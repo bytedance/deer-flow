@@ -84,7 +84,9 @@ Manage packaged extensions with `deerflow extensions install/list/enable/disable
 or the root `make extension-*` wrappers. Install accepts a package requirement, public
 HTTPS Git URL, or local directory. It requires an explicit trust confirmation, records the
 package in `backend/pyproject.toml`'s `extensions` dependency group, updates
-`backend/uv.lock`, and writes the managed `plugins:` entry. A package must expose exactly one PEP 621
+`backend/uv.lock`, and writes the managed `plugins:` entry as `required: false` so a later
+load failure is reported instead of aborting Gateway startup (`install --required` opts
+in). A package must expose exactly one PEP 621
 `deerflow.extensions` entry point. Local directories are copied as deployment snapshots
 under `backend/extensions/sources/`; they are not editable installs. Every manager mutation
 requires a Gateway restart because plugins are imported only during application

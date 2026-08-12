@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import logging
 import os
 import re
 import shlex
@@ -10,9 +12,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import urllib.parse
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,23 +24,37 @@ from typing import Any
 import yaml
 from packaging.requirements import InvalidRequirement, Requirement
 
+logger = logging.getLogger(__name__)
+
 _ENTRY_POINT_GROUP = "deerflow.extensions"
+_LOCK_RETRY_INTERVAL_SECONDS = 0.2
 _SNAPSHOT_IGNORES = (".git", ".venv", "venv", "__pycache__", "*.pyc")
 _DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _SENSITIVE_FILENAMES = {".npmrc", ".pypirc", "credentials.json"}
 _SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx"}
 _SECRET_QUERY_KEY = re.compile(
-    r"(?:^|[-_])(?:api[-_]?key|access[-_]?key|auth(?:orization)?|credential|password|passwd|secret|signature|sig|token)(?:$|[-_])",
+    r"(?:^|[-_])(?:api[-_]?key|access[-_]?key|auth(?:orization)?|code|credential|key|pass(?:wd|word)?|pw|sas|secret|signature|sig|token)(?:$|[-_])",
+    re.IGNORECASE,
+)
+# The camel-case splitter only fires on case transitions, so `accessToken` is
+# separated into words while `accesstoken` and `ACCESSTOKEN` are not. These
+# spellings are distinctive enough to match without a word boundary; short
+# generic words stay boundary-anchored above so `keyword` is still installable.
+_SECRET_QUERY_SUBSTRING = re.compile(
+    r"access[-_]?token|api[-_]?key|auth[-_]?token|session[-_]?token|credential|password|passwd|signature|secret",
     re.IGNORECASE,
 )
 _UV_ENV_OVERRIDES = {
     "UV_ACTIVE",
     "UV_ALL_GROUPS",
     "UV_CONFIG_FILE",
+    "UV_CONSTRAINT",
     "UV_DEFAULT_GROUPS",
     "UV_DEV",
     "UV_FROZEN",
+    "UV_INSECURE_HOST",
     "UV_LOCKED",
+    "UV_NO_BUILD_ISOLATION",
     "UV_NO_CONFIG",
     "UV_NO_DEFAULT_GROUPS",
     "UV_NO_DEV",
@@ -49,6 +66,7 @@ _UV_ENV_OVERRIDES = {
     "UV_PACKAGE",
     "UV_PROJECT",
     "UV_PROJECT_ENVIRONMENT",
+    "UV_PYTHON",
     "UV_SCRIPT",
     "UV_WORKING_DIR",
 }
@@ -141,6 +159,10 @@ class ExtensionManager:
             if source_argument.exists():
                 raise ValueError("local extension sources must be directories so they can be snapshotted for deployment")
             _validate_remote_source(source)
+        # uv add/sync execute the package's build backend. A config this manager
+        # could never write to must fail before that code runs, not afterwards
+        # through rollback.
+        self._read_plugins()
         _require_supported_uv(self.backend_dir)
 
         dependencies_before = _extension_dependency_names(self.pyproject_path)
@@ -225,10 +247,19 @@ class ExtensionManager:
                 snapshot.restore()
             if managed_source is not None:
                 shutil.rmtree(managed_source, ignore_errors=True)
-            if uv_attempted:
-                _sync_restored_environment(self.project_root, self.backend_dir, self.config_path)
-            for snapshot in dependency_snapshots:
-                snapshot.restore()
+            # The recovery sync itself may rewrite the dependency files, so the
+            # second restore has to run even when that sync fails.
+            try:
+                # An interrupt is not answered by a full dependency resolve: the
+                # declarations are already restored, and the next locked startup
+                # sync reconciles the environment.
+                if uv_attempted and isinstance(operation_error, Exception):
+                    _sync_restored_environment(self.project_root, self.backend_dir, self.config_path)
+            except RuntimeError as sync_error:
+                raise RuntimeError(f"{sync_error}; original failure: {operation_error}") from operation_error
+            finally:
+                for snapshot in dependency_snapshots:
+                    snapshot.restore()
             raise
 
         return InstalledExtension(name=name, distribution=distribution, use=use)
@@ -332,10 +363,19 @@ class ExtensionManager:
                 snapshot.restore()
             if managed_config_content is not None and not config_recovery_conflict:
                 config_snapshot.restore()
-            if uv_attempted:
-                _sync_restored_environment(self.project_root, self.backend_dir, self.config_path)
-            for snapshot in dependency_snapshots:
-                snapshot.restore()
+            # The recovery sync itself may rewrite the dependency files, so the
+            # second restore has to run even when that sync fails.
+            try:
+                # An interrupt is not answered by a full dependency resolve: the
+                # declarations are already restored, and the next locked startup
+                # sync reconciles the environment.
+                if uv_attempted and isinstance(operation_error, Exception):
+                    _sync_restored_environment(self.project_root, self.backend_dir, self.config_path)
+            except RuntimeError as sync_error:
+                raise RuntimeError(f"{sync_error}; original failure: {operation_error}") from operation_error
+            finally:
+                for snapshot in dependency_snapshots:
+                    snapshot.restore()
             if config_recovery_conflict:
                 raise RuntimeError("extension removal recovery preserved a concurrent config edit") from operation_error
             raise
@@ -414,6 +454,22 @@ def _normalize_distribution(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _retry_until_locked(acquire: Callable[[], None], *, sleep: Callable[[float], None] = time.sleep) -> None:
+    """Retry a non-blocking lock acquisition until the region is free.
+
+    Windows' blocking mode (``msvcrt.LK_LOCK``) gives up after roughly ten
+    seconds. A real install holds this lock across ``uv add`` plus a full
+    ``uv sync``, so blocking mode reports contention as ``Permission denied``
+    instead of serializing the two operations.
+    """
+    while True:
+        try:
+            acquire()
+            return
+        except OSError:
+            sleep(_LOCK_RETRY_INTERVAL_SECONDS)
+
+
 @contextmanager
 def _manager_lock(project_root: Path) -> Iterator[None]:
     """Serialize extension mutations across processes for one checkout."""
@@ -428,8 +484,12 @@ def _manager_lock(project_root: Path) -> Iterator[None]:
                 stream.write(b"\0")
                 stream.flush()
 
-            stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+            def _acquire_region() -> None:
+                # msvcrt locks a byte range from the current file position.
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+
+            _retry_until_locked(_acquire_region)
             try:
                 yield
             finally:
@@ -532,7 +592,7 @@ def _validate_remote_source(source: str) -> None:
     parsed = urllib.parse.urlsplit(candidate)
     scheme = parsed.scheme.lower()
     for query in (parsed.query, parsed.fragment):
-        if any(_SECRET_QUERY_KEY.search(_normalize_query_key(key)) for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)):
+        if any(_is_secret_query_key(key) for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)):
             raise ValueError("extension source URLs cannot contain credential-like query parameters")
     if not scheme:
         raise ValueError("local path references are not deployable; pass a local directory so DeerFlow can snapshot it")
@@ -546,6 +606,11 @@ def _validate_remote_source(source: str) -> None:
         raise ValueError("remote extension sources must use HTTPS")
     if parsed.password is not None or (parsed.username is not None and scheme != "ssh"):
         raise ValueError("extension source URLs cannot contain embedded credentials")
+
+
+def _is_secret_query_key(key: str) -> bool:
+    normalized = _normalize_query_key(key)
+    return bool(_SECRET_QUERY_KEY.search(normalized) or _SECRET_QUERY_SUBSTRING.search(normalized))
 
 
 def _normalize_query_key(key: str) -> str:
@@ -574,6 +639,7 @@ def _extension_dependency_names(pyproject: Path) -> set[str]:
 _LOCK_LOCAL_PATH_KEYS = frozenset({"path", "directory", "editable", "virtual"})
 _LOCK_LOCAL_URL_KEYS = frozenset({"registry", "url", "git"})
 _LOCK_LOCAL_SOURCE_VIOLATION = "uv.lock contains a local dependency source outside the backend Docker build context"
+_LOCK_LOOPBACK_SOURCE_WARNING = "uv.lock records a loopback dependency source the backend Docker build cannot reach"
 _WINDOWS_ABSOLUTE_PATH = re.compile(r"^[A-Za-z]:[\\/]")
 
 
@@ -609,6 +675,11 @@ def _validate_locked_local_sources(lock_path: Path, backend_dir: Path) -> None:
                         local_path = _resolve_locked_local_path(child, backend_root, path_only=True)
                     elif key in _LOCK_LOCAL_URL_KEYS:
                         local_path = _resolve_locked_local_path(child, backend_root, path_only=False)
+                        if local_path is None and _is_loopback_reference(child):
+                            # An explicit loopback source is an operator choice,
+                            # unlike an environment-driven wheelhouse resolution,
+                            # so it is reported rather than rolled back.
+                            logger.warning("%s: %s", _LOCK_LOOPBACK_SOURCE_WARNING, child)
                     if local_path is not None and not is_reproducible_by_backend_builder(local_path):
                         raise ValueError(_LOCK_LOCAL_SOURCE_VIOLATION)
                 visit(child)
@@ -617,6 +688,32 @@ def _validate_locked_local_sources(lock_path: Path, backend_dir: Path) -> None:
                 visit(child)
 
     visit(document)
+
+
+def _is_loopback_reference(value: str) -> bool:
+    """Report whether a lock URL points back at the installing host.
+
+    Only loopback is rejected. A private-network index (an internal mirror at
+    ``10.0.0.5``) is reachable from a builder on that network, but ``127.0.0.1``
+    resolves to the builder itself, so the recorded source silently means
+    something different — or nothing — during ``make up``.
+    """
+    candidate = value[4:] if value.lower().startswith("git+") else value
+    parsed = urllib.parse.urlsplit(candidate)
+    if not parsed.scheme:
+        return False
+    try:
+        host = parsed.hostname
+    except ValueError:
+        return False
+    if host is None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _workspace_member_dirs(backend_root: Path) -> frozenset[Path]:
@@ -663,6 +760,24 @@ def _resolve_locked_local_path(value: str, backend_root: Path, *, path_only: boo
     return (backend_root / path).resolve()
 
 
+def _first_json_array(stdout: str | None) -> Any:
+    """Return the first JSON array printed by the probe interpreter.
+
+    The child may emit unrelated startup output first — a `sitecustomize` or
+    `.pth` banner, a vendored import notice — so the payload is located rather
+    than assumed to occupy the first line.
+    """
+    for line in (stdout or "").splitlines():
+        candidate = line.strip()
+        if not candidate.startswith("["):
+            continue
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return []
+
+
 def _discover_installed_entry_point(backend_dir: Path, distribution: str) -> tuple[str, str]:
     python = backend_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     script = f"""\
@@ -686,8 +801,7 @@ if len(entry_points) == 1 and not callable(entry_points[0].load()):
         capture_output=True,
         text=True,
     )
-    first_line = completed.stdout.splitlines()[0] if completed.stdout else "[]"
-    entry_points = json.loads(first_line)
+    entry_points = _first_json_array(completed.stdout)
     if not isinstance(entry_points, list) or len(entry_points) != 1:
         raise ValueError(f"distribution {distribution!r} must expose exactly one {_ENTRY_POINT_GROUP!r} entry point")
     name, use = entry_points[0]

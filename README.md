@@ -866,8 +866,11 @@ The manager requires uv 0.8.0 or newer; the provided Docker images pin uv 0.11.1
 The other direct
 commands are `deerflow extensions list`, `enable NAME`, `disable NAME`, and `remove NAME`;
 `NAME` may be the extension name, Python distribution, or `module:install` value. Do not
-put credentials in a source URL. Remote Git sources must use public HTTPS; SSH Git URLs
-are rejected because the stock Docker builder does not forward host SSH credentials.
+put credentials in a source URL — a URL carrying embedded userinfo or a credential-looking
+query parameter is rejected before uv runs. Remote Git sources must use public HTTPS; SSH
+Git URLs are rejected because the stock Docker builder does not forward host SSH
+credentials. Installing from a loopback URL is allowed for local tooling but warns, because
+`127.0.0.1` recorded in the lock is a different machine inside the Docker builder.
 
 A managed package declares exactly one standard PEP 621 entry point:
 
@@ -898,7 +901,10 @@ Plugin order is deterministic, per-plugin configuration is passed to `install()`
 `required: true` makes load failure abort startup; otherwise failures are reported and
 skipped. `enabled: false` skips resolution and import. The manager preserves the extension's
 private `config` when toggling it and writes `name`, `package`, `use`, `enabled`, and
-`required` metadata for managed installs. Plugins load once when the Gateway app is
+`required` metadata for managed installs. Installs are recorded `required: false` so a
+later broken extension is reported rather than blocking Gateway startup; pass
+`extensions install <source> --required` when the package's absence should abort startup
+instead. Plugins load once when the Gateway app is
 constructed, so install, enable, disable, remove, and manual `plugins:` edits all require a
 Gateway restart. Because this imports Python code, `plugins:` is intentionally unavailable
 through the API-writable `extensions_config.json`.

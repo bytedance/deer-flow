@@ -21,7 +21,9 @@ from deerflow.extensions.cli import find_project_root
 from deerflow.extensions.loader import ExtensionSpec
 from deerflow.extensions.manager import (
     ExtensionManager,
+    _controlled_uv_environment,
     _detect_extra_flags,
+    _retry_until_locked,
     _validate_locked_local_sources,
     _validate_remote_source,
 )
@@ -238,6 +240,25 @@ def test_cli_install_exposes_the_required_opt_in(tmp_path: Path, monkeypatch, ca
     capsys.readouterr()
     config = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))
     assert config["plugins"][0]["required"] is True
+
+
+def test_contended_lock_waits_instead_of_failing() -> None:
+    """Windows' blocking lock mode gives up after ~10 seconds, far shorter than
+    a real `uv add` + `uv sync`, so the manager retries a non-blocking
+    acquisition rather than turning contention into an error."""
+    attempts: list[int] = []
+    delays: list[float] = []
+
+    def _acquire() -> None:
+        attempts.append(len(attempts))
+        if len(attempts) < 3:
+            raise OSError(13, "Permission denied")
+
+    _retry_until_locked(_acquire, sleep=delays.append)
+
+    assert len(attempts) == 3
+    assert len(delays) == 2
+    assert all(delay > 0 for delay in delays)
 
 
 def test_mutating_operations_are_serialized_for_one_checkout(tmp_path: Path, monkeypatch) -> None:
@@ -546,6 +567,93 @@ version = "1.0.0"
 
     with pytest.raises(ValueError, match="build context"):
         _validate_locked_local_sources(lock_path, backend)
+
+
+@pytest.mark.parametrize(
+    "source_line",
+    [
+        'source = { registry = "http://127.0.0.1:8000/simple" }',
+        'source = { registry = "http://localhost:8000/simple" }',
+        'source = { url = "http://[::1]:8000/demo-1.0-py3-none-any.whl" }',
+        'source = { git = "http://127.0.0.1:9418/demo.git?rev=0123456789012345678901234567890123456789" }',
+    ],
+    ids=[
+        "loopback-ipv4-registry",
+        "localhost-registry",
+        "loopback-ipv6-wheel-url",
+        "loopback-git-remote",
+    ],
+)
+def test_locked_local_source_audit_warns_about_loopback_references(
+    tmp_path: Path,
+    source_line: str,
+    caplog,
+) -> None:
+    """`_validate_remote_source` allows loopback HTTP for local tooling, so a
+    loopback URL can legitimately land in the lock — but inside the backend
+    image build `127.0.0.1` is a different machine. Unlike an environment-driven
+    wheelhouse resolution, this is an explicit operator choice, so it warns
+    instead of failing the transaction."""
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    _write_audit_host(backend)
+    lock_path = backend / "uv.lock"
+    lock_path.write_text(
+        f"""\
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "host"
+version = "0.0.0"
+source = {{ virtual = "." }}
+
+[[package]]
+name = "smuggled"
+version = "1.0.0"
+{source_line}
+""",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="deerflow.extensions.manager"):
+        _validate_locked_local_sources(lock_path, backend)
+
+    assert "loopback" in caplog.text
+
+
+def test_locked_local_source_audit_allows_a_private_network_index(tmp_path: Path, caplog) -> None:
+    """A builder on the same network can reach a private index host, so only
+    loopback is rejected — blocking RFC1918 would break internal mirrors."""
+    backend = tmp_path / "backend"
+    backend.mkdir()
+    _write_audit_host(backend)
+    lock_path = backend / "uv.lock"
+    lock_path.write_text(
+        """\
+version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "host"
+version = "0.0.0"
+source = { virtual = "." }
+
+[[package]]
+name = "internal"
+version = "1.0.0"
+source = { registry = "https://10.0.0.5/simple" }
+wheels = [
+    { url = "https://10.0.0.5/packages/internal-1.0.0-py3-none-any.whl", hash = "sha256:bbbb" },
+]
+""",
+        encoding="utf-8",
+    )
+
+    with caplog.at_level("WARNING", logger="deerflow.extensions.manager"):
+        _validate_locked_local_sources(lock_path, backend)
+
+    assert caplog.text == ""
 
 
 def test_locked_local_source_audit_rejects_absolute_paths_even_inside_allowed_roots(tmp_path: Path) -> None:
@@ -1700,6 +1808,38 @@ def test_remote_sources_with_secret_query_parameters_are_rejected(source: str) -
 @pytest.mark.parametrize(
     "source",
     [
+        "https://packages.example/demo.whl?accesstoken=do-not-store",
+        "https://packages.example/demo.whl?ACCESSTOKEN=do-not-store",
+        "https://packages.example/demo.whl?apikey=do-not-store",
+        "https://packages.example/demo.whl?key=do-not-store",
+        "https://packages.example/demo.whl?pw=do-not-store",
+        "https://packages.example/demo.whl?sas=do-not-store",
+        "https://packages.example/demo.whl?code=do-not-store",
+    ],
+)
+def test_run_together_secret_query_parameters_are_rejected(source: str) -> None:
+    """The camel-case splitter only fires on case transitions, so run-together
+    and all-caps spellings need to be recognized directly."""
+    with pytest.raises(ValueError, match="credential"):
+        _validate_remote_source(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "git+https://github.com/acme/demo.git@main#subdirectory=packages/demo",
+        "https://packages.example/demo.whl?keyword=demo",
+        "https://packages.example/demo.whl?monkeypatch=1",
+        "https://packages.example/demo.whl?rev=0123456789",
+    ],
+)
+def test_benign_query_parameters_remain_installable(source: str) -> None:
+    _validate_remote_source(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
         "git+ssh://git@github.com/acme/deerflow-extension-demo.git@main",
         "deerflow-extension-demo @ git+ssh://git@github.com/acme/deerflow-extension-demo.git@main",
         "ssh://git@github.com/acme/deerflow-extension-demo.git@main",
@@ -1846,6 +1986,190 @@ def test_install_uses_one_controlled_uv_project_and_deferred_sync(
         }.intersection(child_env)
         assert child_env["UV_INDEX_URL"] == "https://packages.example/simple"
         assert child_env["HTTPS_PROXY"] == "http://proxy.example:8080"
+
+
+@pytest.mark.parametrize(
+    "variable",
+    ["UV_PYTHON", "UV_INSECURE_HOST", "UV_CONSTRAINT", "UV_NO_BUILD_ISOLATION"],
+)
+def test_controlled_uv_environment_drops_interpreter_and_trust_overrides(monkeypatch, variable: str) -> None:
+    """These redirect the target environment rather than index/proxy/cache
+    settings: `UV_PYTHON` swaps the interpreter that later loads the extension
+    entry point, and `UV_INSECURE_HOST` removes the TLS validation that the
+    HTTPS-only source rule depends on."""
+    monkeypatch.setenv(variable, "must-not-reach-uv")
+
+    assert variable not in _controlled_uv_environment()
+
+
+@pytest.mark.parametrize(
+    ("config_text", "expected_error", "message"),
+    [
+        (
+            'plugins: []\nlog_level: info\n"plugins":\n  - use: demo_extension:install\n',
+            ValueError,
+            "duplicate top-level plugins",
+        ),
+        (None, FileNotFoundError, "config not found"),
+        ("- not-a-mapping\n", ValueError, "must be a mapping"),
+    ],
+    ids=["duplicate-plugins-keys", "missing-config", "non-mapping-root"],
+)
+def test_install_validates_the_config_before_running_third_party_build_hooks(
+    tmp_path: Path,
+    monkeypatch,
+    config_text: str | None,
+    expected_error: type[Exception],
+    message: str,
+) -> None:
+    """`uv add`/`uv sync` execute the package's build backend, so a config the
+    manager can never write to must be rejected before that code runs — not
+    after it, via rollback."""
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    config_path = root / "config.yaml"
+    if config_text is None:
+        config_path.unlink()
+    else:
+        config_path.write_text(config_text, encoding="utf-8")
+    commands: list[list[str]] = []
+
+    def _record(command, **_kwargs):
+        commands.append(list(command))
+        return subprocess.CompletedProcess(command, 0, stdout="uv 0.11.1\n")
+
+    monkeypatch.setattr("deerflow.extensions.manager.subprocess.run", _record)
+
+    with pytest.raises(expected_error, match=message):
+        ExtensionManager(root).install(str(source), yes=True)
+
+    assert commands == []
+    assert not (root / "backend" / "extensions").exists()
+
+
+def test_failed_recovery_sync_still_restores_the_dependency_files(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The recovery `uv sync` runs without `--locked` when the checkout had no
+    lock, so uv writes one while resolving. If that sync then fails, the
+    operator must not be left holding a lock file they never had."""
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    backend = root / "backend"
+    pyproject_path = backend / "pyproject.toml"
+    lock_path = backend / "uv.lock"
+    original_pyproject = pyproject_path.read_text(encoding="utf-8")
+
+    def _run(command, **_kwargs):
+        if command[:2] == ["uv", "--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="uv 0.11.1\n")
+        if command[0] != "uv":
+            return subprocess.CompletedProcess(command, 0, stdout='[["demo", "demo_extension:install"]]\n')
+        if command[1] == "add":
+            pyproject_path.write_text(
+                original_pyproject.replace("extensions = []", 'extensions = ["deerflow-extension-demo"]'),
+                encoding="utf-8",
+            )
+            lock_path.write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+        if "--locked" not in command:
+            lock_path.write_text("version = 1\n# written by the recovery resolve\n", encoding="utf-8")
+        raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr("deerflow.extensions.manager.subprocess.run", _run)
+
+    with pytest.raises(RuntimeError, match="original failure"):
+        ExtensionManager(root).install(str(source), yes=True)
+
+    assert not lock_path.exists()
+    assert pyproject_path.read_text(encoding="utf-8") == original_pyproject
+
+
+def test_interrupt_during_install_restores_files_without_a_recovery_resolve(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Ctrl-C must not be answered by blocking on a full dependency resolve: a
+    second interrupt during that sync would escape the handler and strand the
+    checkout mid-transaction."""
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    backend = root / "backend"
+    pyproject_path = backend / "pyproject.toml"
+    lock_path = backend / "uv.lock"
+    original_pyproject = pyproject_path.read_text(encoding="utf-8")
+    syncs: list[list[str]] = []
+
+    def _run(command, **_kwargs):
+        if command[:2] == ["uv", "--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="uv 0.11.1\n")
+        if command[0] != "uv":
+            return subprocess.CompletedProcess(command, 0, stdout='[["demo", "demo_extension:install"]]\n')
+        if command[1] == "add":
+            pyproject_path.write_text(
+                original_pyproject.replace("extensions = []", 'extensions = ["deerflow-extension-demo"]'),
+                encoding="utf-8",
+            )
+            lock_path.write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+        syncs.append(list(command))
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("deerflow.extensions.manager.subprocess.run", _run)
+
+    with pytest.raises(KeyboardInterrupt):
+        ExtensionManager(root).install(str(source), yes=True)
+
+    assert len(syncs) == 1
+    assert not lock_path.exists()
+    assert pyproject_path.read_text(encoding="utf-8") == original_pyproject
+    assert not (backend / "extensions" / "sources" / "deerflow-extension-demo").exists()
+
+
+def test_entry_point_discovery_tolerates_interpreter_startup_output(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A `sitecustomize`/`.pth` banner on the child interpreter's stdout must
+    not roll back an otherwise-successful install with a JSON parse error."""
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+
+    def _run(command, **_kwargs):
+        if command[:2] == ["uv", "--version"]:
+            return subprocess.CompletedProcess(command, 0, stdout="uv 0.11.1\n")
+        if command[0] == "uv":
+            if command[1] == "add":
+                (root / "backend" / "uv.lock").write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
+            return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout='vendor sitecustomize loaded\n[["demo", "demo_extension:install"]]\n',
+        )
+
+    monkeypatch.setattr("deerflow.extensions.manager.subprocess.run", _run)
+
+    result = ExtensionManager(root).install(str(source), yes=True)
+
+    assert (result.name, result.use) == ("demo", "demo_extension:install")
 
 
 def test_install_rejects_uv_versions_without_no_workspace_support(

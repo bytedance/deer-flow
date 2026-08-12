@@ -22,16 +22,35 @@ paths with `SOURCE=` unless backend-relative behavior is intentional.
 `[dependency-groups].extensions` list and `uv.lock`, discovers exactly one packaging entry
 point, and inserts or adopts one
 managed `plugins:` record with `name`, `package`, `use`, `enabled`, `required`, and
-private `config`. Enable/disable changes only the host-level `enabled` flag and preserves
+private `config`. New records are written `required: false`, matching the loader default:
+`required: true` turns any later load failure — a broken wheel, a missing native library, a
+deleted snapshot — into a Gateway startup abort recoverable only through shell access, so
+it is an explicit `install --required` opt-in rather than the managed default. Adoption of
+an existing hand-written record preserves whatever `required` the operator already chose.
+Enable/disable changes only the host-level `enabled` flag and preserves
 private configuration. Remove runs `uv remove --group extensions`, removes the plugin
-record, and deletes its managed source snapshot. Failed install/remove operations restore
-`pyproject.toml`, `uv.lock`, and the selected config file and resynchronize the restored
-environment. Package mutation is deferred from environment mutation: after `uv add/remove`
+record, and deletes its managed source snapshot. Install validates the selected config
+file before running any uv command, because `uv add`/`uv sync` execute the package's build
+backend: a config this manager could never write to must fail before that code runs, not
+afterwards through rollback.
+Failed install/remove operations restore `pyproject.toml` and `uv.lock` and resynchronize
+the restored environment; that second restore runs even when the recovery sync itself fails
+(a recovery sync without `--locked` writes a lock while resolving), and a failing recovery
+sync reports the original failure alongside it. The restore is deliberately not blanket:
+when recovery detects a concurrent external edit to the dependency files or the config it
+preserves that edit and raises instead, and `remove` leaves the plugin deactivated in that
+case rather than reviving a record whose package declaration may already be gone. A
+cancellation skips the recovery sync entirely — the declarations are already restored and
+the next locked startup sync reconciles the environment, whereas blocking an interrupt on a
+full dependency resolve invites a second interrupt that escapes the handler mid-transaction.
+Package mutation is deferred from environment mutation: after `uv add/remove`
 updates the declaration and lock, one `uv sync --locked --all-packages` preserves the same
 config-/environment-detected optional extras as normal startup. All three uv calls pin the
 backend project explicitly and discard UV environment overrides that could redirect the
-project, working directory, sync mode, lock policy, or target environment; index, proxy,
-cache, and credential-provider settings remain available.
+project, working directory, sync mode, lock policy, or target environment — including
+`UV_PYTHON`, which would swap the interpreter that then loads the extension entry point,
+and `UV_INSECURE_HOST`, which would remove the TLS validation the HTTPS-only source rule
+depends on; index, proxy, cache, and credential-provider settings remain available.
 The `--no-workspace` boundary requires uv 0.8.0 or newer. The stock Docker paths pin uv
 0.11.1, and the manager fails before mutation when the host uv is older.
 All install/remove/enable/disable mutations for a checkout hold the cross-process
@@ -65,8 +84,21 @@ or enabling anything. Any local reference that the stock backend image build can
 reproduce — absolute paths, `file:` URLs, or relative paths outside the project root, its
 exact workspace members, and the managed `extensions/sources/` snapshots — fails the whole
 transaction and rolls back the dependency files, config, snapshot, and environment. A
+loopback URL recorded in the lock is warned about rather than rolled back: `127.0.0.1`
+inside the image builder is a different machine, so the reference is just as
+non-reproducible, but unlike an environment-driven wheelhouse resolution it is a source the
+operator typed deliberately. A private-network index is left alone entirely — a builder on
+that network can reach it. A
 config with duplicate top-level `plugins:` keys is rejected outright rather than managed
 against one block while the Gateway reads another.
+
+The managed `plugins:` block is rewritten in place, and both of its boundaries come from
+the YAML parser rather than a key-shaped pattern. `AppConfig` allows extra top-level keys,
+so a neighbouring section may be named anything YAML accepts (`my.key`, `2fa`, `$schema`, a
+non-ASCII word); a pattern that fails to recognize the next key does not fail loudly, it
+reports "no next section" and the rewrite replaces that neighbour and its whole subtree.
+Trailing comments below a file-final block are preserved for the same reason — the manager
+appends `plugins:` at end of file, so that is the steady-state shape.
 
 Dependency synchronization has one lock authority: the manager's `uv add/remove` calls
 are the only extension workflow allowed to update `backend/uv.lock`, and each mutation is

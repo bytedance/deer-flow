@@ -2569,6 +2569,7 @@ authorization:
 #     package: deerflow-extension-example # Python distribution managed by uv
 #     use: deerflow_extension_example:install
 #     enabled: true                       # false skips import and registration
-#     required: true                      # load failure aborts Gateway startup
+#     required: false                     # true makes load failure abort Gateway startup
+#                                         # (install --required opts in)
 #     config:
 #       label: example                    # extension-private values, if any

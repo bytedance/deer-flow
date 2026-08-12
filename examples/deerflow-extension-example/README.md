@@ -68,7 +68,7 @@ plugins:
     package: deerflow-extension-example
     use: deerflow_extension_example:install
     enabled: true
-    required: true
+    required: false
     config: {}
 ```
 
@@ -93,7 +93,7 @@ URL. SSH Git URLs are rejected because the stock Docker builder does not
 forward host SSH credentials. The direct CLI surface, run from `backend/`, is:
 
 ```text
-uv run --frozen --no-group extensions deerflow extensions install <source> [--yes]
+uv run --frozen --no-group extensions deerflow extensions install <source> [--yes] [--required]
 uv run --frozen --no-group extensions deerflow extensions list
 uv run --frozen --no-group extensions deerflow extensions enable <name>
 uv run --frozen --no-group extensions deerflow extensions disable <name>
@@ -102,7 +102,9 @@ uv run --frozen --no-group extensions deerflow extensions remove <name>
 
 `--yes` is intended only for automation that has already reviewed and trusted
 the source: extension build hooks and runtime code execute with Gateway
-privileges.
+privileges. `--required` records `required: true`, which turns any later load
+failure into a Gateway startup abort; leave it off unless the application is
+wrong without this extension.
 
 The local snapshot is included in Docker builds. Local `make dev`, Docker dev,
 and the production Gateway image all consume the same `backend/uv.lock`.
