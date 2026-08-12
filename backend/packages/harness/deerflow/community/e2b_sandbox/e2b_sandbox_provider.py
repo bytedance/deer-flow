@@ -15,6 +15,12 @@ provider fields during startup.
       overflow_policy: wait            # wait | reject | burst (default: wait)
       acquire_timeout: 30              # seconds for ``wait`` policy (default: 30)
       burst_limit: 2                   # extra slots for ``burst`` policy (default: 0)
+      reconciliation_interval_seconds: 60
+      reconciliation_grace_seconds: 120
+      reconciliation_orphan_ttl_seconds: 3600
+      reconciliation_max_pages: 10
+      reconciliation_max_items: 200
+      reconciliation_max_seconds: 15
       ownership:
         type: redis                    # shares ownership and capacity across Gateways
         redis_url: redis://redis:6379/0
