@@ -8,19 +8,19 @@ from __future__ import annotations
 
 import logging
 import os
-from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any
 
 from langchain.tools import tool
 from langgraph.config import get_config
 
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 from deerflow.uploads.manager import is_upload_staging_file
+from deerflow.uploads.summary import format_extension_counts
 from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.utils.input_sanitization import neutralize_untrusted_tags
 
 logger = logging.getLogger(__name__)
 
@@ -34,9 +34,7 @@ def _extension_label(file_path: Path) -> str:
 
 
 def _format_omitted_summary(omitted: list[str]) -> str:
-    counts = Counter(_extension_label(Path(f)) for f in omitted)
-    parts = [f"{count} {ext}" for ext, count in sorted(counts.items())]
-    return neutralize_untrusted_tags(", ".join(parts))
+    return format_extension_counts(_extension_label(Path(filename)) for filename in omitted)
 
 
 def _resolve_thread_id(runtime: Runtime) -> str | None:

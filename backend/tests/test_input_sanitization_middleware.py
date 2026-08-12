@@ -12,12 +12,14 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.input_sanitization_middleware import (
-    _BLOCKED_TAG_NAMES,
-    _USER_INPUT_BEGIN,
-    _USER_INPUT_END,
     InputSanitizationMiddleware,
     _check_user_content,
     _is_genuine_user_message,
+)
+from deerflow.utils.input_sanitization import (
+    _BLOCKED_TAG_NAMES,
+    _USER_INPUT_BEGIN,
+    _USER_INPUT_END,
     neutralize_untrusted_tags,
 )
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
