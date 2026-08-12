@@ -39,6 +39,25 @@ def _reset_process_limiter() -> Iterator[None]:
     mod._CAP_RESOLVED = False
 
 
+@pytest.fixture(autouse=True)
+def _guard_shared_exception_name() -> Iterator[None]:
+    """Fail the test that renames the shared ``FakeError`` class.
+
+    Several tests below drive classification by name (``type(exc).__name__``),
+    so they set ``exc.__class__.__name__``. That mutates the *class*, not the
+    instance: doing it to ``FakeError`` renames it for the rest of the session
+    and every later test asserting ``error_type == "FakeError"`` fails. Use a
+    dedicated stand-in (``_ReadError`` and friends) instead. Without this guard
+    the damage only surfaces in whichever test happens to run next.
+    """
+    original_name = FakeError.__name__
+    yield
+    try:
+        assert FakeError.__name__ == "FakeError", "this test renamed the shared FakeError class; rename a dedicated stand-in such as _ReadError instead of exc.__class__ on FakeError"
+    finally:
+        FakeError.__name__ = original_name
+
+
 def _make_app_config() -> AppConfig:
     """Minimal AppConfig for middleware tests; circuit_breaker uses defaults."""
     return AppConfig(sandbox=SandboxConfig(use="test"))
@@ -810,8 +829,7 @@ def test_user_message_for_read_error_uses_generic_transient_copy() -> None:
     Regression guard for the #3195 CR feedback.
     """
     middleware = _build_middleware()
-    exc = FakeError("connection dropped mid-stream")
-    exc.__class__.__name__ = "ReadError"
+    exc = _ReadError("connection dropped mid-stream")
 
     message = middleware._build_user_message(exc, reason="transient")
 
