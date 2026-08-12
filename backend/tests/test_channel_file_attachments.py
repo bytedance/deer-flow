@@ -589,3 +589,60 @@ class TestManagerArtifactResolution:
         result = _format_artifact_text(["/mnt/user-data/outputs/a.txt", "/mnt/user-data/outputs/b.txt"])
         assert "a.txt" in result
         assert "b.txt" in result
+
+    def test_format_artifact_text_links_html_when_public_base_url_is_configured(self):
+        from app.channels.manager import _format_artifact_text
+
+        result = _format_artifact_text(
+            ["/mnt/user-data/outputs/report [final].html"],
+            thread_id="thread / 1",
+            public_base_url="https://deer.example.com/deer-flow/",
+        )
+
+        assert result == ("Created File: 📎 [report \\[final\\].html](https://deer.example.com/deer-flow/api/threads/thread%20%2F%201/artifacts/mnt/user-data/outputs/report%20%5Bfinal%5D.html)")
+
+    def test_format_artifact_text_does_not_link_non_html_artifacts(self):
+        from app.channels.manager import _format_artifact_text
+
+        result = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.pdf"],
+            thread_id="thread-1",
+            public_base_url="https://deer.example.com",
+        )
+
+        assert result == "Created File: 📎 report.pdf"
+
+    def test_format_artifact_text_ignores_unsafe_public_base_url(self):
+        from app.channels.manager import _format_artifact_text
+
+        result = _format_artifact_text(
+            ["/mnt/user-data/outputs/report.html"],
+            thread_id="thread-1",
+            public_base_url="javascript:alert(1)",
+        )
+
+        assert result == "Created File: 📎 report.html"
+
+    def test_prepare_artifact_delivery_links_resolved_html_and_keeps_attachment(self, tmp_path):
+        from app.channels.manager import _prepare_artifact_delivery
+
+        thread_id = "thread-1"
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        html_file = outputs_dir / "report.html"
+        html_file.write_text("<h1>Report</h1>", encoding="utf-8")
+
+        mock_paths = MagicMock()
+        mock_paths.resolve_virtual_path.return_value = html_file
+        mock_paths.sandbox_outputs_dir.return_value = outputs_dir
+
+        with patch("deerflow.config.paths.get_paths", return_value=mock_paths):
+            text, attachments = _prepare_artifact_delivery(
+                thread_id,
+                "Done.",
+                ["/mnt/user-data/outputs/report.html"],
+                public_base_url="https://deer.example.com",
+            )
+
+        assert text == ("Done.\n\nCreated File: 📎 [report.html](https://deer.example.com/api/threads/thread-1/artifacts/mnt/user-data/outputs/report.html)")
+        assert [attachment.actual_path for attachment in attachments] == [html_file]

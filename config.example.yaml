@@ -2215,13 +2215,18 @@ run_ownership:
 #   langgraph_url: http://localhost:8001/api
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
+#   # Optional browser-facing DeerFlow URL. When set, resolved HTML artifacts in
+#   # IM replies are rendered as clickable links while file attachments remain as a fallback.
+#   # The URL must expose DeerFlow's /api routes and must not include a query or fragment.
+#   public_base_url: https://deer.example.com
 #   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
 #   # of localhost, for example:
 #   # langgraph_url: http://gateway:8001/api
 #   # gateway_url: http://gateway:8001
-#   # You can also set DEER_FLOW_CHANNELS_LANGGRAPH_URL / DEER_FLOW_CHANNELS_GATEWAY_URL.
+#   # You can also set DEER_FLOW_CHANNELS_LANGGRAPH_URL / DEER_FLOW_CHANNELS_GATEWAY_URL /
+#   # DEER_FLOW_CHANNELS_PUBLIC_BASE_URL.
 #
 #   # Optional: default mobile/session settings for all IM channels
 #   session:

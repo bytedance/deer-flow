@@ -262,6 +262,10 @@ Configure the actual IM bots under the existing `channels` block:
 
 ```yaml
 channels:
+  # Optional browser-facing DeerFlow URL for clickable HTML artifact links.
+  # The regular IM file upload remains as a fallback.
+  public_base_url: https://deer.example.com
+
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
@@ -299,6 +303,8 @@ channels:
     relay_url: wss://buzz.example.com
     private_key: $BUZZ_PRIVATE_KEY   # hex or nsec1…
 ```
+
+`public_base_url` can also be supplied through `DEER_FLOW_CHANNELS_PUBLIC_BASE_URL`. It must be an HTTP(S) URL that exposes DeerFlow's `/api` routes. Artifact authorization is unchanged: auth-enabled deployments require a matching DeerFlow browser session, and active HTML is downloaded instead of executed on the application origin.
 
 Then enable user bindings in `channel_connections`:
 

@@ -48,6 +48,7 @@ _CHANNEL_CREDENTIAL_KEYS: dict[str, list[str]] = {
 
 _CHANNELS_LANGGRAPH_URL_ENV = "DEER_FLOW_CHANNELS_LANGGRAPH_URL"
 _CHANNELS_GATEWAY_URL_ENV = "DEER_FLOW_CHANNELS_GATEWAY_URL"
+_CHANNELS_PUBLIC_BASE_URL_ENV = "DEER_FLOW_CHANNELS_PUBLIC_BASE_URL"
 
 
 def _channel_has_credentials(name: str, channel_config: dict[str, Any]) -> bool:
@@ -111,6 +112,7 @@ class ChannelService:
         config = dict(channels_config or {})
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
+        public_base_url = _resolve_service_url(config, "public_base_url", _CHANNELS_PUBLIC_BASE_URL_ENV, "")
         default_session = config.pop("session", None)
         channel_sessions = {name: channel_config.get("session") for name, channel_config in config.items() if isinstance(channel_config, dict)}
         from app.channels.dedupe_store import make_inbound_dedupe_store
@@ -120,6 +122,7 @@ class ChannelService:
             store=self.store,
             langgraph_url=langgraph_url,
             gateway_url=gateway_url,
+            public_base_url=public_base_url,
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
             connection_repo=connection_repo,
