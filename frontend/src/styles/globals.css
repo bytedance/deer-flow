@@ -451,3 +451,21 @@ html.dark .shiki span {
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
 }
+
+/*
+ * Reduced-motion fallback for a registry component we do not hand-edit.
+ * `shine-border` already opts in through `motion-safe:animate-shine`, but
+ * `aurora-text` applies `animate-aurora` unconditionally, and that keyframe
+ * rotates and scales the text. Dropping the animation leaves the gradient
+ * itself intact — the fill comes from an inline `background-image`, so the
+ * text stays readable and only the motion is removed.
+ *
+ * Deliberately scoped to this one animation rather than a blanket
+ * `animation: none`: entrance keyframes such as `fade-in-up` start at
+ * `opacity: 0`, so disabling them wholesale risks hiding real content.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .animate-aurora {
+    animation: none;
+  }
+}

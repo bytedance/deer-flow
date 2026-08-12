@@ -16,6 +16,7 @@ import { ConversationEmptyState } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { resolveArtifactURL } from "@/core/artifacts/utils";
+import { useI18n } from "@/core/i18n/hooks";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -31,6 +32,7 @@ export function BrowserViewPanel({
   threadId: string;
   className?: string;
 }) {
+  const { t } = useI18n();
   const browserView = useMaybeBrowserView();
   const frame = browserView?.latestFrame ?? null;
   const imageUrl = frame
@@ -51,11 +53,10 @@ export function BrowserViewPanel({
     (url: string | undefined, message: string | undefined) => {
       setNavigating(false);
       toast.error(
-        message?.replace(/^Error:\s*/i, "") ??
-          `Cannot open ${url ?? "that URL"}`,
+        message?.replace(/^Error:\s*/i, "") ?? t.browserView.cannotOpenUrl(url),
       );
     },
-    [],
+    [t],
   );
   const { status, frameUrl, liveUrl, sendInput } = useBrowserStream(
     threadId,
@@ -180,7 +181,7 @@ export function BrowserViewPanel({
         });
       } else {
         setUrlInput(result.url);
-        toast.warning("Navigated, but no screenshot could be captured.");
+        toast.warning(t.browserView.navigatedWithoutScreenshot);
       }
       browserView?.openPanel();
     } catch (error) {
@@ -339,7 +340,7 @@ export function BrowserViewPanel({
     >
       <header className="flex shrink-0 items-center gap-2 border-b px-3 py-2">
         <MonitorIcon className="size-4 shrink-0" />
-        <span className="shrink-0 text-sm font-medium">Browser</span>
+        <span className="shrink-0 text-sm font-medium">{t.common.browser}</span>
         <div className="flex shrink-0 items-center">
           <Button
             size="icon-sm"
@@ -347,7 +348,8 @@ export function BrowserViewPanel({
             className="shrink-0"
             disabled={!live}
             onClick={() => sendInput({ type: "back" })}
-            title="Back"
+            title={t.browserView.back}
+            aria-label={t.browserView.back}
           >
             <ArrowLeftIcon />
           </Button>
@@ -357,7 +359,8 @@ export function BrowserViewPanel({
             className="shrink-0"
             disabled={!live}
             onClick={() => sendInput({ type: "forward" })}
-            title="Forward"
+            title={t.browserView.forward}
+            aria-label={t.browserView.forward}
           >
             <ArrowRightIcon />
           </Button>
@@ -388,7 +391,7 @@ export function BrowserViewPanel({
               // bar; stop the panel + global shortcut handlers from swallowing.
               event.stopPropagation();
             }}
-            placeholder="Enter a URL and press Enter"
+            placeholder={t.browserView.urlPlaceholder}
             spellCheck={false}
             autoComplete="off"
             className="h-8 pl-7 text-xs"
@@ -402,10 +405,14 @@ export function BrowserViewPanel({
           variant={live ? "default" : "ghost"}
           className="shrink-0 gap-1"
           onClick={() => setLive((prev) => !prev)}
-          title={live ? "Stop live control" : "Take live control"}
+          title={
+            live ? t.browserView.stopLiveControl : t.browserView.takeLiveControl
+          }
         >
           <RadioIcon className="size-3.5" />
-          {live ? (status === "open" ? "Live" : "…") : "Live"}
+          {live && status !== "open"
+            ? t.browserView.liveConnecting
+            : t.browserView.live}
         </Button>
         <Button
           size="icon-sm"
@@ -415,6 +422,7 @@ export function BrowserViewPanel({
             setLive(false);
             browserView?.close();
           }}
+          aria-label={t.common.close}
         >
           <XIcon />
         </Button>
@@ -432,7 +440,7 @@ export function BrowserViewPanel({
               ref={surfaceRef}
               className="absolute inset-0 h-full w-full cursor-default object-contain object-center"
               src={displayUrl}
-              alt={frame?.title ?? "Browser view"}
+              alt={frame?.title ?? t.browserView.surfaceAlt}
               draggable={false}
               onClick={(event) => forwardMouse("click", event)}
             />
@@ -441,12 +449,12 @@ export function BrowserViewPanel({
               className="absolute inset-0 m-auto h-fit"
               icon={<MonitorIcon />}
               title={
-                live ? "Connecting to live browser…" : "No browser activity yet"
+                live ? t.browserView.connectingTitle : t.browserView.idleTitle
               }
               description={
                 live
-                  ? "Waiting for the first live frame."
-                  : "Enter a URL above or let the agent browse — the live view will appear here."
+                  ? t.browserView.connectingDescription
+                  : t.browserView.idleDescription
               }
             />
           )}

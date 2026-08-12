@@ -121,6 +121,10 @@ export const zhCN: Translations = {
     loadFullFile: "加载完整文件",
     loadingFullFile: "正在加载完整文件...",
     previewFailed: "无法预览此文件，但仍可下载原始文件。",
+    iframeTitle: "制品预览",
+    selectFilePlaceholder: "选择文件",
+    fileTypeLabel: (fileType: string) => `${fileType} 文件`,
+    cannotPreviewFileType: "该文件类型无法在浏览器中预览。",
   },
 
   // Citations
@@ -274,6 +278,7 @@ export const zhCN: Translations = {
       },
     ],
     pleaseWaitStreaming: "请等待当前响应完成。",
+    skillSuggestions: "技能建议",
   },
 
   // Sidebar
@@ -523,6 +528,8 @@ export const zhCN: Translations = {
     pinChat: "置顶对话",
     unpinChat: "取消置顶",
     pinChatFailed: "更新对话置顶状态失败",
+    noArtifactSelected: "未选择制品",
+    noArtifactSelectedDescription: "选择一个制品以查看详情",
   },
 
   // Sidecar
@@ -550,6 +557,25 @@ export const zhCN: Translations = {
     continuing: "继续当前侧边对话",
     selectionCrossesMessages:
       "选区跨越了多条消息，请在同一条回复内选择要引用的文本。",
+  },
+
+  // Browser View
+  browserView: {
+    back: "后退",
+    forward: "前进",
+    urlPlaceholder: "输入网址后按回车",
+    takeLiveControl: "接管实时控制",
+    stopLiveControl: "停止实时控制",
+    live: "实时",
+    liveConnecting: "…",
+    surfaceAlt: "浏览器画面",
+    cannotOpenUrl: (url?: string) => `无法打开 ${url ?? "该网址"}`,
+    navigatedWithoutScreenshot: "已跳转，但未能捕获截图。",
+    connectingTitle: "正在连接实时浏览器…",
+    idleTitle: "暂无浏览器活动",
+    connectingDescription: "正在等待第一帧实时画面。",
+    idleDescription:
+      "在上方输入网址，或让智能体自行浏览——实时画面会显示在这里。",
   },
 
   // Channels

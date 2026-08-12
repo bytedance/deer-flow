@@ -2130,7 +2130,7 @@ export function InputBox({
       {showSkillSuggestions && (
         <div className="absolute right-0 bottom-full left-0 z-40 mb-2 px-1">
           <div
-            aria-label="Skill suggestions"
+            aria-label={t.inputBox.skillSuggestions}
             className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
             role="listbox"
           >

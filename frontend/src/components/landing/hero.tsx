@@ -9,7 +9,10 @@ import { useEffect, useRef, useState } from "react";
 import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
-import { useRenderActivity } from "@/core/dom/render-activity";
+import {
+  usePrefersReducedMotion,
+  useRenderActivity,
+} from "@/core/dom/render-activity";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
@@ -33,7 +36,9 @@ const HERO_WORDS = [
 
 export function Hero({ className }: { className?: string }) {
   const galaxyContainerRef = useRef<HTMLDivElement>(null);
+  // `useRenderActivity` already drops Galaxy under `prefers-reduced-motion`.
   const renderGalaxy = useRenderActivity(galaxyContainerRef);
+  const reducedMotion = usePrefersReducedMotion();
 
   return (
     <div
@@ -63,7 +68,10 @@ export function Hero({ className }: { className?: string }) {
         gridGap={4}
         color={"white"}
         maxOpacity={0.3}
-        flickerChance={0.25}
+        // A zero chance freezes each square at the opacity it was seeded with,
+        // so the deer silhouette stays visible as a static grid instead of
+        // disappearing for reduced-motion users.
+        flickerChance={reducedMotion ? 0 : 0.25}
       />
       <div className="container-md relative z-10 mx-auto flex min-h-[92svh] flex-col items-center justify-center px-4 pt-20 pb-14">
         <h1 className="text-center text-5xl leading-tight font-bold break-words md:text-6xl">
@@ -108,36 +116,57 @@ function HeroWordRotate({
   words: string[];
   duration?: number;
 }) {
+  const reducedMotion = usePrefersReducedMotion();
   const [index, setIndex] = useState(0);
 
   useEffect(() => {
+    if (reducedMotion) {
+      setIndex(0);
+      return;
+    }
     const interval = setInterval(() => {
       setIndex((prevIndex) => (prevIndex + 1) % words.length);
     }, duration);
 
     return () => clearInterval(interval);
-  }, [words, duration]);
+  }, [words, duration, reducedMotion]);
+
+  const word = (
+    <AuroraText
+      className="max-w-full [overflow-wrap:anywhere] whitespace-normal"
+      speed={3}
+      colors={["#efefbb", "#e9c665", "#e3a812"]}
+    >
+      {words[index]}
+    </AuroraText>
+  );
 
   return (
-    <div className="relative max-w-full min-w-0 overflow-hidden py-2">
-      <AnimatePresence mode="popLayout">
-        <motion.div
-          key={index}
-          className="max-w-full"
-          initial={{ opacity: 0, y: -50, filter: "blur(16px)" }}
-          animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
-          exit={{ opacity: 0, y: 50, filter: "blur(16px)" }}
-          transition={{ duration: 0.3, ease: "easeOut" }}
-        >
-          <AuroraText
-            className="max-w-full [overflow-wrap:anywhere] whitespace-normal"
-            speed={3}
-            colors={["#efefbb", "#e9c665", "#e3a812"]}
+    // The rotating word is decorative. `AuroraText` renders its own `sr-only`
+    // copy of the text, and `AnimatePresence` keeps the outgoing word mounted
+    // through the cross-fade, so without this the transition would expose two
+    // headline texts to assistive technology at once. The adjacent
+    // "SuperAgent" span remains the line's one stable semantic text node.
+    <div
+      aria-hidden="true"
+      className="relative max-w-full min-w-0 overflow-hidden py-2"
+    >
+      {reducedMotion ? (
+        <div className="max-w-full">{word}</div>
+      ) : (
+        <AnimatePresence mode="popLayout">
+          <motion.div
+            key={index}
+            className="max-w-full"
+            initial={{ opacity: 0, y: -50, filter: "blur(16px)" }}
+            animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+            exit={{ opacity: 0, y: 50, filter: "blur(16px)" }}
+            transition={{ duration: 0.3, ease: "easeOut" }}
           >
-            {words[index]}
-          </AuroraText>
-        </motion.div>
-      </AnimatePresence>
+            {word}
+          </motion.div>
+        </AnimatePresence>
+      )}
     </div>
   );
 }

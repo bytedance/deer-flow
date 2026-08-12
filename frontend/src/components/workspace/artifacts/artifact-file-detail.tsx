@@ -409,7 +409,9 @@ export function ArtifactFileDetail({
                 }}
               >
                 <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0">
-                  <SelectValue placeholder="Select a file" />
+                  <SelectValue
+                    placeholder={t.artifactPreview.selectFilePlaceholder}
+                  />
                 </SelectTrigger>
                 <SelectContent className="select-none">
                   <SelectGroup>
@@ -760,6 +762,7 @@ function ArtifactDownloadFallback({
   threadId: string;
   isMock?: boolean;
 }) {
+  const { t } = useI18n();
   const filename = getFileName(filepath);
   const fileType = getFileExtensionDisplayName(filepath);
 
@@ -771,10 +774,12 @@ function ArtifactDownloadFallback({
         </div>
         <div className="space-y-1">
           <div className="font-medium break-all">{filename}</div>
-          <div className="text-muted-foreground text-sm">{fileType} file</div>
+          <div className="text-muted-foreground text-sm">
+            {t.artifactPreview.fileTypeLabel(fileType)}
+          </div>
         </div>
         <p className="text-muted-foreground text-sm">
-          This file type cannot be previewed in the browser.
+          {t.artifactPreview.cannotPreviewFileType}
         </p>
         <Button asChild>
           <a
@@ -788,7 +793,7 @@ function ArtifactDownloadFallback({
             rel="noopener noreferrer"
           >
             <DownloadIcon className="size-4" />
-            Download
+            {t.common.download}
           </a>
         </Button>
       </div>
@@ -807,6 +812,7 @@ export function ArtifactFilePreview({
   scrollKey: string;
   url?: string;
 }) {
+  const { t } = useI18n();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const scrollPositionRef = useRef({ x: 0, y: 0 });
   const scrollMessageKey = useMemo(
@@ -903,7 +909,7 @@ export function ArtifactFilePreview({
       <iframe
         ref={iframeRef}
         className="size-full"
-        title="Artifact preview"
+        title={t.artifactPreview.iframeTitle}
         // allow-scripts is needed for the scroll-restoration injected
         // script (appendHtmlPreviewScrollRestoration) which communicates
         // via postMessage. allow-same-origin is deliberately omitted: the

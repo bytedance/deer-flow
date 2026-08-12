@@ -2,13 +2,13 @@ import { StarFilledIcon, GitHubLogoIcon } from "@radix-ui/react-icons";
 import Link from "next/link";
 
 import { Button } from "@/components/ui/button";
-import { NumberTicker } from "@/components/ui/number-ticker";
 import { DEFAULT_LOCALE, type Locale } from "@/core/i18n/locale";
 import { getI18n } from "@/core/i18n/server";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
 import { MobileNav } from "./mobile-nav";
+import { StarCount } from "./star-count";
 
 export type HeaderProps = {
   className?: string;
@@ -117,9 +117,7 @@ async function StarCounter() {
   return (
     <>
       <StarFilledIcon className="size-4 transition-colors duration-300 group-hover:text-yellow-500" />
-      {stars && (
-        <NumberTicker className="font-mono tabular-nums" value={stars} />
-      )}
+      {stars && <StarCount className="font-mono tabular-nums" value={stars} />}
     </>
   );
 }

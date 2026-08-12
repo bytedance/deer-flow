@@ -48,9 +48,27 @@ describe("decorative animation scheduling", () => {
 
     expect(source).toContain('import("../progressive-skills-animation")');
     expect(source).toContain("ssr: false");
-    expect(source).toContain("useRenderActivity(animationRef, false)");
+    // Same shape as Magic Bento above: the third argument opts out of the
+    // hook's reduced-motion gate so the walkthrough still mounts, and the
+    // component suppresses its own auto-play instead of vanishing.
+    expect(source).toContain("useRenderActivity(animationRef, false, false)");
     expect(source).toContain(
       "renderAnimation && <ProgressiveSkillsAnimation />",
+    );
+  });
+
+  it("leaves the skills walkthrough on its idle poster under reduced motion", () => {
+    const source = readFileSync(
+      join(
+        frontendRoot,
+        "src/components/landing/progressive-skills-animation.tsx",
+      ),
+      "utf8",
+    );
+
+    expect(source).toContain("usePrefersReducedMotion");
+    expect(source).toContain(
+      "if (reducedMotion || hasAutoPlayed || !containerRef.current) return;",
     );
   });
 });

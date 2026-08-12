@@ -102,6 +102,10 @@ export interface Translations {
     loadFullFile: string;
     loadingFullFile: string;
     previewFailed: string;
+    iframeTitle: string;
+    selectFilePlaceholder: string;
+    fileTypeLabel: (fileType: string) => string;
+    cannotPreviewFileType: string;
   };
 
   // Citations
@@ -215,6 +219,7 @@ export interface Translations {
         }
     )[];
     pleaseWaitStreaming: string;
+    skillSuggestions: string;
   };
 
   // Sidebar
@@ -441,6 +446,8 @@ export interface Translations {
     pinChat: string;
     unpinChat: string;
     pinChatFailed: string;
+    noArtifactSelected: string;
+    noArtifactSelectedDescription: string;
   };
 
   // Sidecar
@@ -466,6 +473,24 @@ export interface Translations {
     noContext: string;
     continuing: string;
     selectionCrossesMessages: string;
+  };
+
+  // Browser View
+  browserView: {
+    back: string;
+    forward: string;
+    urlPlaceholder: string;
+    takeLiveControl: string;
+    stopLiveControl: string;
+    live: string;
+    liveConnecting: string;
+    surfaceAlt: string;
+    cannotOpenUrl: (url?: string) => string;
+    navigatedWithoutScreenshot: string;
+    connectingTitle: string;
+    idleTitle: string;
+    connectingDescription: string;
+    idleDescription: string;
   };
 
   // Channels

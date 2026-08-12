@@ -124,6 +124,10 @@ export const enUS: Translations = {
     loadingFullFile: "Loading full file...",
     previewFailed:
       "This file could not be previewed. You can still download it.",
+    iframeTitle: "Artifact preview",
+    selectFilePlaceholder: "Select a file",
+    fileTypeLabel: (fileType: string) => `${fileType} file`,
+    cannotPreviewFileType: "This file type cannot be previewed in the browser.",
   },
 
   // Citations
@@ -290,6 +294,7 @@ export const enUS: Translations = {
       },
     ],
     pleaseWaitStreaming: "Please wait for the current response to finish.",
+    skillSuggestions: "Skill suggestions",
   },
 
   // Sidebar
@@ -549,6 +554,8 @@ export const enUS: Translations = {
     pinChat: "Pin chat",
     unpinChat: "Unpin chat",
     pinChatFailed: "Failed to update pinned chat",
+    noArtifactSelected: "No artifact selected",
+    noArtifactSelectedDescription: "Select an artifact to view its details",
   },
 
   // Sidecar
@@ -576,6 +583,26 @@ export const enUS: Translations = {
     continuing: "Continue in this side chat",
     selectionCrossesMessages:
       "Selection spans multiple messages. Select text within a single reply to quote it.",
+  },
+
+  // Browser View
+  browserView: {
+    back: "Back",
+    forward: "Forward",
+    urlPlaceholder: "Enter a URL and press Enter",
+    takeLiveControl: "Take live control",
+    stopLiveControl: "Stop live control",
+    live: "Live",
+    liveConnecting: "…",
+    surfaceAlt: "Browser view",
+    cannotOpenUrl: (url?: string) => `Cannot open ${url ?? "that URL"}`,
+    navigatedWithoutScreenshot:
+      "Navigated, but no screenshot could be captured.",
+    connectingTitle: "Connecting to live browser…",
+    idleTitle: "No browser activity yet",
+    connectingDescription: "Waiting for the first live frame.",
+    idleDescription:
+      "Enter a URL above or let the agent browse — the live view will appear here.",
   },
 
   // Channels

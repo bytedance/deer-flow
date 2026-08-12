@@ -118,9 +118,15 @@ export function PostList({ description, posts, title }: PostListProps) {
   return (
     <div className="mx-auto flex w-full max-w-5xl flex-col gap-12 px-6">
       <header className="space-y-4">
-        <h2 className="text-foreground text-4xl font-semibold tracking-tight">
+        {/*
+         * The blog index/tag pages render this component as their whole body,
+         * and the Nextra wrapper only emits an `h1` for a markdown `#` heading
+         * in MDX content. Without one here these pages have no top-level
+         * heading at all, so the list title owns it.
+         */}
+        <h1 className="text-foreground text-4xl font-semibold tracking-tight">
           {title}
-        </h2>
+        </h1>
         {description ? (
           <p className="text-secondary-foreground">{description}</p>
         ) : null}
@@ -140,16 +146,24 @@ export function PostList({ description, posts, title }: PostListProps) {
                   languages={post.languages}
                   pathname={getBlogRoute(post.slug)}
                 />
-                <Link
-                  href={getBlogRoute(post.slug)}
-                  className="text-foreground hover:text-primary block text-2xl font-semibold tracking-tight transition-colors"
-                >
-                  {post.title}
-                </Link>
+                {/*
+                 * Each entry is a heading, not just large link text, so the
+                 * list is navigable by heading in assistive technology.
+                 */}
+                <h2 className="text-2xl font-semibold tracking-tight">
+                  <Link
+                    href={getBlogRoute(post.slug)}
+                    className="text-foreground hover:text-primary block transition-colors"
+                  >
+                    {post.title}
+                  </Link>
+                </h2>
               </div>
 
               {post.metadata.description ? (
-                <p className="text-secondary-foreground leading-10">
+                // `leading-10` is 2.5rem of leading on 1rem text, which reads
+                // as disconnected lines on a narrow screen.
+                <p className="text-secondary-foreground leading-7 sm:leading-8">
                   {post.metadata.description}
                 </p>
               ) : null}

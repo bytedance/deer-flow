@@ -37,6 +37,10 @@ export function CopyButton({
         type="button"
         variant="ghost"
         onClick={handleCopy}
+        // The tooltip only contributes `aria-describedby`, so without this the
+        // icon-only trigger has no accessible name. Declared before the spread
+        // so a caller can still override it with a more specific label.
+        aria-label={t.clipboard.copyToClipboard}
         {...props}
       >
         {copied ? (

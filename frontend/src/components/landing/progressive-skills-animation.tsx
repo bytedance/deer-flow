@@ -15,6 +15,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { useState, useEffect, useRef } from "react";
 
 import { Tooltip } from "@/components/workspace/tooltip";
+import { usePrefersReducedMotion } from "@/core/dom/render-activity";
 
 type AnimationPhase =
   | "idle"
@@ -62,6 +63,7 @@ const ANIMATION_DELAYS = {
 } as const;
 
 export default function ProgressiveSkillsAnimation() {
+  const reducedMotion = usePrefersReducedMotion();
   const [phase, setPhase] = useState<AnimationPhase>("idle");
   const [searchIndex, setSearchIndex] = useState(0);
   const [buildIndex, setBuildIndex] = useState(0);
@@ -158,9 +160,12 @@ export default function ProgressiveSkillsAnimation() {
     }
   };
 
-  // Auto-play when component enters viewport for the first time
+  // Auto-play when component enters viewport for the first time.
+  // Under `prefers-reduced-motion` the walkthrough stays on its idle poster
+  // instead, so the section still renders and the user can start it from the
+  // existing play button rather than having motion pushed at them.
   useEffect(() => {
-    if (hasAutoPlayed || !containerRef.current) return;
+    if (reducedMotion || hasAutoPlayed || !containerRef.current) return;
 
     const containerElement = containerRef.current;
     const observer = new IntersectionObserver(
@@ -194,7 +199,7 @@ export default function ProgressiveSkillsAnimation() {
         observer.unobserve(containerElement);
       }
     };
-  }, [hasAutoPlayed, isPlaying]);
+  }, [hasAutoPlayed, isPlaying, reducedMotion]);
 
   // Handle search animation
   useEffect(() => {

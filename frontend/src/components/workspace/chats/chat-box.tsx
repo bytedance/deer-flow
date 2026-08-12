@@ -22,6 +22,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
@@ -78,6 +79,7 @@ const ChatBox: React.FC<{
   threadId: string;
   browserEnabled?: boolean;
 }> = ({ children, threadId, browserEnabled = true }) => {
+  const { t } = useI18n();
   const { thread } = useThread();
   const isMobile = useIsMobile();
   const pathname = usePathname();
@@ -311,6 +313,7 @@ const ChatBox: React.FC<{
               onClick={() => {
                 setArtifactsOpen(false);
               }}
+              aria-label={t.common.close}
             >
               <XIcon />
             </Button>
@@ -318,13 +321,13 @@ const ChatBox: React.FC<{
           {artifacts.length === 0 ? (
             <ConversationEmptyState
               icon={<FilesIcon />}
-              title="No artifact selected"
-              description="Select an artifact to view its details"
+              title={t.chats.noArtifactSelected}
+              description={t.chats.noArtifactSelectedDescription}
             />
           ) : (
             <div className="flex size-full max-w-(--container-width-sm) flex-col justify-center p-4 pt-8">
               <header className="shrink-0">
-                <h2 className="text-lg font-medium">Artifacts</h2>
+                <h2 className="text-lg font-medium">{t.common.artifacts}</h2>
               </header>
               <main className="min-h-0 grow">
                 <ArtifactFileList
@@ -345,6 +348,7 @@ const ChatBox: React.FC<{
     threadId,
     artifacts,
     setArtifactsOpen,
+    t,
   ]);
 
   if (isMobile) {

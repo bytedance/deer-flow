@@ -15,7 +15,10 @@ const ProgressiveSkillsAnimation = dynamic(
 
 export function SkillsSection({ className }: { className?: string }) {
   const animationRef = useRef<HTMLDivElement>(null);
-  const renderAnimation = useRenderActivity(animationRef, false);
+  // Keep the walkthrough mounted under `prefers-reduced-motion` — it owns its
+  // own idle poster and only auto-plays when motion is allowed, so gating the
+  // render here would leave an empty section instead of a static variant.
+  const renderAnimation = useRenderActivity(animationRef, false, false);
 
   return (
     <Section
