@@ -202,6 +202,51 @@ def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> N
     assert "lastConfirmedAt" not in without_hybrid_tracking["facts"][0]
 
 
+@pytest.mark.parametrize(
+    ("prior_count", "expected_count"),
+    [
+        (3, 4),
+        (0, 1),
+        (True, 1),
+        (-1, 1),
+        ("3", 1),
+    ],
+)
+def test_apply_updates_normalizes_prior_confirmation_count(prior_count: object, expected_count: int) -> None:
+    updater = _make_updater(config=_memory_config(fact_eviction_policy="hybrid-v1"))
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_preference",
+                "content": "User prefers concise answers",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "source": "thread-a",
+                "confirmationCount": prior_count,
+            }
+        ]
+    )
+    update_data = {
+        "newFacts": [],
+        "factsToReinforce": [
+            {
+                "id": "fact_preference",
+                "scope": "user",
+                "reason": "The user explicitly confirmed this preference",
+            }
+        ],
+    }
+
+    result = updater._apply_updates(
+        current_memory,
+        update_data,
+        signals=frozenset({"reinforcement"}),
+    )
+
+    assert result["facts"][0]["confirmationCount"] == expected_count
+
+
 def test_parse_memory_update_response_normalizes_reinforcement_entries() -> None:
     parsed = _parse_memory_update_response(
         '{"user":{},"history":{},"newFacts":[],"factsToReinforce":[{"id":" fact_a ","scope":"USER","reason":" explicit confirmation "},{"id":"fact_b","scope":"thread","reason":"one-off"},{"id":"","scope":"user","reason":"bad"}]}'

@@ -79,6 +79,14 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
+def _next_confirmation_count(fact: dict[str, Any]) -> int:
+    """Increment a valid prior confirmation count, resetting malformed values."""
+    prior_count = fact.get("confirmationCount", 0)
+    if isinstance(prior_count, bool) or not isinstance(prior_count, int) or prior_count < 0:
+        return 1
+    return prior_count + 1
+
+
 def _trim_facts_to_max(facts: list[dict[str, Any]], max_facts: int) -> list[dict[str, Any]]:
     """Keep the highest-confidence facts within ``max_facts`` (confidence coerced).
 
@@ -1905,9 +1913,7 @@ class MemoryUpdater:
                     {
                         **fact,
                         "lastConfirmedAt": now,
-                        "confirmationCount": (
-                            fact.get("confirmationCount", 0) + 1 if isinstance(fact.get("confirmationCount", 0), int) and not isinstance(fact.get("confirmationCount", 0), bool) and fact.get("confirmationCount", 0) >= 0 else 1
-                        ),
+                        "confirmationCount": _next_confirmation_count(fact),
                     }
                     if isinstance(fact, dict) and fact.get("id") in reinforced_ids
                     else fact
