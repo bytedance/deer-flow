@@ -20,7 +20,9 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+from deerflow.sandbox.tools import read_file_tool
 from deerflow.skills.projection import rebuild_skill_projections
+from deerflow.skills.storage import reset_user_skill_storage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
 
@@ -67,6 +69,7 @@ def skills_fs(tmp_path: Path) -> dict:
     legacy = root / "custom"
     users_dir = tmp_path / "users"
     user_custom = users_dir / "user-1" / "skills" / "custom"
+    integrations = tmp_path / "integrations" / "skills" / "demo-provider"
 
     return {
         "root": root,
@@ -77,6 +80,7 @@ def skills_fs(tmp_path: Path) -> dict:
         "pub_skill": _write_skill(pub, "pub-skill", "public skill"),
         "legacy_skill": _write_skill(legacy, "leg-skill", "legacy skill"),
         "user_skill": _write_skill(user_custom, "usr-skill", "user custom skill"),
+        "integration_skill": _write_skill(integrations, "int-skill", "integration skill"),
     }
 
 
@@ -190,6 +194,77 @@ class TestThreeWayMountEndToEnd:
         sandbox = provider.get(sid)
         assert "leg-skill" in sandbox.read_file("/mnt/skills/legacy/leg-skill/SKILL.md")
 
+    def test_read_file_tool_uses_enabled_projection_for_every_skill_category(self, skills_fs, monkeypatch):
+        """Exercise the model-visible tool through real provider mappings.
+
+        The runtime identity deliberately differs from the ambient ContextVar.
+        Acquire-time ``PathMapping`` must remain authoritative for both full and
+        ranged reads; the tool layer must never reconstruct a raw host path.
+        """
+        from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+        cfg = _build_config(skills_fs["root"])
+        paths = Paths(base_dir=skills_fs["users_dir"].parent)
+        extensions = ExtensionsConfig()
+        reset_user_skill_storage()
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=cfg),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+            patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=extensions),
+            patch("deerflow.config.extensions_config.get_extensions_config", return_value=extensions),
+        ):
+            provider = LocalSandboxProvider()
+            sandbox_ids = {
+                "user-1": provider.acquire("thread-user", user_id="user-1"),
+                "noob": provider.acquire("thread-noob", user_id="noob"),
+            }
+
+            def _sandbox_for(runtime):
+                return provider.get(runtime.state["sandbox"]["sandbox_id"])
+
+            def _must_not_pre_resolve(_path: str) -> str:
+                raise AssertionError("skill paths must stay virtual until the sandbox provider")
+
+            monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", _sandbox_for)
+            monkeypatch.setattr("deerflow.sandbox.tools._resolve_skills_path", _must_not_pre_resolve)
+
+            token = set_current_user(SimpleNamespace(id="wrong-context-user"))
+            try:
+                cases = [
+                    ("user-1", "thread-user", "/mnt/skills/public/pub-skill/SKILL.md", "pub-skill"),
+                    ("user-1", "thread-user", "/mnt/skills/custom/usr-skill/SKILL.md", "usr-skill"),
+                    ("noob", "thread-noob", "/mnt/skills/legacy/leg-skill/SKILL.md", "leg-skill"),
+                    ("user-1", "thread-user", "/mnt/skills/integrations/demo-provider/int-skill/SKILL.md", "int-skill"),
+                ]
+                for user_id, thread_id, virtual_path, skill_name in cases:
+                    runtime = SimpleNamespace(
+                        state={
+                            "sandbox": {"sandbox_id": sandbox_ids[user_id]},
+                            "thread_data": {
+                                "workspace_path": str(paths.sandbox_work_dir(thread_id, user_id=user_id)),
+                                "uploads_path": str(paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
+                                "outputs_path": str(paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
+                            },
+                        },
+                        context={"thread_id": thread_id, "user_id": user_id},
+                    )
+
+                    full = read_file_tool.func(runtime=runtime, description="read skill", path=virtual_path)
+                    ranged = read_file_tool.func(
+                        runtime=runtime,
+                        description="read skill name",
+                        path=virtual_path,
+                        start_line=2,
+                        end_line=2,
+                    )
+
+                    assert f"# {skill_name}" in full
+                    assert ranged == f"name: {skill_name}"
+            finally:
+                reset_current_user(token)
+                reset_user_skill_storage()
+
     # ── Full pipeline: registry → container path → sandbox read ────────
 
     def test_registry_to_sandbox_full_pipeline(self, skills_fs):
@@ -244,7 +319,7 @@ class TestThreeWayMountEndToEnd:
         assert cp == "/mnt/skills/legacy/leg-skill/SKILL.md"
         assert "leg-skill" in sandbox_noob.read_file(cp)
 
-    def test_local_bash_observes_toggle_without_sandbox_recreation(self, tmp_path):
+    def test_local_tools_observe_toggle_without_sandbox_recreation(self, tmp_path, monkeypatch):
         skills_root = tmp_path / "skills"
         _write_skill(skills_root / "public", "secret-skill", "SECRET_PROCEDURE")
         paths = Paths(base_dir=tmp_path)
@@ -263,20 +338,42 @@ class TestThreeWayMountEndToEnd:
             sandbox_id = provider.acquire("thread-1", user_id="user-1")
             sandbox = provider.get(sandbox_id)
             assert sandbox is not None
+            runtime = SimpleNamespace(
+                state={
+                    "sandbox": {"sandbox_id": sandbox_id},
+                    "thread_data": {
+                        "workspace_path": str(paths.sandbox_work_dir("thread-1", user_id="user-1")),
+                        "uploads_path": str(paths.sandbox_uploads_dir("thread-1", user_id="user-1")),
+                        "outputs_path": str(paths.sandbox_outputs_dir("thread-1", user_id="user-1")),
+                    },
+                },
+                context={"thread_id": "thread-1", "user_id": "user-1"},
+            )
+            monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda _runtime: sandbox)
+            virtual_path = "/mnt/skills/public/secret-skill/SKILL.md"
 
-            disabled = sandbox.execute_command("cat /mnt/skills/public/secret-skill/SKILL.md")
+            disabled = sandbox.execute_command(f"cat {virtual_path}")
             assert "SECRET_PROCEDURE" not in disabled
+            structured_disabled = read_file_tool.func(runtime=runtime, description="read disabled skill", path=virtual_path)
+            assert "SECRET_PROCEDURE" not in structured_disabled
+            assert "disabled" in structured_disabled.lower()
+            assert not (paths.public_skills_view_dir / "secret-skill").exists()
+            assert (skills_root / "public" / "secret-skill" / "SKILL.md").is_file()
 
             extensions.skills["secret-skill"] = SkillStateConfig(enabled=True)
             rebuild_skill_projections(storage)
-            enabled = sandbox.execute_command("cat /mnt/skills/public/secret-skill/SKILL.md")
+            enabled = sandbox.execute_command(f"cat {virtual_path}")
             assert "SECRET_PROCEDURE" in enabled
+            assert "SECRET_PROCEDURE" in read_file_tool.func(runtime=runtime, description="read enabled skill", path=virtual_path)
             assert provider.acquire("thread-1", user_id="user-1") == sandbox_id
 
             extensions.skills["secret-skill"] = SkillStateConfig(enabled=False)
             rebuild_skill_projections(storage)
-            disabled_again = sandbox.execute_command("cat /mnt/skills/public/secret-skill/SKILL.md")
+            disabled_again = sandbox.execute_command(f"cat {virtual_path}")
             assert "SECRET_PROCEDURE" not in disabled_again
+            structured_disabled_again = read_file_tool.func(runtime=runtime, description="read disabled skill", path=virtual_path)
+            assert "SECRET_PROCEDURE" not in structured_disabled_again
+            assert "disabled" in structured_disabled_again.lower()
 
     # ── AioSandboxProvider ──────────────────────────────────────────────
 
