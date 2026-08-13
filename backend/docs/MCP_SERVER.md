@@ -259,7 +259,8 @@ are never parsed as a task protocol:
 - `get_report_status({"task_id":"remote-123"})` returns a status from
   `running`, `input_required`, `completed`, `failed`, or `cancelled`. It may
   also return `result`, `result_artifact` (`uri` plus `mime_type`), `error`,
-  `error_code`, `input_required`, and a positive `poll_after_seconds`.
+  `error_code`, `input_required`, and a finite positive
+  `poll_after_seconds`. DeerFlow caps that remote scheduling hint at 24 hours.
 - `cancel_report({"task_id":"remote-123"})` is idempotent and returns the
   actual terminal status: `cancelled`, `completed`, or `failed`.
 
@@ -276,7 +277,11 @@ running remotely.
 Persisted task errors are capped at 4,000 characters. An `input_required`
 payload must be valid JSON no larger than 64 KiB; an oversized or invalid
 payload is treated as a permanent protocol failure instead of being truncated
-into a different question.
+into a different question. `result_artifact` must likewise serialize as JSON
+within 64 KiB; it is a small external reference, not a second result channel.
+Remote task IDs and task names are limited to 255 characters, and a task-enabled
+server name is limited to 128 characters, matching the durable SQL schema on
+both SQLite and PostgreSQL.
 
 `error_code: "task_not_found"` is a permanent failure. Network and transport
 errors remain retryable with capped exponential backoff; the query API reports
@@ -301,7 +306,12 @@ Server-level OAuth works during background polling and refreshes normally.
 Request-scoped secrets from a particular Agent run are not durable task
 credentials and are unavailable to later background polls; use server-level
 authentication for a task toolset. Restart DeerFlow after changing
-`task_toolsets` or `mcp_tasks` settings.
+`mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
+authentication, transport, or timeout setting on a task-enabled server.
+DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
+snapshot instead of discovering tools with new settings while the background
+poller still calls the old endpoint. Agent-facing description/routing changes
+and changes to servers without task toolsets remain hot-reloadable.
 
 ## OAuth Support (HTTP/SSE MCP Servers)
 

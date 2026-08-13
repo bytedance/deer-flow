@@ -12,7 +12,11 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import (
+    DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +74,22 @@ class McpTaskToolsetConfig(BaseModel):
     part of this durable binding.
     """
 
-    name: str = Field(min_length=1, description="Stable local name shown for tasks from this toolset")
+    name: str = Field(
+        min_length=1,
+        max_length=MCP_TASK_NAME_MAX_LENGTH,
+        description="Stable local name shown for tasks from this toolset",
+    )
     submit_tool: str = Field(min_length=1, description="Raw MCP tool name used to submit work")
     status_tool: str = Field(min_length=1, description="Raw MCP tool name used to poll work")
     cancel_tool: str = Field(min_length=1, description="Raw MCP tool name used to cancel work")
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("MCP task toolset name must not be empty")
+        return value
 
 
 class McpOAuthConfig(BaseModel):
@@ -199,6 +214,15 @@ class ExtensionsConfig(BaseModel):
         description="Map of skill name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
+        for server_name, server in self.mcp_servers.items():
+            if not server.task_toolsets:
+                continue
+            if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
+                raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
+        return self
 
     def to_file_dict(self) -> dict[str, Any]:
         """Serialize in the public extensions_config.json shape."""

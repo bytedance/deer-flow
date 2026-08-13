@@ -23,6 +23,43 @@ class McpTaskSubmitter(Protocol):
 
 
 _submitter: McpTaskSubmitter | None = None
+_TaskServerConfigSnapshot = tuple[dict[str, dict[str, Any]], Any]
+_task_server_config_snapshot: _TaskServerConfigSnapshot | None = None
+
+
+def _task_server_configs(extensions_config: ExtensionsConfig) -> _TaskServerConfigSnapshot:
+    servers: dict[str, dict[str, Any]] = {}
+    for server_name, server in extensions_config.get_enabled_mcp_servers().items():
+        if not server.task_toolsets:
+            continue
+        runtime_config = server.model_dump(mode="json")
+        for presentation_field in ("description", "routing", "tools", "tool_name_prefix"):
+            runtime_config.pop(presentation_field, None)
+        servers[server_name] = runtime_config
+    interceptors = (extensions_config.model_extra or {}).get("mcpInterceptors") if servers else None
+    return servers, interceptors
+
+
+def set_mcp_task_config_snapshot(extensions_config: ExtensionsConfig | None) -> None:
+    """Freeze task-enabled server settings for one Gateway process lifetime."""
+    global _task_server_config_snapshot
+    _task_server_config_snapshot = None if extensions_config is None else _task_server_configs(extensions_config)
+
+
+def validate_mcp_task_config_snapshot(extensions_config: ExtensionsConfig) -> None:
+    """Reject hot changes that would split tool discovery from background calls."""
+    if _task_server_config_snapshot is None:
+        return
+    current = _task_server_configs(extensions_config)
+    if current == _task_server_config_snapshot:
+        return
+    current_servers, current_interceptors = current
+    startup_servers, startup_interceptors = _task_server_config_snapshot
+    changed = sorted(server_name for server_name in current_servers.keys() | startup_servers.keys() if current_servers.get(server_name) != startup_servers.get(server_name))
+    if current_interceptors != startup_interceptors:
+        changed.append("mcpInterceptors")
+    names = ", ".join(changed) or "<unknown>"
+    raise McpTaskConfigurationError(f"MCP task-enabled server configuration changed after Gateway startup ({names}); restart DeerFlow before using durable task tools")
 
 
 def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:

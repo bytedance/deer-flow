@@ -8,6 +8,11 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+from deerflow.constants import (
+    MCP_TASK_POLL_AFTER_MAX_SECONDS,
+    MCP_TASK_REMOTE_ID_MAX_LENGTH,
+    MCP_TASK_RESULT_ARTIFACT_MAX_BYTES,
+)
 from deerflow.mcp.tasks import (
     McpTaskDriverRegistry,
     McpTaskProtocolError,
@@ -95,6 +100,8 @@ class McpTaskService:
             driver_data=driver_data,
         )
         try:
+            if len(submission.remote_task_id) > MCP_TASK_REMOTE_ID_MAX_LENGTH:
+                raise McpTaskProtocolError(f"MCP task remote_task_id must not exceed {MCP_TASK_REMOTE_ID_MAX_LENGTH} characters")
             snapshot = self._normalize_snapshot(submission.snapshot)
             next_poll_at = self._next_poll_at(snapshot, now=submitted_at)
             return await self._repository.create(
@@ -226,6 +233,7 @@ class McpTaskService:
         interval = snapshot.poll_after_seconds or self._poll_interval_seconds
         if snapshot.status == TaskStatus.INPUT_REQUIRED:
             interval = max(interval, self._input_required_poll_interval_seconds)
+        interval = min(interval, MCP_TASK_POLL_AFTER_MAX_SECONDS)
         return now + timedelta(seconds=interval)
 
     async def _release_after_error(self, record: dict, *, now: datetime, error: str) -> None:
@@ -246,6 +254,13 @@ class McpTaskService:
     def _normalize_snapshot(self, snapshot: TaskSnapshot) -> TaskSnapshot:
         """Bound remote payloads without ever storing truncated JSON."""
         snapshot = replace(snapshot, error=_bound_error(snapshot.error))
+        if snapshot.result_artifact is not None:
+            encoded_artifact = self._encode_json_payload(
+                snapshot.result_artifact,
+                field_name="result_artifact",
+            )
+            if len(encoded_artifact) > MCP_TASK_RESULT_ARTIFACT_MAX_BYTES:
+                raise McpTaskProtocolError(f"MCP task result_artifact payload exceeds the {MCP_TASK_RESULT_ARTIFACT_MAX_BYTES}-byte limit")
         if snapshot.input_required is not None:
             encoded_input = self._encode_json_payload(
                 snapshot.input_required,

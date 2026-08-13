@@ -1,12 +1,17 @@
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel
 
-from deerflow.config.extensions_config import McpServerConfig
-from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, set_mcp_task_submitter
-from deerflow.mcp.tools import _configure_task_tools_for_server
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
+from deerflow.mcp.tasks.runtime import (
+    McpTaskConfigurationError,
+    set_mcp_task_config_snapshot,
+    set_mcp_task_submitter,
+)
+from deerflow.mcp.tools import _configure_task_tools_for_server, get_mcp_tools
 
 
 class _SubmitArgs(BaseModel):
@@ -177,3 +182,22 @@ async def test_submit_wrapper_fails_clearly_without_gateway_task_runtime() -> No
 
     with pytest.raises(McpTaskConfigurationError, match="not initialized"):
         await configured[0].coroutine(topic="MCP")
+
+
+@pytest.mark.asyncio
+async def test_tool_reload_rejects_task_server_runtime_config_drift() -> None:
+    startup = ExtensionsConfig(mcpServers={"reports": _server_config()})
+    current = ExtensionsConfig(mcpServers={"reports": _server_config()})
+    current.mcp_servers["reports"].env["TOKEN"] = "rotated"
+    set_mcp_task_config_snapshot(startup)
+    try:
+        with (
+            patch(
+                "deerflow.mcp.tools.ExtensionsConfig.from_file",
+                return_value=current,
+            ),
+            pytest.raises(McpTaskConfigurationError, match="reports.*restart"),
+        ):
+            await get_mcp_tools()
+    finally:
+        set_mcp_task_config_snapshot(None)

@@ -172,6 +172,24 @@ async def test_status_keeps_input_required_pollable() -> None:
 
 
 @pytest.mark.asyncio
+async def test_status_rejects_non_finite_poll_after_seconds() -> None:
+    driver = OrdinaryMcpTaskDriver(
+        FakeCaller(
+            _result(
+                {
+                    "task_id": "remote-1",
+                    "status": "running",
+                    "poll_after_seconds": float("inf"),
+                }
+            )
+        )
+    )
+
+    with pytest.raises(McpTaskProtocolError, match="poll_after_seconds"):
+        await driver.get_status(_reference())
+
+
+@pytest.mark.asyncio
 async def test_status_turns_task_not_found_into_permanent_failure() -> None:
     driver = OrdinaryMcpTaskDriver(
         FakeCaller(

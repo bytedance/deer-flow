@@ -6,6 +6,7 @@ from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from deerflow.constants import MCP_TASK_REMOTE_ID_MAX_LENGTH
 from deerflow.mcp.tasks.models import (
     TaskReference,
     TaskSnapshot,
@@ -47,19 +48,19 @@ class _ResultArtifact(BaseModel):
 
 
 class _StatusPayload(BaseModel):
-    task_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1, max_length=MCP_TASK_REMOTE_ID_MAX_LENGTH)
     status: Literal["running", "input_required", "completed", "failed", "cancelled"]
     result: Any | None = None
     result_artifact: _ResultArtifact | None = None
     error: str | None = None
     error_code: str | None = None
     input_required: dict[str, Any] | None = None
-    poll_after_seconds: float | None = Field(default=None, gt=0)
+    poll_after_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     model_config = ConfigDict(extra="ignore")
 
 
 class _CancelPayload(BaseModel):
-    task_id: str = Field(min_length=1)
+    task_id: str = Field(min_length=1, max_length=MCP_TASK_REMOTE_ID_MAX_LENGTH)
     status: Literal["cancelled", "completed", "failed"]
     result: Any | None = None
     result_artifact: _ResultArtifact | None = None

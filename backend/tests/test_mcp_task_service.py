@@ -217,6 +217,46 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
 
 
 @pytest.mark.asyncio
+async def test_submit_cancels_remote_task_when_its_id_exceeds_storage_limit():
+    repo = FakeRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="r" * 256,
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    with pytest.raises(McpTaskProtocolError, match="remote_task_id.*255"):
+        await service.submit(
+            driver_name="fake",
+            request=TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-1",
+                run_id="run-1",
+                tool_call_id="call-1",
+                server_name="reports",
+                task_name="Generate report",
+                arguments={},
+                local_task_id="task-1",
+            ),
+        )
+
+    assert repo.created == []
+    assert len(driver.cancel_calls) == 1
+    assert driver.cancel_calls[0].remote_task_id == "r" * 256
+
+
+@pytest.mark.asyncio
 async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_task():
     repo = DuplicateCreateRepository()
     driver = FakeDriver(
@@ -312,6 +352,26 @@ async def test_run_once_polls_without_an_llm_and_schedules_next_poll():
     assert update["status"] == "working"
     assert update["next_poll_at"] == update["polled_at"] + timedelta(seconds=12)
     assert update["polled_at"] > scan_started_at
+
+
+@pytest.mark.asyncio
+async def test_run_once_caps_remote_poll_hint_to_one_day():
+    repo = FakeRepository([_claimed_row()])
+    driver = FakeDriver([TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=1e20)])
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    _, update = repo.applied[0]
+    assert update["next_poll_at"] == update["polled_at"] + timedelta(days=1)
 
 
 @pytest.mark.asyncio
@@ -559,6 +619,41 @@ async def test_oversized_result_stores_preview_without_invalid_truncated_json():
         "uri": "s3://reports/1.json",
         "mime_type": "application/json",
     }
+
+
+@pytest.mark.asyncio
+async def test_oversized_result_artifact_terminalizes_without_persisting_it():
+    repo = FakeRepository([_claimed_row()])
+    registry = McpTaskDriverRegistry()
+    registry.register(
+        "fake",
+        FakeDriver(
+            [
+                TaskSnapshot(
+                    status=TaskStatus.COMPLETED,
+                    result_artifact={
+                        "uri": "https://example.test/" + "x" * 65_536,
+                        "mime_type": "application/json",
+                    },
+                )
+            ]
+        ),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+
+    await service.run_once(now=datetime.now(UTC))
+
+    assert repo.released == []
+    _, applied = repo.applied[0]
+    assert applied["status"] == "failed"
+    assert applied["result_artifact"] is None
+    assert "result_artifact payload exceeds the 65536-byte limit" in applied["error"]
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,11 @@ from typing import Any
 from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, false
 from sqlalchemy.orm import Mapped, mapped_column
 
+from deerflow.constants import (
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_REMOTE_ID_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
 from deerflow.persistence.base import Base
 
 
@@ -17,10 +22,10 @@ class McpTaskRow(Base):
     thread_id: Mapped[str] = mapped_column(String(64), index=True)
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tool_call_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    server_name: Mapped[str] = mapped_column(String(128))
+    server_name: Mapped[str] = mapped_column(String(MCP_TASK_SERVER_NAME_MAX_LENGTH))
     driver_name: Mapped[str] = mapped_column(String(64))
-    remote_task_id: Mapped[str] = mapped_column(String(255))
-    task_name: Mapped[str] = mapped_column(String(255))
+    remote_task_id: Mapped[str] = mapped_column(String(MCP_TASK_REMOTE_ID_MAX_LENGTH))
+    task_name: Mapped[str] = mapped_column(String(MCP_TASK_NAME_MAX_LENGTH))
     status: Mapped[str] = mapped_column(String(32), index=True)
     result: Mapped[Any | None] = mapped_column(JSON, nullable=True)
     result_preview: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -341,6 +341,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         )
         from deerflow.mcp.tasks.runtime import (
             configured_task_toolset_count,
+            set_mcp_task_config_snapshot,
             set_mcp_task_submitter,
             validate_mcp_task_runtime_configuration,
         )
@@ -349,6 +350,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
         mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
         set_mcp_task_submitter(None)
+        set_mcp_task_config_snapshot(task_extensions_config)
         validate_mcp_task_runtime_configuration(
             mcp_tasks_config=mcp_tasks_config,
             extensions_config=task_extensions_config,
@@ -417,6 +419,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 from deerflow.mcp.tasks.runtime import set_mcp_task_submitter
 
                 set_mcp_task_submitter(None)
+        from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
+
+        set_mcp_task_config_snapshot(None)
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager

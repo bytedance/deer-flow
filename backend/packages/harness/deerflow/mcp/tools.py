@@ -22,7 +22,11 @@ from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
-from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, get_mcp_task_submitter
+from deerflow.mcp.tasks.runtime import (
+    McpTaskConfigurationError,
+    get_mcp_task_submitter,
+    validate_mcp_task_config_snapshot,
+)
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
@@ -764,6 +768,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
     extensions_config = ExtensionsConfig.from_file()
+    validate_mcp_task_config_snapshot(extensions_config)
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
