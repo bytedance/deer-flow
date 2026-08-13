@@ -8,8 +8,10 @@ sync/async code paths.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import pathlib
 import tempfile
 from types import SimpleNamespace
 
@@ -64,6 +66,27 @@ def _make_request(tool_name: str = "remote_executor", tool_call_id: str = "tc-1"
         tool_call={"name": tool_name, "id": tool_call_id},
         runtime=runtime,
     )
+
+
+@contextlib.contextmanager
+def _unwritable_outputs_path():
+    """Yield an ``outputs_path`` that ``os.makedirs`` cannot create, on any platform.
+
+    The parent component is a regular file, so creating a directory below it
+    fails with an ``OSError`` subclass everywhere (``NotADirectoryError`` on
+    POSIX, ``FileNotFoundError`` on Windows) and nothing is written outside the
+    temporary directory.
+
+    This deliberately avoids expressing "unwritable" as a magic absolute path.
+    ``/nonexistent/...`` was creatable by root in the CI container, and its
+    replacement ``/dev/null/...`` relies on ``/dev/null`` being a character
+    device, which is only true on POSIX -- on Windows it is an ordinary
+    relative path that ``os.makedirs`` happily creates at the drive root.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        blocker = pathlib.Path(tmpdir) / "not-a-directory"
+        blocker.touch()
+        yield os.path.join(blocker, "outputs")
 
 
 def _tm(content: str = "ok", name: str = "tool", tool_call_id: str = "tc-1") -> ToolMessage:
@@ -160,20 +183,15 @@ class TestExternalize:
                 assert f.read() == "full content here"
 
     def test_returns_none_on_invalid_path(self):
-        # ``/dev/null`` is a character device on both Linux and macOS, so
-        # ``os.makedirs`` cannot create any subdirectory under it for any
-        # user (including root). The previously-used ``/nonexistent/...``
-        # path was silently created by ``mkdir -p`` when the test process
-        # ran as root inside the CI container, which made this test fail
-        # in CI independently of the externalization logic under test.
-        path = _externalize(
-            "data",
-            tool_name="test",
-            tool_call_id="tc-1",
-            outputs_path="/dev/null/cannot-mkdir-here",
-            storage_subdir=".tool-results",
-        )
-        assert path is None
+        with _unwritable_outputs_path() as outputs_path:
+            path = _externalize(
+                "data",
+                tool_name="test",
+                tool_call_id="tc-1",
+                outputs_path=outputs_path,
+                storage_subdir=".tool-results",
+            )
+            assert path is None
 
     def test_txt_extension_for_unknown_tool(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -710,9 +728,10 @@ class TestWrapToolCallFallback:
         mw = ToolOutputBudgetMiddleware(config=config)
         content = "x" * 500
         msg = _tm(content, name="tool")
-        req = _make_request(outputs_path="/dev/null/cannot-mkdir-here")
 
-        result = mw.wrap_tool_call(req, lambda _: msg)
+        with _unwritable_outputs_path() as outputs_path:
+            req = _make_request(outputs_path=outputs_path)
+            result = mw.wrap_tool_call(req, lambda _: msg)
 
         assert isinstance(result, ToolMessage)
         assert "omitted from tool output" in result.content

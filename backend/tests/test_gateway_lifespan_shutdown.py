@@ -119,7 +119,12 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     stop_channel_service.assert_awaited_once()
 
 
-async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool | Exception) -> MagicMock:
+async def _run_lifespan_with_memory_flush(
+    *,
+    enabled: bool,
+    flush_return: bool | Exception,
+    shutdown_events: list[str] | None = None,
+) -> MagicMock:
     """Drive lifespan with a spied memory manager.shutdown_flush.
 
     Returns the manager mock so the caller can assert the shutdown flush was
@@ -151,8 +156,19 @@ async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool |
     manager = MagicMock()
     if isinstance(flush_return, Exception):
         manager.shutdown_flush.side_effect = flush_return
+    elif shutdown_events is not None:
+
+        def record_memory_flush(_timeout: float) -> bool:
+            shutdown_events.append("memory_flush_started")
+            return flush_return
+
+        manager.shutdown_flush.side_effect = record_memory_flush
     else:
         manager.shutdown_flush.return_value = flush_return
+
+    suspend_system_observations = MagicMock()
+    if shutdown_events is not None:
+        suspend_system_observations.side_effect = lambda: shutdown_events.append("system_observations_suspended")
 
     with (
         patch("app.gateway.app.get_app_config", return_value=startup_config),
@@ -163,6 +179,7 @@ async def _run_lifespan_with_memory_flush(*, enabled: bool, flush_return: bool |
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", stop_channel_service),
         patch("deerflow.agents.memory.get_memory_manager", return_value=manager),
+        patch("deerflow.extensions.notify.suspend_extension_system_observations", suspend_system_observations),
     ):
         async with lifespan(app):
             pass
@@ -178,6 +195,21 @@ def test_lifespan_drains_memory_on_shutdown_with_configured_timeout(caplog) -> N
     manager = asyncio.run(_run_lifespan_with_memory_flush(enabled=True, flush_return=True))
     manager.shutdown_flush.assert_called_once_with(5.0)
     assert any(r.levelno == logging.INFO and "flush completed" in r.message for r in caplog.records)
+
+
+def test_lifespan_suspends_system_observations_before_memory_flush() -> None:
+    """Shutdown-flushed memory calls cannot enqueue observations onto a dying loop."""
+    shutdown_events: list[str] = []
+
+    asyncio.run(
+        _run_lifespan_with_memory_flush(
+            enabled=True,
+            flush_return=True,
+            shutdown_events=shutdown_events,
+        )
+    )
+
+    assert shutdown_events == ["system_observations_suspended", "memory_flush_started"]
 
 
 def test_lifespan_warns_when_memory_flush_does_not_finish(caplog) -> None:
