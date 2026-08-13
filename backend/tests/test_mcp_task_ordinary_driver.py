@@ -19,7 +19,7 @@ class FakeCaller:
 def _result(structured_content, *, text="ignored", is_error=False):
     return SimpleNamespace(
         structuredContent=structured_content,
-        content=[SimpleNamespace(text=text)],
+        content=[SimpleNamespace(type="text", text=text)],
         isError=is_error,
     )
 
@@ -92,6 +92,33 @@ async def test_submit_rejects_missing_or_invalid_structured_content(structured_c
 
     with pytest.raises(McpTaskProtocolError, match=match):
         await driver.submit(_request())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "argument", "tool_name"),
+    [
+        ("submit", _request(), "submit_report"),
+        ("get_status", _reference(), "get_report_status"),
+        ("cancel", _reference(), "cancel_report"),
+    ],
+)
+async def test_tool_errors_preserve_only_a_bounded_first_text_detail(
+    method_name: str,
+    argument: TaskSubmitRequest | TaskReference,
+    tool_name: str,
+) -> None:
+    detail = "remote service unavailable: " + "x" * 600
+    result = _result(None, text=detail, is_error=True)
+    result.content.append(SimpleNamespace(type="text", text="second block must not be included"))
+    driver = OrdinaryMcpTaskDriver(FakeCaller(result))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await getattr(driver, method_name)(argument)
+
+    message = str(exc_info.value)
+    assert message == f"MCP task tool {tool_name!r} returned an error: {detail[:500]}"
+    assert not isinstance(exc_info.value, McpTaskProtocolError)
 
 
 @pytest.mark.asyncio

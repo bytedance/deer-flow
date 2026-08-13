@@ -15,6 +15,7 @@ from deerflow.mcp.tasks.models import (
 )
 
 ORDINARY_MCP_TASK_DRIVER = "ordinary-tools"
+_MAX_TOOL_ERROR_DETAIL_CHARS = 500
 
 
 class McpTaskProtocolError(RuntimeError):
@@ -82,9 +83,30 @@ def _tool_name(data: dict[str, Any], role: str) -> str:
     return value
 
 
+def _first_error_text(call_result: Any) -> str | None:
+    content = getattr(call_result, "content", None)
+    if not isinstance(content, (list, tuple)):
+        return None
+    for item in content:
+        if isinstance(item, dict):
+            if item.get("type") != "text":
+                continue
+            text = item.get("text")
+        else:
+            if getattr(item, "type", None) != "text":
+                continue
+            text = getattr(item, "text", None)
+        if isinstance(text, str) and (text := text.strip()):
+            return text[:_MAX_TOOL_ERROR_DETAIL_CHARS]
+    return None
+
+
 def _structured_content(call_result: Any, *, tool_name: str) -> Any:
     if bool(getattr(call_result, "isError", False)):
-        raise RuntimeError(f"MCP task tool {tool_name!r} returned an error")
+        message = f"MCP task tool {tool_name!r} returned an error"
+        if detail := _first_error_text(call_result):
+            message = f"{message}: {detail}"
+        raise RuntimeError(message)
     value = getattr(call_result, "structuredContent", None)
     if value is None:
         raise McpTaskProtocolError(f"MCP task tool {tool_name!r} must return structuredContent; text content is not parsed")

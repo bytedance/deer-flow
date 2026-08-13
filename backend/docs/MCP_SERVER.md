@@ -263,6 +263,16 @@ are never parsed as a task protocol:
 - `cancel_report({"task_id":"remote-123"})` is idempotent and returns the
   actual terminal status: `cancelled`, `completed`, or `failed`.
 
+For the status tool, `isError: true` means that the status call itself failed;
+DeerFlow records a bounded snippet of its first text content block and retries
+with capped exponential backoff. It does not infer that the remote task failed,
+because MCP tool errors do not distinguish transient from permanent conditions.
+A server must report a permanent remote-task failure through a normal tool
+result (`isError: false` or omitted) whose `structuredContent` contains
+`status: "failed"` and an optional `error`. This distinction lets a temporary
+server or network outage recover without terminalizing work that may still be
+running remotely.
+
 Persisted task errors are capped at 4,000 characters. An `input_required`
 payload must be valid JSON no larger than 64 KiB; an oversized or invalid
 payload is treated as a permanent protocol failure instead of being truncated

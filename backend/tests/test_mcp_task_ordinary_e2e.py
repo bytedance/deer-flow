@@ -34,8 +34,11 @@ class FakeMcpServer:
                 isError=False,
             )
         if tool_name == "status_report":
+            status_result = self.status_results.pop(0)
+            if not isinstance(status_result, dict):
+                return status_result
             return SimpleNamespace(
-                structuredContent=self.status_results.pop(0),
+                structuredContent=status_result,
                 content=[],
                 isError=False,
             )
@@ -136,3 +139,51 @@ async def test_submit_poll_restart_recovery_complete_and_fail(tmp_path) -> None:
     assert failed is not None
     assert failed["status"] == "failed"
     assert failed["error"] == "report generation failed"
+
+
+@pytest.mark.asyncio
+async def test_status_tool_error_retries_with_detail_before_structured_failure_terminalizes(tmp_path) -> None:
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    session_factory = get_session_factory()
+    assert session_factory is not None
+    repo = McpTaskRepository(session_factory)
+    fake_server = FakeMcpServer()
+    service = _service(repo, fake_server)
+    submitted_at = datetime.now(UTC)
+    created = await service.submit(
+        driver_name=ORDINARY_MCP_TASK_DRIVER,
+        request=_request("remote-fail"),
+        now=submitted_at,
+    )
+    fake_server.status_results.extend(
+        [
+            SimpleNamespace(
+                structuredContent=None,
+                content=[SimpleNamespace(type="text", text="upstream temporarily unavailable")],
+                isError=True,
+            ),
+            {
+                "task_id": "remote-fail",
+                "status": "failed",
+                "error": "report generation failed",
+            },
+        ]
+    )
+
+    await service.run_once(now=submitted_at + timedelta(seconds=2))
+
+    retrying = await repo.get(created["id"], user_id="user-1")
+    assert retrying is not None
+    assert retrying["status"] == "submitted"
+    assert retrying["consecutive_poll_error_count"] == 1
+    assert retrying["last_poll_error"] == ("MCP task tool 'status_report' returned an error: upstream temporarily unavailable")
+    assert retrying["next_poll_at"] is not None
+
+    await service.run_once(now=datetime.now(UTC) + timedelta(seconds=10))
+
+    failed = await repo.get(created["id"], user_id="user-1")
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["error"] == "report generation failed"
+    assert failed["consecutive_poll_error_count"] == 0
+    assert failed["next_poll_at"] is None
