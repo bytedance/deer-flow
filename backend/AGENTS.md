@@ -90,6 +90,11 @@ When making code changes, you MUST update the relevant documentation:
 ```bash
 make check      # Check system requirements
 make install    # Install all dependencies (frontend + backend)
+make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-list                # List configured Python extensions
+make extension-enable NAME=...     # Enable an installed extension
+make extension-disable NAME=...    # Disable an extension without uninstalling it
+make extension-remove NAME=...     # Remove a managed extension
 make detect-thread-boundaries  # Inventory backend executor/thread/event-loop boundaries
 make dev        # Start all services (Gateway + Frontend + Nginx), with config.yaml preflight
 make start      # Start production services locally

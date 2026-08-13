@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check check-agent-guidance install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check check-agent-guidance install extension-install extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -30,6 +30,11 @@ help:
 	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
+	@echo "  make extension-install SOURCE=... - Install and enable a trusted Python extension"
+	@echo "  make extension-list              - List configured Python extensions"
+	@echo "  make extension-enable NAME=...   - Enable an installed extension"
+	@echo "  make extension-disable NAME=...  - Disable an extension without uninstalling it"
+	@echo "  make extension-remove NAME=...   - Uninstall a managed extension"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
 	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
@@ -84,7 +89,7 @@ check-agent-guidance:
 # Install all dependencies
 install:
 	@echo "Installing backend dependencies..."
-	@cd backend && uv sync
+	@cd backend && uv sync --locked
 	@echo "Installing frontend dependencies..."
 	@cd frontend && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."
@@ -99,6 +104,29 @@ install:
 	@echo "If you plan to use Docker/Container-based sandbox, you can pre-pull the image:"
 	@echo "  make setup-sandbox"
 	@echo ""
+
+extension-install: export DEER_FLOW_EXTENSION_SOURCE := $(value SOURCE)
+extension-install:
+	$(if $(and $(filter command line,$(origin SOURCE)),$(strip $(value SOURCE))),,$(error usage: make extension-install SOURCE=<package|git-url|dir>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions install --source-env __deerflow_extension_source__
+
+extension-list:
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions list
+
+extension-enable: export DEER_FLOW_EXTENSION_NAME := $(value NAME)
+extension-enable:
+	$(if $(and $(filter command line,$(origin NAME)),$(strip $(value NAME))),,$(error usage: make extension-enable NAME=<extension>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions enable --name-env __deerflow_extension_name__
+
+extension-disable: export DEER_FLOW_EXTENSION_NAME := $(value NAME)
+extension-disable:
+	$(if $(and $(filter command line,$(origin NAME)),$(strip $(value NAME))),,$(error usage: make extension-disable NAME=<extension>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions disable --name-env __deerflow_extension_name__
+
+extension-remove: export DEER_FLOW_EXTENSION_NAME := $(value NAME)
+extension-remove:
+	$(if $(and $(filter command line,$(origin NAME)),$(strip $(value NAME))),,$(error usage: make extension-remove NAME=<extension>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions remove --name-env __deerflow_extension_name__
 
 # Pre-pull sandbox Docker image (optional but recommended)
 setup-sandbox:
