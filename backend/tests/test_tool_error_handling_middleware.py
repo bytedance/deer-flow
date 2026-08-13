@@ -161,8 +161,10 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
     # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
+    # + 1 DynamicContextMiddleware (date-only for subagents)
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
@@ -170,7 +172,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 17
+    assert len(middlewares) == 18
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -187,6 +189,11 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # middleware), so it is the last element regardless of summarization.enabled —
     # unlike DurableContextMiddleware, which is only last when summarization is off.
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
+    dynamic_context = [m for m in middlewares if isinstance(m, DynamicContextMiddleware)]
+    assert len(dynamic_context) == 1
+    assert dynamic_context[0]._include_memory is False
+    dynamic_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DynamicContextMiddleware))
+    assert dynamic_idx < len(middlewares) - 1
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
     assert policy_idx < durable_idx < len(middlewares) - 1
 
@@ -895,6 +902,61 @@ def test_subagent_chain_coalesces_durable_authority_system_message(monkeypatch):
     agent.invoke({"messages": seed, "summary_text": "COMPRESSED_SUBAGENT_HISTORY"})
 
     assert seen["system_indices"] == [0], f"request must have a single leading SystemMessage, got {seen['system_indices']}"
+
+
+def test_subagent_model_input_receives_current_date():
+    """The subagent's first model call must see one leading SystemMessage with the date.
+
+    ``DynamicContextMiddleware(include_memory=False)`` injects the framework-owned
+    date reminder into the subagent chain, and ``SystemMessageCoalescingMiddleware``
+    merges it with the leading system prompt so strict providers still receive a
+    single leading ``SystemMessage`` (#4781).
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.thread_state import ThreadState
+
+    seen: dict[str, object] = {}
+
+    class _StrictModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "strict"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            seen["system_indices"] = [i for i, message in enumerate(messages) if isinstance(message, SystemMessage)]
+            seen["date_injected"] = any(isinstance(message, SystemMessage) and "<current_date>" in message.content and "</current_date>" in message.content for message in messages)
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    app_config = _make_app_config()
+    runtime_middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        agent_name="general-purpose",
+    )
+    chain = [middleware for middleware in runtime_middlewares if isinstance(middleware, (DynamicContextMiddleware, SystemMessageCoalescingMiddleware))]
+    assert [type(middleware).__name__ for middleware in chain] == [
+        "DynamicContextMiddleware",
+        "SystemMessageCoalescingMiddleware",
+    ]
+
+    agent = create_agent(model=_StrictModel(), tools=[], middleware=chain, state_schema=ThreadState)
+    seed = [
+        SystemMessage(content="subagent instructions", id="system"),
+        HumanMessage(content="research today's news", id="human"),
+    ]
+    agent.invoke({"messages": seed})
+
+    assert seen["system_indices"] == [0], f"request must have a single leading SystemMessage, got {seen['system_indices']}"
+    assert seen["date_injected"] is True
 
 
 def test_subagent_runtime_middlewares_omit_summarization_when_factory_returns_none(monkeypatch):

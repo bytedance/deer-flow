@@ -336,6 +336,15 @@ def build_subagent_runtime_middlewares(
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
+    # Subagents are one-shot and isolated: give them the same framework-owned
+    # current-date anchor as the lead without pulling in per-user memory or
+    # memory-flush side effects. The SystemMessageCoalescingMiddleware appended
+    # below merges this hidden reminder with the leading system prompt, so strict
+    # providers still receive exactly one leading SystemMessage.
+    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+
+    middlewares.append(DynamicContextMiddleware(app_config=app_config, include_memory=False))
+
     # Enabled/configured skills are discoverable metadata, not automatically
     # active authority. Mirror the lead agent's activation + policy pair so a
     # subagent keeps its ordinary tool set until a slash command or a completed
