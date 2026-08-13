@@ -161,8 +161,9 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
     # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
-    # + 1 DynamicContextMiddleware (date-only for subagents)
+    # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
+    from deerflow.agents.middlewares.date_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -189,12 +190,14 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # middleware), so it is the last element regardless of summarization.enabled —
     # unlike DurableContextMiddleware, which is only last when summarization is off.
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
-    dynamic_context = [m for m in middlewares if isinstance(m, DynamicContextMiddleware)]
-    assert len(dynamic_context) == 1
-    assert dynamic_context[0]._include_memory is False
-    dynamic_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DynamicContextMiddleware))
-    assert dynamic_idx < len(middlewares) - 1
+    date_context = [m for m in middlewares if isinstance(m, SubagentDateContextMiddleware)]
+    assert len(date_context) == 1
+    # The subagent path must not reuse the lead middleware; the dedicated
+    # date-only middleware is registered immediately before the coalescer.
+    assert not any(isinstance(m, DynamicContextMiddleware) for m in middlewares)
+    date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
+    assert date_idx == len(middlewares) - 2
     assert policy_idx < durable_idx < len(middlewares) - 1
 
 
@@ -907,17 +910,17 @@ def test_subagent_chain_coalesces_durable_authority_system_message(monkeypatch):
 def test_subagent_model_input_receives_current_date():
     """The subagent's first model call must see one leading SystemMessage with the date.
 
-    ``DynamicContextMiddleware(include_memory=False)`` injects the framework-owned
-    date reminder into the subagent chain, and ``SystemMessageCoalescingMiddleware``
-    merges it with the leading system prompt so strict providers still receive a
-    single leading ``SystemMessage`` (#4781).
+    ``SubagentDateContextMiddleware`` injects the framework-owned date reminder
+    into the subagent chain, and ``SystemMessageCoalescingMiddleware`` merges it
+    with the leading system prompt so strict providers still receive a single
+    leading ``SystemMessage`` (#4781).
     """
     from langchain.agents import create_agent
     from langchain_core.language_models import BaseChatModel
     from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
 
-    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
+    from deerflow.agents.middlewares.date_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.thread_state import ThreadState
 
@@ -942,9 +945,9 @@ def test_subagent_model_input_receives_current_date():
         model_name="test-model",
         agent_name="general-purpose",
     )
-    chain = [middleware for middleware in runtime_middlewares if isinstance(middleware, (DynamicContextMiddleware, SystemMessageCoalescingMiddleware))]
+    chain = [middleware for middleware in runtime_middlewares if isinstance(middleware, (SubagentDateContextMiddleware, SystemMessageCoalescingMiddleware))]
     assert [type(middleware).__name__ for middleware in chain] == [
-        "DynamicContextMiddleware",
+        "SubagentDateContextMiddleware",
         "SystemMessageCoalescingMiddleware",
     ]
 

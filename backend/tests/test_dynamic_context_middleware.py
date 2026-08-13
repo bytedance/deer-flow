@@ -118,32 +118,6 @@ def test_memory_included_when_present():
     assert msgs[2].content == "Hi"
 
 
-def test_date_only_mode_injects_date_without_memory():
-    app_config = SimpleNamespace(memory=SimpleNamespace(injection_enabled=True))
-    mw = _make_middleware(app_config=app_config, include_memory=False)
-    state = {"messages": [HumanMessage(content="Do research", id="msg-1")]}
-
-    with (
-        mock.patch(
-            "deerflow.agents.lead_agent.prompt._get_memory_context",
-            side_effect=AssertionError("memory must not load in date-only mode"),
-        ),
-        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
-    ):
-        mock_dt.now.return_value.strftime.return_value = "2026-08-13, Thursday"
-        result = mw.before_agent(state, _fake_runtime())
-
-    assert result is not None
-    msgs = result["messages"]
-    assert len(msgs) == 2  # date SystemMessage + user HumanMessage only
-    assert isinstance(msgs[0], SystemMessage)
-    assert "<current_date>2026-08-13, Thursday</current_date>" in msgs[0].content
-    assert msgs[0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
-    assert msgs[0].additional_kwargs.get("reminder_date") == "2026-08-13, Thursday"
-    assert isinstance(msgs[1], HumanMessage)
-    assert msgs[1].content == "Do research"
-
-
 def test_memory_lookup_uses_runtime_user_id():
     mw = _make_middleware()
     state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}

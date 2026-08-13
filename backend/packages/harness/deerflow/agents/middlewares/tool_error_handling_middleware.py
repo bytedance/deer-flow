@@ -336,15 +336,6 @@ def build_subagent_runtime_middlewares(
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
-    # Subagents are one-shot and isolated: give them the same framework-owned
-    # current-date anchor as the lead without pulling in per-user memory or
-    # memory-flush side effects. The SystemMessageCoalescingMiddleware appended
-    # below merges this hidden reminder with the leading system prompt, so strict
-    # providers still receive exactly one leading SystemMessage.
-    from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
-
-    middlewares.append(DynamicContextMiddleware(app_config=app_config, include_memory=False))
-
     # Enabled/configured skills are discoverable metadata, not automatically
     # active authority. Mirror the lead agent's activation + policy pair so a
     # subagent keeps its ordinary tool set until a slash command or a completed
@@ -520,18 +511,30 @@ def build_subagent_runtime_middlewares(
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
+    # SubagentDateContextMiddleware (#4781) — inject framework-owned temporal
+    # context before the first model call without registering the lead agent's
+    # DynamicContextMiddleware. The lead middleware also reads user memory,
+    # performs a persisted HumanMessage ID swap, handles midnight updates, and
+    # records effective memory in the run journal; none of that belongs in a
+    # one-shot subagent run. The date-only reminder has no AppConfig or memory
+    # dependency.
+    from deerflow.agents.middlewares.date_context_middleware import SubagentDateContextMiddleware
+
+    middlewares.append(SubagentDateContextMiddleware())
+
     # SystemMessageCoalescingMiddleware (#4040) — DurableContextMiddleware above
     # inserts a second ``SystemMessage(authority_contract)`` after the leading
-    # system prompt (subagents carry their prompt as a leading ``SystemMessage``
-    # in ``messages``, not via ``create_agent(system_prompt=...)``). Two system
-    # messages — or a non-leading one — are exactly what the strict backends this
-    # targets (vLLM/SGLang/Qwen/Anthropic) reject, so the durable fix would trade
-    # #4039's assistant-first 400 for a duplicate-system 400. Mirror the lead
-    # chain: append the coalescer innermost so it merges every SystemMessage into
-    # one leading ``system_message`` on the outgoing request. It only rewrites the
+    # system prompt, and SubagentDateContextMiddleware adds the hidden date
+    # reminder. Subagents carry their prompt as a leading ``SystemMessage`` in
+    # ``messages``, not via ``create_agent(system_prompt=...)``, so multiple or
+    # non-leading system messages are exactly what the strict backends this
+    # targets (vLLM/SGLang/Qwen/Anthropic) reject. Append the coalescer
+    # innermost so it merges every SystemMessage into one leading
+    # ``system_message`` on the outgoing request. It only rewrites the
     # per-request payload (no ``after_model``/``consume_stop_reason``), so it is
     # inert to the Phase 2 guard-cap channel, and must sit inner of
-    # DurableContextMiddleware to observe the injected system message.
+    # DurableContextMiddleware and SubagentDateContextMiddleware to observe the
+    # injected system messages.
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
     middlewares.append(SystemMessageCoalescingMiddleware())
