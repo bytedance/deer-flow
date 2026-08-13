@@ -6,9 +6,10 @@ It is the **monorepo orientation layer**: it maps the whole repo and points to t
 module guides that own the depth. For anything inside a module, read that module's
 guide rather than expecting full detail here:
 
-- **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
+- **[backend/AGENTS.md](backend/AGENTS.md)** — backend orientation: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
-  config system, test layout.
+  config system, test layout. Subsystem depth lives in `backend/docs/` — the
+  subsystem index in `backend/AGENTS.md` routes each subsystem to its guide.
 - **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
@@ -135,7 +136,10 @@ cd frontend && pnpm test      # Unit tests
 Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
+Host-side pnpm consumers, including the root/frontend Makefiles and local
+diagnostic scripts, must run through `scripts/pnpm.py`. The runner resolves
+paths independently of the caller's directory, prefers direct `pnpm`, and
+falls back to `corepack pnpm` using the version pinned by the frontend.
 
 ## Where to Go Next
 
@@ -152,9 +156,15 @@ Host-side pnpm consumers, including the root/frontend Makefiles and local diagno
 
 These apply repo-wide; module guides own the module-specific detail.
 
-- **Documentation update policy** — keep docs in sync with code: update `README.md` for
-  user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
-  the same change set.
+- **Documentation ownership** — update `README.md` for user-facing behavior.
+  Keep root `AGENTS.md` to repository navigation and cross-module constraints;
+  module `AGENTS.md` to module commands, boundaries, and a path-driven index;
+  nested `AGENTS.md` only to unique rules that must load automatically. Put
+  implementation detail in one canonical subsystem document.
+- **Guidance budgets** — LF-normalized UTF-8 hard limits are 16 KiB for the
+  root guide, 32 KiB for first-level module guides, 16 KiB for nested guides,
+  and 48 KiB for any inherited AGENTS chain. `CLAUDE.md` stays below 1 KiB and
+  imports only its sibling `@AGENTS.md`. Run `make check-agent-guidance`.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
   frontend tests live in `frontend/tests/`.

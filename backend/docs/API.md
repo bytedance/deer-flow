@@ -1,6 +1,8 @@
 # API Reference
 
 This document provides a complete reference for the DeerFlow backend APIs.
+It is the canonical public endpoint contract. For Gateway implementation and lifecycle
+invariants, see [Gateway API](GATEWAY_API.md).
 
 ## Overview
 
