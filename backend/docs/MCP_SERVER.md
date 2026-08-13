@@ -1,8 +1,6 @@
 # MCP (Model Context Protocol) Configuration
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities, which are loaded from a dedicated `extensions_config.json` file in the project root directory.
-This is the canonical operator setup guide. For runtime architecture and lifecycle
-invariants, see [MCP System](MCP_SYSTEM.md).
 
 ## Setup
 

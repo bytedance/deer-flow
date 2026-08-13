@@ -1,7 +1,4 @@
-# Gateway API
-
-Canonical guide for Gateway implementation, lifecycle, routing, and security invariants.
-For the public endpoint contract, see [API Reference](API.md).
+### Gateway API (`app/gateway/`)
 
 FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
 

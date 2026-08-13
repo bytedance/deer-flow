@@ -2,9 +2,6 @@
 
 本文档解释 DeerFlow 是如何把 LangGraph agent 的事件流端到端送到两类消费者（HTTP 客户端、嵌入式 Python 调用方）的：两条路径为什么**必须**并存、它们各自的契约是什么、以及设计里那些 non-obvious 的不变式。
 
-本文档是共享事件与传输契约的唯一说明；嵌入式 Python API 见
-[Embedded Client](EMBEDDED_CLIENT.md)。
-
 ---
 
 ## TL;DR

@@ -1,10 +1,62 @@
-# Backend Documentation
+# Documentation
 
-Use the [backend subsystem index](../AGENTS.md#subsystem-documentation-index) to find
-the canonical guide for each subsystem. This README intentionally does not duplicate
-that index: `backend/AGENTS.md` owns navigation, while files in this directory own
-implementation detail, contracts, and operational guidance.
+This directory contains detailed documentation for the DeerFlow backend.
 
-When two documents touch the same subsystem, each document must state its distinct
-scope and link to the other one. Do not create a second canonical guide for the same
-concern.
+## Quick Links
+
+| Document | Description |
+|----------|-------------|
+| [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture overview |
+| [API.md](API.md) | Complete API reference |
+| [AUTH_DESIGN.md](AUTH_DESIGN.md) | User authentication, CSRF, platform-trust (IM / Internal Auth), and per-user isolation |
+| [SSO.md](SSO.md) | OIDC / SSO single sign-on |
+| [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) | IM channel user binding (`channel_connections`) |
+| [CONFIGURATION.md](CONFIGURATION.md) | Configuration options |
+| [SETUP.md](SETUP.md) | Quick setup guide |
+
+## Feature Documentation
+
+| Document | Description |
+|----------|-------------|
+| [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
+| [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md) | Persisted run event stream contract: envelope, producers, consumers, and known gaps |
+| [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
+| [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
+| [SANDBOX_MEMORY_PROFILING.md](SANDBOX_MEMORY_PROFILING.md) | Sandbox memory baseline and runtime comparison guide |
+| [summarization.md](summarization.md) | Context summarization feature |
+| [plan_mode_usage.md](plan_mode_usage.md) | Plan mode with TodoList |
+| [AUTO_TITLE_GENERATION.md](AUTO_TITLE_GENERATION.md) | Automatic title generation |
+
+## Development
+
+| Document | Description |
+|----------|-------------|
+| [TODO.md](TODO.md) | Planned features and known issues |
+
+## Getting Started
+
+1. **New to DeerFlow?** Start with [SETUP.md](SETUP.md) for quick installation
+2. **Configuring the system?** See [CONFIGURATION.md](CONFIGURATION.md)
+3. **Understanding the architecture?** Read [ARCHITECTURE.md](ARCHITECTURE.md)
+4. **Building integrations?** Check [API.md](API.md) for API reference
+
+## Document Organization
+
+```
+docs/
+├── README.md                  # This file
+├── ARCHITECTURE.md            # System architecture
+├── API.md                     # API reference
+├── AUTH_DESIGN.md             # User authentication and isolation design
+├── CONFIGURATION.md           # Configuration guide
+├── SETUP.md                   # Setup instructions
+├── FILE_UPLOAD.md             # File upload feature
+├── PATH_EXAMPLES.md           # Path usage examples
+├── summarization.md           # Summarization feature
+├── plan_mode_usage.md         # Plan mode feature
+├── STREAMING.md               # Token-level streaming design
+├── RUN_EVENT_STREAM.md        # Persisted run event stream contract
+├── AUTO_TITLE_GENERATION.md   # Title generation
+├── TITLE_GENERATION_IMPLEMENTATION.md  # Title implementation details
+└── TODO.md                    # Roadmap and issues
+```

@@ -13,15 +13,13 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
 - **Provisioner** (port 8002, optional in Docker dev): Started only when sandbox is configured for provisioner/Kubernetes mode
 
 **Runtime**:
-
-- Gateway owns the embedded agent runtime through `RunManager`, `run_agent()`,
-  and `StreamBridge`; Nginx exposes it at `/api/langgraph/*`.
-- Scheduled tasks reuse the normal Gateway run lifecycle. Database constraints,
-  not process-local prechecks, are the final arbiter for overlap prevention.
-- Long-running MCP work uses the durable MCP task runtime; recoverable task state
-  must not live only in `ThreadState`.
-- For lifecycle, streaming, scheduler, and MCP details, use the subsystem index
-  below instead of adding implementation narratives here.
+- `make dev`, Docker dev, and production all run the agent runtime in Gateway via `RunManager` + `run_agent()` + `StreamBridge` (`packages/harness/deerflow/runtime/`). Nginx exposes that runtime at `/api/langgraph/*` and rewrites it to Gateway's native `/api/*` routers.
+- Gateway streams `write_file` and `str_replace` argument deltas in bounded batches when clients also subscribe to `values`; messages-only consumers retain the original per-chunk contract, while `values` preserves the complete tool call.
+- With `stream_subgraphs`, subgraph frames keep their namespace in the SSE event name (`values|<ns>`, LangGraph Platform style) instead of impersonating root frames — a delegated subagent inherits the parent checkpoint namespace, so publishing its `values` snapshot as bare `values` replaces the whole thread view in SDK clients (#4399). Root-only consumers (file-tool chunk batcher, subagent event persistence, LLM error-fallback detection) ignore namespaced frames. The web frontend does not request subgraph streaming; subtask progress rides root-namespace `task_*` custom events.
+- Background subagent identity is deliberately split: the provider `tool_call_id` remains the correlation key for `ToolMessage`, `task_*` SSE events, persisted lifecycle events, frontend cards, and the public `ExtensionData.scope_id` contract (stored as `SubagentResult.external_task_id`), while `SubagentExecutor.execute_async()` generates a full server-side `execution_id` for `SubagentResult.task_id`, the process-wide registry, polling, cancellation, timeout handling, and cleanup. Provider IDs are not globally unique across parent runs, so they must never become registry ownership keys; scheduler closures retain their own `SubagentResult` rather than resolving ownership again through the mutable registry. Terminal subagent token usage travels in the current run's `ToolMessage.additional_kwargs` and is attributed from message state, never through a process-global provider-ID cache.
+- Scheduled-task executions must reuse that same Gateway run lifecycle. The scheduler may decide *when* work runs, but it must dispatch through the existing run path rather than introducing a parallel execution stack.
+- Long-running MCP work uses a separate durable task runtime rather than keeping remote task IDs or status polling inside the Agent loop. `McpTaskService` claims due rows with leases, resolves a protocol-specific `McpTaskDriver`, and writes normalized snapshots back to `mcp_tasks`; expired leases are the restart-recovery mechanism, and a result returned after expiry must be discarded even when the owner token still matches. The database is the source of truth. `ThreadState` may receive only a bounded projection in later integration work, never the sole recoverable copy.
+- Scheduled-task dispatch enforces "at most one active run per task when `overlap_policy=skip`" at the DB layer via the partial unique index `uq_scheduled_task_run_active` (`scheduled_task_runs.task_id WHERE status IN ('queued','running')`). `ScheduledTaskService.dispatch_task`'s `has_active_runs` check is a non-atomic fast path (its own session, separated from the `create()` insert by `await` points), so two concurrent dispatches — a manual `POST /scheduled-tasks/{id}/trigger` racing the poller, a double-click, or a client retry — can both pass it; the index is the atomic arbiter, and the losing `create` surfaces as `ActiveScheduledRunConflict` (translated from `IntegrityError` in the repository) and collapses to the same outcome as the fast path (manual → 409 conflict, scheduled → a `"skipped"` tombstone). The scheduled-skip tombstone is created directly as terminal `"skipped"` (not a transient `"queued"`) so it never occupies the active slot the pre-existing run still holds. Sibling of the `runs` table's `uq_runs_thread_active` (PR #4003), which keys on `thread_id` and so does not cover the default `fresh_thread_per_run` context where every dispatch gets a new thread. Index is status-only, not `overlap_policy`-conditional (the policy is fixed to `"skip"` in the MVP).
 
 **Project Structure**:
 ```
@@ -39,7 +37,7 @@ deer-flow/
 │   │       └── deerflow/
 │   │           ├── agents/            # LangGraph agent system
 │   │           │   ├── lead_agent/    # Main agent (factory + system prompt)
-│   │           │   ├── middlewares/   # middleware components (see [docs/MIDDLEWARE_CHAIN.md](docs/MIDDLEWARE_CHAIN.md))
+│   │           │   ├── middlewares/   # middleware components (see Middleware Chain section)
 │   │           │   ├── memory/        # Memory extraction, queue, prompts
 │   │           │   └── thread_state.py # ThreadState schema
 │   │           ├── sandbox/           # Sandbox execution system
@@ -78,19 +76,13 @@ deer-flow/
 ## Important Development Guidelines
 
 ### Documentation Update Policy
+**CRITICAL: Always update README.md and AGENTS.md after every code change**
 
-**Doc updates travel with the change that made them necessary** — a PR that
-changes behavior updates the doc describing that behavior, in the same change set.
-
-- `README.md` — user-facing changes (features, setup, usage).
-- `AGENTS.md` — **orientation layer only**: public repo structure, commands,
-  cross-cutting conventions, hard architectural constraints (e.g. the
-  harness/app import boundary), and the subsystem index. Update it only when
-  those change.
-- Subsystem internals — go in `backend/docs/<SUBSYSTEM>.md` (see the index
-  below), **not** in this AGENTS.md.
-- Guidance budgets and validation are defined in the root `AGENTS.md`; run
-  `make check-agent-guidance` from the repository root.
+When making code changes, you MUST update the relevant documentation:
+- Update `README.md` for user-facing changes (features, setup, usage instructions)
+- Update `AGENTS.md` for development changes (architecture, commands, workflows, internal systems). `CLAUDE.md` imports it via `@AGENTS.md`, so editing `AGENTS.md` updates both.
+- Keep documentation synchronized with the codebase at all times
+- Ensure accuracy and timeliness of all documentation
 
 ## Commands
 
@@ -114,7 +106,7 @@ make test-live          # Explicitly run live DeerFlowClient tests with real API
 make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
 make lint               # Lint with ruff
 make format             # Format code with ruff
-make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see [docs/SCHEMA_MIGRATIONS.md](docs/SCHEMA_MIGRATIONS.md))
+make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 ```
 
 The backend `make dev` target pre-creates and excludes `DEER_FLOW_HOME`
@@ -123,43 +115,7 @@ watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
 Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
 restart the Gateway during an active run.
 
-Deep documentation for the executor and blocking-io detection tooling lives in
-[docs/THREAD_BOUNDARY_DETECTION.md](docs/THREAD_BOUNDARY_DETECTION.md) and
-[docs/BLOCKING_IO_DETECTION.md](docs/BLOCKING_IO_DETECTION.md).
-
-Boundary check (harness → app import firewall):
-- `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
-
-Memory backend async boundary:
-- `MemoryMiddleware.aafter_agent` calls `MemoryManager.aadd`; network-backed
-  managers must override their `a*` methods to offload or use native async I/O.
-- The mem0 backend requires an HTTPS `base_url` by default because requests
-  carry an API token. Plain HTTP requires the explicit
-  `backend_config.allow_insecure_http: true` local-development opt-in.
-- Gateway memory routes offload the synchronous management contract with
-  `asyncio.to_thread`, so backend file or HTTP I/O does not run on the ASGI
-  event loop. Gateway startup and shutdown also resolve the manager off-loop,
-  because a backend's `from_config` may perform a fail-fast connectivity check.
-- A backend may set `requires_passive_writes_in_tool_mode = True` when tool-mode
-  search is supported but durable writes still depend on conversation-level
-  extraction. Such backends receive memory tools and retain `MemoryMiddleware`.
-- Prompt recall rethrows `MemoryManagerError` only when backend config declares
-  `failure_policy.read: fail_closed`; other recall errors preserve the existing
-  log-and-empty-context behavior.
-
-CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
-
-Agentic browser sessions are process-local. The Gateway startup safety gate rejects
-`GATEWAY_WORKERS > 1` when `browser_navigate` is configured, because ordinary
-uvicorn worker dispatch does not provide thread affinity for browser tools, REST
-navigation, and the Live WebSocket.
-
-Browser Live screenshots remain JPEG bytes inside the harness and the Gateway's
-bounded, drop-oldest frame queue. WebSocket clients that request
-`frame_format=binary` receive binary messages; control metadata remains JSON.
-The legacy no-parameter protocol still base64-encodes frames into JSON at the
-Gateway boundary for backward compatibility. Unknown `frame_format` values
-receive a JSON error and close code 1008.
+More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
 
 ## Architecture
 
@@ -194,46 +150,6 @@ roots expose heavyweight graph/executor entrypoints lazily. Internal modules
 that only need lightweight types, config, or registries should import the
 concrete submodule instead of adding eager package-root imports that pull in the
 tool graph or subagent executor during state/schema imports.
-
-### Agent System
-
-- Entry point: `make_lead_agent(config: RunnableConfig)` registered in `langgraph.json`
-- Dynamic model selection via `create_chat_model()` with thinking/vision support
-- Full detail (ThreadState schema, runtime config, reducers): see [AGENT_SYSTEM.md](docs/AGENT_SYSTEM.md)
-
-### Reflection System
-
-- `resolve_variable(path)` - Import module and return variable (e.g., `module.path:variable_name`)
-- `resolve_class(path, base_class)` - Import and validate class against base class
-
-### Subsystem Index
-
-Subsystem depth lives in `backend/docs/`. Before changing a subsystem, read its guide.
-
-| Subsystem | Code path | Deep docs |
-|---|---|---|
-| Agent / Lead Agent | `agents/lead_agent/`, `agents/thread_state.py` | [AGENT_SYSTEM.md](docs/AGENT_SYSTEM.md) |
-| Middleware chain | `agents/middlewares/` | [MIDDLEWARE_CHAIN.md](docs/MIDDLEWARE_CHAIN.md) |
-| Python extension system | `extensions/` | [EXTENSION_SYSTEM.md](docs/EXTENSION_SYSTEM.md) |
-| Configuration system | `config/` | [CONFIGURATION_SYSTEM.md](docs/CONFIGURATION_SYSTEM.md) |
-| Gateway API | `app/gateway/` | [GATEWAY_API.md](docs/GATEWAY_API.md) |
-| Sandbox system | `sandbox/` | [SANDBOX_SYSTEM.md](docs/SANDBOX_SYSTEM.md) |
-| Subagent system | `subagents/` | [SUBAGENTS_SYSTEM.md](docs/SUBAGENTS_SYSTEM.md) |
-| Tool system | `tools/` | [TOOL_SYSTEM.md](docs/TOOL_SYSTEM.md) |
-| MCP system | `mcp/` | [MCP_SYSTEM.md](docs/MCP_SYSTEM.md) |
-| Skills system | `skills/` | [SKILLS_SYSTEM.md](docs/SKILLS_SYSTEM.md) |
-| Model factory | `models/` | [MODELS.md](docs/MODELS.md) |
-| IM channels | `app/channels/` | [IM_CHANNELS.md](docs/IM_CHANNELS.md) |
-| Memory system | `agents/memory/` | [MEMORY_SYSTEM.md](docs/MEMORY_SYSTEM.md) |
-| Schema migrations | `persistence/migrations/` | [SCHEMA_MIGRATIONS.md](docs/SCHEMA_MIGRATIONS.md) |
-| Checkpoint channel modes | `runtime/checkpointer/` | [CHECKPOINT_MODES.md](docs/CHECKPOINT_MODES.md) |
-| TUI | `tui/` | [TUI.md](docs/TUI.md) |
-| Observability | `tracing/`, `trace_context.py` | [TRACING.md](docs/TRACING.md) |
-| Embedded client | `client.py` | [EMBEDDED_CLIENT.md](docs/EMBEDDED_CLIENT.md) |
-| File uploads | `app/gateway/routers/uploads.py`, `agents/middlewares/uploads.py` | [FILE_UPLOAD.md](docs/FILE_UPLOAD.md) |
-| Context summarization | `agents/middlewares/summarization.py` | [summarization.md](docs/summarization.md) |
-| Plan mode | `agents/middlewares/todo_list.py` | [plan_mode_usage.md](docs/plan_mode_usage.md) |
-| Executor/blocking-io detection | `scripts/` | [THREAD_BOUNDARY_DETECTION.md](docs/THREAD_BOUNDARY_DETECTION.md), [BLOCKING_IO_DETECTION.md](docs/BLOCKING_IO_DETECTION.md) |
 
 ## Development Workflow
 
@@ -309,9 +225,71 @@ The frontend uses environment variables to connect to backend services:
 
 When using `make dev` from root, the frontend automatically connects through nginx.
 
+## Key Features
+
+### File Upload
+
+Multi-file upload with automatic document conversion:
+- Endpoint: `POST /api/threads/{thread_id}/uploads`
+- Supports: PDF, PPT, Excel, Word documents (converted via `markitdown`)
+- Rejects directory inputs before copying so uploads stay all-or-nothing
+- Reuses one conversion worker per request when called from an active event loop
+- Files stored in thread-isolated directories under the resolving user's bucket (`users/{user_id}/threads/{thread_id}/user-data/uploads`). For IM channels the owner is threaded explicitly via the `user_id=` kwarg (see IM Channels → Owner-scoped file storage); HTTP/embedded callers resolve it from `get_effective_user_id()`
+- Duplicate filenames in a single upload request are auto-renamed with `_N` suffixes so later files do not truncate earlier files
+- Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
+- Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
+- Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
+- Agent receives uploaded file list via `UploadsMiddleware`
+
+See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
+
+### Plan Mode
+
+TodoList middleware for complex multi-step tasks:
+- Controlled via runtime config: `config.configurable.is_plan_mode = True`
+- Provides `write_todos` tool for task tracking
+- One task in_progress at a time, real-time updates
+
+See [docs/plan_mode_usage.md](docs/plan_mode_usage.md) for details.
+
+### Context Summarization
+
+Automatic conversation summarization when approaching token limits:
+- Configured in `config.yaml` under `summarization` key
+- Trigger types: tokens, messages, or fraction of max input
+- Keeps recent messages while summarizing older ones
+- Manual compaction uses `POST /api/threads/{id}/compact`, reuses the same
+  `DeerFlowSummarizationMiddleware`, writes a new checkpoint with updated
+  `messages` and `summary_text`, and bumps only those channel versions.
+  The route uses the shared `reserve_checkpoint_write()` boundary (also used by
+  manual state updates). Its short-lived `checkpoint_write` thread operation
+  shares the durable active-thread uniqueness constraint with run admission,
+  preventing either worker-local or cross-worker checkpoint-write races.
+
+See [docs/summarization.md](docs/summarization.md) for details.
+
+### Vision Support
+
+For models with `supports_vision: true`:
+- `ViewImageMiddleware` processes images in conversation
+- `view_image_tool` added to agent's toolset
+- Images are converted to base64 and injected into a hidden message carrying both a reserved ID prefix and a server-owned metadata marker for the model call; Gateway strips that marker from untrusted input, and the middleware requires both identifiers before removing the message. The `before_model` and `model` node checkpoints for that call still contain the payload; after `after_model` cleanup, subsequent checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive
+
 ## Code Style
 
 - Uses `ruff` for linting and formatting
 - Line length: 240 characters
 - Python 3.12+ with type hints
 - Double quotes, space indentation
+
+## Documentation
+
+See `docs/` directory for detailed documentation:
+- [CONFIGURATION.md](docs/CONFIGURATION.md) - Configuration options
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - Architecture details
+- [API.md](docs/API.md) - API reference
+- [SETUP.md](docs/SETUP.md) - Setup guide
+- [FILE_UPLOAD.md](docs/FILE_UPLOAD.md) - File upload feature
+- [PATH_EXAMPLES.md](docs/PATH_EXAMPLES.md) - Path types and usage
+- [summarization.md](docs/summarization.md) - Context summarization
+- [plan_mode_usage.md](docs/plan_mode_usage.md) - Plan mode with TodoList

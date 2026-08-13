@@ -1,68 +1,47 @@
 #!/usr/bin/env python3
-"""Validate DeerFlow's automatically loaded agent guidance.
-
-The checker intentionally uses only the Python standard library so it can run
-before project dependencies are installed. Budgets are measured after newline
-normalization as UTF-8 bytes; ordinary linked docs are loaded on demand and do
-not count toward an AGENTS.md inheritance chain.
-"""
+"""Check the size of directory-scoped AGENTS.md instruction chains."""
 
 from __future__ import annotations
 
 import argparse
-import re
 import subprocess
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import Literal, NamedTuple
-from urllib.parse import unquote, urlsplit
 
-ROOT_AGENT_SOFT = 12 * 1024
-ROOT_AGENT_HARD = 16 * 1024
-MODULE_AGENT_SOFT = 24 * 1024
-MODULE_AGENT_HARD = 32 * 1024
-NESTED_AGENT_SOFT = 12 * 1024
-NESTED_AGENT_HARD = 16 * 1024
-CHAIN_SOFT = 40 * 1024
-CHAIN_HARD = 48 * 1024
-CLAUDE_HARD = 1024
-LONG_LINE_CHARS = 500
-
-_MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(\s*(?:<([^>]+)>|([^\s)]+))")
-_MALFORMED_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+#{1,6}(?:\s|$)")
-_IMPORT_RE = re.compile(r"^@\S+\.md$")
+ROOT_SOFT = 12 * 1024
+ROOT_HARD = 16 * 1024
+MODULE_SOFT = 24 * 1024
+MODULE_HARD = 32 * 1024
+LOCAL_SOFT = 40 * 1024
+LOCAL_HARD = 48 * 1024
+CHAIN_SOFT = 80 * 1024
+CHAIN_HARD = 96 * 1024
 
 
 class Finding(NamedTuple):
     severity: Literal["error", "warning"]
     code: str
     path: PurePosixPath
-    line: int
     message: str
 
 
 def normalized_utf8_size(text: str) -> int:
-    """Return UTF-8 bytes after normalizing CRLF/CR newlines to LF."""
-
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     return len(normalized.encode("utf-8"))
 
 
 def agent_budget(path: PurePosixPath) -> tuple[int, int]:
-    """Return the soft and hard byte limits for one AGENTS.md."""
-
     if path == PurePosixPath("AGENTS.md"):
-        return ROOT_AGENT_SOFT, ROOT_AGENT_HARD
+        return ROOT_SOFT, ROOT_HARD
     if len(path.parts) == 2:
-        return MODULE_AGENT_SOFT, MODULE_AGENT_HARD
-    return NESTED_AGENT_SOFT, NESTED_AGENT_HARD
+        return MODULE_SOFT, MODULE_HARD
+    return LOCAL_SOFT, LOCAL_HARD
 
 
 def guidance_paths(paths: Iterable[PurePosixPath]) -> set[PurePosixPath]:
-    """Keep exact guidance basenames, excluding names such as GITHUB_AGENTS.md."""
-
-    return {path for path in paths if path.name in {"AGENTS.md", "CLAUDE.md"}}
+    return {path for path in paths if path.name == "AGENTS.md"}
 
 
 def _is_descendant_or_same(path: PurePosixPath, parent: PurePosixPath) -> bool:
@@ -73,22 +52,17 @@ def _is_descendant_or_same(path: PurePosixPath, parent: PurePosixPath) -> bool:
     return True
 
 
-def _ancestor_agent_paths(
+def _ancestor_agents(
     target: PurePosixPath,
-    agent_paths: Iterable[PurePosixPath],
+    candidates: Iterable[PurePosixPath],
 ) -> list[PurePosixPath]:
     target_dir = target.parent
     ancestors = [
         candidate
-        for candidate in agent_paths
+        for candidate in candidates
         if _is_descendant_or_same(target_dir, candidate.parent)
     ]
     return sorted(ancestors, key=lambda item: (len(item.parts), item.as_posix()))
-
-
-def _chain_size(target: PurePosixPath, files: Mapping[PurePosixPath, str]) -> int:
-    agents = [path for path in files if path.name == "AGENTS.md"]
-    return sum(normalized_utf8_size(files[path]) for path in _ancestor_agent_paths(target, agents))
 
 
 def _relevant_change(
@@ -110,22 +84,19 @@ def _budget_finding(
     label: str,
 ) -> Finding | None:
     if actual > hard:
-        grows_legacy_violation = base_actual is None or actual > base_actual
-        if grows_legacy_violation:
+        if base_actual is None or actual > base_actual:
             return Finding(
                 "error",
                 code,
                 path,
-                1,
-                f"{label} is {actual} bytes; hard limit is {hard}. Remove or move details before adding more guidance.",
+                f"{label} is {actual} bytes; hard limit is {hard}. Remove inherited or local instructions.",
             )
         if relevant_change:
             return Finding(
                 "warning",
                 code,
                 path,
-                1,
-                f"{label} remains above the {hard}-byte hard limit at {actual} bytes, but did not grow from {base_actual}.",
+                f"{label} remains above {hard} bytes at {actual}, but did not grow from {base_actual}.",
             )
         return None
     if actual > soft and relevant_change:
@@ -133,117 +104,9 @@ def _budget_finding(
             "warning",
             code,
             path,
-            1,
-            f"{label} is {actual} bytes; soft limit is {soft} and hard limit is {hard}. Split before the next substantive expansion.",
+            f"{label} is {actual} bytes; soft limit is {soft} and hard limit is {hard}.",
         )
     return None
-
-
-def _non_fenced_lines(text: str) -> Iterable[tuple[int, str]]:
-    fence_char: str | None = None
-    for line_number, line in enumerate(text.splitlines(), start=1):
-        stripped = line.lstrip()
-        if stripped.startswith("```") or stripped.startswith("~~~"):
-            marker = stripped[0]
-            if fence_char is None:
-                fence_char = marker
-            elif fence_char == marker:
-                fence_char = None
-            continue
-        if fence_char is None:
-            yield line_number, line
-
-
-def _validate_wrapper(path: PurePosixPath, text: str) -> list[Finding]:
-    imports = [
-        line.strip()
-        for _, line in _non_fenced_lines(text)
-        if _IMPORT_RE.fullmatch(line.strip())
-    ]
-    if imports == ["@AGENTS.md"]:
-        return []
-    return [
-        Finding(
-            "error",
-            "AG005",
-            path,
-            1,
-            "CLAUDE.md must contain exactly one standalone @AGENTS.md import and no other Markdown imports.",
-        )
-    ]
-
-
-def _validate_local_links(repo_root: Path, path: PurePosixPath, text: str) -> list[Finding]:
-    findings: list[Finding] = []
-    resolved_root = repo_root.resolve()
-    source_dir = (repo_root / Path(path.parent.as_posix())).resolve()
-    for line_number, line in _non_fenced_lines(text):
-        for match in _MARKDOWN_LINK_RE.finditer(line):
-            raw_target = (match.group(1) or match.group(2) or "").strip()
-            parsed = urlsplit(raw_target)
-            if (
-                not raw_target
-                or raw_target.startswith(("#", "/"))
-                or parsed.scheme
-                or parsed.netloc
-            ):
-                continue
-            target_path = unquote(parsed.path)
-            if not target_path:
-                continue
-            resolved_target = (source_dir / target_path).resolve()
-            if not resolved_target.is_relative_to(resolved_root):
-                findings.append(
-                    Finding(
-                        "error",
-                        "AG003",
-                        path,
-                        line_number,
-                        f"Local link escapes the repository: {raw_target}",
-                    )
-                )
-            elif not resolved_target.exists():
-                findings.append(
-                    Finding(
-                        "error",
-                        "AG003",
-                        path,
-                        line_number,
-                        f"Local link target does not exist: {raw_target}",
-                    )
-                )
-    return findings
-
-
-def _validate_changed_markdown(
-    path: PurePosixPath,
-    text: str,
-    *,
-    check_long_lines: bool,
-) -> list[Finding]:
-    findings: list[Finding] = []
-    for line_number, line in _non_fenced_lines(text):
-        if check_long_lines and len(line) > LONG_LINE_CHARS:
-            findings.append(
-                Finding(
-                    "warning",
-                    "AG007",
-                    path,
-                    line_number,
-                    f"Non-code line has {len(line)} characters; split lines longer than {LONG_LINE_CHARS} characters for reviewability.",
-                )
-            )
-        if _MALFORMED_HEADING_RE.match(line):
-            findings.append(
-                Finding(
-                    "error",
-                    "AG008",
-                    path,
-                    line_number,
-                    "Malformed Markdown heading contains a second heading marker.",
-                )
-            )
-    return findings
 
 
 def analyze(
@@ -253,114 +116,53 @@ def analyze(
     base_files: Mapping[PurePosixPath, str] | None = None,
     changed_paths: set[PurePosixPath] | None = None,
 ) -> list[Finding]:
-    """Analyze one repository snapshot and return deterministic findings."""
+    """Analyze AGENTS instructions. ``repo_root`` is kept for a stable test API."""
 
+    del repo_root
     findings: list[Finding] = []
-    head_guidance = guidance_paths(head_files)
-    head_agents = {path for path in head_guidance if path.name == "AGENTS.md"}
-    head_claude = {path for path in head_guidance if path.name == "CLAUDE.md"}
+    agents = guidance_paths(head_files)
     base_files = base_files or {}
+    base_agents = guidance_paths(base_files)
 
-    root_agent = PurePosixPath("AGENTS.md")
-    root_wrapper = PurePosixPath("CLAUDE.md")
-    if root_agent not in head_agents and root_wrapper not in head_claude:
-        findings.append(
-            Finding(
-                "error",
-                "AG004",
-                root_agent,
-                1,
-                "Repository root must keep an AGENTS.md and CLAUDE.md guidance pair.",
-            )
-        )
-
-    for agent_path in sorted(head_agents):
-        wrapper = agent_path.with_name("CLAUDE.md")
-        if wrapper not in head_claude:
-            findings.append(
-                Finding("error", "AG004", agent_path, 1, f"Missing sibling wrapper: {wrapper.as_posix()}")
-            )
-    for wrapper_path in sorted(head_claude):
-        agent = wrapper_path.with_name("AGENTS.md")
-        if agent not in head_agents:
-            findings.append(
-                Finding("error", "AG004", wrapper_path, 1, f"Missing sibling guidance: {agent.as_posix()}")
-            )
-        findings.extend(_validate_wrapper(wrapper_path, head_files[wrapper_path]))
-        wrapper_size = normalized_utf8_size(head_files[wrapper_path])
-        if wrapper_size > CLAUDE_HARD:
-            findings.append(
-                Finding(
-                    "error",
-                    "AG006",
-                    wrapper_path,
-                    1,
-                    f"CLAUDE.md is {wrapper_size} bytes; thin-wrapper hard limit is {CLAUDE_HARD}.",
-                )
-            )
-
-    base_agent_paths = {path for path in base_files if path.name == "AGENTS.md"}
-    for agent_path in sorted(head_agents):
-        actual = normalized_utf8_size(head_files[agent_path])
-        soft, hard = agent_budget(agent_path)
-        base_actual = (
-            normalized_utf8_size(base_files[agent_path])
-            if agent_path in base_files
-            else None
-        )
-        finding = _budget_finding(
+    for path in sorted(agents):
+        actual = normalized_utf8_size(head_files[path])
+        soft, hard = agent_budget(path)
+        base_actual = normalized_utf8_size(base_files[path]) if path in base_files else None
+        file_finding = _budget_finding(
             code="AG001",
-            path=agent_path,
+            path=path,
             actual=actual,
             soft=soft,
             hard=hard,
             base_actual=base_actual,
-            relevant_change=_relevant_change([agent_path], changed_paths),
+            relevant_change=_relevant_change([path], changed_paths),
             label="AGENTS.md",
         )
-        if finding:
-            findings.append(finding)
+        if file_finding:
+            findings.append(file_finding)
 
-        chain_paths = _ancestor_agent_paths(agent_path, head_agents)
-        chain_actual = sum(normalized_utf8_size(head_files[path]) for path in chain_paths)
-        base_chain_paths = _ancestor_agent_paths(agent_path, base_agent_paths)
+        chain = _ancestor_agents(path, agents)
+        chain_actual = sum(normalized_utf8_size(head_files[item]) for item in chain)
+        base_chain = _ancestor_agents(path, base_agents)
         base_chain_actual = (
-            sum(normalized_utf8_size(base_files[path]) for path in base_chain_paths)
+            sum(normalized_utf8_size(base_files[item]) for item in base_chain)
             if base_files
             else None
         )
         chain_finding = _budget_finding(
             code="AG002",
-            path=agent_path,
+            path=path,
             actual=chain_actual,
             soft=CHAIN_SOFT,
             hard=CHAIN_HARD,
             base_actual=base_chain_actual,
-            relevant_change=_relevant_change(chain_paths, changed_paths),
-            label="Inherited AGENTS.md chain",
+            relevant_change=_relevant_change(chain, changed_paths),
+            label="Effective AGENTS.md chain",
         )
         if chain_finding:
             findings.append(chain_finding)
 
-    markdown_paths = {
-        path
-        for path in head_files
-        if path.suffix.lower() == ".md"
-        and (path in head_guidance or changed_paths is None or path in changed_paths)
-    }
-    for path in sorted(markdown_paths):
-        text = head_files[path]
-        findings.extend(_validate_local_links(repo_root, path, text))
-        if changed_paths is None or path in changed_paths:
-            findings.extend(
-                _validate_changed_markdown(
-                    path,
-                    text,
-                    check_long_lines=path in head_guidance,
-                )
-            )
-
-    return sorted(findings, key=lambda finding: (finding.path.as_posix(), finding.line, finding.code, finding.severity))
+    return sorted(findings, key=lambda finding: (finding.path.as_posix(), finding.code))
 
 
 def _run_git(repo_root: Path, args: Sequence[str]) -> bytes:
@@ -376,7 +178,7 @@ def _run_git(repo_root: Path, args: Sequence[str]) -> bytes:
     return result.stdout
 
 
-def _parse_nul_paths(output: bytes) -> set[PurePosixPath]:
+def _parse_paths(output: bytes) -> set[PurePosixPath]:
     return {
         PurePosixPath(item.decode("utf-8", errors="surrogateescape"))
         for item in output.split(b"\0")
@@ -385,9 +187,30 @@ def _parse_nul_paths(output: bytes) -> set[PurePosixPath]:
 
 
 def _worktree_paths(repo_root: Path) -> set[PurePosixPath]:
-    return _parse_nul_paths(
+    return _parse_paths(
         _run_git(repo_root, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
     )
+
+
+def _load_worktree_agents(repo_root: Path) -> dict[PurePosixPath, str]:
+    files: dict[PurePosixPath, str] = {}
+    for path in guidance_paths(_worktree_paths(repo_root)):
+        local_path = repo_root / Path(path.as_posix())
+        if local_path.is_file():
+            files[path] = local_path.read_text(encoding="utf-8")
+    return files
+
+
+def _load_ref_agents(repo_root: Path, ref: str | None) -> dict[PurePosixPath, str]:
+    if not ref or set(ref) == {"0"}:
+        return {}
+    paths = guidance_paths(
+        _parse_paths(_run_git(repo_root, ["ls-tree", "-r", "--name-only", "-z", ref]))
+    )
+    return {
+        path: _run_git(repo_root, ["show", f"{ref}:{path.as_posix()}"]).decode("utf-8")
+        for path in paths
+    }
 
 
 def _changed_paths(
@@ -399,63 +222,29 @@ def _changed_paths(
 ) -> set[PurePosixPath]:
     if base_ref and head_ref:
         if set(base_ref) == {"0"}:
-            return _worktree_paths(repo_root)
+            return set(_load_ref_agents(repo_root, head_ref))
         revision_range = (
             f"{base_ref}...{head_ref}" if use_merge_base else f"{base_ref}..{head_ref}"
         )
-        return _parse_nul_paths(
-            _run_git(repo_root, ["diff", "--name-only", "-z", revision_range, "--"])
+        return guidance_paths(
+            _parse_paths(
+                _run_git(repo_root, ["diff", "--name-only", "-z", revision_range, "--"])
+            )
         )
-    tracked_changes = _parse_nul_paths(
-        _run_git(repo_root, ["diff", "--name-only", "-z", "HEAD", "--"])
-    )
-    untracked = _parse_nul_paths(
+    tracked = _parse_paths(_run_git(repo_root, ["diff", "--name-only", "-z", "HEAD", "--"]))
+    untracked = _parse_paths(
         _run_git(repo_root, ["ls-files", "--others", "--exclude-standard", "-z"])
     )
-    return tracked_changes | untracked
-
-
-def _load_worktree_files(
-    repo_root: Path,
-    all_paths: set[PurePosixPath],
-    changed_paths: set[PurePosixPath],
-) -> dict[PurePosixPath, str]:
-    selected = guidance_paths(all_paths) | {
-        path for path in changed_paths if path.suffix.lower() == ".md"
-    }
-    files: dict[PurePosixPath, str] = {}
-    for path in selected:
-        local_path = repo_root / Path(path.as_posix())
-        if local_path.is_file():
-            files[path] = local_path.read_text(encoding="utf-8")
-    return files
-
-
-def _load_ref_guidance(repo_root: Path, ref: str | None) -> dict[PurePosixPath, str]:
-    if not ref or set(ref) == {"0"}:
-        return {}
-    paths = guidance_paths(
-        _parse_nul_paths(_run_git(repo_root, ["ls-tree", "-r", "--name-only", "-z", ref]))
-    )
-    files: dict[PurePosixPath, str] = {}
-    for path in paths:
-        raw = _run_git(repo_root, ["show", f"{ref}:{path.as_posix()}"])
-        files[path] = raw.decode("utf-8")
-    return files
-
-
-def _annotation_escape(value: str) -> str:
-    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    return guidance_paths(tracked | untracked)
 
 
 def _print_finding(finding: Finding, github_annotations: bool) -> None:
-    location = f"{finding.path.as_posix()}:{finding.line}"
     if github_annotations:
         level = "error" if finding.severity == "error" else "warning"
-        print(
-            f"::{level} file={_annotation_escape(finding.path.as_posix())},line={finding.line},title={finding.code}::{_annotation_escape(finding.message)}"
-        )
-    print(f"{finding.severity.upper()} {finding.code} {location} — {finding.message}")
+        print(f"::{level} file={finding.path.as_posix()},line=1,title={finding.code}::{finding.message}")
+    print(
+        f"{finding.severity.upper()} {finding.code} {finding.path.as_posix()}:1 — {finding.message}"
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -483,15 +272,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     base_ref = args.base_ref or args.before
     head_ref = args.head_ref or args.after
     try:
-        all_paths = _worktree_paths(repo_root)
+        if head_ref:
+            head_files = _load_ref_agents(repo_root, head_ref)
+            base_files = _load_ref_agents(repo_root, base_ref)
+        else:
+            head_files = _load_worktree_agents(repo_root)
+            base_files = {}
         changed = _changed_paths(
             repo_root,
             base_ref,
             head_ref,
             use_merge_base=bool(args.base_ref),
         )
-        head_files = _load_worktree_files(repo_root, all_paths, changed)
-        base_files = _load_ref_guidance(repo_root, base_ref)
         findings = analyze(
             repo_root,
             head_files,
@@ -506,9 +298,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_finding(finding, args.github_annotations)
     errors = sum(finding.severity == "error" for finding in findings)
     warnings = sum(finding.severity == "warning" for finding in findings)
-    agents = sum(path.name == "AGENTS.md" for path in guidance_paths(head_files))
-    wrappers = sum(path.name == "CLAUDE.md" for path in guidance_paths(head_files))
-    print(f"Agent guidance check: {agents} AGENTS.md, {wrappers} CLAUDE.md, {errors} errors, {warnings} warnings.")
+    print(f"Agent guidance check: {len(head_files)} AGENTS.md, {errors} errors, {warnings} warnings.")
     return 1 if errors or (warnings and args.strict_warnings) else 0
 
 

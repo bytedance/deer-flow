@@ -1,10 +1,4 @@
-# Frontend Thread and Streaming Invariants
-
-This is the canonical implementation guide for thread state, history, streaming,
-message grouping, composer commands, and run-scoped UI metadata. Read it before
-changing `src/core/threads/` or the workspace message/composer flow.
-
-## Data Flow
+### Data Flow
 
 1. Optional composer helpers such as `core/input-polish` can rewrite the local draft before submission, and `core/voice-input` can transcribe browser microphone input into that same local draft; confirmed user input then flows to thread hooks (`core/threads/hooks.ts`) → LangGraph SDK streaming
 2. Stream events update thread state (messages, artifacts, todos, goal). The main thread stream uses the LangGraph SDK's `throttle: true` mode so updates received in the same macrotask coalesce before React is notified; do not replace it with a numeric delay without validating the SDK's trailing-debounce behavior on a continuous stream.
@@ -30,48 +24,6 @@ changing `src/core/threads/` or the workspace message/composer flow.
    so backend cross-tab ordering remains authoritative.
 6. Components subscribe to thread state and render updates
 
-## Stream Request and Replay
-
-`core/api/stream-mode.ts` accepts only the Gateway-supported modes: `values`,
-`messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom`. Unsupported
-modes fail before HTTP. Thread hooks may retain `streamResumable` for SDK reconnect
-bookkeeping, but the request sanitizer must remove it; replay uses the SSE
-`Last-Event-ID` cursor. Keep this allowlist aligned with the backend request schema.
-
-`core/api/api-client.ts` wraps both initial and joined streams because the upstream SDK
-ignores unknown event names. An id-less `gap` frame clears stale reconnect metadata,
-emits the internal `stream_replay_gap` event, reloads durable values, and rejoins after
-the retained tail. Recovery permits five rejoins after the original stream. The wrapper
-must remain a lazy async iterable. On a gap, `core/threads/hooks.ts` clears optimistic,
-transient, and subtask state, invalidates durable history, and shows the recovery warning;
-do not treat the gap as normal completion or cancel the still-running backend run.
-
-## Subtask History
-
-`Subtask.steps[]` appends live `task_running` steps through `mergeSteps` and backfills
-historical steps with paged, task-scoped event requests. `task_started` carries the
-effective model and `task_running` carries cumulative usage. Lifecycle folding keeps the
-largest cumulative total so replayed or late frames cannot double-count or roll state
-backward. Terminal ToolMessage metadata restores model and usage after reload.
-
-`core/tasks/steps.ts` owns conversion, deduplication by `message_index`, and display
-filtering. `useUpdateSubtask` merges against the latest `tasksRef`, so a late backfill
-cannot overwrite live steps or sibling tasks. History content messages must retain their
-owning `run_id` so cards can resolve the scoped events endpoint.
-
-## Right Panel Layout
-
-All desktop right panels share one `ResizablePanelGroup`; do not fork a non-resizable
-branch per panel kind. Open and close through the panel handle's `collapse()` and
-`resize()` methods so width can animate. Apply the flex-grow transition to the group's
-`[data-panel]` element only during open/close, and hold content at its final container
-width while clipping the animation to avoid message-list reflow and scroll jumps.
-
-During a drag, `onResize` records the last positive size. The owning artifact, sidecar,
-or browser state mirrors a final zero-width layout only from `onLayoutChanged`, after
-pointer release. Closing on the first zero-width resize frame breaks a drag that reaches
-the edge and then reverses.
-
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.
 
 Run duration is run-scoped UI metadata even though the compatibility field `additional_kwargs.turn_duration` is repeated on historical AI messages. `core/messages/run-duration.ts` folds those copies into one display anchored after the run's last visible message group. `MessageList` owns the temporary client-side duration for a just-completed live turn until authoritative history arrives. The duration is total run wall-clock time, not per-message reasoning time; reasoning disclosure and run activity/duration are rendered separately.
@@ -96,3 +48,41 @@ Because the same message is rendered by two different components over its lifeti
 Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLatestEditableTurn()` exposes a human turn only when the transcript is idle and the most recent visible turn ends in a terminal assistant message. `core/threads/hooks.ts::editAndRegenerateMessage()` calls `POST /api/threads/{id}/runs/edit-regenerate/prepare`, submits the returned replacement message/checkpoint/metadata through the same LangGraph stream path as regenerate, optimistically hides the superseded message ids, and clears the optimistic replacement once the persisted replacement arrives.
 
 `MessageGroup` builds its tool-result and browser-preview lookups once per processing group before converting messages to steps. The lookup preserves the first non-empty result and first screenshot-bearing browser view for each tool-call ID, matching the streamed-message display semantics without repeatedly scanning the full group for every tool call.
+
+### Key Patterns
+
+- **Server Components by default**, `"use client"` only for interactive components
+- **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
+  chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived
+  locale provider; docs derive locale from their route, and blog owns its preference
+  cookie. Public server routes load one dictionary at a time through
+  `core/i18n/translations.ts`; the interactive auth/workspace client provider owns both
+  formatter-bearing dictionaries because functions cannot cross the RSC boundary.
+  Keep public `/` static and keep rich-content CSS on the routes that render it.
+- **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
+- **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
+- **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
+- **Run stream options** are sanitized by `core/api/stream-mode.ts`: the Gateway-supported set is `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom`; any request containing an unsupported mode throws before HTTP instead of being partially forwarded or silently defaulting to `values`. `streamResumable` is retained by thread hooks only for SDK-side reconnect bookkeeping but stripped before the HTTP request because the Gateway does not accept that request option; actual replay uses the SSE `Last-Event-ID` cursor. Keep this boundary aligned with the backend request schema; `messages` and `events` are not supported and must not be forwarded.
+- **SSE replay gaps** are handled in `core/api/api-client.ts`, which wraps both initial and joined run streams because the upstream SDK ignores unknown event names. An id-less backend `gap` control frame clears stale reconnect metadata, emits an internal `stream_replay_gap` custom event, reloads durable thread values, and rejoins after the server-provided retained tail, with up to five recovery rejoins after the original stream (six total stream calls on an all-gap exhaustion path). The wrapper remains a lazy async iterable because the SDK consumes it with `for await`. `core/threads/hooks.ts` clears optimistic/transient/subtask state, invalidates durable history caches, and shows the localized recovery warning; never let a gap fall through as a normal stream finish or cancel the still-running backend run.
+- **Streaming Markdown rendering** is owned by `core/streamdown`: Streamdown's `animated` / `isAnimating` API handles incremental word animation, while the shared `streamdownRenderingPlugins` config registers the named code-highlighting and Mermaid plugins required by Streamdown 2.5. Keep wrappers and derived configs wired to that shared object; do not reintroduce a rehype plugin that wraps every word, because reparsing a growing block remounts old words and replays their animation.
+- Citation links in message and artifact Markdown must derive their `citation:` label from the full `ReactNode` children tree, since Streamdown may provide element or array children during streaming rather than a plain string.
+- **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
+- **Subtask step history and runtime metadata** (`core/tasks/`) — the subtask card shows a subagent's full step timeline (#3779): its assistant reasoning turns interleaved with the tools it ran. `Subtask.steps[]` is accumulated live from `task_running` events (appended via `mergeSteps`, not overwritten) and backfilled on expand for historical runs by `fetchSubtaskSteps`, which pages the events endpoint scoped to one task (GET `/runs/{runId}/events?event_types=subagent.step&task_id=…&after_seq=…`) until a short page, so the run-wide limit can't truncate the timeline. `task_started` carries the effective `model_name`; `task_running` carries a cumulative usage snapshot after each completed LLM call. `core/tasks/lifecycle.ts` normalizes these additive events, and `computeNextSubtask` keeps the largest cumulative total so replayed or late SSE frames cannot double-count or roll the folded card backward. Terminal ToolMessage metadata (`subagent_model_name` / `subagent_token_usage`) restores the same values from normal history after reload; no per-card event fetch is needed. `core/tasks/steps.ts` is the pure step model: `messageToStep` (live), `eventsToSteps` (reload), `mergeSteps` (dedup by `message_index`), and `stepsForDisplay` (what the card renders — keeps tool steps + AI steps with text, drops the trailing final-answer AI step when completed since it's shown as `result`). `core/tasks/context.tsx`'s `useUpdateSubtask` applies updates against a `tasksRef` mirroring the latest state (not a closure snapshot), so a late-resolving `fetchSubtaskSteps` backfill merges into current state instead of clobbering SSE steps or sibling subtasks that arrived meanwhile. The owning `run_id` is carried onto history content messages in `buildVisibleHistoryMessages` so the card can resolve the events endpoint.
+
+### Interaction Ownership
+
+- `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
+- `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
+- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own edit-and-rerun submission wiring because the page must preserve normal/custom-agent run context; `MessageList` only detects the latest editable user turn and renders the inline editor.
+- `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` applies the same capability gate and additionally requires the Custom Agent's tool groups to be unrestricted or include `browser`. Default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.
+- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
+- `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
+- `src/components/workspace/browser-view/browser-view-panel.tsx` forwards each physical pointer click as one `click` input; do not also emit `down`/`up` for the same gesture because the remote Playwright click would run twice.
+- `src/components/workspace/browser-view/use-browser-stream.ts` requests binary JPEG
+  frames with `frame_format=binary`; status, URL, tabs, and navigation rejection
+  messages remain JSON. `LatestBrowserFrameBuffer` keeps only the newest pending
+  frame, publishes through `useSyncExternalStore` at most once per animation
+  frame, and owns object-URL revocation. Keep the Gateway's legacy JSON/base64
+  frame path for older clients.
+- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
+- `src/components/workspace/chats/chat-box.tsx` owns the desktop right-panel layout, and **all three** right panels (artifacts, sidecar, browser) share one `ResizablePanelGroup` — do not fork a non-resizable branch per panel kind, which is how the artifacts divider silently lost its drag handle (#4465). Open/close is `collapse()` / `resize()` on the side panel's imperative handle, not conditional rendering, so the width can animate. Three constraints hold that together: the size transition is applied from the group as `[&>[data-panel]]:transition-[flex-grow]` because the sized flex item is the library's own `[data-panel]` element rather than the child `className` lands on; it is applied only while an open/close is in flight, so a drag is not interpolated frame by frame; and during the animation the panel content is held at its final width in `cqw` and clipped, because a reflowing message list re-runs its scroll-to-bottom (pinned by `tests/e2e/sidecar-chat.spec.ts`'s no-animated-scroll test) and a re-wrapping composer changes which responsive labels it shows. Because the panel is `collapsible`, the library can also collapse it to `0%` on its own when a drag crosses `minSize`, without going through the state that owns it. `onResize` records the last positive size while the pointer moves, but the owning `sidecar` / `browserView` / `artifactsOpen` state must only mirror a final `0%` layout from `onLayoutChanged`, after pointer release; closing on the first `0%` resize frame breaks a continuous drag that reaches the edge and then reverses before release.

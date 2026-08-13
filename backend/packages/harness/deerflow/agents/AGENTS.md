@@ -1,5 +1,4 @@
-# Agent System
-
+### Agent System
 
 **Lead Agent** (`packages/harness/deerflow/agents/lead_agent/agent.py`):
 - Entry point: `make_lead_agent(config: RunnableConfig)` registered in `langgraph.json`

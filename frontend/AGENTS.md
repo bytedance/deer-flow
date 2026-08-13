@@ -32,11 +32,7 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-Rstest runs tests as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` use
-plain **node** and are the default for pure logic. `*.dom.test.ts` / `*.dom.test.tsx`
-use **happy-dom** for components and hooks driven through `renderHook`. Keep tests in
-node unless they require real React behavior such as effect ordering, unmount cleanup,
-or re-rendering on store changes; do not mock React to keep such a test in node.
+Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
 
@@ -59,10 +55,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic. Major domains include `threads/`, `api/`, `agents/`,
-  `auth/`, `artifacts/`, `channels/`, `integrations/`, `i18n/`, `settings/`, `memory/`,
-  `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/`, `voice-input/`, `tasks/`,
-  `todos/`, `tools/`, `workspace-changes/`, `config/`, and rendering helpers.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app
@@ -70,57 +63,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 - **`typings/`** — Ambient TypeScript declarations
 - Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
 
-### Data Flow
-
-Thread hooks own submission and LangGraph streaming; TanStack Query owns
-server-state caching; message components derive visible groups from the merged
-thread state. Before changing thread history, streaming, message grouping,
-composer commands, or run-scoped UI metadata, read
-[Thread and Streaming Invariants](docs/THREAD_AND_STREAMING.md).
-
-### Key Patterns
-
-- **Server Components by default**, `"use client"` only for interactive components
-- **Static root boundary** — `src/app/layout.tsx` must not read cookies or import
-  chat-only KaTeX/Streamdown styles. Auth and workspace layouts own the cookie-derived
-  locale provider; docs derive locale from their route, and blog owns its preference
-  cookie. Public server routes load one dictionary at a time through
-  `core/i18n/translations.ts`; the interactive auth/workspace client provider owns both
-  formatter-bearing dictionaries because functions cannot cross the RSC boundary.
-  Keep public `/` static and keep rich-content CSS on the routes that render it.
-- **Thread hooks** (`useThreadStream`, `useSubmitThread`, `useThreads`) are the primary API interface
-- **Thread routes** — construct Web UI chat paths through `core/threads/utils.ts::pathOfThread()`, which percent-encodes both custom agent names and thread IDs before inserting them into route segments
-- **LangGraph client** is a singleton obtained via `getAPIClient()` in `core/api/`
-- **Streaming and replay invariants** — supported stream modes, request sanitization,
-  SSE gap recovery, and state reset behavior are owned by
-  [Thread and Streaming Invariants](docs/THREAD_AND_STREAMING.md).
-- **Streaming Markdown rendering** is owned by `core/streamdown`: Streamdown's `animated` / `isAnimating` API handles incremental word animation, while the shared `streamdownRenderingPlugins` config registers the named code-highlighting and Mermaid plugins required by Streamdown 2.5. Keep wrappers and derived configs wired to that shared object; do not reintroduce a rehype plugin that wraps every word, because reparsing a growing block remounts old words and replays their animation.
-- Citation links in message and artifact Markdown must derive their `citation:` label from the full `ReactNode` children tree, since Streamdown may provide element or array children during streaming rather than a plain string.
-- **Environment validation** uses `@t3-oss/env-nextjs` with Zod schemas (`src/env.js`). Skip with `SKIP_ENV_VALIDATION=1`
-- **Subtask history and usage folding** — live/reloaded step merging and cumulative
-  metadata rules are owned by
-  [Thread and Streaming Invariants](docs/THREAD_AND_STREAMING.md#subtask-history).
-
-### Interaction Ownership
-
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
-- `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own edit-and-rerun submission wiring because the page must preserve normal/custom-agent run context; `MessageList` only detects the latest editable user turn and renders the inline editor.
-- `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` applies the same capability gate and additionally requires the Custom Agent's tool groups to be unrestricted or include `browser`. Default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.
-- `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
-- `src/components/workspace/messages/message-list.tsx` owns human-input card answered/latest/pending gating; entry pages only translate a submitted card response into `sendMessage` calls.
-- `src/components/workspace/browser-view/browser-view-panel.tsx` forwards each physical pointer click as one `click` input; do not also emit `down`/`up` for the same gesture because the remote Playwright click would run twice.
-- `src/components/workspace/browser-view/use-browser-stream.ts` requests binary JPEG
-  frames with `frame_format=binary`; status, URL, tabs, and navigation rejection
-  messages remain JSON. `LatestBrowserFrameBuffer` keeps only the newest pending
-  frame, publishes through `useSyncExternalStore` at most once per animation
-  frame, and owns object-URL revocation. Keep the Gateway's legacy JSON/base64
-  frame path for older clients.
-- `src/core/threads/hooks.ts` owns pre-submit upload state and thread submission.
-- `src/components/workspace/chats/chat-box.tsx` owns the shared resizable layout for
-  artifact, sidecar, and browser panels. Its collapse, resize, and animation invariants
-  are documented in
-  [Thread and Streaming Invariants](docs/THREAD_AND_STREAMING.md#right-panel-layout).
+More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
 
 ## Code Style
 
@@ -158,8 +101,7 @@ When adding features:
 2. Add TypeScript types and proper error handling
 3. Write unit tests under `tests/unit/` (`pnpm test`) and E2E tests under `tests/e2e/` (`pnpm test:e2e`)
 4. Run `pnpm check` before committing
-5. Update this `AGENTS.md` only when module navigation, commands, or hard
-   constraints change; put implementation details in one canonical document
+5. Update this `AGENTS.md` when architecture, commands, or conventions change
 
 Route asset budgets are enforced with `pnpm perf:check`. The command measures
 `/login` from a normal production build, then builds in static-demo mode for the

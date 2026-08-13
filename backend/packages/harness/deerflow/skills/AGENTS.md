@@ -1,5 +1,4 @@
-# Skills System
-
+### Skills System (`packages/harness/deerflow/skills/`)
 
 - **Location**: global public skills live under `deer-flow/skills/public/`; user-authored custom skills live under `{DEER_FLOW_HOME}/users/{user_id}/skills/custom/`; globally managed integration skills live under `{DEER_FLOW_HOME}/integrations/skills/{provider}/`; per-user integration credentials remain under `{DEER_FLOW_HOME}/users/{user_id}/integrations/{provider}/{config,data}`
 - **Format**: Directory with `SKILL.md` (YAML frontmatter: name, description, license, allowed-tools, required-secrets)

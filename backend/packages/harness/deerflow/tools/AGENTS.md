@@ -1,5 +1,4 @@
-# Tool System
-
+### Tool System (`packages/harness/deerflow/tools/`)
 
 `get_available_tools(groups, include_mcp, model_name, subagent_enabled)` assembles:
 1. **Config-defined tools** - Resolved from `config.yaml` via `resolve_variable()`

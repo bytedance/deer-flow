@@ -1,5 +1,4 @@
-# Memory System
-
+### Memory System (`packages/harness/deerflow/agents/memory/`)
 
 **Components**:
 - `updater.py` - LLM-based memory updates with fact extraction, whitespace-normalized fact deduplication, optimistic revision checks, and repository change sets

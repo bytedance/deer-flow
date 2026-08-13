@@ -20,15 +20,6 @@ Fixes #
        - "Default model changed from X to Y — existing users notice on first run" -->
 
 
-## Documentation impact
-
-<!-- Name the canonical document path updated by this change, or write `N/A`
-     with a reason. Update AGENTS.md only when repository/module navigation,
-     commands, or hard constraints change. -->
-
-**Canonical document path or `N/A` with a reason:**
-
-
 ## Surface area
 
 <!-- Check every box that applies. Reviewers use this to scope the review. -->
@@ -81,3 +72,4 @@ Fixes #
      "AI wrote tests, I wrote the impl". A prompt or conversation link is great too. -->
 
 - [ ] I've read and understand every line of this change and take responsibility for it — it's not unreviewed AI output.
+

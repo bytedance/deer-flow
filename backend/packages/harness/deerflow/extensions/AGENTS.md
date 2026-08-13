@@ -1,5 +1,4 @@
-# Python Extension System
-
+### Python Extension System (Runtime Slice)
 
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in

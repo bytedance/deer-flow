@@ -26,7 +26,7 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
-	@echo "  make check-agent-guidance - Validate AGENTS.md budgets, inheritance, wrappers, and links"
+	@echo "  make check-agent-guidance - Validate scoped AGENTS.md file and chain budgets"
 	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"

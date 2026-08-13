@@ -1,7 +1,31 @@
-# Embedded Client
+### Request Trace Context (`packages/harness/deerflow/trace_context.py`)
 
-Canonical guide for the in-process Python client API. The shared event and transport
-contract is documented in [Streaming](STREAMING.md).
+Request trace correlation is controlled by `logging.enhance.enabled` at **both** entry points, gated through the shared helper `deerflow.config.app_config.is_trace_correlation_enabled` so the Gateway and embedded paths cannot drift:
+
+- **Gateway HTTP**: `app.gateway.trace_middleware.TraceMiddleware` binds one request-level trace id per HTTP request, inheriting inbound `X-Trace-Id` when present or generating a new id otherwise. A **valid** inbound header also marks the request so `runtime/runs/worker.py` prefers that id over `config.metadata.deerflow_trace_id`, keeping logs, response headers, Langfuse, and runtime context aligned when callers send both. The middleware writes the final value to every HTTP response at `http.response.start`, which covers SSE / streaming responses without consuming the body.
+- **Embedded / TUI / CLI**: `DeerFlowClient.stream()` mints (or inherits) a request-level trace id per turn only when the flag is on. When it is off, no fresh id is minted — a caller that explicitly wraps `stream()` in `request_trace_context(...)` still opts in, because the downstream `get_current_trace_id()` read propagates that value into Langfuse metadata regardless of the flag. Because `stream()` is a sync generator (which shares the caller's context), the id binding is set/reset around each `next()` step rather than around `yield from`: this keeps LangGraph node execution and its log records inside the binding, while returning control to the caller with the ContextVar restored — avoids cross-request leak between yields and `ValueError: <Token> was created in a different Context` on GC-driven close of an abandoned generator (regression pinned by `tests/test_client_langfuse_metadata.py::test_stream_does_not_leak_trace_id_to_caller_context_between_yields` and `::test_stream_abandoned_generator_close_does_not_raise_cross_context`).
+
+The same ContextVar value is injected into enhanced log records as `trace_id` and into Langfuse metadata as `deerflow_trace_id`.
+
+`logging` is registered as a **restart-required** field
+(`STARTUP_ONLY_FIELDS["logging"]`): `configure_logging()` installs the trace-context
+filter and enhanced formatter on root handlers only during app.py lifespan startup,
+and `TraceMiddleware` captures `logging.enhance.enabled` once when the FastAPI app
+is constructed (via `resolve_trace_enabled(get_app_config())` in `create_app()`,
+itself a thin alias for `is_trace_correlation_enabled`). This keeps the response
+`X-Trace-Id` header, log `trace_id` fields, and Langfuse `deerflow_trace_id`
+coherent — a runtime `config.yaml` edit to `logging.enhance.*` needs a Gateway
+restart to take effect. The `deerflow_trace_id` chain inherits this guarantee
+transitively because every injection point ultimately reads the same
+`trace_context` ContextVar that the middleware alone populates. `DeerFlowClient`
+reads its own `self._app_config` snapshot (captured at `__init__`) through the
+same helper for the embedded gate.
+
+`deerflow_trace_id` is a DeerFlow correlation metadata key, not Langfuse's native
+trace id and not a DeerFlow `run_id`. Keep the existing subagent `trace_id` field
+separate: that short id is still only for subagent execution logs/status.
+
+### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
 
@@ -18,7 +42,7 @@ contract is documented in [Streaming](STREAMING.md).
 - Agent created lazily via `create_agent()` + `build_middlewares()`, same as `make_lead_agent`
 - Supports `checkpointer` parameter for state persistence across turns
 - `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
-- See [STREAMING.md](STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
+- See [docs/STREAMING.md](../../../docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
 
 **Gateway Equivalent Methods** (replaces Gateway API):
 
