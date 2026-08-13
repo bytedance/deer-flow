@@ -75,30 +75,15 @@ deer-flow/
 
 Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). See the Extension System section in
-[backend/AGENTS.md](backend/AGENTS.md). Packaged extensions can contribute middleware,
-task lifecycle, system-model observers, Gateway services, and FastAPI HTTP routers; the
-[reference extension](examples/deerflow-extension-example/) demonstrates all five.
-
-Manage packaged extensions with `deerflow extensions install/list/enable/disable/remove`
-or the root `make extension-*` wrappers. Install accepts a package requirement, public
-HTTPS Git URL, or local directory. It requires an explicit trust confirmation, records the
-package in `backend/pyproject.toml`'s `extensions` dependency group, updates
-`backend/uv.lock`, and writes the managed `plugins:` entry as `required: false` so a later
-load failure is reported instead of aborting Gateway startup (`install --required` opts
-in). A package must expose exactly one PEP 621
-`deerflow.extensions` entry point. Local directories are copied as deployment snapshots
-under `backend/extensions/sources/`; they are not editable installs. Every manager mutation
-requires a Gateway restart because plugins are imported only during application
-construction. SSH Git sources are rejected because the stock Docker builder does not
-forward host SSH credentials.
-
-All startup paths consume that same lock. Local full-stack and Docker-dev launchers sync it
-with `--locked` before starting; the production Docker builder syncs it while constructing
-the Gateway image and the runtime starts with `--no-sync`. Never add a startup-time remote
-extension installer: production startup must use the environment already built from the
-lock. Extensions and their build systems execute with Gateway privileges, so only trusted
-sources belong in this operator-controlled path.
+kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
+middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
+routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
+five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
+`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
+hooks and extension code execute with Gateway privileges, so only trusted operator sources
+belong in this path. The manager transaction, accepted source forms, lock discipline, and
+contribution contract live in
+[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
