@@ -1274,6 +1274,32 @@ def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
     assert "overflo_policy" in caplog.text
 
 
+def test_e2b_config_accepts_documented_reconciliation_fields(monkeypatch, caplog):
+    """The six ``reconciliation_*`` settings are documented in
+    ``backend/docs/CONFIGURATION.md`` and consumed by the provider, so they
+    must not be reported as unknown sandbox fields (#4771)."""
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    config = SandboxConfig(
+        use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        api_key="test-key",
+        reconciliation_interval_seconds=45,
+        reconciliation_grace_seconds=90,
+        reconciliation_orphan_ttl_seconds=1800,
+        reconciliation_max_pages=5,
+        reconciliation_max_items=50,
+        reconciliation_max_seconds=12,
+    )
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+
+    with caplog.at_level("WARNING"):
+        loaded = provider._load_config()
+
+    assert "unknown sandbox config fields" not in caplog.text
+    assert loaded["reconciliation_interval_seconds"] == 45.0
+    assert loaded["reconciliation_max_pages"] == 5
+
+
 def test_evict_oldest_warm_keeps_slot_when_kill_lookup_raises(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)

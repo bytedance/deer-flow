@@ -104,7 +104,24 @@ META_KEY_CREATED_AT = "deer_flow_created_at"
 META_KEY_CAPACITY_LEDGER = "deer_flow_capacity_ledger"
 META_KEY_CAPACITY_RESERVATION = "deer_flow_capacity_reservation"
 META_VAL_PROVIDER = "e2b_sandbox_provider"
-E2B_EXTRA_CONFIG_KEYS = frozenset({"api_key", "domain", "home_dir", "template"})
+# Config keys that ``SandboxConfig`` stores in ``model_extra`` (``extra="allow"``)
+# but E2B legitimately consumes. These are documented in
+# ``backend/docs/CONFIGURATION.md`` and read via ``_opt`` in ``_load_config``,
+# so they must not be reported as unknown sandbox fields (#4771).
+E2B_EXTRA_CONFIG_KEYS = frozenset(
+    {
+        "api_key",
+        "domain",
+        "home_dir",
+        "template",
+        "reconciliation_interval_seconds",
+        "reconciliation_grace_seconds",
+        "reconciliation_orphan_ttl_seconds",
+        "reconciliation_max_pages",
+        "reconciliation_max_items",
+        "reconciliation_max_seconds",
+    }
+)
 
 
 @dataclass
