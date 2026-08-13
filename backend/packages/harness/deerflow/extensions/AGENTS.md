@@ -229,6 +229,13 @@ route items, startup/shutdown hooks, and custom router lifespans are rejected; l
 resources must use `ExtensionService`. Auth and CSRF classify
 `get_request_route_path(request)`, the same root-path-adjusted ASGI path Starlette routes
 match; do not switch those security predicates back to reconstructed `request.url.path`.
+That helper delegates to the private `starlette._utils.get_route_path` on purpose. Its
+requirement is not "strip `root_path` correctly" but "return exactly what the router is
+matching on", so importing the dispatcher's own implementation keeps the two in lockstep by
+construction. Do not vendor a local copy: a private import that disappears fails loudly at
+startup, while a stale copy diverges silently at a security boundary. `starlette` is
+therefore a declared, bounded direct dependency so the bump is visible in review, and
+`tests/test_gateway_request_path.py` pins the agreement independently of the mechanism.
 Any preflight, conflict, or include failure rolls back the whole router without preventing
 later routers from mounting. Do not introduce a framework-bound `RouterContributor`
 contract: the public registry accepts `Sequence[Any]`
