@@ -388,6 +388,8 @@ echo ""
 
 report_startup_failure() {
     echo -e "${RED}✗ DeerFlow services failed to become ready.${NC}" >&2
+    echo '  If Docker Compose reports "unknown flag: --wait", upgrade to a version that' >&2
+    echo '  supports `docker compose up --wait`.' >&2
     echo "  Container status:" >&2
     "${COMPOSE_CMD[@]}" ps >&2 || true
     echo "" >&2

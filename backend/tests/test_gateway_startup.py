@@ -106,6 +106,7 @@ def test_deploy_failure_prints_gateway_diagnostics_and_never_claims_success(tmp_
     assert result.returncode != 0
     assert "DeerFlow is running!" not in result.stdout
     assert "DeerFlow services failed to become ready" in result.stderr
+    assert "supports `docker compose up --wait`" in result.stderr
     calls = capture.read_text(encoding="utf-8")
     assert any(call.endswith(" ps") for call in calls.splitlines())
     assert " logs --no-color --tail 100 gateway" in calls
