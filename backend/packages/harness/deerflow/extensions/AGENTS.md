@@ -72,7 +72,9 @@ trusted operator sources; source URLs containing embedded credentials are reject
 Remote direct references are limited to HTTPS, and remote Git sources must use public
 Git-over-HTTPS (with loopback HTTP accepted for local tooling). SSH Git URLs are rejected
 because the stock Docker builder does not forward host SSH credentials; relative paths and
-local wheels must use the managed directory snapshot path instead.
+local wheels must use the managed directory snapshot path instead. Git's SCP-like shorthand
+(`git@host:org/repo.git`) carries no URL scheme, so it is detected before the scheme rules
+and reported with the same public-HTTPS correction rather than the local-path message.
 Local wheel and `file://` sources are rejected because they cannot be reproduced inside the
 Docker build context; local code must enter through the directory-snapshot path. Stock
 production builds support public package indexes and public HTTPS Git sources reachable by

@@ -1862,6 +1862,27 @@ def test_remote_git_ssh_sources_are_rejected_before_uv(
     assert not (root / "backend" / "uv.lock").exists()
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        "git@github.com:acme/deerflow-extension-demo.git",
+        "git+git@github.com:acme/deerflow-extension-demo.git",
+        "deerflow-extension-demo @ git+git@github.com:acme/deerflow-extension-demo.git",
+        "deploy@internal.example:acme/deerflow-extension-demo.git",
+    ],
+)
+def test_git_ssh_shorthand_points_at_the_https_correction(source: str) -> None:
+    """SCP-like shorthand carries no scheme, so it reaches validation looking
+    like a bare path. The operator asked for a remote source, so the actionable
+    correction is the HTTPS spelling, not a local directory snapshot."""
+    with pytest.raises(ValueError, match="public HTTPS") as excinfo:
+        _validate_remote_source(source)
+
+    message = str(excinfo.value)
+    assert "git+https://" in message
+    assert "snapshot" not in message
+
+
 def test_cli_rejects_git_ssh_without_traceback_or_partial_state(
     tmp_path: Path,
     monkeypatch,

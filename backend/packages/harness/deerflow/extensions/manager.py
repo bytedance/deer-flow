@@ -44,6 +44,10 @@ _SECRET_QUERY_SUBSTRING = re.compile(
     r"access[-_]?token|api[-_]?key|auth[-_]?token|session[-_]?token|credential|password|passwd|signature|secret",
     re.IGNORECASE,
 )
+# Git's SCP-like shorthand (`git@host:org/repo.git`) is a remote source that
+# carries no URL scheme, so it reaches validation looking like a bare path.
+_SCP_LIKE_REFERENCE = re.compile(r"^[^\s/:@]+@[^\s/:@]+:(?!/)")
+_PEP508_NAME_PREFIX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\s*@\s*")
 _UV_ENV_OVERRIDES = {
     "UV_ACTIVE",
     "UV_ALL_GROUPS",
@@ -585,15 +589,14 @@ def _validate_remote_source(source: str) -> None:
     if requirement is not None and requirement.url is None:
         return
 
-    candidate = requirement.url if requirement is not None else raw_source
-    is_git = candidate.lower().startswith("git+")
-    if is_git:
-        candidate = candidate[4:]
+    candidate = _strip_git_prefix(requirement.url if requirement is not None else raw_source)
     parsed = urllib.parse.urlsplit(candidate)
     scheme = parsed.scheme.lower()
     for query in (parsed.query, parsed.fragment):
         if any(_is_secret_query_key(key) for key, _ in urllib.parse.parse_qsl(query, keep_blank_values=True)):
             raise ValueError("extension source URLs cannot contain credential-like query parameters")
+    if _is_scp_like_reference(raw_source):
+        raise ValueError("Git SSH shorthand is not deployable; remote Git sources must use public HTTPS, as in git+https://host/org/repo.git")
     if not scheme:
         raise ValueError("local path references are not deployable; pass a local directory so DeerFlow can snapshot it")
     if scheme == "file":
@@ -606,6 +609,20 @@ def _validate_remote_source(source: str) -> None:
         raise ValueError("remote extension sources must use HTTPS")
     if parsed.password is not None or (parsed.username is not None and scheme != "ssh"):
         raise ValueError("extension source URLs cannot contain embedded credentials")
+
+
+def _strip_git_prefix(reference: str) -> str:
+    return reference[4:] if reference.lower().startswith("git+") else reference
+
+
+def _is_scp_like_reference(source: str) -> bool:
+    # The bare shorthand is checked directly; a PEP 508 direct reference keeps
+    # it behind the requirement name, which packaging strips off the URL.
+    candidates = [source]
+    named = _PEP508_NAME_PREFIX.sub("", source, count=1)
+    if named != source:
+        candidates.append(named)
+    return any(_SCP_LIKE_REFERENCE.match(_strip_git_prefix(candidate)) for candidate in candidates)
 
 
 def _is_secret_query_key(key: str) -> bool:
