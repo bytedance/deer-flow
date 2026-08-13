@@ -2344,6 +2344,81 @@ class TestCooperativeCancellation:
         assert result.result == "done: Task"
         assert result.error is None
 
+    def test_execute_async_isolates_duplicate_external_task_ids(self, executor_module, classes, base_config):
+        """Concurrent runs must not share registry entries when provider IDs collide."""
+        import concurrent.futures
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        scheduled: list = []
+
+        def capture_submission(fn, *args, **kwargs):
+            scheduled.append(lambda: fn(*args, **kwargs))
+            return concurrent.futures.Future()
+
+        def run_coroutine(_context, coroutine_factory):
+            future = concurrent.futures.Future()
+            try:
+                future.set_result(asyncio.run(coroutine_factory()))
+            except Exception as exc:
+                future.set_exception(exc)
+            return future
+
+        async def complete_a(_task, result_holder=None):
+            result_holder.status = SubagentStatus.COMPLETED
+            result_holder.result = "done-a"
+            result_holder.completed_at = datetime.now()
+            return result_holder
+
+        async def complete_b(_task, result_holder=None):
+            result_holder.status = SubagentStatus.COMPLETED
+            result_holder.result = "done-b"
+            result_holder.completed_at = datetime.now()
+            return result_holder
+
+        executor_a = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="thread-a",
+            trace_id="trace-a",
+        )
+        executor_b = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="thread-b",
+            trace_id="trace-b",
+        )
+
+        with (
+            patch.object(executor_module._scheduler_pool, "submit", side_effect=capture_submission),
+            patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=run_coroutine),
+            patch.object(executor_a, "_aexecute", side_effect=complete_a),
+            patch.object(executor_b, "_aexecute", side_effect=complete_b),
+        ):
+            execution_a = executor_a.execute_async("Task A", task_id="same-provider-tool-call-id")
+            execution_b = executor_b.execute_async("Task B", task_id="same-provider-tool-call-id")
+
+            assert execution_a != execution_b
+            assert executor_module._background_tasks[execution_a].trace_id == "trace-a"
+            assert executor_module._background_tasks[execution_b].trace_id == "trace-b"
+
+            for run_task in scheduled:
+                run_task()
+
+        assert executor_module._background_tasks[execution_a].result == "done-a"
+        assert executor_module._background_tasks[execution_b].result == "done-b"
+
+        result_a = executor_module._background_tasks[execution_a]
+        result_b = executor_module._background_tasks[execution_b]
+        executor_module.request_cancel_background_task(execution_a)
+        assert result_a.cancel_event.is_set()
+        assert not result_b.cancel_event.is_set()
+
+        executor_module.cleanup_background_task(execution_a)
+        assert execution_a not in executor_module._background_tasks
+        assert executor_module._background_tasks[execution_b] is result_b
+        executor_module.cleanup_background_task(execution_b)
+
     def test_execute_async_propagates_user_context_to_isolated_loop(self, executor_module, classes, base_config):
         """Regression: background subagent execution must keep request user context."""
         import concurrent.futures

@@ -443,6 +443,37 @@ def test_thread_page_batch_hydrates_duration_for_old_runs():
     assert response.json()["data"][0]["content"]["additional_kwargs"]["turn_duration"] == 7
 
 
+def test_thread_page_stamps_turn_duration_on_last_ai_message_only():
+    # #4152 regression: a run with multiple AI messages (multi-step turn) must
+    # carry turn_duration on the LAST AI message only, not on every one.
+    store = MemoryRunEventStore()
+
+    async def seed():
+        await _put_message(store, "run-multi", "ai", "first-answer")
+        await _put_message(store, "run-multi", "ai", "second-answer")
+
+    asyncio.run(seed())
+    record = RunRecord(
+        run_id="run-multi",
+        thread_id="thread-1",
+        assistant_id=None,
+        status="success",
+        on_disconnect="cancel",
+        created_at="2026-01-01T00:00:00Z",
+        updated_at="2026-01-01T00:00:07Z",
+    )
+    app = _make_app(store, records={"run-multi": record})
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/messages/page")
+
+    data = response.json()["data"]
+    # Messages are returned newest-first; the last AI message is data[0].
+    first_row = next(row for row in data if row["content"]["id"] == "first-answer")
+    second_row = next(row for row in data if row["content"]["id"] == "second-answer")
+    assert second_row["content"]["additional_kwargs"]["turn_duration"] == 7
+    assert "turn_duration" not in first_row["content"].get("additional_kwargs", {})
+
+
 def test_thread_page_preserves_tool_and_subagent_wrapper_metadata():
     store = MemoryRunEventStore()
     asyncio.run(
