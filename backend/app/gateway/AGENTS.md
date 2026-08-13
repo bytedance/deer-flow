@@ -8,6 +8,24 @@ Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login acce
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
+Standalone local LangGraph Studio is recognized only through the upstream
+`Auth.types.StudioUser` principal type, never by its reusable identity string.
+For that principal's assistant reads/searches, `langgraph_auth.add_owner_filter`
+selects genuine server-registered assistants plus assistants owned by Studio;
+all other resources remain owner-scoped. Assistant create/update handlers make
+both `user_id` and `created_by=user` server-owned, because LangGraph gives
+`created_by=system` privileged ownership semantics during run creation. The
+custom application lifespan in `langgraph_studio.py` runs after graph
+registration and demotes persisted `created_by=system` rows whose deterministic
+IDs are absent from LangGraph's `SYSTEM_ASSISTANT_IDS`, so metadata written by
+older vulnerable versions is not trusted. Reconciliation skips without writing
+when that registry is empty, and it attempts every candidate before failing
+startup if any repair fails; this avoids both destructive mass demotion and
+running with known privileged rows still active. Standalone external assistant
+version rollback is denied because upstream restores a historical version's
+metadata without passing it through the update handler. Ordinary authenticated
+users retain owner-scoped assistant reads/searches.
+
 **Routers**:
 
 | Router | Endpoints |

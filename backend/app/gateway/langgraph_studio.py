@@ -51,6 +51,10 @@ async def reconcile_assistant_provenance(
         system_assistant_ids = SYSTEM_ASSISTANT_IDS
 
     registered_ids = {str(assistant_id) for assistant_id in system_assistant_ids}
+    if not registered_ids:
+        logger.warning("Skipping assistant provenance reconciliation because no registered system assistants are available")
+        return 0
+
     marked_ids: list[str] = []
 
     async with connect() as conn:
@@ -78,17 +82,32 @@ async def reconcile_assistant_provenance(
             offset = next_offset
 
         forged_ids = [assistant_id for assistant_id in marked_ids if assistant_id not in registered_ids]
+        repaired = 0
+        failures: list[tuple[str, Exception]] = []
         for assistant_id in forged_ids:
-            updated = await assistants_ops.patch(
-                conn,
-                assistant_id,
-                metadata={"created_by": "user"},
-                ctx=None,
-            )
-            async for _ in updated:
-                pass
+            try:
+                updated = await assistants_ops.patch(
+                    conn,
+                    assistant_id,
+                    metadata={"created_by": "user"},
+                    ctx=None,
+                )
+                async for _ in updated:
+                    pass
+            except Exception as exc:
+                failures.append((assistant_id, exc))
+                logger.exception(
+                    "Failed to reconcile assistant provenance for %s",
+                    assistant_id,
+                )
+                continue
+            repaired += 1
 
-    return len(forged_ids)
+    if failures:
+        failed_ids = ", ".join(assistant_id for assistant_id, _ in failures)
+        raise RuntimeError(f"Failed to reconcile {len(failures)} assistant provenance row(s): {failed_ids}") from failures[0][1]
+
+    return repaired
 
 
 @asynccontextmanager

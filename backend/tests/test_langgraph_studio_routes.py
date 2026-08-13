@@ -95,7 +95,11 @@ graph = builder.compile()
         last_error: Exception | None = None
         while time.monotonic() < deadline and process.poll() is None:
             try:
-                response = httpx.get(f"{base_url}/ok", timeout=1)
+                response = httpx.get(
+                    f"{base_url}/ok",
+                    timeout=1,
+                    trust_env=False,
+                )
                 if response.status_code == 200:
                     break
             except httpx.HTTPError as exc:
@@ -110,6 +114,7 @@ graph = builder.compile()
             base_url=base_url,
             headers={"x-auth-scheme": "langsmith"},
             timeout=10,
+            trust_env=False,
         )
         try:
             yield client
