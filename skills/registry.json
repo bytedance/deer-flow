@@ -1,0 +1,37 @@
+[
+  {
+    "name": "deep-research",
+    "description": "Deep research using web search and crawling",
+    "category": "public",
+    "builtin": true,
+    "tags": ["research", "search", "web"]
+  },
+  {
+    "name": "podcast-generation",
+    "description": "Generate podcast episodes from research",
+    "category": "public",
+    "builtin": true,
+    "tags": ["audio", "podcast", "content"]
+  },
+  {
+    "name": "data-analysis",
+    "description": "Analyze data files and generate insights",
+    "category": "public",
+    "builtin": true,
+    "tags": ["data", "analysis", "charts"]
+  },
+  {
+    "name": "image-generation",
+    "description": "Generate images using AI models",
+    "category": "public",
+    "builtin": true,
+    "tags": ["image", "generation", "art"]
+  },
+  {
+    "name": "video-generation",
+    "description": "Generate videos from prompts",
+    "category": "public",
+    "builtin": true,
+    "tags": ["video", "generation", "content"]
+  }
+]
