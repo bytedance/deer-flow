@@ -441,6 +441,7 @@ If a provider is explicitly enabled but required credentials are missing, or the
 make install    # Install dependencies
 make dev        # Run Gateway API + embedded agent runtime with safe reload (port 8001)
 make gateway    # Run Gateway API without reload (port 8001)
+make benchmark  # Run informational runtime/config hot-path benchmarks
 make lint       # Run linter (ruff)
 make format     # Format code (ruff)
 make detect-blocking-io  # Inventory blocking IO that may block the backend event loop
@@ -495,6 +496,9 @@ make test
 
 # Explicit real-API DeerFlowClient integration suite
 make test-live
+
+# Deterministic offline benchmarks (separate from the unit suite)
+make benchmark
 ```
 
 The live suite requires a valid root `config.yaml` and API credentials. It may
@@ -502,6 +506,11 @@ incur API costs or create local sandboxes, artifacts, and files, so it is not
 part of default test runs or CI. Direct pytest invocation of
 `tests/test_client_live.py` also requires
 `DEER_FLOW_RUN_LIVE_TESTS=1`.
+
+Benchmarks live in `benchmarks/`, use `pytest-benchmark`, and have no hard
+performance thresholds. A non-blocking workflow runs them daily and on manual
+dispatch. Extra plugin options can be passed with `BENCHMARK_ARGS`, for example
+`make benchmark BENCHMARK_ARGS="--benchmark-json=benchmark-results.json"`.
 
 `make detect-blocking-io` statically scans backend business code for blocking
 IO that may run on the backend event loop and is not test-coverage-bound. It

@@ -28,6 +28,9 @@ test-live:
 test-blocking-io:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
 
+benchmark:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest benchmarks/ --benchmark-only $(BENCHMARK_ARGS)
+
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
