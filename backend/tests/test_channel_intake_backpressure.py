@@ -10,6 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from app.channels import service as service_module
 from app.channels.manager import ChannelManager
 from app.channels.message_bus import (
     InboundMessage,
@@ -159,12 +160,59 @@ async def test_fixed_worker_pool_bounds_handler_and_queue_tasks(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_and_awaits_workers_drops_queue_and_releases_dedupe(tmp_path: Path) -> None:
+async def test_stop_gracefully_drains_every_accepted_message_before_cancelling_workers(tmp_path: Path) -> None:
     bus = MessageBus(inbound_queue_maxsize=2)
     manager = ChannelManager(
         bus=bus,
         store=ChannelStore(path=tmp_path / "store.json"),
         max_concurrency=1,
+        shutdown_grace_period_seconds=0.5,
+    )
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    completed: list[str] = []
+    cancelled = False
+
+    async def graceful_handler(msg: InboundMessage) -> None:
+        nonlocal cancelled
+        if msg.text == "message-1":
+            first_started.set()
+            try:
+                await release_first.wait()
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+        completed.append(msg.text)
+
+    manager._handle_message = graceful_handler  # type: ignore[method-assign]
+    await manager.start()
+    await bus.publish_inbound(_message(1))
+    await asyncio.wait_for(first_started.wait(), timeout=1)
+    await bus.publish_inbound(_message(2))
+
+    stop_task = asyncio.create_task(manager.stop())
+    await asyncio.sleep(0.02)
+
+    assert not stop_task.done()
+    assert cancelled is False
+
+    release_first.set()
+    await asyncio.wait_for(stop_task, timeout=1)
+
+    assert completed == ["message-1", "message-2"]
+    assert cancelled is False
+    assert bus.inbound_queue.empty()
+    await asyncio.wait_for(bus.join_inbound(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_after_grace_drops_queue_and_releases_dedupe(tmp_path: Path) -> None:
+    bus = MessageBus(inbound_queue_maxsize=2)
+    manager = ChannelManager(
+        bus=bus,
+        store=ChannelStore(path=tmp_path / "store.json"),
+        max_concurrency=1,
+        shutdown_grace_period_seconds=0,
     )
     handler_started = asyncio.Event()
     handler_cancelled = asyncio.Event()
@@ -204,18 +252,121 @@ async def test_stop_cancels_and_awaits_workers_drops_queue_and_releases_dedupe(t
     assert await manager._inbound_dedupe_store.try_record(dedupe_key) is False
 
 
+@pytest.mark.asyncio
+async def test_stop_deadline_is_not_extended_by_a_cancel_resistant_handler(tmp_path: Path) -> None:
+    bus = MessageBus(inbound_queue_maxsize=1)
+    manager = ChannelManager(
+        bus=bus,
+        store=ChannelStore(path=tmp_path / "store.json"),
+        max_concurrency=1,
+        shutdown_grace_period_seconds=0.01,
+        shutdown_cancel_timeout_seconds=0.01,
+    )
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    release_after_cancel = asyncio.Event()
+
+    async def cancellation_resistant_handler(_msg: InboundMessage) -> None:
+        handler_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            # Model an SDK call that suppresses cancellation until its own IO
+            # eventually returns. Channel shutdown must not wait indefinitely.
+            await release_after_cancel.wait()
+
+    manager._handle_message = cancellation_resistant_handler  # type: ignore[method-assign]
+    await manager.start()
+    await bus.publish_inbound(_message(1))
+    await asyncio.wait_for(handler_started.wait(), timeout=1)
+    workers = tuple(manager._worker_tasks)
+
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+    await manager.stop()
+    elapsed = loop.time() - started_at
+
+    assert elapsed < 0.2
+    assert handler_cancelled.is_set()
+    assert any(not worker.done() for worker in workers)
+
+    release_after_cancel.set()
+    await asyncio.wait_for(asyncio.gather(*workers), timeout=1)
+    assert manager._worker_tasks == set()
+    await asyncio.wait_for(bus.join_inbound(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_outer_shutdown_cancellation_does_not_start_an_unbounded_second_join(tmp_path: Path) -> None:
+    bus = MessageBus(inbound_queue_maxsize=1)
+    manager = ChannelManager(
+        bus=bus,
+        store=ChannelStore(path=tmp_path / "store.json"),
+        max_concurrency=1,
+        shutdown_grace_period_seconds=60,
+        shutdown_cancel_timeout_seconds=60,
+    )
+    handler_started = asyncio.Event()
+    handler_cancelled = asyncio.Event()
+    release_after_cancel = asyncio.Event()
+
+    async def cancellation_resistant_handler(_msg: InboundMessage) -> None:
+        handler_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            handler_cancelled.set()
+            await release_after_cancel.wait()
+
+    manager._handle_message = cancellation_resistant_handler  # type: ignore[method-assign]
+    await manager.start()
+    await bus.publish_inbound(_message(1))
+    await asyncio.wait_for(handler_started.wait(), timeout=1)
+    workers = tuple(manager._worker_tasks)
+
+    stop_task = asyncio.create_task(manager.stop())
+    await asyncio.sleep(0)
+    started_at = asyncio.get_running_loop().time()
+    stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    assert asyncio.get_running_loop().time() - started_at < 0.2
+    assert handler_cancelled.is_set()
+    assert any(not worker.done() for worker in workers)
+
+    release_after_cancel.set()
+    await asyncio.wait_for(asyncio.gather(*workers), timeout=1)
+    assert manager._worker_tasks == set()
+    await asyncio.wait_for(bus.join_inbound(), timeout=1)
+
+
 def test_channel_service_threads_intake_limits_into_bus_and_worker_pool() -> None:
     service = ChannelService(
         channels_config={
             "inbound_queue_maxsize": 17,
             "max_concurrency": 3,
+            "shutdown_grace_period_seconds": 2.5,
         }
     )
 
     assert service.bus.inbound_queue_maxsize == 17
     assert service.manager._max_concurrency == 3
+    assert service.manager._shutdown_grace_period_seconds == 2.5
     assert "inbound_queue_maxsize" not in service._config
     assert "max_concurrency" not in service._config
+    assert "shutdown_grace_period_seconds" not in service._config
+
+
+@pytest.mark.parametrize(
+    "invalid_value",
+    [True, -1, float("nan"), float("inf"), "3"],
+)
+def test_invalid_shutdown_grace_period_uses_finite_default(invalid_value: object) -> None:
+    service = ChannelService(channels_config={"shutdown_grace_period_seconds": invalid_value})
+
+    assert service.manager._shutdown_grace_period_seconds == 3.0
 
 
 @pytest.mark.asyncio
@@ -243,3 +394,46 @@ async def test_cancelled_service_stop_still_drains_manager_workers() -> None:
     assert service._channels == {}
     with pytest.raises(InboundQueueClosedError):
         await service.bus.publish_inbound(_message(9))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_manager_drain_still_releases_service_channels() -> None:
+    service = ChannelService(channels_config={})
+    manager_stop_started = asyncio.Event()
+
+    async def blocked_manager_stop() -> None:
+        manager_stop_started.set()
+        await asyncio.Event().wait()
+
+    service.manager.stop = blocked_manager_stop  # type: ignore[method-assign]
+    service._channels["transport"] = MagicMock()  # type: ignore[assignment]
+    stop_task = asyncio.create_task(service.stop())
+    await asyncio.wait_for(manager_stop_started.wait(), timeout=1)
+
+    stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+
+    assert service._channels == {}
+
+
+@pytest.mark.asyncio
+async def test_global_service_is_detached_before_cancelled_shutdown() -> None:
+    service = ChannelService(channels_config={})
+    stop_started = asyncio.Event()
+
+    async def blocked_stop() -> None:
+        stop_started.set()
+        await asyncio.Event().wait()
+
+    service.stop = blocked_stop  # type: ignore[method-assign]
+    service_module._channel_service = service
+    stop_task = asyncio.create_task(service_module.stop_channel_service())
+    await asyncio.wait_for(stop_started.wait(), timeout=1)
+
+    assert service_module.get_channel_service() is None
+
+    stop_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task
+    assert service_module.get_channel_service() is None

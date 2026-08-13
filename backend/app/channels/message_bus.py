@@ -202,7 +202,14 @@ class MessageBus:
         This deliberately uses reservation + ``put_nowait`` rather than an
         awaited ``Queue.put``. Under overload, producers get an explicit
         rejection and cannot accumulate an unbounded set of pending put tasks.
+        The initial zero-delay sleep is a scheduling handoff, not a capacity
+        wait: a producer that publishes a batch (notably GitHub webhook
+        fan-out) gives fixed workers a chance to dequeue between entries so a
+        batch larger than the queue does not repeatedly fail on the same
+        prefix during redelivery. It occurs before admission so cancellation
+        cannot report failure after this call already committed the message.
         """
+        await asyncio.sleep(0)
         reservation = self.reserve_inbound(msg)
         try:
             reservation.commit(msg)

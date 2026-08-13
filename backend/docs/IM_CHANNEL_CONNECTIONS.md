@@ -131,7 +131,7 @@ sequenceDiagram
 
 ### Inbound capacity and overload behavior
 
-Two top-level `channels` settings bound the MessageBus/manager layer: `inbound_queue_maxsize` (default `1000`) covers queued messages plus provider-side reservations that may still be doing final identity/ack preparation, while `max_concurrency` (default `5`) is the exact number of long-lived `ChannelManager` workers. Active handlers run inline in those workers, so a burst cannot create a task per message. The maximum manager-owned live intake is therefore the pending capacity plus the fixed worker count.
+Three top-level `channels` settings control the MessageBus/manager lifecycle: `inbound_queue_maxsize` (default `1000`) covers queued messages plus provider-side reservations that may still be doing final identity/ack preparation, `max_concurrency` (default `5`) is the exact number of long-lived `ChannelManager` workers, and `shutdown_grace_period_seconds` (default `3`) bounds graceful draining before active handlers are cancelled. Active handlers run inline in those workers, so a burst cannot create a task per message. The maximum manager-owned live intake is therefore the pending capacity plus the fixed worker count.
 
 Admission never waits for queue space, because waiting producer coroutines would simply move the unbounded backlog outside the queue. At capacity:
 
@@ -139,7 +139,7 @@ Admission never waits for queue space, because waiting producer coroutines would
 - Buzz leaves the per-channel replay watermark unchanged and reconnects, allowing relay history to replay the event.
 - GitHub webhook fan-out returns `503`. GitHub records the delivery as failed; an operator or recovery job can retry it through the Recent Deliveries UI or REST redelivery API (GitHub does not retry failed deliveries automatically).
 
-Shutdown first closes admission, then cancels and awaits every worker and follow-up watcher, and finally discards queue entries that never began. A successful `ChannelManager.stop()` therefore leaves no old message handler able to create a run or use closed resources.
+Shutdown first closes admission and cancels follow-up watchers, but keeps provider transports alive while workers drain accepted messages for up to `shutdown_grace_period_seconds`. Once that grace expires, it cancels active handlers within a separate bounded cleanup interval and discards queue entries that never began. Cancellation-resistant SDK calls are logged and may outlive the local deadline; a stopped manager cannot be restarted while one of its old workers is still running.
 
 ## Sync vs Streaming Channels
 
@@ -276,6 +276,7 @@ Configure the actual IM bots under the existing `channels` block:
 channels:
   inbound_queue_maxsize: 1000
   max_concurrency: 5
+  shutdown_grace_period_seconds: 3
 
   telegram:
     enabled: true

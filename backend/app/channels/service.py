@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel
-from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
+from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
@@ -75,6 +76,16 @@ def _resolve_positive_int(config: dict[str, Any], config_key: str, default: int)
     return value
 
 
+def _resolve_non_negative_float(config: dict[str, Any], config_key: str, default: float) -> float:
+    value = config.pop(config_key, None)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        logger.warning("Invalid channels.%s=%r; using default %.1f", config_key, value, default)
+        return default
+    return float(value)
+
+
 def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], app_config: AppConfig) -> None:
     connection_config = getattr(app_config, "channel_connections", None)
     merge_runtime_channel_configs(channels_config, connection_config)
@@ -117,6 +128,7 @@ class ChannelService:
         config = dict(channels_config or {})
         inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
         max_concurrency = _resolve_positive_int(config, "max_concurrency", DEFAULT_CHANNEL_MAX_CONCURRENCY)
+        shutdown_grace_period_seconds = _resolve_non_negative_float(config, "shutdown_grace_period_seconds", DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS)
         self.bus = MessageBus(inbound_queue_maxsize=inbound_queue_maxsize)
         self.store = ChannelStore()
         self._connection_repo = connection_repo
@@ -131,6 +143,7 @@ class ChannelService:
             bus=self.bus,
             store=self.store,
             max_concurrency=max_concurrency,
+            shutdown_grace_period_seconds=shutdown_grace_period_seconds,
             langgraph_url=langgraph_url,
             gateway_url=gateway_url,
             default_session=default_session if isinstance(default_session, dict) else None,
@@ -256,31 +269,33 @@ class ChannelService:
             return False
 
     async def stop(self) -> None:
-        """Stop all channels and the manager without orphaning handler workers."""
+        """Drain accepted messages while channels can still deliver replies."""
         self._running = False
-        cancellation: asyncio.CancelledError | None = None
-        for name, channel in list(self._channels.items()):
-            try:
-                await channel.stop()
-                logger.info("Channel stopped")
-            except asyncio.CancelledError as exc:
-                # The Gateway applies an outer shutdown deadline. Preserve that
-                # cancellation, but finish the ownership chain so it cannot
-                # bypass ChannelManager.stop() and orphan active handlers.
-                if cancellation is None:
-                    cancellation = exc
-            except Exception:
-                logger.exception("Error stopping channel")
-        self._channels.clear()
-
+        # Reject new provider work first. Existing workers keep draining during
+        # manager.stop(), and channel transports remain alive until that drain
+        # completes so an already-sent "Working on it..." can still receive its
+        # final update.
         try:
             await self.manager.stop()
-        except asyncio.CancelledError as exc:
-            if cancellation is None:
-                cancellation = exc
+            for _name, channel in list(self._channels.items()):
+                try:
+                    await channel.stop()
+                    logger.info("Channel stopped")
+                except asyncio.CancelledError:
+                    # The manager has already completed its bounded ownership
+                    # cleanup. Propagate the Gateway deadline immediately;
+                    # continuing through more channel stops would extend it.
+                    raise
+                except Exception:
+                    logger.exception("Error stopping channel")
+        finally:
+            # The Gateway's outer deadline may cancel manager draining before
+            # transport shutdown can begin. It is no longer safe to await SDK
+            # cleanup then, but this stopped service must not retain live
+            # channel objects or become reusable through the singleton.
+            self._channels.clear()
+
         logger.info("ChannelService stopped")
-        if cancellation is not None:
-            raise cancellation
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
         """Load the latest config for a specific channel from disk.
@@ -486,5 +501,8 @@ async def stop_channel_service() -> None:
     """Stop the global ChannelService."""
     global _channel_service
     if _channel_service is not None:
-        await _channel_service.stop()
+        service = _channel_service
+        # Detach first so cancellation or a bounded shutdown timeout cannot
+        # leave callers observing a half-stopped singleton on a later startup.
         _channel_service = None
+        await service.stop()
