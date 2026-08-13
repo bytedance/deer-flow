@@ -559,6 +559,278 @@ def test_search_survives_non_float_confidence(deermem_data_dir):
     assert [r["id"] for r in results] == ["b", "a", "c"]
 
 
+def test_query_search_records_access_but_default_injection_does_not(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "token_counting": "char",
+            "fact_eviction_policy": "hybrid-v1",
+        }
+    )
+    dm.create_fact(
+        "User prefers concise answers",
+        category="preference",
+        confidence=0.8,
+        user_id="u1",
+    )
+
+    dm.get_context(user_id="u1")
+    assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
+
+    results = dm.search("concise", user_id="u1")
+    usage = dm._storage.get_fact_usage(agent_name="__default__", user_id="u1")
+    assert len(results) == 1
+    fact_id = results[0]["id"]
+    assert usage[fact_id]["accessCount"] == 1
+
+    dm.delete_fact(fact_id, user_id="u1")
+    dm._storage.record_fact_accesses(
+        [fact_id],
+        agent_name="__default__",
+        user_id="u1",
+    )
+    assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
+
+
+def test_default_confidence_policy_does_not_collect_hybrid_usage(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "token_counting": "char",
+        }
+    )
+    dm.create_fact("User prefers concise answers", user_id="u1")
+
+    assert dm.search("concise", user_id="u1")
+    assert dm._storage.get_fact_usage(agent_name="__default__", user_id="u1") == {}
+
+
+def test_hybrid_capacity_keeps_recent_confirmation_over_stale_confidence(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_policy": "hybrid-v1",
+            "max_facts": 10,
+        }
+    )
+    dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                *[
+                    {
+                        "id": f"high_{index}",
+                        "content": f"high {index}",
+                        "category": "preference",
+                        "confidence": 0.99,
+                        "createdAt": "2026-08-12T00:00:00Z",
+                    }
+                    for index in range(8)
+                ],
+                {
+                    "id": "stale_high",
+                    "content": "stale high confidence",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                },
+                {
+                    "id": "confirmed_recently",
+                    "content": "recently confirmed preference",
+                    "category": "preference",
+                    "confidence": 0.7,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                    "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                },
+            ],
+        },
+        user_id="u1",
+    )
+
+    memory, created_id = dm.create_fact(
+        "new useful context",
+        category="context",
+        confidence=0.8,
+        user_id="u1",
+    )
+
+    kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert created_id is not None
+    assert "confirmed_recently" in kept_ids
+    assert "stale_high" not in kept_ids
+
+
+def test_hybrid_import_applies_same_capacity_policy(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_policy": "hybrid-v1",
+            "max_facts": 10,
+        }
+    )
+    memory = dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                *[
+                    {
+                        "id": f"high_{index}",
+                        "content": f"high {index}",
+                        "category": "preference",
+                        "confidence": 0.99,
+                        "createdAt": "2026-08-12T00:00:00Z",
+                    }
+                    for index in range(8)
+                ],
+                {
+                    "id": "stale_high",
+                    "content": "stale high confidence",
+                    "category": "preference",
+                    "confidence": 0.9,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                },
+                {
+                    "id": "confirmed_recently",
+                    "content": "recently confirmed preference",
+                    "category": "preference",
+                    "confidence": 0.7,
+                    "createdAt": "2025-01-01T00:00:00Z",
+                    "lastConfirmedAt": "2026-08-12T00:00:00Z",
+                },
+                {
+                    "id": "new_context",
+                    "content": "new useful context",
+                    "category": "context",
+                    "confidence": 0.8,
+                    "createdAt": "2026-08-12T00:00:00Z",
+                },
+            ],
+        },
+        user_id="u1",
+    )
+
+    kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert "confirmed_recently" in kept_ids
+    assert "stale_high" not in kept_ids
+
+
+def test_hybrid_capacity_reserves_correction_and_writes_audit(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_policy": "hybrid-v1",
+            "max_facts": 10,
+        }
+    )
+    dm.import_memory(
+        {
+            "user": {},
+            "history": {},
+            "facts": [
+                {
+                    "id": f"preference_{index}",
+                    "content": f"preference {index}",
+                    "category": "preference",
+                    "confidence": 0.99,
+                    "createdAt": "2026-08-12T00:00:00Z",
+                }
+                for index in range(10)
+            ],
+        },
+        user_id="u1",
+    )
+
+    memory, correction_id = dm.create_fact(
+        "Never repeat this corrected behavior",
+        category="correction",
+        confidence=0.1,
+        user_id="u1",
+    )
+
+    assert correction_id is not None
+    assert correction_id in {fact["id"] for fact in memory["facts"]}
+    memory_path = dm._storage._get_memory_file_path("__default__", user_id="u1")
+    audit_path = memory_path.parent / "agents" / "__default__" / ".metadata" / "eviction-audit.json"
+    assert audit_path.is_file()
+    assert "Never repeat this corrected behavior" not in audit_path.read_text()
+
+
+def test_confidence_policy_shadow_does_not_change_actual_selection(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "fact_eviction_shadow_enabled": True,
+            "max_facts": 10,
+        }
+    )
+    facts = [
+        *[
+            {
+                "id": f"high_{index}",
+                "content": f"high {index}",
+                "category": "preference",
+                "confidence": 0.99,
+                "createdAt": "2026-08-12T00:00:00Z",
+            }
+            for index in range(8)
+        ],
+        {
+            "id": "stale_high",
+            "content": "stale high confidence",
+            "category": "preference",
+            "confidence": 0.9,
+            "createdAt": "2025-01-01T00:00:00Z",
+        },
+        {
+            "id": "confirmed_recently",
+            "content": "recently confirmed preference",
+            "category": "preference",
+            "confidence": 0.7,
+            "createdAt": "2025-01-01T00:00:00Z",
+            "lastConfirmedAt": "2026-08-12T00:00:00Z",
+        },
+    ]
+    dm.import_memory({"user": {}, "history": {}, "facts": facts}, user_id="u1")
+
+    memory, _ = dm.create_fact("new useful context", confidence=0.8, user_id="u1")
+
+    kept_ids = {fact["id"] for fact in memory["facts"]}
+    assert "stale_high" in kept_ids
+    assert "confirmed_recently" not in kept_ids
+    memory_path = dm._storage._get_memory_file_path("__default__", user_id="u1")
+    audit = (memory_path.parent / "agents" / "__default__" / ".metadata" / "eviction-audit.json").read_text()
+    assert '"disagrees": true' in audit
+
+
+def test_clear_memory_removes_usage_and_eviction_sidecars(deermem_data_dir):
+    dm = DeerMem(
+        backend_config={
+            "storage_path": str(deermem_data_dir),
+            "retrieval_adapter": "",
+            "max_facts": 10,
+        }
+    )
+    for index in range(10):
+        dm.create_fact(f"query fact {index}", confidence=0.9, user_id="u1")
+    dm.search("query", user_id="u1")
+    dm.create_fact("capacity rejected", confidence=0.1, user_id="u1")
+    memory_path = dm._storage._get_memory_file_path("__default__", user_id="u1")
+    metadata_path = memory_path.parent / "agents" / "__default__" / ".metadata"
+    assert metadata_path.is_dir()
+
+    dm.clear_memory(user_id="u1")
+
+    assert not metadata_path.exists()
+
+
 def test_is_human_clarification_response_matches_host_read():
     """The standalone mirror must agree with the host's read_human_input_response
     so hidden-message filtering doesn't diverge between production (host hook) and

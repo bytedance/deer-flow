@@ -157,6 +157,120 @@ def test_apply_updates_skips_whitespace_only_facts() -> None:
     assert all(fact["content"].strip() for fact in result["facts"])
 
 
+def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> None:
+    updater = _make_updater(config=_memory_config(fact_eviction_policy="hybrid-v1"))
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_preference",
+                "content": "User prefers concise answers",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "source": "thread-a",
+            }
+        ]
+    )
+    update_data = {
+        "newFacts": [],
+        "factsToReinforce": [
+            {
+                "id": "fact_preference",
+                "scope": "user",
+                "reason": "The user explicitly confirmed this preference",
+            }
+        ],
+    }
+
+    without_signal = updater._apply_updates(copy.deepcopy(current_memory), update_data)
+    with_signal = updater._apply_updates(
+        copy.deepcopy(current_memory),
+        update_data,
+        signals=frozenset({"reinforcement"}),
+    )
+
+    assert "lastConfirmedAt" not in without_signal["facts"][0]
+    assert with_signal["facts"][0]["lastConfirmedAt"].endswith("Z")
+    assert with_signal["facts"][0]["confirmationCount"] == 1
+
+    confidence_only = _make_updater()
+    without_hybrid_tracking = confidence_only._apply_updates(
+        copy.deepcopy(current_memory),
+        update_data,
+        signals=frozenset({"reinforcement"}),
+    )
+    assert "lastConfirmedAt" not in without_hybrid_tracking["facts"][0]
+
+
+def test_parse_memory_update_response_normalizes_reinforcement_entries() -> None:
+    parsed = _parse_memory_update_response(
+        '{"user":{},"history":{},"newFacts":[],"factsToReinforce":[{"id":" fact_a ","scope":"USER","reason":" explicit confirmation "},{"id":"fact_b","scope":"thread","reason":"one-off"},{"id":"","scope":"user","reason":"bad"}]}'
+    )
+
+    assert parsed["factsToReinforce"] == [
+        {"id": "fact_a", "scope": "user", "reason": "explicit confirmation"},
+        {"id": "fact_b", "scope": "thread", "reason": "one-off"},
+    ]
+
+
+def test_automatic_update_uses_hybrid_capacity_policy() -> None:
+    updater = _make_updater(
+        config=_memory_config(
+            fact_eviction_policy="hybrid-v1",
+            max_facts=10,
+            fact_confidence_threshold=0.7,
+        )
+    )
+    current_memory = _make_memory(
+        facts=[
+            *[
+                {
+                    "id": f"high_{index}",
+                    "content": f"high {index}",
+                    "category": "preference",
+                    "confidence": 0.99,
+                    "createdAt": "2026-08-12T00:00:00Z",
+                }
+                for index in range(8)
+            ],
+            {
+                "id": "stale_high",
+                "content": "stale high confidence",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2025-01-01T00:00:00Z",
+            },
+            {
+                "id": "confirmed_recently",
+                "content": "recently confirmed preference",
+                "category": "preference",
+                "confidence": 0.7,
+                "createdAt": "2025-01-01T00:00:00Z",
+                "lastConfirmedAt": "2026-08-12T00:00:00Z",
+            },
+        ]
+    )
+
+    result = updater._apply_updates(
+        current_memory,
+        {
+            "newFacts": [
+                {
+                    "content": "new useful context",
+                    "category": "context",
+                    "confidence": 0.8,
+                    **_DURABLE_USER_FACT,
+                }
+            ]
+        },
+        agent_name="default",
+    )
+
+    kept_ids = {fact["id"] for fact in result["facts"]}
+    assert "confirmed_recently" in kept_ids
+    assert "stale_high" not in kept_ids
+
+
 def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
     current_memory = _make_memory(
         facts=[
