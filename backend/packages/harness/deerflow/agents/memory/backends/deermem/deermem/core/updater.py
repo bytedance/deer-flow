@@ -87,22 +87,6 @@ def _next_confirmation_count(fact: dict[str, Any]) -> int:
     return prior_count + 1
 
 
-def _trim_facts_to_max(facts: list[dict[str, Any]], max_facts: int) -> list[dict[str, Any]]:
-    """Keep the highest-confidence facts within ``max_facts`` (confidence coerced).
-
-    Confidence is read via :func:`_coerce_source_confidence` so legacy / imported
-    facts with ``null`` or non-numeric confidence never crash the sort -- the
-    pre-#4023 ``key=lambda f: f.get("confidence", 0)`` form compared ``None`` /
-    ``str`` against ``float`` and raised ``TypeError`` once ``len(facts) >
-    max_facts``. Mirrors upstream's ``_trim_facts_to_max`` (introduced in #4023)
-    so the vendored copy no longer lags the coercion fix the
-    monolithic->vendored rename silently dropped.
-    """
-    if len(facts) <= max_facts:
-        return facts
-    return sorted(facts, key=_coerce_source_confidence, reverse=True)[:max_facts]
-
-
 def _extract_text(content: Any) -> str:
     """Extract plain text from LLM response content (str or list of content blocks).
 

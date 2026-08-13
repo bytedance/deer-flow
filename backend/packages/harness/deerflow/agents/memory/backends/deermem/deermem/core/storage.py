@@ -690,6 +690,9 @@ class FileMemoryStorage(MemoryStorage):
                 shadow = event.get("shadow")
                 if isinstance(shadow, dict) and isinstance(shadow.get("wouldEvict"), list):
                     shadow["wouldEvict"] = [fact_id for fact_id in shadow["wouldEvict"] if fact_id not in removed_ids]
+                    actual_ids = {item.get("factId") for item in event.get("evicted", []) if isinstance(item, dict) and isinstance(item.get("factId"), str)}
+                    shadow_ids = {fact_id for fact_id in shadow["wouldEvict"] if isinstance(fact_id, str)}
+                    shadow["disagrees"] = actual_ids != shadow_ids
                 if event.get("evicted"):
                     filtered_events.append(event)
             if filtered_events:

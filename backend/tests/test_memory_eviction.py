@@ -61,6 +61,24 @@ def test_confidence_policy_preserves_existing_ranking() -> None:
     assert decision.policy == EVICTION_POLICY_CONFIDENCE
 
 
+def test_confidence_policy_coerces_non_float_confidence() -> None:
+    facts = [
+        {"id": "a", "confidence": None},
+        {"id": "b", "confidence": "0.9"},
+        {"id": "c", "confidence": 0.8},
+        {"id": "d", "confidence": "high"},
+    ]
+
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=2,
+        policy=EVICTION_POLICY_CONFIDENCE,
+        now=NOW,
+    )
+
+    assert [fact["id"] for fact in decision.kept] == ["b", "c"]
+
+
 def test_hybrid_policy_keeps_recently_confirmed_fact_over_stale_high_confidence() -> None:
     facts = [
         _fact(
@@ -227,3 +245,49 @@ def test_file_storage_writes_bounded_metadata_only_eviction_audit(tmp_path) -> N
     assert len(events) == 1
     assert events[0]["evicted"][0]["factId"] == "evicted"
     assert "content" not in json.dumps(events[0])
+
+
+def test_clear_fact_metadata_recomputes_shadow_disagreement(tmp_path) -> None:
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+    )
+    storage = FileMemoryStorage(config)
+    memory_path = storage._get_memory_file_path("default", user_id="u")
+    facts = [
+        _fact("always_kept", confidence=1.0, confirmed_at="2026-08-13T00:00:00Z"),
+        _fact("stale_high", confidence=0.9, created_at="2025-01-01T00:00:00Z"),
+        _fact("recent_low", confidence=0.6, confirmed_at="2026-08-13T00:00:00Z"),
+        _fact("common_loser", confidence=0.1, created_at="2025-01-01T00:00:00Z"),
+    ]
+    actual = select_facts_for_capacity(
+        facts,
+        max_facts=2,
+        policy=EVICTION_POLICY_CONFIDENCE,
+        now=NOW,
+    )
+    shadow = select_facts_for_capacity(
+        facts,
+        max_facts=2,
+        policy=EVICTION_POLICY_HYBRID_V1,
+        now=NOW,
+    )
+    storage.record_capacity_eviction(
+        actual,
+        max_facts=2,
+        agent_name="default",
+        user_id="u",
+        occurred_at=NOW,
+        shadow_decision=shadow,
+    )
+
+    storage.clear_fact_metadata(
+        agent_name="default",
+        user_id="u",
+        fact_ids=["recent_low", "stale_high"],
+    )
+
+    events = json.loads(agent_eviction_audit_path(memory_path, "default").read_text())
+    assert {item["factId"] for item in events[0]["evicted"]} == {"common_loser"}
+    assert set(events[0]["shadow"]["wouldEvict"]) == {"common_loser"}
+    assert events[0]["shadow"]["disagrees"] is False

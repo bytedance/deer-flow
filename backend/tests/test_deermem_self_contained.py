@@ -24,7 +24,6 @@ from deerflow.agents.memory.backends.deermem.deermem.core.message_processing imp
     filter_messages_for_memory,
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import FileMemoryStorage
-from deerflow.agents.memory.backends.deermem.deermem.core.updater import _trim_facts_to_max
 from deerflow.agents.memory.manager import MemoryCallbacks
 
 
@@ -488,28 +487,6 @@ def test_per_user_memory_path_matches_host_safe_user_id(deermem_data_dir):
     # DeerMem used the host-identical safe_user_id (not some other encoding).
     user_dirs = [p.name for p in (deermem_data_dir / "users").iterdir() if p.is_dir()]
     assert user_dirs == [expected_safe], f"safe_user_id diverged from host: {user_dirs}"
-
-
-def test_trim_facts_to_max_coerces_non_float_confidence():
-    """Non-float stored confidence must not crash the max_facts trim sort.
-
-    Regression: the vendored copy used ``key=lambda f: f.get("confidence", 0)``
-    which raised TypeError comparing None/str against float once ``len > max_facts``
-    (legacy / imported facts with abnormal confidence). This is the #4034 intent
-    that the module-skipped test files never exercised against the vendored
-    updater; pinning it here so the rename can't silently drop the coercion again.
-    """
-    facts = [
-        {"id": "a", "confidence": None},
-        {"id": "b", "confidence": "0.9"},  # numeric string
-        {"id": "c", "confidence": 0.8},
-        {"id": "d", "confidence": "high"},  # non-numeric
-    ]
-    # No TypeError; coerced ranking: b("0.9"->0.9) > c(0.8) > a(None->0.5)=d("high"->0.5).
-    kept = _trim_facts_to_max(facts, max_facts=2)
-    assert [f["id"] for f in kept] == ["b", "c"]
-    # Below the cap -> returned unchanged (no sort, no crash).
-    assert _trim_facts_to_max(facts, max_facts=10) == facts
 
 
 def test_create_fact_trims_to_max_and_signals_eviction(deermem_data_dir):
