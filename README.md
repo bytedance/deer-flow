@@ -892,7 +892,11 @@ system-model observation. Services receive app-scoped runtime dependencies after
 persistence is ready and stop in reverse order after active runs drain. Extension HTTP
 routers are mounted after every host route; definite shadows and routes entering the
 host's authentication- or CSRF-exempt paths are rejected with attributed diagnostics,
-while unrelated routers continue to load. Router startup/shutdown hooks, custom lifespans,
+while unrelated routers continue to load. Because the host's public paths are a reserved
+prefix list that extensions cannot enter, **every contributed endpoint requires an
+authenticated session** — there is currently no way for an extension to expose an
+unauthenticated route, so inbound provider webhooks and public status endpoints are out of
+scope for this release. Router startup/shutdown hooks, custom lifespans,
 Mounts, and WebSocket routes are not accepted; lifetime resources belong in
 `ExtensionService`, and WebSocket contributions require a future host-owned
 authentication/Origin wrapper. Lifecycle and system-model callbacks use the Gateway's

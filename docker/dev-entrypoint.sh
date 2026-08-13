@@ -12,7 +12,10 @@
 #   3. `uv sync --locked --all-packages` so the declared extension group and
 #      workspace member extras (deerflow-harness's
 #      postgres extra in particular) are installed — see PR #2584.
-#   4. Self-heal: if the first sync fails, recreate .venv and retry once.
+#   4. Self-heal: if the first sync fails, recreate .venv and retry once. The
+#      retry stays `--locked`, so it repairs a broken .venv but not a stale
+#      lock; a second failure aborts with recovery instructions rather than
+#      starting uvicorn against an environment that does not match the lock.
 #   5. Hand off to uvicorn with reload, replacing this shell so uvicorn becomes
 #      PID 1 inside the container.
 #
@@ -142,8 +145,19 @@ cd /app/backend
 if ! uv sync --locked --all-packages $EXTRAS_FLAGS; then
     echo "[startup] uv sync failed; recreating .venv and retrying once"
     uv venv --clear .venv
+    # The retry keeps `--locked` on purpose: it repairs a corrupt or partial
+    # .venv, not a lock that disagrees with pyproject.toml. Startup must never
+    # silently resolve dependencies, so a second failure is fatal rather than
+    # something uvicorn limps past and reports later as an import error.
+    # `set -e` would already stop here; abort explicitly so the operator gets
+    # the fix instead of a bare uv exit code.
     # shellcheck disable=SC2086
-    uv sync --locked --all-packages $EXTRAS_FLAGS
+    if ! uv sync --locked --all-packages $EXTRAS_FLAGS; then
+        echo "[startup] uv sync --locked failed again after recreating .venv." >&2
+        echo "[startup] backend/uv.lock does not match backend/pyproject.toml, or a locked artifact is unreachable." >&2
+        echo "[startup] Run 'make install' on the host to refresh the lock, then restart this container." >&2
+        exit 1
+    fi
 fi
 
 # ── Hand off to uvicorn ─────────────────────────────────────────────────────

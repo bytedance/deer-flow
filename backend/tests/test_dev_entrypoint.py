@@ -166,3 +166,97 @@ def test_underscores_and_hyphens_in_name_are_allowed():
     proc = _run("post_gres,post-gres")
     assert proc.returncode == 0
     assert proc.stdout.strip() == "--extra post_gres --extra post-gres"
+
+
+# ── Dependency-sync failure branch ──────────────────────────────────────────
+#
+# The self-heal retry reuses `--locked`, so a lock that genuinely disagrees with
+# the environment fails the same way twice. `set -e` already stops the script
+# there -- these tests pin that the handoff to uvicorn is never reached, and
+# that the operator is told what to do instead of reading a bare uv traceback.
+#
+# `/app/backend` only exists inside the container, so the sync block is sliced
+# out of the real script and run against a stub `uv`. The block is read from
+# the file rather than duplicated here: editing the script changes what runs.
+
+_SYNC_BLOCK_START = "# ── Sync dependencies (with self-heal) ──"
+_SYNC_BLOCK_END = "# ── Hand off to uvicorn ──"
+
+_STUB_UV_ALWAYS_FAILS_SYNC = """#!/bin/sh
+# `uv venv` succeeds so the retry is actually reached; every sync fails.
+case "$1" in
+  sync) exit 1 ;;
+  *) exit 0 ;;
+esac
+"""
+
+_STUB_UV_SUCCEEDS = """#!/bin/sh
+exit 0
+"""
+
+_STUB_UV_FAILS_THEN_SUCCEEDS = """#!/bin/sh
+case "$1" in
+  sync)
+    if [ -f "$STUB_UV_STATE/first_sync_done" ]; then exit 0; fi
+    : > "$STUB_UV_STATE/first_sync_done"
+    exit 1
+    ;;
+  *) exit 0 ;;
+esac
+"""
+
+
+def _sync_block() -> str:
+    content = ENTRYPOINT.read_text(encoding="utf-8")
+    start = content.index(_SYNC_BLOCK_START)
+    end = content.index(_SYNC_BLOCK_END)
+    return content[start:end]
+
+
+def _run_sync_block(tmp_path: Path, stub_uv: str) -> subprocess.CompletedProcess[str]:
+    """Execute the script's real sync block with a stubbed `uv` on PATH."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    uv_stub = bin_dir / "uv"
+    uv_stub.write_text(stub_uv, encoding="utf-8")
+    uv_stub.chmod(0o755)
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    # `cd` is shadowed because /app/backend does not exist outside the
+    # container; everything else in the block runs verbatim.
+    script = f'set -e\ncd() {{ :; }}\nEXTRAS_FLAGS=""\n{_sync_block()}\necho "REACHED_HANDOFF"\n'
+
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["STUB_UV_STATE"] = str(state_dir)
+    return subprocess.run(["sh", "-c", script], capture_output=True, text=True, check=False, env=env, cwd=tmp_path)
+
+
+def test_successful_sync_reaches_the_uvicorn_handoff(tmp_path: Path):
+    proc = _run_sync_block(tmp_path, _STUB_UV_SUCCEEDS)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "REACHED_HANDOFF" in proc.stdout
+
+
+def test_self_heal_retry_still_reaches_the_handoff(tmp_path: Path):
+    proc = _run_sync_block(tmp_path, _STUB_UV_FAILS_THEN_SUCCEEDS)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "recreating .venv" in proc.stdout
+    assert "REACHED_HANDOFF" in proc.stdout
+
+
+def test_failed_retry_aborts_before_starting_uvicorn(tmp_path: Path):
+    proc = _run_sync_block(tmp_path, _STUB_UV_ALWAYS_FAILS_SYNC)
+
+    assert proc.returncode != 0, "startup continued past an unsatisfied lock"
+    assert "REACHED_HANDOFF" not in proc.stdout, "uvicorn would have been started against a stale or missing environment"
+
+
+def test_failed_retry_tells_the_operator_how_to_recover(tmp_path: Path):
+    proc = _run_sync_block(tmp_path, _STUB_UV_ALWAYS_FAILS_SYNC)
+
+    assert "make install" in proc.stderr, f"no recovery guidance on stderr: {proc.stderr!r}"

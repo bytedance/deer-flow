@@ -111,6 +111,11 @@ the same copied backend project and lock, and both image runtime commands use
 `--no-sync`. Thus production may download locked remote artifacts while building an
 image, but production container startup never resolves or installs an extension from the
 network. Local and Docker-dev pre-start syncs may fetch missing locked artifacts.
+`docker/dev-entrypoint.sh` retries a failed sync once after recreating `.venv`, but keeps
+`--locked` on the retry: that repairs a broken virtualenv, not a stale lock. A second
+failure aborts with recovery instructions instead of starting uvicorn against an
+environment that does not match the lock, because startup must never silently resolve
+dependencies.
 That discipline assumes the uv writing the lock and the uv reading it stay compatible, so
 uv is pinned rather than floating: `backend/Dockerfile`'s `UV_IMAGE` is the single source of
 truth, both compose defaults repeat it, and every `astral-sh/setup-uv` step pins the same
