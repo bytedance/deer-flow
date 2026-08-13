@@ -111,6 +111,14 @@ the same copied backend project and lock, and both image runtime commands use
 `--no-sync`. Thus production may download locked remote artifacts while building an
 image, but production container startup never resolves or installs an extension from the
 network. Local and Docker-dev pre-start syncs may fetch missing locked artifacts.
+That discipline assumes the uv writing the lock and the uv reading it stay compatible, so
+uv is pinned rather than floating: `backend/Dockerfile`'s `UV_IMAGE` is the single source of
+truth, both compose defaults repeat it, and every `astral-sh/setup-uv` step pins the same
+version so CI exercises the manager against the binary production actually runs. Otherwise a
+newer uv can bump `uv.lock`'s `revision` (or make `uv lock --check` disagree with a lock
+generated elsewhere) while CI stays green, and the pinned uv in the production image then
+fails on the committed lock. `backend/tests/test_ci_uv_version_pin.py` keeps the four
+locations in step, which makes a uv upgrade one deliberate, reviewable change.
 Rebuild the Gateway image after changing the managed set. Every install, enable, disable,
 remove, or config mutation also requires a Gateway restart because plugin loading is
 startup-only.
