@@ -14,6 +14,17 @@ def test_input_required_snapshot_requires_payload():
         TaskSnapshot(status=TaskStatus.INPUT_REQUIRED)
 
 
+@pytest.mark.parametrize("interval", [float("nan"), float("inf"), float("-inf"), 0.0, -1.0])
+def test_task_snapshot_rejects_non_finite_or_non_positive_poll_intervals(interval):
+    with pytest.raises(ValueError, match="finite, positive"):
+        TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=interval)
+
+
+def test_task_snapshot_accepts_finite_positive_poll_interval():
+    snapshot = TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=5)
+    assert snapshot.poll_after_seconds == 5
+
+
 def test_submission_rejects_empty_remote_id():
     with pytest.raises(ValueError, match="remote_task_id must not be empty"):
         TaskSubmission(remote_task_id="  ", snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED))
