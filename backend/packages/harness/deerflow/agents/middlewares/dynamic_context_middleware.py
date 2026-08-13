@@ -66,6 +66,20 @@ _SUMMARY_MESSAGE_NAME = "summary"
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
 
 
+def _format_current_date() -> str:
+    return datetime.now().strftime("%Y-%m-%d, %A")
+
+
+def _format_current_date_reminder(current_date: str) -> str:
+    return "\n".join(
+        [
+            "<system-reminder>",
+            f"<current_date>{current_date}</current_date>",
+            "</system-reminder>",
+        ]
+    )
+
+
 def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
     """Return the id *message_id* had before the reminder ID-swap.
 
@@ -155,14 +169,8 @@ class SubagentDateContextMiddleware(AgentMiddleware):
 
     @staticmethod
     def _inject() -> dict:
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        reminder = "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        current_date = _format_current_date()
+        reminder = _format_current_date_reminder(current_date)
         return {
             "messages": [
                 SystemMessage(
@@ -228,29 +236,15 @@ class DynamicContextMiddleware(AgentMiddleware):
             if injection_enabled
             else ""
         )
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-
-        date_reminder = "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        current_date = _format_current_date()
+        date_reminder = _format_current_date_reminder(current_date)
 
         memory_block = memory_context.strip() if memory_context else None
 
         return date_reminder, memory_block
 
     def _build_date_update_reminder(self) -> str:
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        return _format_current_date_reminder(_format_current_date())
 
     @staticmethod
     def _make_reminder_and_user_messages(
@@ -312,7 +306,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         if not messages:
             return None
 
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
+        current_date = _format_current_date()
         last_date = _last_injected_date(messages)
         logger.debug(
             "DynamicContextMiddleware._inject: msg_count=%d last_date=%r current_date=%r",
