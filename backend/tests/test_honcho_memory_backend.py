@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from types import SimpleNamespace
 
 import httpx
@@ -68,6 +69,37 @@ class TestHonchoConfig:
             HonchoConfig.from_backend_config({"workspace_overrides": {"alice": None}})
         with pytest.raises(ValueError, match="user_peer_overrides"):
             HonchoConfig.from_backend_config({"user_peer_overrides": {"bob": "  "}})
+
+    def test_non_positive_char_limits_rejected(self):
+        """``message_char_limit = 0`` stores an empty string (the turn is silently
+        dropped from Honcho) and ``-1`` becomes ``text[:-1]`` (a suffix deletion).
+        Same class of bug for ``max_injection_chars`` on injected memory. These
+        must fail at parse time, before the HTTP client is built."""
+        with pytest.raises(ValueError, match="message_char_limit"):
+            HonchoConfig.from_backend_config({"message_char_limit": 0})
+        with pytest.raises(ValueError, match="message_char_limit"):
+            HonchoConfig.from_backend_config({"message_char_limit": -1})
+        with pytest.raises(ValueError, match="max_injection_chars"):
+            HonchoConfig.from_backend_config({"max_injection_chars": 0})
+        with pytest.raises(ValueError, match="max_injection_chars"):
+            HonchoConfig.from_backend_config({"max_injection_chars": -1})
+
+    def test_non_finite_or_non_positive_timeouts_rejected(self):
+        """``httpx.Timeout`` accepts 0, negatives, NaN, and Inf, so a bad timeout
+        only surfaces on a real HTTP call. Reject at parse time instead."""
+        for bad in (0, -1, math.nan, math.inf):
+            with pytest.raises(ValueError, match="timeout_seconds must be a finite positive number"):
+                HonchoConfig.from_backend_config({"timeout_seconds": bad})
+        for bad in (0, -1, math.nan, math.inf):
+            with pytest.raises(ValueError, match="connect_timeout_seconds must be a finite positive number"):
+                HonchoConfig.from_backend_config({"connect_timeout_seconds": bad})
+
+    def test_valid_limits_and_timeouts_accepted(self):
+        cfg = HonchoConfig.from_backend_config({"message_char_limit": 10, "max_injection_chars": 3, "timeout_seconds": 30, "connect_timeout_seconds": 5})
+        assert cfg.message_char_limit == 10
+        assert cfg.max_injection_chars == 3
+        assert cfg.timeout_seconds == 30
+        assert cfg.connect_timeout_seconds == 5
 
 
 class TestSanitizeId:
