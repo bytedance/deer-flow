@@ -402,7 +402,8 @@ class DiscordChannel(Channel):
                 )
                 inbound.topic_id = thread_id
                 inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
-                self._publish(inbound)
+                if not self._publish(inbound):
+                    return
                 # Start typing indicator in the thread
                 if typing_target:
                     await self._start_typing(typing_target, chat_id, thread_id)
@@ -511,18 +512,29 @@ class DiscordChannel(Channel):
         inbound.topic_id = thread_id
         inbound = await self._attach_connection_identity(inbound, guild_id=str(guild.id) if guild else None)
 
-        # Start typing indicator in the correct target (thread or channel)
+        if not self._publish(inbound):
+            return
+
+        # Start typing/reaction only after bounded admission succeeds.
         if typing_target:
             await self._start_typing(typing_target, chat_id, thread_id)
-
-        self._publish(inbound)
         asyncio.create_task(self._add_reaction(message))
 
-    def _publish(self, inbound) -> None:
+    def _publish(self, inbound) -> bool:
         """Publish an inbound message to the main event loop."""
         if self._main_loop and self._main_loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
-            future.add_done_callback(lambda f: logger.exception("[Discord] publish_inbound failed", exc_info=f.exception()) if f.exception() else None)
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return False
+            try:
+                # This is called from discord.py's private event-loop thread.
+                # Reserve first so scheduled callbacks stay bounded too.
+                self._main_loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
+                return True
+            except RuntimeError:
+                reservation.release()
+                logger.info("[Discord] main loop stopped before reserved inbound could be scheduled")
+        return False
 
     async def _attach_connection_identity(self, inbound: InboundMessage, guild_id: str | None = None) -> InboundMessage:
         return await attach_connection_identity(

@@ -16,7 +16,7 @@ import httpx
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command, strip_leading_mentions
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
@@ -478,18 +478,31 @@ class DingTalkChannel(Channel):
             )
             inbound.topic_id = topic_id
 
-            if self._card_template_id:
-                source_key = self._make_card_source_key(inbound)
-                with self._incoming_messages_lock:
-                    self._incoming_messages[source_key] = message
-
             if self._main_loop and self._main_loop.is_running():
+                reservation = self._reserve_inbound(inbound)
+                if reservation is None:
+                    return
+                if self._card_template_id:
+                    source_key = self._make_card_source_key(inbound)
+                    with self._incoming_messages_lock:
+                        self._incoming_messages[source_key] = message
                 logger.info("[DingTalk] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
-                fut = asyncio.run_coroutine_threadsafe(
-                    self._prepare_inbound(chat_id, inbound),
-                    self._main_loop,
-                )
-                fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "prepare_inbound", mid))
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self._prepare_inbound(chat_id, inbound, reservation=reservation),
+                        self._main_loop,
+                    )
+                    fut.add_done_callback(
+                        lambda f, res=reservation, mid=msg_id: self._finalize_reserved_inbound_future(
+                            f,
+                            res,
+                            "prepare_inbound",
+                            mid,
+                        )
+                    )
+                except RuntimeError:
+                    reservation.release()
+                    logger.info("[DingTalk] main loop stopped before reserved inbound could be scheduled")
             else:
                 logger.warning("[DingTalk] main loop not running, cannot publish inbound message")
         except Exception:
@@ -735,12 +748,25 @@ class DingTalkChannel(Channel):
             logger.exception("[DingTalk] failed to download file by code")
             return None
 
-    async def _prepare_inbound(self, chat_id: str, inbound: InboundMessage) -> None:
-        inbound = await self._attach_connection_identity(inbound)
-        # Running reply must finish before publish_inbound so AI card tracks are
-        # registered before the manager emits streaming outbounds.
-        await self._send_running_reply(chat_id, inbound)
-        await self.bus.publish_inbound(inbound)
+    async def _prepare_inbound(
+        self,
+        chat_id: str,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        try:
+            inbound = await self._attach_connection_identity(inbound)
+            # Running reply must finish before commit so AI card tracks are
+            # registered before the manager emits streaming outbounds.
+            await self._send_running_reply(chat_id, inbound)
+            if reservation is None:
+                await self.bus.publish_inbound(inbound)
+            else:
+                self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            if reservation is not None:
+                reservation.release()
 
     @staticmethod
     def _connection_workspace_id(conversation_type: str, conversation_id: str) -> str | None:

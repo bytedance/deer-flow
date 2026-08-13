@@ -13,7 +13,7 @@ from markdown_to_mrkdwn import SlackMarkdownConverter
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
 
@@ -377,18 +377,47 @@ class SlackChannel(Channel):
         inbound.topic_id = thread_ts
 
         if self._loop and self._loop.is_running():
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
             # Acknowledge with an eyes reaction
             self._add_reaction(channel_id, event.get("ts", thread_ts), "eyes")
             # Send "running" reply first (fire-and-forget from SDK thread)
             self._send_running_reply(channel_id, thread_ts)
-            if self._connection_repo is None:
-                asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._loop)
-            else:
-                asyncio.run_coroutine_threadsafe(self._publish_inbound_with_connection(inbound, team_id=team_id), self._loop)
+            try:
+                if self._connection_repo is None:
+                    # Reservation bounds callbacks scheduled from the SDK
+                    # thread; no coroutine/Future waits for queue capacity.
+                    self._loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
+                else:
+                    future = asyncio.run_coroutine_threadsafe(
+                        self._publish_inbound_with_connection(inbound, reservation=reservation, team_id=team_id),
+                        self._loop,
+                    )
+                    future.add_done_callback(
+                        lambda f, res=reservation: self._finalize_reserved_inbound_future(
+                            f,
+                            res,
+                            "publish_inbound",
+                            event.get("ts", thread_ts),
+                        )
+                    )
+            except RuntimeError:
+                reservation.release()
+                logger.info("[Slack] main loop stopped before reserved inbound could be scheduled")
 
-    async def _publish_inbound_with_connection(self, inbound, *, team_id: str | None = None) -> None:
-        inbound = await self._attach_connection_identity(inbound, team_id=team_id)
-        await self.bus.publish_inbound(inbound)
+    async def _publish_inbound_with_connection(
+        self,
+        inbound,
+        *,
+        reservation: InboundReservation,
+        team_id: str | None = None,
+    ) -> None:
+        try:
+            inbound = await self._attach_connection_identity(inbound, team_id=team_id)
+            self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            reservation.release()
 
     async def _attach_connection_identity(self, inbound, *, team_id: str | None = None):
         workspace_id = str(team_id or inbound.metadata.get("team_id") or "")

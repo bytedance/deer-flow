@@ -10,7 +10,17 @@ from concurrent.futures import CancelledError as FutureCancelledError
 from typing import Any, TypeVar
 
 from app.channels.commands import extract_connect_code
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    InboundMessage,
+    InboundMessageType,
+    InboundQueueClosedError,
+    InboundQueueFullError,
+    InboundReservation,
+    InboundReservationExpiredError,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +129,17 @@ class Channel(ABC):
         if exc:
             logger.error("[%s] %s failed for msg_id=%s: %s", self.name, name, msg_id, exc)
 
+    def _finalize_reserved_inbound_future(
+        self,
+        fut: Any,
+        reservation: InboundReservation,
+        name: str,
+        msg_id: Any,
+    ) -> None:
+        """Release capacity even if a cross-thread coroutine never starts."""
+        reservation.release()
+        self._log_future_error(fut, name, msg_id)
+
     def _pending_connect_code(self, text: str) -> str | None:
         """Return the one-time bind code if *text* is a ``/connect <code>`` command
         and channel connections are configured, else ``None``.
@@ -154,6 +175,48 @@ class Channel(ABC):
             files=files or [],
             metadata=metadata or {},
         )
+
+    def _reserve_inbound(self, msg: InboundMessage) -> InboundReservation | None:
+        """Reserve bounded intake capacity or explicitly drop under overload.
+
+        Real-time socket/polling providers do not expose a reliable delivery
+        retry contract to this adapter layer. They therefore drop a message
+        that cannot be admitted immediately. ``MessageBus`` emits a
+        rate-limited warning with the cumulative rejection count.
+        """
+        try:
+            return self.bus.reserve_inbound(msg)
+        except InboundQueueFullError:
+            return None
+        except (InboundQueueClosedError, InboundReservationExpiredError):
+            logger.debug("[%s] inbound ignored because channel intake is closed", self.name)
+            return None
+
+    def _commit_reserved_inbound(
+        self,
+        reservation: InboundReservation,
+        msg: InboundMessage,
+    ) -> bool:
+        """Commit a reservation on the MessageBus loop, releasing on failure."""
+        try:
+            reservation.commit(msg)
+            return True
+        except (InboundQueueClosedError, InboundReservationExpiredError):
+            logger.debug("[%s] inbound reservation expired during shutdown", self.name)
+            return False
+        finally:
+            reservation.release()
+
+    async def _publish_inbound_or_drop(self, msg: InboundMessage) -> bool:
+        """Publish from an already-serialized provider loop without waiting."""
+        try:
+            await self.bus.publish_inbound(msg)
+            return True
+        except InboundQueueFullError:
+            return False
+        except InboundQueueClosedError:
+            logger.debug("[%s] inbound ignored because channel intake is closed", self.name)
+            return False
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         """Outbound callback registered with the bus.

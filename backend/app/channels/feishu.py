@@ -18,6 +18,7 @@ from app.channels.message_bus import (
     RESOLVED_FROM_PENDING_CLARIFICATION_METADATA_KEY,
     InboundMessage,
     InboundMessageType,
+    InboundReservation,
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
@@ -832,12 +833,31 @@ class FeishuChannel(Channel):
         source_message_ids: list[str] | None = None,
     ) -> None:
         if self._main_loop and self._main_loop.is_running():
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
             logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", inbound.msg_type.value, msg_id)
-            fut = asyncio.run_coroutine_threadsafe(
-                self._prepare_inbound(msg_id, inbound, source_message_ids=source_message_ids),
-                self._main_loop,
-            )
-            fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "prepare_inbound", mid))
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    self._prepare_inbound(
+                        msg_id,
+                        inbound,
+                        source_message_ids=source_message_ids,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                )
+                fut.add_done_callback(
+                    lambda f, res=reservation, mid=msg_id: self._finalize_reserved_inbound_future(
+                        f,
+                        res,
+                        "prepare_inbound",
+                        mid,
+                    )
+                )
+            except RuntimeError:
+                reservation.release()
+                logger.info("[Feishu] main loop stopped before reserved inbound could be scheduled")
         else:
             logger.warning("[Feishu] main loop not running, cannot publish inbound message")
 
@@ -909,6 +929,9 @@ class FeishuChannel(Channel):
         if not batch:
             return
         anchor_message_id, inbound, source_message_ids = batch
+        reservation = self._reserve_inbound(inbound)
+        if reservation is None:
+            return
         logger.info(
             "[Feishu] flushing inbound file batch: chat_id=%s user_id=%s anchor=%s messages=%d files=%d",
             inbound.chat_id,
@@ -917,7 +940,12 @@ class FeishuChannel(Channel):
             len(source_message_ids),
             len(inbound.files),
         )
-        await self._prepare_inbound(anchor_message_id, inbound, source_message_ids=source_message_ids)
+        await self._prepare_inbound(
+            anchor_message_id,
+            inbound,
+            source_message_ids=source_message_ids,
+            reservation=reservation,
+        )
 
     @staticmethod
     def _log_task_error(task: asyncio.Task, name: str, msg_id: str) -> None:
@@ -931,15 +959,29 @@ class FeishuChannel(Channel):
         except Exception:
             pass
 
-    async def _prepare_inbound(self, msg_id: str, inbound, *, source_message_ids: list[str] | None = None) -> None:
+    async def _prepare_inbound(
+        self,
+        msg_id: str,
+        inbound,
+        *,
+        source_message_ids: list[str] | None = None,
+        reservation: InboundReservation | None = None,
+    ) -> None:
         """Kick off Feishu side effects without delaying inbound dispatch."""
-        inbound = await self._attach_connection_identity(inbound)
-        reaction_message_ids = source_message_ids or [msg_id]
-        for reaction_message_id in reaction_message_ids:
-            reaction_task = asyncio.create_task(self._add_reaction(reaction_message_id, "OK"))
-            self._track_background_task(reaction_task, name="add_reaction", msg_id=reaction_message_id)
-        self._ensure_running_card_started(msg_id, metadata=inbound.metadata)
-        await self.bus.publish_inbound(inbound)
+        try:
+            inbound = await self._attach_connection_identity(inbound)
+            reaction_message_ids = source_message_ids or [msg_id]
+            for reaction_message_id in reaction_message_ids:
+                reaction_task = asyncio.create_task(self._add_reaction(reaction_message_id, "OK"))
+                self._track_background_task(reaction_task, name="add_reaction", msg_id=reaction_message_id)
+            self._ensure_running_card_started(msg_id, metadata=inbound.metadata)
+            if reservation is None:
+                await self.bus.publish_inbound(inbound)
+            else:
+                self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            if reservation is not None:
+                reservation.release()
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(

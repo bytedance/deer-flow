@@ -54,6 +54,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
@@ -984,7 +985,7 @@ class ChannelManager:
         bus: MessageBus,
         store: ChannelStore,
         *,
-        max_concurrency: int = 5,
+        max_concurrency: int = DEFAULT_CHANNEL_MAX_CONCURRENCY,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
@@ -995,6 +996,8 @@ class ChannelManager:
         inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
+            raise ValueError("max_concurrency must be a positive integer")
         self.bus = bus
         self.store = store
         self._max_concurrency = max_concurrency
@@ -1023,7 +1026,6 @@ class ChannelManager:
         self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
-        self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         # Distinct from self._running: that flag is also False before the
         # very first start() (so tests that call internal drain/handler
@@ -1031,7 +1033,11 @@ class ChannelManager:
         # working unchanged). self._stopped tracks specifically whether
         # stop() has run, for the follow-up drain guard below.
         self._stopped = False
-        self._task: asyncio.Task | None = None
+        # Fixed, long-lived workers own message handling end to end. The pool
+        # size is the only number of handler coroutines that can exist; inbound
+        # bursts remain as bounded queue entries instead of semaphore-waiting
+        # task-per-message fan-out.
+        self._worker_tasks: set[asyncio.Task[None]] = set()
         # Inbound webhook dedupe store. Defaults to the in-process Memory store
         # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
         # duplicate deliveries landing on different pods are collapsed.
@@ -1211,7 +1217,7 @@ class ChannelManager:
         threaded in — e.g. a ``ChannelManager`` constructed directly without
         going through ``start_channel_service()`` — so tests and any
         not-yet-wired deployment never see a dangling background task for
-        this. When wired, mirrors the existing ``_dispatch_loop`` pattern:
+        this. When wired, mirrors the worker-task error-reporting pattern:
         ``asyncio.create_task`` + ``add_done_callback(self._log_task_error)``
         so an unexpected watcher failure is surfaced in the logs instead of
         silently vanishing. The task is also tracked in
@@ -1566,77 +1572,138 @@ class ChannelManager:
     # -- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the dispatch loop."""
+        """Open inbound admission and start the fixed message-worker pool."""
         if self._running:
             return
         self._running = True
         self._stopped = False
-        self._semaphore = asyncio.Semaphore(self._max_concurrency)
-        self._task = asyncio.create_task(self._dispatch_loop())
-        logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
+        self.bus.open_inbound()
+        self._worker_tasks = {
+            asyncio.create_task(
+                self._worker_loop(worker_index),
+                name=f"deerflow-channel-worker-{worker_index}",
+            )
+            for worker_index in range(self._max_concurrency)
+        }
+        for task in self._worker_tasks:
+            task.add_done_callback(self._log_task_error)
+        logger.info(
+            "ChannelManager started (workers=%d, inbound_queue_maxsize=%d)",
+            self._max_concurrency,
+            self.bus.inbound_queue_maxsize,
+        )
 
     async def stop(self) -> None:
-        """Stop the dispatch loop."""
+        """Close intake, cancel, and await every manager-owned background task."""
         self._running = False
         self._stopped = True
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        invalidated_reservations = self.bus.close_inbound()
 
-        # Follow-up watchers are long-lived background tasks (they await a
-        # run's full stream, which can take minutes) started outside the
-        # dispatch loop, so cancelling self._task above does not touch them.
-        # Left unmanaged, one still subscribed to a run that ends AFTER this
-        # point would drain its buffer and fire a brand new runs.create()
-        # into a manager that has already been stopped.
+        # Workers execute handlers inline, so cancelling and awaiting this fixed
+        # set proves no old handler can outlive stop(). Watchers are included in
+        # the same ownership boundary after workers can no longer spawn more.
+        worker_tasks = list(self._worker_tasks)
+        for task in worker_tasks:
+            task.cancel()
+
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            if worker_tasks:
+                await asyncio.gather(*worker_tasks, return_exceptions=True)
+        except asyncio.CancelledError as exc:
+            # Gateway wraps channel shutdown in a deadline. Even when that
+            # deadline cancels stop(), finish joining the already-cancelled
+            # workers before propagating so no handler is orphaned locally.
+            cancellation = exc
+            for task in worker_tasks:
+                task.cancel()
+            if worker_tasks:
+                await asyncio.gather(*worker_tasks, return_exceptions=True)
+        finally:
+            self._worker_tasks.clear()
+
         watcher_tasks = list(self._followup_watcher_tasks)
         for task in watcher_tasks:
             task.cancel()
-        for task in watcher_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("[Manager] follow-up watcher task raised during stop()")
-        self._followup_watcher_tasks.clear()
+        try:
+            if watcher_tasks:
+                await asyncio.gather(*watcher_tasks, return_exceptions=True)
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+            for task in watcher_tasks:
+                task.cancel()
+            if watcher_tasks:
+                await asyncio.gather(*watcher_tasks, return_exceptions=True)
+        finally:
+            self._followup_watcher_tasks.clear()
+
+        discarded_messages = self.bus.discard_pending_inbound()
+        if invalidated_reservations or discarded_messages:
+            logger.warning(
+                "[Manager] shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                invalidated_reservations,
+                discarded_messages,
+            )
 
         logger.info("ChannelManager stopped")
+        if cancellation is not None:
+            raise cancellation
 
-    # -- dispatch loop -----------------------------------------------------
+    # -- worker pool -------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        logger.info("[Manager] dispatch loop started, waiting for inbound messages")
+    async def _worker_loop(self, worker_index: int) -> None:
+        logger.info("[Manager] inbound worker %d started", worker_index)
         while self._running:
             try:
-                msg = await asyncio.wait_for(self.bus.get_inbound(), timeout=1.0)
-            except TimeoutError:
-                continue
+                msg = await self.bus.get_inbound()
             except asyncio.CancelledError:
-                break
+                raise
 
-            # Dedupe before logging "received" so a provider retrying an event N
-            # times does not log N accepts; duplicates are logged once as ignored.
-            # Note: this manager-level dedupe only guards the agent run / final
-            # answer. Provider adapters may emit ack side-effects (a "Working on
-            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
-            # intentionally not deduped here.
-            if await self._is_duplicate_inbound(msg):
-                continue
-            logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
-                msg.channel_name,
-                msg.chat_id,
-                msg.msg_type.value,
-                len(msg.text or ""),
-                len(msg.files),
-            )
-            task = asyncio.create_task(self._handle_message(msg))
-            task.add_done_callback(self._log_task_error)
+            dedupe_recorded = False
+            try:
+                # Dedupe before logging "received" so a provider retrying an
+                # event N times does not log N accepts. Provider ack side
+                # effects may still happen before this manager-level dedupe.
+                if await self._is_duplicate_inbound(msg):
+                    continue
+                dedupe_recorded = self._inbound_dedupe_key(msg) is not None
+                logger.info(
+                    "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                    msg.channel_name,
+                    msg.chat_id,
+                    msg.msg_type.value,
+                    len(msg.text or ""),
+                    len(msg.files),
+                )
+                # Deliberately awaited inline: never create a task per message.
+                await self._handle_message(msg)
+            except asyncio.CancelledError:
+                # A cancellation after dedupe admission must make provider
+                # redelivery retryable rather than retaining a TTL-long key for
+                # work that never completed.
+                if dedupe_recorded:
+                    try:
+                        await self._release_inbound_dedupe_key(msg)
+                    except Exception:
+                        logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
+                raise
+            except Exception:
+                logger.exception(
+                    "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
+                    worker_index,
+                    msg.channel_name,
+                    msg.chat_id,
+                )
+                if dedupe_recorded:
+                    try:
+                        await self._release_inbound_dedupe_key(msg)
+                    except Exception:
+                        # A dedupe backend outage must not shrink the fixed
+                        # worker pool by letting cleanup escape this loop.
+                        logger.exception("[Manager] failed to release inbound dedupe key after worker error")
+            finally:
+                self.bus.inbound_task_done()
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
@@ -1716,8 +1783,7 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
-            # Non-command chat can be rejected before it consumes a semaphore
-            # slot. Commands are handled below because provider adapters consume
+            # Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
             # applies its own admission gate for manager-level commands.
             bound_identity_rejection = None
@@ -1727,11 +1793,10 @@ class ChannelManager:
                 await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
                 return
 
-            async with self._semaphore:
-                if msg.msg_type == InboundMessageType.COMMAND:
-                    await self._handle_command(msg)
-                else:
-                    await self._handle_chat(msg, bound_identity_checked=True)
+            if msg.msg_type == InboundMessageType.COMMAND:
+                await self._handle_command(msg)
+            else:
+                await self._handle_chat(msg, bound_identity_checked=True)
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",

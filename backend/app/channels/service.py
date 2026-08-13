@@ -9,8 +9,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel
-from app.channels.manager import DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
-from app.channels.message_bus import MessageBus
+from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_GATEWAY_URL, DEFAULT_LANGGRAPH_URL, ChannelManager
+from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
 
@@ -65,6 +65,16 @@ def _resolve_service_url(config: dict[str, Any], config_key: str, env_key: str, 
     return default
 
 
+def _resolve_positive_int(config: dict[str, Any], config_key: str, default: int) -> int:
+    value = config.pop(config_key, None)
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        logger.warning("Invalid channels.%s=%r; using default %d", config_key, value, default)
+        return default
+    return value
+
+
 def _merge_channel_connection_runtime_config(channels_config: dict[str, Any], app_config: AppConfig) -> None:
     connection_config = getattr(app_config, "channel_connections", None)
     merge_runtime_channel_configs(channels_config, connection_config)
@@ -104,11 +114,13 @@ class ChannelService:
         app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
-        self.bus = MessageBus()
+        config = dict(channels_config or {})
+        inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
+        max_concurrency = _resolve_positive_int(config, "max_concurrency", DEFAULT_CHANNEL_MAX_CONCURRENCY)
+        self.bus = MessageBus(inbound_queue_maxsize=inbound_queue_maxsize)
         self.store = ChannelStore()
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
-        config = dict(channels_config or {})
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
         default_session = config.pop("session", None)
@@ -118,6 +130,7 @@ class ChannelService:
         self.manager = ChannelManager(
             bus=self.bus,
             store=self.store,
+            max_concurrency=max_concurrency,
             langgraph_url=langgraph_url,
             gateway_url=gateway_url,
             default_session=default_session if isinstance(default_session, dict) else None,
@@ -243,18 +256,31 @@ class ChannelService:
             return False
 
     async def stop(self) -> None:
-        """Stop all channels and the manager."""
+        """Stop all channels and the manager without orphaning handler workers."""
+        self._running = False
+        cancellation: asyncio.CancelledError | None = None
         for name, channel in list(self._channels.items()):
             try:
                 await channel.stop()
                 logger.info("Channel stopped")
+            except asyncio.CancelledError as exc:
+                # The Gateway applies an outer shutdown deadline. Preserve that
+                # cancellation, but finish the ownership chain so it cannot
+                # bypass ChannelManager.stop() and orphan active handlers.
+                if cancellation is None:
+                    cancellation = exc
             except Exception:
                 logger.exception("Error stopping channel")
         self._channels.clear()
 
-        await self.manager.stop()
-        self._running = False
+        try:
+            await self.manager.stop()
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
         logger.info("ChannelService stopped")
+        if cancellation is not None:
+            raise cancellation
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
         """Load the latest config for a specific channel from disk.
