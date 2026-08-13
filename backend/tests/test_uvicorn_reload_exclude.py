@@ -157,12 +157,12 @@ def test_sandbox_mkdir_precedes_uvicorn_launch(name):
 
     ``_mkdir_dirs`` only proves the mkdir is present somewhere; this pins script
     order so a future edit can't move (or guard) the mkdir below the launch and
-    silently reintroduce the #3454 crash on a fresh checkout. The regular
-    expression accepts both development and ``--no-sync`` production launches,
-    while still excluding serve.sh's ``stop_all`` kill line.
+    silently reintroduce the #3454 crash on a fresh checkout. The ``uv run``
+    matcher allows runtime-only flags while still excluding serve.sh's
+    ``stop_all`` kill line.
     """
     lines = LAUNCHERS[name].read_text(encoding="utf-8").splitlines()
-    launch_idx = next((i for i, ln in enumerate(lines) if re.search(r"uv run(?: --no-sync)? uvicorn", ln)), None)
+    launch_idx = next((i for i, ln in enumerate(lines) if re.search(r"\buv run(?: --(?:no-sync|locked))? uvicorn\b", ln)), None)
     mkdir_idx = next((i for i, ln in enumerate(lines) if re.search(r"\bmkdir\b", ln) and "sandbox" in ln.lower()), None)
 
     assert launch_idx is not None, f"{name}: could not locate the uvicorn launch line"
