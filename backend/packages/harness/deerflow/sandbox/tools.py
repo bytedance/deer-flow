@@ -570,14 +570,12 @@ def _resolve_max_results(name: str, requested: int, *, default: int, upper_bound
     return min(requested_max_results, configured_max_results)
 
 
-def _resolve_local_read_path(path: str, thread_data: ThreadDataState) -> str:
+def _resolve_local_read_path(path: str, thread_data: ThreadDataState | None) -> str:
     validate_local_tool_path(path, thread_data, read_only=True)
-    if _is_skills_path(path) or _is_acp_workspace_path(path):
-        # Skills and ACP workspace paths are resolved by the sandbox's
-        # PathMapping (which uses the user_id from acquire time), not
-        # by _resolve_skills_path / _resolve_acp_workspace_path (which
-        # use get_effective_user_id() from contextvar and may differ
-        # from the sandbox mapping's user_id).
+    if _is_skills_path(path) or _is_acp_workspace_path(path) or _is_custom_mount_path(path):
+        # Mounted paths are resolved by the sandbox's PathMapping (which uses
+        # acquire-time identity and provider state), not by tool-layer host
+        # path reconstruction.
         return path
     return _resolve_and_validate_user_data_path(path, thread_data)
 
@@ -859,8 +857,8 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
     This function is a security gate — it checks whether *path* may be
     accessed and raises on violation.  It does **not** resolve the virtual
-    path to a host path; callers are responsible for resolution via
-    ``resolve_and_validate_user_data_path`` or ``_resolve_skills_path``.
+    path to a host path. Sandbox-backed readers should keep mounted paths
+    virtual and let the provider's mount table resolve them.
 
     Allowed virtual-path families:
       - ``/mnt/user-data/*``  — always allowed (read + write)
@@ -2102,6 +2100,23 @@ async def _grep_tool_async(
 grep_tool.coroutine = _grep_tool_async
 
 
+def _read_file_from_sandbox(
+    runtime: Runtime | None,
+    path: str,
+    *,
+    start_line: int | None = None,
+    end_line: int | None = None,
+) -> str:
+    """Read through the sandbox while preserving provider-owned mount paths."""
+    sandbox = ensure_sandbox_initialized(runtime)
+    ensure_thread_directories_exist(runtime)
+    if is_local_sandbox(runtime):
+        path = _resolve_local_read_path(path, get_thread_data(runtime))
+    if start_line is None and end_line is None:
+        return sandbox.read_file(path)
+    return sandbox.read_file(path, start_line=start_line, end_line=end_line)
+
+
 def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     """Read the full current content of ``path`` using read_file's resolution rules.
 
@@ -2110,19 +2125,7 @@ def read_current_file_content(runtime: Runtime | None, path: str) -> str:
     ``FileNotFoundError`` when the file does not exist; other sandbox errors
     propagate to the caller.
     """
-    sandbox = ensure_sandbox_initialized(runtime)
-    ensure_thread_directories_exist(runtime)
-    if is_local_sandbox(runtime):
-        thread_data = get_thread_data(runtime)
-        validate_local_tool_path(path, thread_data, read_only=True)
-        if _is_skills_path(path):
-            path = _resolve_skills_path(path)
-        elif _is_acp_workspace_path(path):
-            path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-        elif not _is_custom_mount_path(path):
-            path = _resolve_and_validate_user_data_path(path, thread_data)
-        # Custom mount paths are resolved by LocalSandbox._resolve_path()
-    return sandbox.read_file(path)
+    return _read_file_from_sandbox(runtime, path)
 
 
 @tool("read_file", parse_docstring=True)
@@ -2155,21 +2158,9 @@ def read_file_tool(
             return "(start_line > end_line — no lines in range)"
 
         requested_path = path
-        sandbox = ensure_sandbox_initialized(runtime)
-        ensure_thread_directories_exist(runtime)
         use_line_range = start_line is not None or end_line is not None
         if use_line_range:
-            if is_local_sandbox(runtime):
-                thread_data = get_thread_data(runtime)
-                validate_local_tool_path(path, thread_data, read_only=True)
-                if _is_skills_path(path):
-                    path = _resolve_skills_path(path)
-                elif _is_acp_workspace_path(path):
-                    path = _resolve_acp_workspace_path(path, _extract_thread_id_from_thread_data(thread_data))
-                elif not _is_custom_mount_path(path):
-                    path = _resolve_and_validate_user_data_path(path, thread_data)
-                # Custom mount paths are resolved by LocalSandbox._resolve_path()
-            content = sandbox.read_file(path, start_line=start_line, end_line=end_line)
+            content = _read_file_from_sandbox(runtime, path, start_line=start_line, end_line=end_line)
         else:
             content = read_current_file_content(runtime, path)
         if not content:

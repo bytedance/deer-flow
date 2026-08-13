@@ -825,7 +825,7 @@ that cannot tell sibling branches apart.
 **Virtual Path System**:
 - Agent sees: `/mnt/user-data/{workspace,uploads,outputs}`, `/mnt/skills`
 - Physical: `backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/...`; raw skills stay under `deer-flow/skills/` and managed integration storage, while sandboxes read `backend/.deer-flow/skills_view/public/` and `backend/.deer-flow/users/{user_id}/skills_view/{custom,legacy,integrations}/`
-- Translation: `LocalSandboxProvider` builds per-thread `PathMapping`s for the user-data prefixes at acquire time; `tools.py` keeps `replace_virtual_path()` / `replace_virtual_paths_in_command()` as a defense-in-depth layer (and for path validation). AIO has the directories volume-mounted at the same virtual paths inside its container, so both implementations accept `/mnt/user-data/...` natively.
+- Translation: `LocalSandboxProvider` builds per-thread `PathMapping`s at acquire time. Sandbox-backed readers resolve only `/mnt/user-data/...` in the tool layer; skills, ACP workspaces, and configured custom mounts stay virtual so the provider mount table remains the single source of acquire-time identity and visibility. Full reads, ranged reads, and read-before-write hashing share this path. `tools.py` keeps `replace_virtual_path()` / `replace_virtual_paths_in_command()` as a defense-in-depth layer (and for path validation). AIO has the directories volume-mounted at the same virtual paths inside its container, so both implementations accept `/mnt/user-data/...` natively.
 - Detection: `is_local_sandbox()` accepts both `sandbox_id == "local"` (legacy / no-thread) and `sandbox_id.startswith("local:")` (per-thread)
 
 **Sandbox Tools** (in `packages/harness/deerflow/sandbox/tools.py`):
