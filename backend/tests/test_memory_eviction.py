@@ -79,6 +79,31 @@ def test_confidence_policy_coerces_non_float_confidence() -> None:
     assert [fact["id"] for fact in decision.kept] == ["b", "c"]
 
 
+@pytest.mark.parametrize(
+    "policy",
+    [EVICTION_POLICY_CONFIDENCE, EVICTION_POLICY_HYBRID_V1],
+)
+@pytest.mark.parametrize("max_facts", [2, 10])
+def test_capacity_policy_preserves_input_order_at_or_below_cap(
+    policy: str,
+    max_facts: int,
+) -> None:
+    facts = [
+        _fact("low", confidence=0.6),
+        _fact("high", confidence=0.9),
+    ]
+
+    decision = select_facts_for_capacity(
+        facts,
+        max_facts=max_facts,
+        policy=policy,
+        now=NOW,
+    )
+
+    assert decision.kept == facts
+    assert decision.evicted == []
+
+
 def test_hybrid_policy_keeps_recently_confirmed_fact_over_stale_high_confidence() -> None:
     facts = [
         _fact(
@@ -291,3 +316,85 @@ def test_clear_fact_metadata_recomputes_shadow_disagreement(tmp_path) -> None:
     assert {item["factId"] for item in events[0]["evicted"]} == {"common_loser"}
     assert set(events[0]["shadow"]["wouldEvict"]) == {"common_loser"}
     assert events[0]["shadow"]["disagrees"] is False
+
+
+def test_delete_fact_tolerates_malformed_eviction_audit(tmp_path) -> None:
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+    )
+    storage = FileMemoryStorage(config)
+    storage.upsert_fact(
+        _fact("victim", confidence=0.8),
+        agent_name="default",
+        user_id="u",
+    )
+    memory_path = storage._get_memory_file_path("default", user_id="u")
+    audit_path = agent_eviction_audit_path(memory_path, "default")
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        json.dumps(
+            [
+                {
+                    "reason": "capacity",
+                    "evicted": None,
+                    "shadow": {"wouldEvict": ["victim"], "disagrees": True},
+                }
+            ]
+        )
+    )
+
+    storage.delete_fact("victim", agent_name="default", user_id="u")
+
+    assert storage.get_fact("victim", agent_name="default", user_id="u") is None
+    assert not audit_path.exists()
+
+
+def test_clear_fact_metadata_sanitizes_malformed_audit_fields(tmp_path) -> None:
+    config = DeerMemConfig(
+        storage_path=str(tmp_path),
+        retrieval_adapter="",
+    )
+    storage = FileMemoryStorage(config)
+    memory_path = storage._get_memory_file_path("default", user_id="u")
+    audit_path = agent_eviction_audit_path(memory_path, "default")
+    audit_path.parent.mkdir(parents=True, exist_ok=True)
+    audit_path.write_text(
+        json.dumps(
+            [
+                {
+                    "reason": "capacity",
+                    "evicted": [
+                        {"factId": "keep"},
+                        {"factId": "removed"},
+                        {"factId": []},
+                        "invalid",
+                    ],
+                    "shadow": {
+                        "wouldEvict": ["keep", "removed", {"invalid": True}],
+                        "disagrees": True,
+                    },
+                },
+                {
+                    "reason": "capacity",
+                    "evicted": [{"factId": "keep_without_shadow"}],
+                    "shadow": {"wouldEvict": None, "disagrees": True},
+                },
+            ]
+        )
+    )
+
+    storage.clear_fact_metadata(
+        agent_name="default",
+        user_id="u",
+        fact_ids=["removed"],
+    )
+
+    events = json.loads(audit_path.read_text())
+    assert events[0]["evicted"] == [{"factId": "keep"}]
+    assert events[0]["shadow"] == {
+        "wouldEvict": ["keep"],
+        "disagrees": False,
+    }
+    assert events[1]["evicted"] == [{"factId": "keep_without_shadow"}]
+    assert "shadow" not in events[1]

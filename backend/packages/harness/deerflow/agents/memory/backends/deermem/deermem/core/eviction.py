@@ -193,6 +193,14 @@ def select_facts_for_capacity(
             access_half_life_days=access_half_life_days,
         )
 
+    if len(indexed_facts) <= max_facts:
+        return FactEvictionDecision(
+            kept=list(facts),
+            evicted=[],
+            scores=scores,
+            policy=policy,
+        )
+
     ranked = sorted(
         indexed_facts,
         key=lambda item: (-scores[str(item[1].get("id") or f"__missing_{item[0]}")].value, item[0]),

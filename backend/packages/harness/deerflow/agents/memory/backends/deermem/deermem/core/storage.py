@@ -685,11 +685,20 @@ class FileMemoryStorage(MemoryStorage):
                     continue
                 event = copy.deepcopy(raw_event)
                 evicted = event.get("evicted")
-                if isinstance(evicted, list):
-                    event["evicted"] = [item for item in evicted if not isinstance(item, dict) or item.get("factId") not in removed_ids]
+                if not isinstance(evicted, list):
+                    continue
+                event["evicted"] = [item for item in evicted if isinstance(item, dict) and isinstance(item.get("factId"), str) and item["factId"] not in removed_ids]
                 shadow = event.get("shadow")
-                if isinstance(shadow, dict) and isinstance(shadow.get("wouldEvict"), list):
-                    shadow["wouldEvict"] = [fact_id for fact_id in shadow["wouldEvict"] if fact_id not in removed_ids]
+                if isinstance(shadow, dict):
+                    would_evict = shadow.get("wouldEvict")
+                    if not isinstance(would_evict, list):
+                        event.pop("shadow", None)
+                    else:
+                        shadow["wouldEvict"] = [fact_id for fact_id in would_evict if isinstance(fact_id, str) and fact_id not in removed_ids]
+                elif "shadow" in event:
+                    event.pop("shadow")
+                if isinstance(event.get("shadow"), dict):
+                    shadow = event["shadow"]
                     actual_ids = {item.get("factId") for item in event.get("evicted", []) if isinstance(item, dict) and isinstance(item.get("factId"), str)}
                     shadow_ids = {fact_id for fact_id in shadow["wouldEvict"] if isinstance(fact_id, str)}
                     shadow["disagrees"] = actual_ids != shadow_ids
