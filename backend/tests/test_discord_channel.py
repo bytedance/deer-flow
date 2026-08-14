@@ -6,13 +6,13 @@ import asyncio
 import builtins
 import threading
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.channels.discord import DiscordChannel
 from app.channels.manager import CHANNEL_CAPABILITIES
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.service import _CHANNEL_REGISTRY
 
 
@@ -46,11 +46,10 @@ def _make_discord_message(text: str):
 async def test_discord_bot_mention_slash_skill_routes_as_chat() -> None:
     bus = MessageBus()
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
-    captured = []
     channel._running = True
     channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
     channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
-    channel._publish = captured.append
+    channel._main_loop = asyncio.get_running_loop()
 
     async def noop(*_args, **_kwargs):
         return None
@@ -59,9 +58,10 @@ async def test_discord_bot_mention_slash_skill_routes_as_chat() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /data-analysis analyze uploads/foo.csv"))
+    await asyncio.sleep(0)
 
-    assert len(captured) == 1
-    inbound = captured[0]
+    inbound = bus.get_inbound_nowait()
+    bus.inbound_task_done()
     assert inbound.text == "/data-analysis analyze uploads/foo.csv"
     assert inbound.msg_type == InboundMessageType.CHAT
     assert inbound.topic_id == "456"
@@ -71,11 +71,10 @@ async def test_discord_bot_mention_slash_skill_routes_as_chat() -> None:
 async def test_discord_bot_mention_known_command_routes_as_command() -> None:
     bus = MessageBus()
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
-    captured = []
     channel._running = True
     channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
     channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
-    channel._publish = captured.append
+    channel._main_loop = asyncio.get_running_loop()
 
     async def noop(*_args, **_kwargs):
         return None
@@ -84,12 +83,65 @@ async def test_discord_bot_mention_known_command_routes_as_command() -> None:
     channel._add_reaction = noop
 
     await channel._on_message(_make_discord_message("<@999> /help"))
+    await asyncio.sleep(0)
 
-    assert len(captured) == 1
-    inbound = captured[0]
+    inbound = bus.get_inbound_nowait()
+    bus.inbound_task_done()
     assert inbound.text == "/help"
     assert inbound.msg_type == InboundMessageType.COMMAND
     assert inbound.topic_id == "456"
+
+
+@pytest.mark.asyncio
+async def test_discord_full_queue_rejects_before_thread_or_identity_side_effects() -> None:
+    bus = MessageBus(inbound_queue_maxsize=1)
+    await bus.publish_inbound(
+        InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text="already queued",
+        )
+    )
+    channel = DiscordChannel(bus=bus, config={"bot_token": "token", "thread_mode": True})
+    channel._running = True
+    channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+    channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+    channel._main_loop = asyncio.get_running_loop()
+    channel._create_thread = AsyncMock()
+    channel._attach_connection_identity = AsyncMock()
+
+    await channel._on_message(_make_discord_message("hello"))
+
+    channel._create_thread.assert_not_awaited()
+    channel._attach_connection_identity.assert_not_awaited()
+    assert channel._active_threads == {}
+    assert bus.inbound_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+async def test_discord_releases_early_reservation_when_thread_creation_raises() -> None:
+    bus = MessageBus(inbound_queue_maxsize=1)
+    channel = DiscordChannel(bus=bus, config={"bot_token": "token", "thread_mode": True})
+    channel._running = True
+    channel._client = SimpleNamespace(user=SimpleNamespace(id=999, mention="<@999>"))
+    channel._discord_module = SimpleNamespace(Thread=type("FakeThread", (), {}))
+    channel._main_loop = asyncio.get_running_loop()
+    channel._create_thread = AsyncMock(side_effect=RuntimeError("thread create failed"))
+
+    with pytest.raises(RuntimeError, match="thread create failed"):
+        await channel._on_message(_make_discord_message("hello"))
+
+    # The exception path must return the capacity slot to the shared bus.
+    await bus.publish_inbound(
+        InboundMessage(
+            channel_name="slack",
+            chat_id="C1",
+            user_id="U1",
+            text="capacity was released",
+        )
+    )
+    assert bus.inbound_queue.qsize() == 1
 
 
 # ---------------------------------------------------------------------------
