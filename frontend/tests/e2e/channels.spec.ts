@@ -3,6 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 const channelProviders = [
+  ["buzz", "Buzz", "binding_code"],
   ["telegram", "Telegram", "deep_link"],
   ["slack", "Slack", "binding_code"],
   ["discord", "Discord", "binding_code"],
@@ -102,6 +103,7 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("Channels")).toBeVisible({
       timeout: 15_000,
     });
+    await expect(sidebar.getByText("Buzz")).toBeVisible();
     await expect(sidebar.getByText("Telegram")).toBeVisible();
     await expect(sidebar.getByText("Slack")).toBeVisible();
     await expect(sidebar.getByText("Discord")).toBeVisible();
@@ -111,12 +113,15 @@ test.describe("IM channels", () => {
     await expect(sidebar.getByText("WeCom")).toBeVisible();
     await expect(
       sidebar.getByRole("button", { name: "Connected" }),
-    ).toHaveCount(7);
+    ).toHaveCount(8);
 
     await sidebar.getByRole("button", { name: /Settings and more/ }).click();
     await page.getByRole("menuitem", { name: "Settings" }).click();
     await page.getByRole("button", { name: "Channels" }).click();
 
+    await expect(
+      page.getByText("Buzz channels and direct messages"),
+    ).toBeVisible();
     await expect(page.getByText("Telegram direct messages")).toBeVisible();
     await expect(page.getByText("Slack workspace messages")).toBeVisible();
     await expect(page.getByText("Discord server messages")).toBeVisible();
@@ -126,7 +131,7 @@ test.describe("IM channels", () => {
     await expect(page.getByText("WeCom messages")).toBeVisible();
 
     const dialog = page.getByRole("dialog", { name: "Settings" });
-    await expect(dialog.getByRole("button", { name: "Modify" })).toHaveCount(7);
+    await expect(dialog.getByRole("button", { name: "Modify" })).toHaveCount(8);
   });
 
   test("only enabled providers are shown and runtime setup stays editable", async ({

@@ -29,6 +29,18 @@ class ExtensionSpec(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    enabled: bool = Field(
+        default=True,
+        description="When false, skip the extension without resolving or importing it",
+    )
+    name: str | None = Field(
+        default=None,
+        description="Stable operator-facing name recorded by the extension manager",
+    )
+    package: str | None = Field(
+        default=None,
+        description="Installed Python distribution recorded by the extension manager",
+    )
     use: str = Field(description="Entry point path, e.g. 'my_extension:install'")
     config: dict[str, Any] = Field(
         default_factory=dict,
@@ -85,8 +97,8 @@ def _parse_version(version: object) -> tuple[int, ...] | None:
 def _compatible(declared: str, current: str) -> bool:
     """One-directional, with the semver window for the contract's life stage.
 
-    Pre-1.0 the contract surface is observational only and minors may break,
-    so the window is same major.minor with patches additive: host >= declared.
+    Pre-1.0 minors may break, so the window is same major.minor with patches
+    additive: host >= declared.
     From 1.0 on contracts only grow within a major, so a newer host stays
     compatible with older extensions while an extension written against a
     newer minor is refused — it would reach for contract additions the host
@@ -130,6 +142,9 @@ def load_extensions(specs: Sequence[ExtensionSpec]) -> tuple[LoadedExtensions, l
     loaded_sources: list[str] = []
 
     for spec in specs:
+        if not spec.enabled:
+            continue
+
         try:
             install = resolve_variable(spec.use)
         except Exception as exc:
