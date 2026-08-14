@@ -1187,6 +1187,14 @@ servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
 requires an explicit local-development opt-in. See the
 [mem0 backend guide](backend/packages/harness/deerflow/agents/memory/backends/mem0/README.md).
 
+An opt-in `honcho` backend is available for self-hosted or hosted Honcho (v3
+API). It builds user-model memory — long-term preferences and a cross-session
+working representation — on Honcho's server side, so the backend makes no LLM
+calls locally. Each user gets an isolated workspace derived from `user_id`; a
+missing user id fails closed instead of falling back to a shared workspace.
+Fact CRUD and Settings-page fact editing are not available for this backend. See
+the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
+
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 
 In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. Only durable, descriptive user-level facts are stored; current-thread or project constraints and one-time action permissions stay in conversation state. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
