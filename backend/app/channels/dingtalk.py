@@ -398,7 +398,7 @@ class DingTalkChannel(Channel):
             connect_code = self._pending_connect_code(text)
             if connect_code:
                 if self._main_loop and self._main_loop.is_running():
-                    future = self._submit_threadsafe_coroutine(
+                    scheduled = self._submit_threadsafe_coroutine(
                         self._bind_connection_from_connect_code(
                             conversation_type=conversation_type,
                             sender_staff_id=sender_staff_id,
@@ -410,7 +410,7 @@ class DingTalkChannel(Channel):
                         name="bind_connection",
                         msg_id=msg_id,
                     )
-                    if future is None:
+                    if not scheduled:
                         logger.info("[DingTalk] main loop stopped before channel connection bind could be scheduled")
                 else:
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
@@ -492,14 +492,14 @@ class DingTalkChannel(Channel):
                     with self._incoming_messages_lock:
                         self._incoming_messages[source_key] = message
                 logger.info("[DingTalk] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
-                future = self._submit_threadsafe_coroutine(
+                scheduled = self._submit_threadsafe_coroutine(
                     self._prepare_inbound(chat_id, inbound, reservation=reservation),
                     self._main_loop,
                     name="prepare_inbound",
                     msg_id=msg_id,
                     reservation=reservation,
                 )
-                if future is None:
+                if not scheduled:
                     logger.info("[DingTalk] main loop stopped before reserved inbound could be scheduled")
             else:
                 logger.warning("[DingTalk] main loop not running, cannot publish inbound message")

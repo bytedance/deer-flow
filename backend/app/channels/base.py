@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
 from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from app.channels.commands import extract_connect_code
@@ -27,6 +28,18 @@ from app.channels.message_bus import (
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+@dataclass(eq=False, slots=True)
+class _ThreadsafeSubmission:
+    coroutine: Coroutine[Any, Any, Any]
+    loop: asyncio.AbstractEventLoop
+    name: str
+    msg_id: Any
+    reservation: InboundReservation | None
+    completion: Future[Any]
+    task: asyncio.Task[Any] | None = None
+    cancel_requested: bool = False
 
 
 class Channel(ABC):
@@ -48,9 +61,9 @@ class Channel(ABC):
         # Provider SDK callbacks often run on a dedicated thread and submit
         # preparation work to the Gateway loop. Submission and shutdown share
         # this lock so stop() cannot miss a future created concurrently.
-        self._threadsafe_futures: set[Future[Any]] = set()
-        self._threadsafe_futures_lock = threading.Lock()
-        self._threadsafe_future_intake_open = True
+        self._threadsafe_submissions: set[_ThreadsafeSubmission] = set()
+        self._threadsafe_submissions_lock = threading.Lock()
+        self._threadsafe_submission_intake_open = True
 
     @property
     def is_running(self) -> bool:
@@ -139,12 +152,10 @@ class Channel(ABC):
 
     def _open_threadsafe_future_intake(self) -> None:
         """Allow a newly started provider to submit work to its main loop."""
-        with self._threadsafe_futures_lock:
-            pending = [future for future in self._threadsafe_futures if not future.done()]
-            if pending:
+        with self._threadsafe_submissions_lock:
+            if self._threadsafe_submissions:
                 raise RuntimeError(f"cannot restart {self.name} while cross-thread work is still running")
-            self._threadsafe_futures.clear()
-            self._threadsafe_future_intake_open = True
+            self._threadsafe_submission_intake_open = True
 
     def _submit_threadsafe_coroutine(
         self,
@@ -154,60 +165,111 @@ class Channel(ABC):
         name: str,
         msg_id: Any,
         reservation: InboundReservation | None = None,
-    ) -> Future[T] | None:
-        """Submit and retain provider-thread work until completion or shutdown."""
+    ) -> bool:
+        """Submit provider-thread work while retaining its real asyncio Task."""
 
-        with self._threadsafe_futures_lock:
-            if not self._threadsafe_future_intake_open or loop is None or not loop.is_running():
+        with self._threadsafe_submissions_lock:
+            if not self._threadsafe_submission_intake_open or loop is None or not loop.is_running():
                 coroutine.close()
                 if reservation is not None:
                     reservation.release()
-                return None
-            try:
-                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
-            except RuntimeError:
-                coroutine.close()
-                if reservation is not None:
-                    reservation.release()
-                return None
-            self._threadsafe_futures.add(future)
+                return False
 
-        future.add_done_callback(
-            lambda completed: self._finalize_threadsafe_future(
-                completed,
+            submission = _ThreadsafeSubmission(
+                coroutine=coroutine,
+                loop=loop,
                 name=name,
                 msg_id=msg_id,
                 reservation=reservation,
+                completion=Future(),
             )
-        )
-        return future
+            self._threadsafe_submissions.add(submission)
+            try:
+                loop.call_soon_threadsafe(self._start_threadsafe_submission, submission)
+            except RuntimeError:
+                self._threadsafe_submissions.discard(submission)
+                coroutine.close()
+                if reservation is not None:
+                    reservation.release()
+                return False
+        return True
 
-    def _finalize_threadsafe_future(
+    def _start_threadsafe_submission(self, submission: _ThreadsafeSubmission) -> None:
+        """Create the owned Task on its event loop or finish a pre-start cancel."""
+        task: asyncio.Task[Any] | None = None
+        startup_error: BaseException | None = None
+        with self._threadsafe_submissions_lock:
+            if submission.cancel_requested:
+                self._threadsafe_submissions.discard(submission)
+                cancelled_before_start = True
+            else:
+                cancelled_before_start = False
+                try:
+                    task = submission.loop.create_task(submission.coroutine)
+                except BaseException as exc:
+                    self._threadsafe_submissions.discard(submission)
+                    startup_error = exc
+                else:
+                    submission.task = task
+
+        if cancelled_before_start:
+            submission.coroutine.close()
+            if submission.reservation is not None:
+                submission.reservation.release()
+            submission.completion.cancel()
+            return
+
+        if startup_error is not None:
+            submission.coroutine.close()
+            if submission.reservation is not None:
+                submission.reservation.release()
+            submission.completion.set_exception(startup_error)
+            self._log_future_error(submission.completion, submission.name, submission.msg_id)
+            return
+
+        assert task is not None
+        task.add_done_callback(lambda completed: self._finalize_threadsafe_submission(submission, completed))
+
+    def _finalize_threadsafe_submission(
         self,
-        future: Future[Any],
-        *,
-        name: str,
-        msg_id: Any,
-        reservation: InboundReservation | None,
+        submission: _ThreadsafeSubmission,
+        task: asyncio.Task[Any],
     ) -> None:
-        with self._threadsafe_futures_lock:
-            self._threadsafe_futures.discard(future)
-        if reservation is not None:
-            reservation.release()
-        self._log_future_error(future, name, msg_id)
+        with self._threadsafe_submissions_lock:
+            self._threadsafe_submissions.discard(submission)
+        if submission.reservation is not None:
+            submission.reservation.release()
+
+        if task.cancelled():
+            submission.completion.cancel()
+        else:
+            try:
+                submission.completion.set_result(task.result())
+            except BaseException as exc:
+                submission.completion.set_exception(exc)
+        self._log_future_error(submission.completion, submission.name, submission.msg_id)
 
     async def _close_and_drain_threadsafe_futures(self) -> None:
-        """Close cross-thread submission, then cancel and await owned futures."""
-        with self._threadsafe_futures_lock:
-            self._threadsafe_future_intake_open = False
-            futures = tuple(self._threadsafe_futures)
+        """Close submission, then cancel and await the owned asyncio Tasks."""
+        with self._threadsafe_submissions_lock:
+            self._threadsafe_submission_intake_open = False
+            submissions = tuple(self._threadsafe_submissions)
+            tasks: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any]]] = []
+            for submission in submissions:
+                submission.cancel_requested = True
+                if submission.task is not None:
+                    tasks.append((submission.loop, submission.task))
 
-        for future in futures:
-            future.cancel()
-        if futures:
-            await asyncio.gather(*(asyncio.wrap_future(future) for future in futures), return_exceptions=True)
-            with self._threadsafe_futures_lock:
-                self._threadsafe_futures.difference_update(future for future in futures if future.done())
+        for loop, task in tasks:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                logger.warning("[%s] event loop closed before cross-thread task cancellation", self.name)
+        if submissions:
+            await asyncio.gather(
+                *(asyncio.shield(asyncio.wrap_future(submission.completion)) for submission in submissions),
+                return_exceptions=True,
+            )
 
     def _pending_connect_code(self, text: str) -> str | None:
         """Return the one-time bind code if *text* is a ``/connect <code>`` command
