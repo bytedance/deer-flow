@@ -34,6 +34,12 @@ def _run(coro):
         loop.close()
 
 
+async def _take_inbound(bus: MessageBus):
+    inbound = await asyncio.wait_for(bus.get_inbound(), timeout=1)
+    bus.inbound_task_done()
+    return inbound
+
+
 # ---------------------------------------------------------------------------
 # Helper: build mock ChatbotMessage
 # ---------------------------------------------------------------------------
@@ -258,8 +264,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.channel_name == "dingtalk"
             assert inbound.chat_id == "user_001"
             assert inbound.user_id == "user_001"
@@ -292,8 +297,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.channel_name == "dingtalk"
             assert inbound.chat_id == "conv_group_001"
             assert inbound.user_id == "user_002"
@@ -330,8 +334,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.msg_type == InboundMessageType.COMMAND, f"{text!r} should be COMMAND"
             assert not inbound.text.startswith("@"), "leading mention must be stripped for dispatch"
             assert inbound.text.split(maxsplit=1)[0] in KNOWN_CHANNEL_COMMANDS
@@ -362,8 +365,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.msg_type == InboundMessageType.CHAT
             assert inbound.text == "@bot please summarise this"
 
@@ -393,8 +395,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.chat_id == "conv_group_001"
             assert inbound.topic_id == "msg_group_002"
             assert inbound.metadata["conversation_type"] == _CONVERSATION_TYPE_GROUP
@@ -431,6 +432,7 @@ class TestOnChatbotMessage:
             await asyncio.sleep(0.1)
 
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
 
         _run(go())
 
@@ -459,6 +461,7 @@ class TestOnChatbotMessage:
             await asyncio.sleep(0.1)
 
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
 
         _run(go())
 
@@ -490,8 +493,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.chat_id == "conv_group_003"
             assert inbound.topic_id == "msg_group_003"
 
@@ -512,8 +514,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.msg_type == InboundMessageType.COMMAND
 
         _run(go())
@@ -533,8 +534,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.msg_type == InboundMessageType.CHAT
 
         _run(go())
@@ -553,6 +553,7 @@ class TestOnChatbotMessage:
 
             await asyncio.sleep(0.1)
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
 
         _run(go())
 
@@ -577,7 +578,7 @@ class TestAllowedUsersFiltering:
             channel._on_chatbot_message(msg)
 
             await asyncio.sleep(0.1)
-            bus.publish_inbound.assert_awaited_once()
+            await _take_inbound(bus)
 
         _run(go())
 
@@ -595,6 +596,7 @@ class TestAllowedUsersFiltering:
 
             await asyncio.sleep(0.1)
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
 
         _run(go())
 
@@ -615,6 +617,7 @@ class TestAllowedUsersFiltering:
                 await asyncio.sleep(0.1)
 
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
             # The parsed-message INFO log (with message content) must not fire for
             # a blocked sender — allowed_users still acts as a privacy/noise filter.
             assert "parsed message" not in caplog.text
@@ -638,6 +641,7 @@ class TestAllowedUsersFiltering:
             await asyncio.sleep(0.1)
             channel._bind_connection_from_connect_code.assert_awaited_once()
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
 
         _run(go())
 
@@ -655,7 +659,7 @@ class TestAllowedUsersFiltering:
             channel._on_chatbot_message(msg)
 
             await asyncio.sleep(0.1)
-            bus.publish_inbound.assert_awaited_once()
+            await _take_inbound(bus)
 
         _run(go())
 
@@ -871,7 +875,7 @@ class TestTopicIdMapping:
             channel._on_chatbot_message(msg)
 
             await asyncio.sleep(0.1)
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.topic_id is None
 
         _run(go())
@@ -894,7 +898,7 @@ class TestTopicIdMapping:
             channel._on_chatbot_message(msg)
 
             await asyncio.sleep(0.1)
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.topic_id == "msg_group_001"
 
         _run(go())
@@ -1645,29 +1649,34 @@ class TestCardMode:
         assert channel._dingtalk_client is mock_client
 
     def test_chatbot_message_stored_for_card_mode(self):
-        bus = MessageBus()
-        channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
+        async def go():
+            bus = MessageBus()
+            channel = DingTalkChannel(bus, config={"card_template_id": "tpl_123"})
 
-        mock_message = MagicMock()
-        mock_message.sender_staff_id = "user_001"
-        mock_message.conversation_type = "1"
-        mock_message.conversation_id = ""
-        mock_message.message_id = "msg_001"
-        mock_message.sender_nick = "TestUser"
-        mock_message.message_type = "text"
-        mock_message.text = MagicMock(content="hello")
-        mock_message.rich_text_content = None
+            mock_message = MagicMock()
+            mock_message.sender_staff_id = "user_001"
+            mock_message.conversation_type = "1"
+            mock_message.conversation_id = ""
+            mock_message.message_id = "msg_001"
+            mock_message.sender_nick = "TestUser"
+            mock_message.message_type = "text"
+            mock_message.text = MagicMock(content="hello")
+            mock_message.rich_text_content = None
 
-        channel._main_loop = MagicMock()
-        channel._main_loop.is_running.return_value = False
-        channel._allowed_users = set()
-        channel._running = True
+            channel._main_loop = asyncio.get_running_loop()
+            channel._allowed_users = set()
+            channel._running = True
+            channel._send_running_reply = AsyncMock()
 
-        channel._on_chatbot_message(mock_message)
+            channel._on_chatbot_message(mock_message)
+            await asyncio.sleep(0.1)
 
-        assert len(channel._incoming_messages) == 1
-        stored_msg = list(channel._incoming_messages.values())[0]
-        assert stored_msg is mock_message
+            assert len(channel._incoming_messages) == 1
+            stored_msg = list(channel._incoming_messages.values())[0]
+            assert stored_msg is mock_message
+            await _take_inbound(bus)
+
+        _run(go())
 
     def test_card_replier_cleanup_on_final(self):
         async def go():
@@ -1867,8 +1876,7 @@ class TestOnChatbotMessageFiles:
             channel._on_chatbot_message(_make_picture_message(download_code="dc_pic", sender_staff_id="u1", message_id="m1"))
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.msg_type == InboundMessageType.CHAT
             assert inbound.files == [{"type": "image", "download_code": "dc_pic", "filename": "image.png"}]
 
@@ -1887,8 +1895,7 @@ class TestOnChatbotMessageFiles:
             channel._on_chatbot_message(_make_file_message(download_code="dc_doc", file_name="data.csv", sender_staff_id="u1", message_id="m1"))
             await asyncio.sleep(0.1)
 
-            bus.publish_inbound.assert_awaited_once()
-            inbound = bus.publish_inbound.await_args.args[0]
+            inbound = await _take_inbound(bus)
             assert inbound.files == [{"type": "file", "download_code": "dc_doc", "filename": "data.csv"}]
 
         _run(go())
@@ -1909,6 +1916,7 @@ class TestOnChatbotMessageFiles:
             await asyncio.sleep(0.1)
 
             bus.publish_inbound.assert_not_awaited()
+            assert bus.inbound_queue.empty()
 
         _run(go())
 

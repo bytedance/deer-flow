@@ -323,6 +323,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                    multi_instance=startup_config.scheduler.multi_instance,
+                    run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
@@ -653,6 +655,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ExtensionLoadError,
         initialize_runtime_diagnostics,
         load_extensions,
+        record_runtime_diagnostics,
         set_loaded_extensions,
     )
 
@@ -779,6 +782,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    # Extension routes are deliberately last: FastAPI/Starlette dispatches in
+    # registration order, so every host route (including conditional routes
+    # and /health) keeps precedence. Definite shadows are rejected with an
+    # attributed diagnostic while unrelated extension routers still mount.
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    record_runtime_diagnostics(include_contributed_routers(app, loaded_extensions))
 
     return app
 

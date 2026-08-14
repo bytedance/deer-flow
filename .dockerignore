@@ -69,3 +69,10 @@ backend/.coverage
 !README.md
 !frontend/README.md
 !backend/README.md
+
+# Extension manager snapshots must enter the backend builder intact. A Python
+# package may require README metadata, native modules, or package assets that
+# the general image-context exclusions above intentionally omit elsewhere.
+!backend/extensions/
+!backend/extensions/sources/
+!backend/extensions/sources/**

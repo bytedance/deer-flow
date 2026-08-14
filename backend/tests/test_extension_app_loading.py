@@ -85,6 +85,53 @@ def test_create_app_exposes_one_canonical_live_diagnostics_list(monkeypatch):
     ]
 
 
+def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
+    from fastapi import APIRouter
+    from fastapi.testclient import TestClient
+
+    import deerflow.extensions as extensions_module
+
+    conflict = APIRouter()
+    good = APIRouter()
+
+    @conflict.get("/health")
+    async def shadow_health():
+        return {"status": "extension"}
+
+    @good.get("/api/extension-test/ping")
+    async def ping():
+        return {"ok": True}
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("router:install"):
+        registry.routers((conflict, good))
+    loaded = registry.build()
+    monkeypatch.setattr(
+        extensions_module,
+        "load_extensions",
+        lambda plugins: (loaded, []),
+    )
+
+    from app.gateway.app import create_app
+
+    app = create_app()
+    paths = [getattr(route, "path", None) for route in app.routes]
+
+    assert paths.count("/health") == 1
+    assert "/api/extension-test/ping" in paths
+    assert len(app.state.extension_diagnostics) == 1
+    assert app.state.extension_diagnostics == extensions_module.get_runtime_diagnostics()
+    assert app.state.extension_diagnostics[0].source == "router:install"
+    assert "host" in app.state.extension_diagnostics[0].message
+
+    client = TestClient(app)
+    assert client.get("/health").json() == {
+        "status": "healthy",
+        "service": "deer-flow-gateway",
+    }
+    assert client.get("/api/extension-test/ping").status_code == 401
+
+
 def test_create_app_fails_open_when_extension_loading_raises_unexpectedly(monkeypatch):
     import deerflow.extensions as extensions_module
 
