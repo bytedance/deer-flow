@@ -301,6 +301,20 @@ Provider note:
 - `models[*].use` references provider classes by module path (for example `langchain_openai:ChatOpenAI`).
 - If a provider module is missing, DeerFlow now returns an actionable error with install guidance (for example `uv add langchain-google-genai`).
 
+### Custom Agent Subagent Defaults
+
+A custom agent that depends on delegation can declare defaults in its own
+`config.yaml`:
+
+```yaml
+subagent_enabled: true
+max_concurrent_subagents: 2
+```
+
+Explicit runtime request values override these defaults. If neither is set,
+the runtime defaults remain `false` and `3`, respectively. The concurrency
+value must be between 1 and 4.
+
 ### Extensions Configuration (`extensions_config.json`)
 
 MCP servers and skill states in a single file:

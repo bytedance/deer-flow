@@ -103,6 +103,21 @@ def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
     return default
 
 
+def _inject_resolved_runtime_option(config: RunnableConfig, key: str, value) -> None:
+    """Expose a resolved option to both legacy and current runtime consumers."""
+    configurable = dict(config.get("configurable", {}) or {})
+    configurable[key] = value
+    config["configurable"] = configurable
+
+    context = config.get("context")
+    if context is None:
+        config["context"] = {key: value}
+    elif isinstance(context, dict):
+        runtime_context = dict(context)
+        runtime_context[key] = value
+        config["context"] = runtime_context
+
+
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
     """Append memory tools without dropping unrelated duplicate-named tools."""
     from deerflow.agents.memory.tools import get_memory_tools
@@ -709,8 +724,6 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))
@@ -728,6 +741,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     agent_reasoning = getattr(agent_config, "reasoning_effort", None) if agent_config else None
     thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", agent_thinking, True))
     reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", agent_reasoning, None)
+
+    # Subagent precedence: request > custom agent default > runtime default
+    # (issue #2381). Write the resolved pair back to both config sections so
+    # task injection, prompt rendering, middleware, and ToolRuntime consumers
+    # all observe the same values.
+    agent_subagent_enabled = getattr(agent_config, "subagent_enabled", None) if agent_config else None
+    agent_max_concurrent_subagents = getattr(agent_config, "max_concurrent_subagents", None) if agent_config else None
+    subagent_enabled = bool(_resolve_runtime_option(cfg, "subagent_enabled", agent_subagent_enabled, False))
+    max_concurrent_subagents = _resolve_runtime_option(cfg, "max_concurrent_subagents", agent_max_concurrent_subagents, 3)
+    _inject_resolved_runtime_option(config, "subagent_enabled", subagent_enabled)
+    _inject_resolved_runtime_option(config, "max_concurrent_subagents", max_concurrent_subagents)
 
     # Per-agent sampling overrides (temperature / max_tokens) layered on top of
     # the resolved model profile (issue #4336). None when the agent set none.

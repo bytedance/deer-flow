@@ -29,3 +29,8 @@
   Gateway and `DeerFlowClient.stream()` always provide the runtime `run_id`; custom
   graph integrations must do the same. If it is absent, enforcement deliberately
   counts the thread's full delegation ledger (fail-restrictive) and emits a warning.
+
+Custom-agent `config.yaml` files may set `subagent_enabled` and
+`max_concurrent_subagents` as defaults. Runtime request values take precedence,
+and `make_lead_agent()` writes the resolved pair to both `configurable` and
+`context` before constructing tools, prompt, and middleware.
