@@ -2216,6 +2216,14 @@ run_ownership:
 #   langgraph_url: http://localhost:8001/api
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
+#   # Maximum queued or provider-reserved inbound messages. Must be a positive integer.
+#   inbound_queue_maxsize: 1000
+#   # Fixed number of long-lived inbound handler workers. Must be a positive integer.
+#   max_concurrency: 5
+#   # Seconds to drain accepted inbound work before cancelling active handlers.
+#   # Must be a non-negative finite number. Cancelled handlers are awaited; the Gateway's
+#   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
+#   shutdown_grace_period_seconds: 3
 #   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
