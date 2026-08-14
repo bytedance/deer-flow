@@ -286,6 +286,12 @@ make down   # Stop and remove containers
 
 Access: http://localhost:2026
 
+`make up` waits for the Gateway `/health` endpoint before reporting success.
+If the Gateway does not become healthy within the startup window, deployment
+exits non-zero and prints the container status plus recent Gateway logs. The
+production image starts from its already-built environment and never resolves
+or installs Python dependencies at container startup.
+
 For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
@@ -346,6 +352,10 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    ```
 
 6. **Access**: http://localhost:2026
+
+Local services always use their internal ports (`8001`, `3000`, and `2026`).
+The root `.env` variable `PORT` configures only the published Docker ingress;
+it does not change the Next.js port used by `make dev`.
 
 #### Startup Modes
 
