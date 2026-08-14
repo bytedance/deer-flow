@@ -857,7 +857,7 @@ class TelegramChannel(Channel):
                 return
             try:
                 inbound = await self._attach_connection_identity(inbound)
-                future = self._submit_threadsafe_coroutine(
+                scheduled = self._submit_threadsafe_coroutine(
                     self._process_incoming_with_reply(
                         chat_id,
                         update.message.message_id,
@@ -869,7 +869,7 @@ class TelegramChannel(Channel):
                     msg_id=update.message.message_id,
                     reservation=reservation,
                 )
-                if future is None:
+                if not scheduled:
                     logger.info("[Telegram] main loop stopped before reserved command could be scheduled")
             except Exception:
                 reservation.release()
@@ -928,7 +928,7 @@ class TelegramChannel(Channel):
                 return
             try:
                 inbound = await self._attach_connection_identity(inbound)
-                future = self._submit_threadsafe_coroutine(
+                scheduled = self._submit_threadsafe_coroutine(
                     self._process_incoming_with_reply(
                         chat_id,
                         update.message.message_id,
@@ -940,7 +940,7 @@ class TelegramChannel(Channel):
                     msg_id=update.message.message_id,
                     reservation=reservation,
                 )
-                if future is None:
+                if not scheduled:
                     logger.info("[Telegram] main loop stopped before reserved inbound could be scheduled")
             except Exception:
                 reservation.release()
