@@ -30,6 +30,7 @@ class LaunchPlan:
     thread_id: str | None = None
     continue_recent: bool = False
     forced_tui: bool = False
+    transparent: bool = False
     recursion_limit: int | None = None
     reason: str = ""
 
@@ -48,6 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="deerflow",
         description="DeerFlow terminal workbench — a TUI over the embedded DeerFlow harness.",
+        epilog="Extension management: deerflow extensions --help",
         add_help=True,
     )
     parser.add_argument("message", nargs="*", help="initial prompt for the TUI, or message in --cli mode")
@@ -70,6 +72,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="headless streaming: emit newline-delimited JSON StreamEvents and exit",
     )
     parser.add_argument("--tui", action="store_true", help="force the terminal UI (error if unavailable)")
+    parser.add_argument(
+        "--tui-transparent",
+        action="store_true",
+        help="use the terminal's default background in the TUI",
+    )
     parser.add_argument("--cli", action="store_true", help="force headless/classic mode for one invocation")
     parser.add_argument("--continue", dest="continue_recent", action="store_true", help="resume the most recent thread")
     parser.add_argument("--resume", dest="resume", metavar="THREAD", default=None, help="resume a thread by id or title")
@@ -162,6 +169,7 @@ def plan_launch(
         )
 
     forced_tui = bool(args.tui)
+    transparent = bool(args.tui_transparent) or _truthy(env.get("DEER_FLOW_TUI_TRANSPARENT"))
     if forced_tui or _truthy(env.get("DEER_FLOW_TUI")) or (stdin_isatty and stdout_isatty):
         return LaunchPlan(
             mode="tui",
@@ -169,6 +177,7 @@ def plan_launch(
             thread_id=resume,
             continue_recent=continue_recent,
             forced_tui=forced_tui,
+            transparent=transparent,
         )
 
     return LaunchPlan(
@@ -189,12 +198,14 @@ deerflow — DeerFlow terminal workbench
 
   deerflow                      launch the terminal UI (TTY required)
   deerflow --tui                force the terminal UI
+  deerflow --tui-transparent    use the terminal's default background
   deerflow --continue           resume the most recent thread in the UI
   deerflow --resume THREAD      resume a thread by id or title
   deerflow --print "question"   one-shot answer to stdout
   deerflow --json "question"    stream newline-delimited JSON events
   deerflow --recursion-limit N --print "question"
                               set the headless agent-loop super-step limit
+  deerflow extensions --help  install and manage trusted Python extensions
   echo "question" | deerflow --print
 """
 
@@ -213,6 +224,10 @@ def _run_overrides(plan: LaunchPlan) -> dict[str, int]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "extensions":
+        from deerflow.extensions.cli import main as extensions_main
+
+        return extensions_main(argv[1:])
     plan = plan_launch(
         argv,
         stdin_isatty=sys.stdin.isatty(),

@@ -2,17 +2,22 @@
 
 import pytest
 
-from deerflow.tui.cli import LaunchPlan, plan_launch
+from deerflow.tui.cli import LaunchPlan, build_parser, plan_launch
 
 
 def plan(argv, *, stdin_tty=True, stdout_tty=True, env=None):
     return plan_launch(argv, stdin_isatty=stdin_tty, stdout_isatty=stdout_tty, env=env or {})
 
 
+def test_top_level_help_points_to_extension_management():
+    assert "deerflow extensions --help" in build_parser().format_help()
+
+
 def test_bare_command_on_tty_launches_tui():
     p = plan([])
     assert p.mode == "tui"
     assert p.forced_tui is False
+    assert p.transparent is False
 
 
 def test_non_tty_with_no_message_falls_back_to_headless_help():
@@ -71,6 +76,18 @@ def test_force_tui_even_without_tty():
 def test_env_var_forces_tui():
     p = plan([], stdin_tty=False, stdout_tty=False, env={"DEER_FLOW_TUI": "1"})
     assert p.mode == "tui"
+
+
+def test_transparent_flag_is_carried_to_tui_plan():
+    p = plan(["--tui-transparent"])
+    assert p.mode == "tui"
+    assert p.transparent is True
+
+
+def test_transparent_env_is_carried_to_tui_plan():
+    p = plan([], env={"DEER_FLOW_TUI_TRANSPARENT": "yes"})
+    assert p.mode == "tui"
+    assert p.transparent is True
 
 
 def test_cli_flag_with_message_runs_print():

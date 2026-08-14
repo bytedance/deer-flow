@@ -397,6 +397,7 @@ class TestChannelBase:
         assert "prepare_inbound failed for msg_id=m1: boom" in caplog.text
 
     def test_channel_capabilities_match_channel_defaults(self):
+        from app.channels.buzz import BuzzChannel
         from app.channels.dingtalk import DingTalkChannel
         from app.channels.discord import DiscordChannel
         from app.channels.feishu import FeishuChannel
@@ -409,6 +410,7 @@ class TestChannelBase:
 
         bus = MessageBus()
         defaults = {
+            "buzz": BuzzChannel(bus=bus, config={"relay_url": "wss://buzz.example.com"}).supports_streaming,
             "dingtalk": DingTalkChannel(bus=bus, config={}).supports_streaming,
             "discord": DiscordChannel(bus=bus, config={}).supports_streaming,
             "feishu": FeishuChannel(bus=bus, config={}).supports_streaming,
@@ -5690,6 +5692,219 @@ class TestHandleChatWithArtifacts:
         _run(go())
 
 
+class TestDiscordChannel:
+    def test_stop_prevents_queued_typing_starter_from_creating_task(self):
+        from app.channels.discord import DiscordChannel
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            # Queue the starter without yielding to it.  stop() therefore runs
+            # first and must form a boundary that the delayed starter cannot
+            # cross by installing a fresh infinite typing loop afterwards.
+            starter = asyncio.create_task(channel._start_typing(typing_target, "chat-1"))
+            await channel.stop()
+            await starter
+
+            try:
+                assert channel._typing_tasks == {}
+            finally:
+                leaked_tasks = list(channel._typing_tasks.values())
+                for task in leaked_tasks:
+                    task.cancel()
+                await asyncio.gather(*leaked_tasks, return_exceptions=True)
+
+        _run(go())
+
+    def test_stop_serializes_typing_cleanup_with_discord_loop(self):
+        from app.channels.discord import DiscordChannel
+
+        class BlockingTypingTasks(dict):
+            def __init__(self, lookup_started: threading.Event, release_lookup: threading.Event):
+                super().__init__()
+                self._lookup_started = lookup_started
+                self._release_lookup = release_lookup
+                self.registered_task = None
+
+            def __contains__(self, key):
+                self._lookup_started.set()
+                if not self._release_lookup.wait(timeout=5):
+                    raise TimeoutError("typing-task lookup was not released")
+                return super().__contains__(key)
+
+            def __setitem__(self, key, value):
+                self.registered_task = value
+                super().__setitem__(key, value)
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            discord_loop = asyncio.new_event_loop()
+            loop_ready = threading.Event()
+
+            def run_discord_loop():
+                asyncio.set_event_loop(discord_loop)
+                loop_ready.set()
+                discord_loop.run_forever()
+
+            discord_thread = threading.Thread(target=run_discord_loop, daemon=True)
+            discord_thread.start()
+            assert await asyncio.to_thread(loop_ready.wait, 5)
+
+            lookup_started = threading.Event()
+            release_lookup = threading.Event()
+            stop_started = threading.Event()
+            channel._discord_loop = discord_loop
+            typing_tasks = BlockingTypingTasks(lookup_started, release_lookup)
+            channel._typing_tasks = typing_tasks
+            channel.bus.unsubscribe_outbound = MagicMock(side_effect=lambda _callback: stop_started.set())
+
+            starter = asyncio.run_coroutine_threadsafe(channel._start_typing(typing_target, "chat-1"), discord_loop)
+            stop_task = None
+
+            try:
+                # Pause the Discord loop after _start_typing() has observed
+                # _running=True but before it can create and register the task.
+                assert await asyncio.to_thread(lookup_started.wait, 5)
+
+                stop_task = asyncio.create_task(channel.stop())
+                # unsubscribe_outbound() runs immediately after stop() flips
+                # _running to False.  Once this fires, release the Discord
+                # loop so any queued cleanup can serialize after registration.
+                assert await asyncio.to_thread(stop_started.wait, 5)
+                release_lookup.set()
+
+                await asyncio.wait_for(stop_task, timeout=5)
+                await asyncio.wait_for(asyncio.wrap_future(starter), timeout=5)
+
+                assert typing_tasks == {}
+                assert typing_tasks.registered_task is not None
+                assert typing_tasks.registered_task.done()
+            finally:
+                release_lookup.set()
+                if stop_task is not None and not stop_task.done():
+                    stop_task.cancel()
+                    await asyncio.gather(stop_task, return_exceptions=True)
+
+                if not starter.done():
+                    starter.cancel()
+                await asyncio.gather(asyncio.wrap_future(starter), return_exceptions=True)
+
+                async def cleanup_typing_tasks():
+                    leaked_tasks = list(channel._typing_tasks.values())
+                    for task in leaked_tasks:
+                        task.cancel()
+                    await asyncio.gather(*leaked_tasks, return_exceptions=True)
+                    channel._typing_tasks.clear()
+
+                cleanup = asyncio.run_coroutine_threadsafe(cleanup_typing_tasks(), discord_loop)
+                await asyncio.wait_for(asyncio.wrap_future(cleanup), timeout=5)
+                discord_loop.call_soon_threadsafe(discord_loop.stop)
+                await asyncio.to_thread(discord_thread.join, 5)
+                assert not discord_thread.is_alive()
+                discord_loop.close()
+
+        _run(go())
+
+    def test_stop_does_not_await_typing_tasks_from_stopped_discord_loop(self):
+        from app.channels.discord import DiscordChannel
+
+        async def go():
+            channel = DiscordChannel(MessageBus(), config={})
+            channel._running = True
+            typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+            discord_loop = asyncio.new_event_loop()
+            loop_ready = threading.Event()
+
+            def run_discord_loop():
+                asyncio.set_event_loop(discord_loop)
+                loop_ready.set()
+                discord_loop.run_forever()
+
+            discord_thread = threading.Thread(target=run_discord_loop, daemon=True)
+            discord_thread.start()
+            assert await asyncio.to_thread(loop_ready.wait, 5)
+
+            channel._discord_loop = discord_loop
+            channel._thread = discord_thread
+            starter = asyncio.run_coroutine_threadsafe(channel._start_typing(typing_target, "chat-1"), discord_loop)
+            await asyncio.wait_for(asyncio.wrap_future(starter), timeout=5)
+            typing_task = channel._typing_tasks["chat-1"]
+
+            discord_loop.call_soon_threadsafe(discord_loop.stop)
+            await asyncio.to_thread(discord_thread.join, 5)
+            assert not discord_thread.is_alive()
+            assert not discord_loop.is_running()
+            assert not typing_task.done()
+
+            try:
+                # The task belongs to a loop that has already exited.  stop()
+                # must not gather it from the main loop, and must still finish
+                # clearing all channel lifecycle state.
+                await channel.stop()
+
+                assert channel._typing_tasks == {}
+                assert channel._thread is None
+                assert channel._discord_loop is None
+            finally:
+
+                def drain_stopped_loop():
+                    asyncio.set_event_loop(discord_loop)
+                    if not typing_task.done():
+                        typing_task.cancel()
+                    discord_loop.run_until_complete(asyncio.gather(typing_task, return_exceptions=True))
+                    discord_loop.close()
+
+                await asyncio.to_thread(drain_stopped_loop)
+
+        _run(go())
+
+    def test_run_client_drains_typing_tasks_before_worker_loop_exits(self):
+        from app.channels.discord import DiscordChannel
+
+        channel = DiscordChannel(MessageBus(), config={})
+        channel._running = True
+        typing_target = SimpleNamespace(trigger_typing=AsyncMock())
+
+        class FailingClient:
+            def __init__(self):
+                self.closed = False
+                self.typing_task = None
+
+            async def start(self, _token):
+                await channel._start_typing(typing_target, "chat-1")
+                self.typing_task = channel._typing_tasks["chat-1"]
+                raise RuntimeError("simulated disconnect")
+
+            def is_closed(self):
+                return self.closed
+
+            async def close(self):
+                self.closed = True
+
+        client = FailingClient()
+        channel._client = client
+        channel._bot_token = "token"
+
+        try:
+            with patch("app.channels.discord.logger.exception"):
+                channel._run_client()
+
+            assert channel._typing_tasks == {}
+            assert client.typing_task is not None
+            assert client.typing_task.done()
+            assert client.closed
+        finally:
+            discord_loop = channel._discord_loop
+            if discord_loop is not None and not discord_loop.is_closed():
+                discord_loop.close()
+
+
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
         from app.channels.feishu import FeishuChannel
@@ -6388,7 +6603,244 @@ class TestFeishuCardSuccessChecks:
         _run(go())
 
 
+class _ControlledWeComManager:
+    def __init__(self, shutdown_started: asyncio.Event, release_shutdown: asyncio.Event, shutdown_finished: asyncio.Event) -> None:
+        self._ws = object()
+        self._is_manual_close = False
+        self.shutdown_started = shutdown_started
+        self.release_shutdown = release_shutdown
+        self.shutdown_finished = shutdown_finished
+        self.shutdown_tasks: list[asyncio.Task] = []
+        self.heartbeat_stopped = False
+        self.pending_messages_cleared = False
+
+    def _stop_heartbeat(self) -> None:
+        self.heartbeat_stopped = True
+
+    def _clear_pending_messages(self, _reason: str) -> None:
+        self.pending_messages_cleared = True
+
+    def disconnect(self) -> None:
+        self._is_manual_close = True
+        self._stop_heartbeat()
+        self._clear_pending_messages("Connection manually closed")
+        if self._ws:
+            asyncio.ensure_future(self._async_disconnect())
+
+    async def _async_disconnect(self) -> None:
+        shutdown_task = asyncio.current_task()
+        assert shutdown_task is not None
+        self.shutdown_tasks.append(shutdown_task)
+        self.shutdown_started.set()
+        try:
+            await self.release_shutdown.wait()
+        finally:
+            self._ws = None
+            self.shutdown_finished.set()
+
+
+class _ControlledWeComClient:
+    def __init__(self, manager: _ControlledWeComManager) -> None:
+        self._ws_manager = manager
+        self._started = False
+        self.connect_started = asyncio.Event()
+
+    def on(self, *_args) -> None:
+        pass
+
+    async def connect(self):
+        self._started = True
+        self.connect_started.set()
+        return self
+
+    def disconnect(self) -> None:
+        if not self._started:
+            return
+        self._started = False
+        self._ws_manager.disconnect()
+
+
+async def _wait_for_next_event_loop_turn() -> None:
+    checkpoint = asyncio.get_running_loop().create_future()
+    asyncio.get_running_loop().call_soon(checkpoint.set_result, None)
+    await checkpoint
+
+
 class TestWeComChannel:
+    def test_stop_waits_for_connection_task_cancellation(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            channel = WeComChannel(MessageBus(), config={})
+            connection_started = asyncio.Event()
+            cancellation_finished = asyncio.Event()
+
+            async def connect():
+                connection_started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    cancellation_finished.set()
+
+            connection_task = asyncio.create_task(connect())
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = connection_task
+            await connection_started.wait()
+
+            try:
+                await channel.stop()
+
+                assert connection_task.done()
+                assert cancellation_finished.is_set()
+                assert channel._ws_task is None
+            finally:
+                if not connection_task.done():
+                    connection_task.cancel()
+                await asyncio.gather(connection_task, return_exceptions=True)
+
+        _run(go())
+
+    def test_stop_waits_for_sdk_shutdown_after_connect_returns(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            shutdown_started = asyncio.Event()
+            release_shutdown = asyncio.Event()
+            shutdown_finished = asyncio.Event()
+            manager = _ControlledWeComManager(shutdown_started, release_shutdown, shutdown_finished)
+            client = _ControlledWeComClient(manager)
+            channel = WeComChannel(MessageBus(), config={})
+            connect_task = asyncio.create_task(client.connect())
+            await connect_task
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = connect_task
+
+            stop_task = asyncio.create_task(channel.stop())
+            await shutdown_started.wait()
+            await _wait_for_next_event_loop_turn()
+
+            try:
+                assert not stop_task.done()
+            finally:
+                release_shutdown.set()
+                await asyncio.gather(stop_task, *manager.shutdown_tasks, return_exceptions=True)
+
+            assert shutdown_finished.is_set()
+            assert len(manager.shutdown_tasks) == 1
+            assert manager.heartbeat_stopped
+            assert manager.pending_messages_cleared
+            assert not client._started
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+
+        _run(go())
+
+    def test_concurrent_start_waits_for_stop_before_installing_new_client(self, monkeypatch):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            old_cancellation_started = asyncio.Event()
+            release_old_cancellation = asyncio.Event()
+            start_attempted = asyncio.Event()
+            new_client = MagicMock()
+            new_client.connect_started = asyncio.Event()
+
+            async def connect_new_client():
+                new_client.connect_started.set()
+                return new_client
+
+            new_client.connect = connect_new_client
+            monkeypatch.setitem(
+                __import__("sys").modules,
+                "aibot",
+                SimpleNamespace(
+                    WSClient=lambda _options: new_client,
+                    WSClientOptions=lambda **kwargs: SimpleNamespace(**kwargs),
+                ),
+            )
+
+            async def connect_old_client():
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    old_cancellation_started.set()
+                    await release_old_cancellation.wait()
+                    raise
+
+            old_task = asyncio.create_task(connect_old_client())
+            channel = WeComChannel(MessageBus(), config={"bot_id": "bot", "bot_secret": "secret"})
+            channel._running = True
+            channel._ws_client = SimpleNamespace(disconnect=MagicMock())
+            channel._ws_task = old_task
+
+            stop_task = asyncio.create_task(channel.stop())
+            await old_cancellation_started.wait()
+
+            async def start_concurrently():
+                start_attempted.set()
+                await channel.start()
+
+            start_task = asyncio.create_task(start_concurrently())
+            await start_attempted.wait()
+            release_old_cancellation.set()
+            await asyncio.gather(stop_task, start_task)
+            await new_client.connect_started.wait()
+
+            assert channel._running
+            assert channel._ws_client is new_client
+            assert channel._ws_task is not None
+            assert channel._ws_task.done()
+
+        _run(go())
+
+    def test_cancelled_stop_finishes_sdk_shutdown_and_clears_state(self):
+        from app.channels.wecom import WeComChannel
+
+        async def go():
+            shutdown_started = asyncio.Event()
+            release_shutdown = asyncio.Event()
+            shutdown_finished = asyncio.Event()
+            manager = _ControlledWeComManager(shutdown_started, release_shutdown, shutdown_finished)
+            client = _ControlledWeComClient(manager)
+            channel = WeComChannel(MessageBus(), config={})
+            connect_task = asyncio.create_task(client.connect())
+            await connect_task
+            channel._running = True
+            channel._ws_client = client
+            channel._ws_task = connect_task
+            channel._ws_frames["message-1"] = {"body": {}}
+            channel._ws_stream_ids["message-1"] = "stream-1"
+
+            stop_task = asyncio.create_task(channel.stop())
+            await shutdown_started.wait()
+            await _wait_for_next_event_loop_turn()
+            stop_task.cancel()
+            await _wait_for_next_event_loop_turn()
+
+            assert not stop_task.done()
+            assert not shutdown_finished.is_set()
+
+            release_shutdown.set()
+
+            try:
+                with pytest.raises(asyncio.CancelledError):
+                    await stop_task
+            finally:
+                release_shutdown.set()
+                await asyncio.gather(*manager.shutdown_tasks, return_exceptions=True)
+
+            assert shutdown_finished.is_set()
+            assert channel._ws_client is None
+            assert channel._ws_task is None
+            assert channel._ws_shutdown_task is None
+            assert channel._ws_frames == {}
+            assert channel._ws_stream_ids == {}
+
+        _run(go())
+
     def test_publish_ws_inbound_starts_stream_and_publishes_message(self, monkeypatch):
         from app.channels.wecom import WeComChannel
 
@@ -9649,3 +10101,254 @@ def test_merge_stream_text_newline_split():
 def test_merge_stream_text_normal_append():
     _merge = _get_merge_stream_text()
     assert _merge("Hello ", "world") == "Hello world"
+
+
+# ---------------------------------------------------------------------------
+# LIVE-TEST FINDING 1 (critical, data disclosure): _accumulate_stream_text
+# decided what streamed payloads become displayable assistant text by REJECTING
+# only payloads whose ``type`` contained "tool".  DeerFlow injects hidden
+# context -- memory facts (DynamicContextMiddleware) and durable context
+# (DurableContextMiddleware) -- as hidden HumanMessages whose ``type`` is
+# "human", and DynamicContextMiddleware also rewrites the user's own turn into
+# a fresh HumanMessage.  All of those are written to the messages channel, so
+# LangGraph fans them out on the ``messages-tuple`` stream and the old denylist
+# accumulated them and published them to the IM channel as the assistant's
+# reply.  Proved live on a Buzz relay: the connector published
+# "<memory>\nFacts:\n- [context | 0.70] ...\n</memory> ▉" and, in another run,
+# a verbatim echo of the user's own inbound message.
+#
+# The filter is now an ALLOWLIST of assistant message types.  These tests pin
+# both directions: hidden context never accumulates, and assistant streaming --
+# including multi-chunk merging across one message id -- is untouched.
+# ---------------------------------------------------------------------------
+
+
+def _get_accumulate_stream_text():
+    from app.channels.manager import _accumulate_stream_text
+
+    return _accumulate_stream_text
+
+
+_MEMORY_LEAK_TEXT = "<memory>\nFacts:\n- [context | 0.70] User interacts with the assistant through the DeerFlow chat channel.\n</memory>"
+
+
+def test_accumulate_stream_text_rejects_hidden_memory_human_message():
+    """The exact live leak: a hidden HumanMessage carrying a <memory> block."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "id": "run-1__memory",
+                "type": "human",
+                "content": _MEMORY_LEAK_TEXT,
+                "additional_kwargs": {"hide_from_ui": True},
+            },
+            {"langgraph_node": "model_request"},
+        ],
+    )
+    assert text is None
+    assert message_id is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_durable_context_human_message():
+    """DurableContextMiddleware's hidden <durable_context_data> block."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(
+        buffers,
+        None,
+        [
+            {"id": "dc-1", "type": "human", "content": "<durable_context_data>\n## Conversation summary so far\nsecret\n</durable_context_data>"},
+            {},
+        ],
+    )
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_echo_of_plain_human_message():
+    """DynamicContextMiddleware re-writes the user's own turn as a new
+    HumanMessage; echoing it back to the channel as the assistant's reply is
+    the second half of the same live leak."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(buffers, None, [{"id": "u-1__user", "type": "human", "content": "what is my deploy status?"}, {}])
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_system_message():
+    """The <system-reminder> SystemMessage is hidden context too."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(buffers, None, [{"id": "s-1", "type": "system", "content": "<system-reminder>Today is 2026-08-01</system-reminder>"}, {}])
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_still_rejects_tool_payloads():
+    """Pre-existing behavior: tool calls and tool results are never displayable."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    assert _accumulate(buffers, None, [{"id": "t-1", "type": "tool", "content": "bash output"}, {}]) == (None, None)
+    assert _accumulate(buffers, None, [{"id": "t-2", "type": "ToolMessageChunk", "content": "more output"}, {}]) == (None, None)
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_rejects_hidden_context_wrapped_in_kwargs_shape():
+    """The LangChain ``to_json`` shape the function already reads content from:
+    the wrapper's own ``type`` is "constructor", so the real message type has to
+    be resolved from ``kwargs``/``id`` or hidden context walks straight through."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, _ = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "HumanMessage"],
+                "kwargs": {"id": "m-1", "content": _MEMORY_LEAK_TEXT},
+            },
+            {},
+        ],
+    )
+    assert text is None
+    assert buffers == {}
+
+
+def test_accumulate_stream_text_accepts_assistant_chunk_in_kwargs_shape():
+    """...and the same shape must still stream an AIMessageChunk."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(
+        buffers,
+        None,
+        [
+            {
+                "lc": 1,
+                "type": "constructor",
+                "id": ["langchain", "schema", "messages", "AIMessageChunk"],
+                "kwargs": {"id": "ai-9", "content": "Hello"},
+            },
+            {},
+        ],
+    )
+    assert text == "Hello"
+    assert message_id == "ai-9"
+
+
+def test_accumulate_stream_text_rejects_untyped_bare_string_payload():
+    """A bare ``str`` payload carries no type information at all, so it cannot be
+    attributed to the assistant.  Under an allowlist an unattributable payload
+    must not be published -- hidden context arriving that way would be
+    indistinguishable from assistant output."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    assert _accumulate(buffers, None, "Hello") == (None, None)
+    assert _accumulate(buffers, "ai-1", ["raw text", {}]) == (None, "ai-1")
+    assert buffers == {}
+
+
+@pytest.mark.parametrize("payload_type", ["ai", "AIMessageChunk", "AIMessage", "assistant"])
+def test_accumulate_stream_text_accepts_every_assistant_type_spelling(payload_type):
+    """The literal ``type`` values assistant output actually carries: LangChain
+    serializes AIMessage as "ai" and AIMessageChunk as "AIMessageChunk"; the
+    OpenAI-style "assistant" spelling is accepted for foreign runtimes."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    text, message_id = _accumulate(buffers, None, [{"id": "ai-1", "content": "Hi", "type": payload_type}, {"langgraph_node": "agent"}])
+    assert text == "Hi"
+    assert message_id == "ai-1"
+
+
+def test_accumulate_stream_text_merges_multi_chunk_assistant_stream_across_one_message_id():
+    """The function's entire purpose.  Pinned hard so the allowlist can never
+    silently kill streaming for Feishu / Telegram / WeCom / Buzz."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    current: str | None = None
+    seen = []
+    for delta in ("Hello", " ", "world", "!"):
+        text, current = _accumulate(buffers, current, [{"id": "ai-1", "content": delta, "type": "AIMessageChunk"}, {"langgraph_node": "agent"}])
+        seen.append(text)
+    assert seen == ["Hello", "Hello ", "Hello world", "Hello world!"]
+    assert current == "ai-1"
+    assert buffers == {"ai-1": "Hello world!"}
+
+
+def test_accumulate_stream_text_keeps_separate_buffers_per_message_id():
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    _accumulate(buffers, None, [{"id": "ai-1", "content": "first", "type": "AIMessageChunk"}, {}])
+    _accumulate(buffers, "ai-1", [{"id": "ai-2", "content": "second", "type": "AIMessageChunk"}, {}])
+    text, current = _accumulate(buffers, "ai-2", [{"id": "ai-1", "content": "-more", "type": "AIMessageChunk"}, {}])
+    assert text == "first-more"
+    assert current == "ai-1"
+    assert buffers == {"ai-1": "first-more", "ai-2": "second"}
+
+
+def test_accumulate_stream_text_hidden_context_between_assistant_chunks_never_enters_the_buffer():
+    """Interleaving is the realistic live shape: the middleware writes its hidden
+    HumanMessage in the middle of a turn.  It must neither be published nor
+    corrupt the assistant buffer it sits between."""
+    _accumulate = _get_accumulate_stream_text()
+    buffers: dict[str, str] = {}
+    _, current = _accumulate(buffers, None, [{"id": "ai-1", "content": "Deploy ", "type": "AIMessageChunk"}, {}])
+    leaked, current_after = _accumulate(buffers, current, [{"id": "mem-1", "type": "human", "content": _MEMORY_LEAK_TEXT}, {}])
+    assert leaked is None
+    assert current_after == "ai-1"  # the assistant message id is preserved
+    text, _ = _accumulate(buffers, current_after, [{"id": "ai-1", "content": "succeeded.", "type": "AIMessageChunk"}, {}])
+    assert text == "Deploy succeeded."
+    assert buffers == {"ai-1": "Deploy succeeded."}
+
+
+def test_streaming_chat_never_publishes_hidden_memory_context(monkeypatch):
+    """End-to-end through _handle_streaming_chat: the hidden <memory> HumanMessage
+    the live relay actually received must reach no outbound message at all."""
+    from app.channels.manager import ChannelManager
+
+    monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+    async def go():
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store)
+        outbound_received: list[OutboundMessage] = []
+
+        async def capture_outbound(msg):
+            outbound_received.append(msg)
+
+        bus.subscribe_outbound(capture_outbound)
+
+        stream_events = [
+            _make_stream_part("messages-tuple", [{"id": "u-1__user", "type": "human", "content": "what is my deploy status?"}, {}]),
+            _make_stream_part("messages-tuple", [{"id": "u-1__memory", "type": "human", "content": _MEMORY_LEAK_TEXT, "additional_kwargs": {"hide_from_ui": True}}, {}]),
+            _make_stream_part("messages-tuple", [{"id": "ai-1", "content": "All green.", "type": "AIMessageChunk"}, {"langgraph_node": "agent"}]),
+            _make_stream_part(
+                "values",
+                {"messages": [{"type": "human", "content": "what is my deploy status?"}, {"type": "ai", "content": "All green."}], "artifacts": []},
+            ),
+        ]
+
+        mock_client = _make_mock_langgraph_client()
+        mock_client.runs.stream = MagicMock(return_value=_make_async_iterator(stream_events))
+        manager._client = mock_client
+        await manager.start()
+
+        await bus.publish_inbound(InboundMessage(channel_name="buzz", chat_id="chan-1", user_id="pk-1", text="what is my deploy status?", thread_ts=None))
+        await _wait_for(lambda: any(m.is_final for m in outbound_received))
+        await manager.stop()
+
+        assert outbound_received, "expected at least the final outbound"
+        for published in outbound_received:
+            assert "<memory>" not in published.text
+            assert "what is my deploy status?" not in published.text
+        assert [m.text for m in outbound_received] == ["All green. ▉", "All green."]
+
+    _run(go())

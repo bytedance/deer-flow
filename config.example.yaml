@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 32
+config_version: 33
 
 # ============================================================================
 # Logging
@@ -41,7 +41,8 @@ logging:
 # lead-only vs subagent-only configuration is not expressible yet. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
-# lets extensions_config.json remain the source of truth for extension packages.
+# lets extensions_config.json remain the source of truth for this legacy
+# config-declared middleware list. Packaged plugins use the `plugins:` block below.
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
@@ -1699,17 +1700,18 @@ memory:
   # Backend-private config (a dict), passed verbatim to the backend __init__.
   # Each backend self-interprets it (DeerMem parses it into DeerMemConfig).
   #
-  # OpenViking HTTP example (replace this DeerMem backend_config block when
-  # manager_class is openviking; OpenViking currently supports middleware mode):
+  # OpenViking example (replace this DeerMem backend_config block when
+  # manager_class is openviking). This first official-adapter integration uses
+  # one credential-bound OpenViking USER key for one DeerFlow user and supports
+  # middleware mode only. Use owner_user_id: default when DeerFlow auth is off.
   #
   # backend_config:
   #   base_url: http://openviking:1933
-  #   auth_mode: trusted
-  #   account: deerflow
+  #   owner_user_id: default
   #   api_key_env: OPENVIKING_API_KEY
-  #   max_connections: 100
-  #   max_keepalive_connections: 20
-  #   max_seen_message_ids: 512 # recent-ID fallback for compacted histories
+  #   timeout_seconds: 30
+  #   default_peer_id: deerflow
+  #   max_seen_message_ids: 512 # bounded hash-only capture cursor
   #   startup_policy: fail_fast
   #   failure_policy:
   #     read: fail_open
@@ -1718,10 +1720,26 @@ memory:
   #     top_k: 8
   #     score_threshold: 0.25
   #     max_injection_chars: 12000
+  #     content_mode: overview
+  #     injection_query: >-
+  #       user profile preferences important entities events ongoing goals
+  #       constraints and prior decisions
   #
   # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
   # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
   # optional Compose overlay uses the internal http://openviking:1933 address.
+  #
+  # Honcho example (replace this DeerMem backend_config block when
+  # manager_class is honcho). This remote HTTP adapter uses Honcho's server-side
+  # deriver to build user-model memory representations; no local LLM calls.
+  #
+  # backend_config:
+  #   base_url: http://localhost:8000
+  #   # api_key: $HONCHO_API_KEY   # hosted Honcho; plain-http + api_key needs allow_insecure_http: true
+  #   workspace_prefix: deerflow-u-   # one isolated workspace per user id
+  #   # workspace_overrides: {}    # map specific user ids to custom workspaces
+  #   # user_peer_overrides: {}    # map specific user ids to custom peer names
+  #   assistant_peer: deerflow
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
@@ -2055,6 +2073,24 @@ scheduler:
   min_once_delay_seconds: 60
 
 # ============================================================================
+# Long-running MCP Tasks Configuration
+# ============================================================================
+# Protocol-neutral durable task runtime. This foundation is disabled by
+# default; an MCP task driver must be configured before tasks can be submitted.
+# All fields are restart-required (captured at Gateway lifespan startup).
+#
+# mcp_tasks:
+#   enabled: false               # Master switch for the background status poller
+#   poll_interval_seconds: 5     # Scan interval and default task retry interval
+#   lease_seconds: 120           # Expired claims become recoverable after this delay
+#   max_concurrent_polls: 8      # Maximum status calls started by one worker per scan
+mcp_tasks:
+  enabled: false
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_polls: 8
+
+# ============================================================================
 # Run Ownership Configuration
 # ============================================================================
 # Controls cross-process run ownership for multi-worker deployments.
@@ -2161,6 +2197,9 @@ run_ownership:
 #     enabled: false
 #
 #   wecom:
+#     enabled: false
+#
+#   buzz:
 #     enabled: false
 
 # ============================================================================
@@ -2279,6 +2318,20 @@ run_ownership:
 #     mention_only: false             # If true, only respond when the bot is mentioned
 #     allowed_channels: []              # Optional: channel IDs exempt from mention_only (bot responds without mention)
 #     thread_mode: false               # If true, group a channel conversation into a thread
+#
+#   # Buzz (https://github.com/block/buzz) — Nostr-relay team workspace.
+#   # DeerFlow joins as a member identity; generate a keypair and register it as
+#   # a relay member, then @mention or DM DeerFlow in Buzz. Requires the `buzz`
+#   # dependency extra (uv sync --extra buzz).
+#   buzz:
+#     enabled: false
+#     relay_url: wss://buzz.example.com
+#     private_key: $BUZZ_PRIVATE_KEY        # hex or nsec1…
+#     allowed_users: []                     # pubkeys (hex or npub) allowed to trigger runs.
+#                                           # DENY-BY-DEFAULT (unlike other channels): empty
+#                                           # means nobody, and DeerFlow logs a startup warning.
+#     require_mention: true                 # @mention needed in channels
+#     mention_free_channels: []             # channel UUIDs that respond to every message
 
 # ============================================================================
 # Guardrails Configuration
@@ -2473,3 +2526,50 @@ authorization:
 #         # Security features (enabled by default):
 #         pkce_enabled: true               # PKCE (S256) for authorization code flow
 #         nonce_enabled: true              # Nonce validation in ID tokens
+
+# --- Plugins ----------------------------------------------------------------
+# Extension packages, loaded once at startup in the order listed here. Each
+# entry names an install entry point as "module.path:install"; the `config`
+# block is handed to that package verbatim and validated by the package itself.
+#
+# Prefer the extension manager over editing this list by hand:
+#   make extension-install SOURCE="deerflow-extension-acme==1.2.3"
+#   make extension-install SOURCE="git+https://github.com/acme/deerflow-extension-acme.git@<commit>"
+#   make extension-install SOURCE="/absolute/path/to/local-extension"
+#   make extension-list
+#   make extension-enable NAME=acme
+#   make extension-disable NAME=acme
+#   make extension-remove NAME=acme
+# The installer updates backend/pyproject.toml, backend/uv.lock, and this block
+# together. It also asks the operator to confirm that the source is trusted;
+# extensions and their build systems execute with Gateway privileges.
+#
+# Every install, enable, disable, remove, or manual edit requires a Gateway
+# restart. Development launchers may fetch missing locked artifacts before
+# handoff; a built production Gateway never installs plugins during startup.
+# Local directories are copied to backend/extensions/sources as deployable
+# snapshots; use a pinned version or public HTTPS Git commit for reproducible
+# remote sources. SSH Git URLs are rejected because the stock Docker builder
+# does not forward host SSH credentials.
+# Loading remains explicit: a package installed outside the manager does nothing
+# until it is listed here, and list order fixes contribution ordering.
+#
+# This is deliberately separate from the `extensions:` block above (MCP servers,
+# skills, config-declared middlewares). That one is backed by
+# extensions_config.json, which the Gateway can rewrite through an HTTP
+# endpoint; a list that causes code to be imported must stay in this
+# operator-controlled file only.
+#
+# Plugins can contribute semantically placed middleware, task-lifecycle hooks,
+# system-model observers, Gateway-lifetime services, and eager FastAPI HTTP routers.
+# See examples/deerflow-extension-example for a package that exercises all five.
+#
+# plugins:
+#   - name: example                       # PEP 621 entry-point name
+#     package: deerflow-extension-example # Python distribution managed by uv
+#     use: deerflow_extension_example:install
+#     enabled: true                       # false skips import and registration
+#     required: false                     # true makes load failure abort Gateway startup
+#                                         # (install --required opts in)
+#     config:
+#       label: example                    # extension-private values, if any
