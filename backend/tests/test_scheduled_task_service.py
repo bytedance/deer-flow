@@ -1001,3 +1001,63 @@ async def test_malformed_launch_result_still_retains_active_slot():
 
     first_row_id = run_repo.created[0]["run_record_id"]
     assert run_repo.rows[first_row_id]["status"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_rejected_when_global_budget_exhausted():
+    """Manual trigger must return a conflict when max_concurrent_runs is reached."""
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-budget", "thread_id": kwargs["thread_id"]}
+
+    row = _once_task_row(task_id="task-budget", status="enabled")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "overlap_policy": "skip"})
+    task_repo = DummyTaskRepo([row])
+    # active_count equals max_concurrent_runs → budget is exhausted
+    run_repo = DummyRunRepo(active_count=3)
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "conflict"
+    assert "limit" in result["error"]
+    assert launched == []
+    assert run_repo.created is None
+
+
+@pytest.mark.asyncio
+async def test_manual_trigger_proceeds_when_global_budget_available():
+    """Manual trigger must launch when active count is below max_concurrent_runs."""
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-ok", "thread_id": kwargs["thread_id"]}
+
+    row = _once_task_row(task_id="task-ok", status="enabled")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "overlap_policy": "skip"})
+    task_repo = DummyTaskRepo([row])
+    # active_count is 2, max_concurrent_runs is 3 → one slot left
+    run_repo = DummyRunRepo(active_count=2)
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    result = await service.dispatch_task(row, now=datetime.now(UTC), trigger="manual")
+
+    assert result["outcome"] == "launched"
+    assert len(launched) == 1

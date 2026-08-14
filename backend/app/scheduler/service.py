@@ -183,6 +183,25 @@ class ScheduledTaskService:
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
 
+        # Global concurrent-run budget check for manual triggers.  The poller
+        # enforces max_concurrent_runs via count_active_runs() before
+        # claim_due_tasks(); a manual trigger bypasses that path and must apply
+        # the same cap so it cannot push the active count above the limit.
+        # Like the poller's count this is a non-atomic fast path; the partial
+        # unique index uq_scheduled_task_run_active is the atomic arbiter that
+        # rejects a second active insert for the *same task*, but there is no
+        # DB-level constraint that caps the global count, so we treat this as a
+        # best-effort guard consistent with how the poller enforces the budget.
+        if trigger == "manual" and self._max_concurrent_runs > 0:
+            active = await self._task_run_repo.count_active_runs()
+            if active >= self._max_concurrent_runs:
+                return {
+                    "outcome": "conflict",
+                    "task_run_id": None,
+                    "run_id": None,
+                    "thread_id": execution_thread_id,
+                    "error": "global concurrent-run limit reached",
+                }
         if self._multi_instance and trigger == "manual":
             task = await self._task_repo.claim_dispatch_lease(
                 task["id"],
