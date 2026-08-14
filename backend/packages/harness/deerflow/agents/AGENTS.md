@@ -43,3 +43,10 @@
   counts the thread's full delegation ledger (fail-restrictive) and emits a warning.
 
 **Direct subagent runtime**: `create_deerflow_agent(..., subagent_runtime=runtime)` is the explicit dependency-injection path for direct graph callers. Reuse one `deerflow.subagents.SubagentRuntime` across every graph that belongs to the same application capacity boundary. With the default subagent feature it binds middleware concurrency/total limits, the ordinary `task` tool, one real execution controller, and any active durable-batch submitter to the same snapshot. A caller-owned batch repository requires `await runtime.start()` (or `async with runtime`) before graph construction and `stop()` at shutdown; the factory fails closed while that worker is stopped, and already-built bound batch tools must fail unavailable after it stops rather than falling through to another process-global submitter. The factory never creates SQL infrastructure, renders the caller-owned `system_prompt`, or mounts Gateway API/UI routes. Full middleware takeover cannot be combined with this runtime; direct callers and custom subagent middleware remain responsible for model-visible call-policy wording.
+
+Custom-agent `config.yaml` files may set `subagent_enabled` and
+`max_concurrent_subagents` as defaults. Runtime request values take precedence,
+and `make_lead_agent()` writes the resolved pair to both `configurable` and
+`context` before constructing tools, prompt, and middleware. An empty
+`allowed_subagents` list remains a hard deny and cannot be widened by either
+default.

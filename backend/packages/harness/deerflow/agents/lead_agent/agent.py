@@ -178,6 +178,21 @@ def _resolve_runtime_option(cfg: dict, key: str, agent_value, default):
     return default
 
 
+def _inject_resolved_runtime_option(config: RunnableConfig, key: str, value) -> None:
+    """Expose a resolved option to both legacy and current runtime consumers."""
+    configurable = dict(config.get("configurable", {}) or {})
+    configurable[key] = value
+    config["configurable"] = configurable
+
+    context = config.get("context")
+    if context is None:
+        config["context"] = {key: value}
+    elif isinstance(context, dict):
+        runtime_context = dict(context)
+        runtime_context[key] = value
+        config["context"] = runtime_context
+
+
 def _append_memory_tools_without_name_conflicts(tools: list) -> None:
     """Append memory tools without dropping unrelated duplicate-named tools."""
     from deerflow.agents.memory.tools import get_memory_tools
@@ -880,13 +895,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
-    requested_subagent_enabled = cfg.get("subagent_enabled", False)
     subagent_execution_capacity = configured_subagent_max_running()
-    max_concurrent_subagents = effective_subagent_concurrency(
-        cfg.get("max_concurrent_subagents"),
-        resolved_app_config,
-        execution_capacity=subagent_execution_capacity,
-    )
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))
@@ -896,12 +905,6 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
-    # The request switch may disable delegation, but it can never widen the
-    # server-side custom-agent policy. An explicit empty list is a hard deny.
-    subagent_enabled = bool(requested_subagent_enabled and allowed_subagents != [])
-    config.setdefault("configurable", {})["subagent_enabled"] = subagent_enabled
-    if isinstance(config.get("context"), dict):
-        config["context"]["subagent_enabled"] = subagent_enabled
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
@@ -913,6 +916,25 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     agent_reasoning = getattr(agent_config, "reasoning_effort", None) if agent_config else None
     thinking_enabled = bool(_resolve_runtime_option(cfg, "thinking_enabled", agent_thinking, True))
     reasoning_effort = _resolve_runtime_option(cfg, "reasoning_effort", agent_reasoning, None)
+
+    # Subagent precedence: request > custom agent default > runtime default
+    # (issue #2381). Write the resolved pair back to both config sections so
+    # task injection, prompt rendering, middleware, and ToolRuntime consumers
+    # all observe the same values.
+    agent_subagent_enabled = getattr(agent_config, "subagent_enabled", None) if agent_config else None
+    agent_max_concurrent_subagents = getattr(agent_config, "max_concurrent_subagents", None) if agent_config else None
+    subagent_enabled = bool(_resolve_runtime_option(cfg, "subagent_enabled", agent_subagent_enabled, False))
+    # Neither a request nor a config-file default may widen an explicit
+    # custom-agent deny policy.
+    subagent_enabled = bool(subagent_enabled and allowed_subagents != [])
+    requested_max_concurrent = _resolve_runtime_option(cfg, "max_concurrent_subagents", agent_max_concurrent_subagents, 3)
+    max_concurrent_subagents = effective_subagent_concurrency(
+        requested_max_concurrent,
+        resolved_app_config,
+        execution_capacity=subagent_execution_capacity,
+    )
+    _inject_resolved_runtime_option(config, "subagent_enabled", subagent_enabled)
+    _inject_resolved_runtime_option(config, "max_concurrent_subagents", max_concurrent_subagents)
 
     # Per-agent sampling overrides (temperature / max_tokens) layered on top of
     # the resolved model profile (issue #4336). None when the agent set none.
