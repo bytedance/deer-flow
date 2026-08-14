@@ -27,7 +27,7 @@ def test_versioned_example_publishes_verification_section():
     example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
     example = yaml.safe_load(example_path.read_text(encoding="utf-8"))
 
-    assert example["config_version"] >= 33
+    assert example["config_version"] >= 34
     assert example["verification"] == {
         "receipts_enabled": True,
         "receipts_render_mode": "delegation_only",
