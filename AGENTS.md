@@ -159,6 +159,37 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
 
 Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
 
+### Prerequisites before `make dev`
+
+`make dev` does **not** generate config files. First-time setup order:
+
+```bash
+make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
+make install     # install frontend + backend deps and pre-commit hooks
+make dev         # then start everything
+```
+
+Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
+may be edited at runtime via the Gateway API but are gitignored, so never commit them.
+
+### Run a single test
+
+```bash
+# Backend (pytest); run one file or one test function
+cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
+cd backend && python -m pytest tests/path/to/test.py::test_func -q
+
+# Frontend (rstest)
+cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
+```
+
+### Logs
+
+- Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
+- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+  errors surface in the browser console at `localhost:3000`; backend tracebacks appear
+  in the Gateway terminal.
+
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
@@ -182,3 +213,11 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Version sources must stay in lockstep** — a release version must match identically in
+  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
+  (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
+  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
+  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all four at once) and
+  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
+  belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.
