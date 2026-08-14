@@ -41,6 +41,8 @@ fonts, images, audio, and video uncompressed at the proxy layer.
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**, matching the README's documented deployment model. A bare
 `"${PORT}:2026"` binds `0.0.0.0`, which does not.
+The root `PORT` value is Docker ingress configuration only; local orchestration pins
+Next.js to `3000` so loading `.env` cannot make `make dev` wait on the wrong port.
 Nginx itself listens `default_server` on IPv4+IPv6 and the
 Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
 internal; the published nginx port is the entire external surface, and the Gateway's
@@ -125,6 +127,12 @@ make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
+
+Production startup uses the image's pre-built Python environment with `uv run
+--no-sync`, gives the Gateway a real `/health` probe, and makes `make up` wait
+for that probe before printing its success banner. A readiness failure must
+surface Compose status and recent Gateway logs instead of claiming the stack is
+running.
 
 Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
 checkout before invoking Compose, matching the start and stop commands.
