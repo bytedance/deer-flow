@@ -2105,7 +2105,7 @@ class E2BSandboxProvider(SandboxProvider):
                     rel = path.relative_to(src).as_posix()
                     add_file(path, f"{dest_dir}/{rel}")
 
-        for path, target, _file_size in files:
+        for path, target, expected_size in files:
             try:
                 make_dir = getattr(client.files, "make_dir", None)
                 if callable(make_dir):
@@ -2115,6 +2115,9 @@ class E2BSandboxProvider(SandboxProvider):
             except Exception:
                 pass
             with path.open("rb") as fh:
+                actual_size = os.fstat(fh.fileno()).st_size
+                if actual_size != expected_size:
+                    raise ValueError(f"Mount file {path} changed during upload preflight")
                 client.files.write(target, fh)
         if read_only:
             try:

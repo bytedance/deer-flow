@@ -377,6 +377,29 @@ def test_upload_tree_streams_file_contents(tmp_path):
     assert client.files.write_streamed == [True]
 
 
+@pytest.mark.parametrize("replacement_content", [b"123", b"12345"], ids=["smaller", "larger"])
+def test_upload_tree_rejects_file_size_changed_after_preflight(monkeypatch, tmp_path, replacement_content):
+    source = tmp_path / "small.bin"
+    source.write_bytes(b"1234")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(replacement_content)
+    original_open = Path.open
+
+    def replace_before_open(path: Path, *args, **kwargs):
+        if path == source and replacement.exists():
+            os.replace(replacement, source)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", replace_before_open)
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="changed during upload preflight"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
 def test_upload_tree_rejects_oversized_file_before_upload(monkeypatch, tmp_path):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 4)

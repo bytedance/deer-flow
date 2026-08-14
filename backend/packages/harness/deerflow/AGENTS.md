@@ -78,6 +78,8 @@ Each mount has these fixed limits:
 - 512 MiB for all files.
 - 2,000 files.
 
-The provider checks all limits before it uploads file data. An invalid mount does not block later mounts.
+The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
+
+An invalid mount does not block later mounts.
 
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
