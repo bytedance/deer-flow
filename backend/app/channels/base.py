@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import Future
 from typing import Any, TypeVar
 
 from app.channels.commands import extract_connect_code
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    InboundMessage,
+    InboundMessageType,
+    InboundQueueClosedError,
+    InboundQueueFullError,
+    InboundReservation,
+    InboundReservationExpiredError,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +45,12 @@ class Channel(ABC):
         self.config = config
         self._running = False
         self._connection_repo: Any = config.get("connection_repo")
+        # Provider SDK callbacks often run on a dedicated thread and submit
+        # preparation work to the Gateway loop. Submission and shutdown share
+        # this lock so stop() cannot miss a future created concurrently.
+        self._threadsafe_futures: set[Future[Any]] = set()
+        self._threadsafe_futures_lock = threading.Lock()
+        self._threadsafe_future_intake_open = True
 
     @property
     def is_running(self) -> bool:
@@ -119,6 +137,78 @@ class Channel(ABC):
         if exc:
             logger.error("[%s] %s failed for msg_id=%s: %s", self.name, name, msg_id, exc)
 
+    def _open_threadsafe_future_intake(self) -> None:
+        """Allow a newly started provider to submit work to its main loop."""
+        with self._threadsafe_futures_lock:
+            pending = [future for future in self._threadsafe_futures if not future.done()]
+            if pending:
+                raise RuntimeError(f"cannot restart {self.name} while cross-thread work is still running")
+            self._threadsafe_futures.clear()
+            self._threadsafe_future_intake_open = True
+
+    def _submit_threadsafe_coroutine(
+        self,
+        coroutine: Coroutine[Any, Any, T],
+        loop: asyncio.AbstractEventLoop | None,
+        *,
+        name: str,
+        msg_id: Any,
+        reservation: InboundReservation | None = None,
+    ) -> Future[T] | None:
+        """Submit and retain provider-thread work until completion or shutdown."""
+
+        with self._threadsafe_futures_lock:
+            if not self._threadsafe_future_intake_open or loop is None or not loop.is_running():
+                coroutine.close()
+                if reservation is not None:
+                    reservation.release()
+                return None
+            try:
+                future = asyncio.run_coroutine_threadsafe(coroutine, loop)
+            except RuntimeError:
+                coroutine.close()
+                if reservation is not None:
+                    reservation.release()
+                return None
+            self._threadsafe_futures.add(future)
+
+        future.add_done_callback(
+            lambda completed: self._finalize_threadsafe_future(
+                completed,
+                name=name,
+                msg_id=msg_id,
+                reservation=reservation,
+            )
+        )
+        return future
+
+    def _finalize_threadsafe_future(
+        self,
+        future: Future[Any],
+        *,
+        name: str,
+        msg_id: Any,
+        reservation: InboundReservation | None,
+    ) -> None:
+        with self._threadsafe_futures_lock:
+            self._threadsafe_futures.discard(future)
+        if reservation is not None:
+            reservation.release()
+        self._log_future_error(future, name, msg_id)
+
+    async def _close_and_drain_threadsafe_futures(self) -> None:
+        """Close cross-thread submission, then cancel and await owned futures."""
+        with self._threadsafe_futures_lock:
+            self._threadsafe_future_intake_open = False
+            futures = tuple(self._threadsafe_futures)
+
+        for future in futures:
+            future.cancel()
+        if futures:
+            await asyncio.gather(*(asyncio.wrap_future(future) for future in futures), return_exceptions=True)
+            with self._threadsafe_futures_lock:
+                self._threadsafe_futures.difference_update(future for future in futures if future.done())
+
     def _pending_connect_code(self, text: str) -> str | None:
         """Return the one-time bind code if *text* is a ``/connect <code>`` command
         and channel connections are configured, else ``None``.
@@ -154,6 +244,48 @@ class Channel(ABC):
             files=files or [],
             metadata=metadata or {},
         )
+
+    def _reserve_inbound(self, msg: InboundMessage) -> InboundReservation | None:
+        """Reserve bounded intake capacity or explicitly drop under overload.
+
+        Real-time socket/polling providers do not expose a reliable delivery
+        retry contract to this adapter layer. They therefore drop a message
+        that cannot be admitted immediately. ``MessageBus`` emits a
+        rate-limited warning with the cumulative rejection count.
+        """
+        try:
+            return self.bus.reserve_inbound(msg)
+        except InboundQueueFullError:
+            return None
+        except (InboundQueueClosedError, InboundReservationExpiredError):
+            logger.debug("[%s] inbound ignored because channel intake is closed", self.name)
+            return None
+
+    def _commit_reserved_inbound(
+        self,
+        reservation: InboundReservation,
+        msg: InboundMessage,
+    ) -> bool:
+        """Commit a reservation on the MessageBus loop, releasing on failure."""
+        try:
+            reservation.commit(msg)
+            return True
+        except (InboundQueueClosedError, InboundReservationExpiredError):
+            logger.debug("[%s] inbound reservation expired during shutdown", self.name)
+            return False
+        finally:
+            reservation.release()
+
+    async def _publish_inbound_or_drop(self, msg: InboundMessage) -> bool:
+        """Publish from an already-serialized provider loop without waiting."""
+        try:
+            await self.bus.publish_inbound(msg)
+            return True
+        except InboundQueueFullError:
+            return False
+        except InboundQueueClosedError:
+            logger.debug("[%s] inbound ignored because channel intake is closed", self.name)
+            return False
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         """Outbound callback registered with the bus.
