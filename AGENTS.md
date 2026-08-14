@@ -41,6 +41,8 @@ fonts, images, audio, and video uncompressed at the proxy layer.
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**, matching the README's documented deployment model. A bare
 `"${PORT}:2026"` binds `0.0.0.0`, which does not.
+The root `PORT` value is Docker ingress configuration only; local orchestration pins
+Next.js to `3000` so loading `.env` cannot make `make dev` wait on the wrong port.
 Nginx itself listens `default_server` on IPv4+IPv6 and the
 Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
 internal; the published nginx port is the entire external surface, and the Gateway's
@@ -57,6 +59,7 @@ deer-flow/
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
 │   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
@@ -66,6 +69,7 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -73,8 +77,15 @@ deer-flow/
 
 Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). See the Extension System section in
-[backend/AGENTS.md](backend/AGENTS.md).
+kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
+middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
+routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
+five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
+`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
+hooks and extension code execute with Gateway privileges, so only trusted operator sources
+belong in this path. The manager transaction, accepted source forms, lock discipline, and
+contribution contract live in
+[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -105,12 +116,23 @@ make support-bundle  # Generate redacted troubleshooting summary, AI issue draft
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
+make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-list                # List configured Python extensions
+make extension-enable NAME=...     # Enable an installed extension (restart required)
+make extension-disable NAME=...    # Disable without uninstalling (restart required)
+make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
+
+Production startup uses the image's pre-built Python environment with `uv run
+--no-sync`, gives the Gateway a real `/health` probe, and makes `make up` wait
+for that probe before printing its success banner. A readiness failure must
+surface Compose status and recent Gateway logs instead of claiming the stack is
+running.
 
 Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
 checkout before invoking Compose, matching the start and stop commands.
@@ -137,6 +159,37 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
 
 Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
 
+### Prerequisites before `make dev`
+
+`make dev` does **not** generate config files. First-time setup order:
+
+```bash
+make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
+make install     # install frontend + backend deps and pre-commit hooks
+make dev         # then start everything
+```
+
+Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
+may be edited at runtime via the Gateway API but are gitignored, so never commit them.
+
+### Run a single test
+
+```bash
+# Backend (pytest); run one file or one test function
+cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
+cd backend && python -m pytest tests/path/to/test.py::test_func -q
+
+# Frontend (rstest)
+cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
+```
+
+### Logs
+
+- Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
+- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+  errors surface in the browser console at `localhost:3000`; backend tracebacks appear
+  in the Gateway terminal.
+
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
@@ -160,3 +213,11 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Version sources must stay in lockstep** — a release version must match identically in
+  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
+  (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
+  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
+  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all four at once) and
+  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
+  belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

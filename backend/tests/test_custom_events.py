@@ -149,7 +149,6 @@ async def test_real_task_tool_events_reach_astream_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _task_id: completed)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
-    monkeypatch.setattr(task_tool_module, "_token_usage_cache_enabled", lambda _config: False)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
 
     agent = create_agent(

@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 import pytest
 
 from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskSnapshot, TaskStatus, TaskSubmission
@@ -12,6 +14,24 @@ def test_task_snapshot_normalizes_string_statuses():
 def test_input_required_snapshot_requires_payload():
     with pytest.raises(ValueError, match="requires an input_required payload"):
         TaskSnapshot(status=TaskStatus.INPUT_REQUIRED)
+
+
+@pytest.mark.parametrize("interval", [float("nan"), float("inf")])
+def test_snapshot_rejects_non_finite_poll_interval(interval):
+    with pytest.raises(ValueError, match="poll_after_seconds must be a finite positive number"):
+        TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=interval)
+
+
+@pytest.mark.parametrize("interval", [0, -1, float("-inf")])
+def test_snapshot_rejects_non_positive_poll_interval(interval):
+    with pytest.raises(ValueError, match="poll_after_seconds"):
+        TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=interval)
+
+
+def test_snapshot_keeps_valid_poll_interval_schedulable():
+    snapshot = TaskSnapshot(status=TaskStatus.WORKING, poll_after_seconds=12.5)
+    assert snapshot.poll_after_seconds == 12.5
+    assert timedelta(seconds=snapshot.poll_after_seconds) == timedelta(seconds=12.5)
 
 
 def test_submission_rejects_empty_remote_id():

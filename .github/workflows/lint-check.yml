@@ -10,6 +10,34 @@ permissions:
   contents: read
 
 jobs:
+  agent-guidance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check agent guidance on pull requests
+        if: github.event_name == 'pull_request'
+        run: >-
+          python scripts/check_agent_guidance.py
+          --base-ref "${{ github.event.pull_request.base.sha }}"
+          --head-ref "${{ github.event.pull_request.head.sha }}"
+          --github-annotations
+
+      - name: Check agent guidance on pushes
+        if: github.event_name == 'push'
+        run: >-
+          python scripts/check_agent_guidance.py
+          --before "${{ github.event.before }}"
+          --after "${{ github.sha }}"
+          --github-annotations
+
   lint-backend:
     runs-on: ubuntu-latest
     steps:
@@ -22,6 +50,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
 
       - name: Check uv.lock is in sync
         working-directory: backend

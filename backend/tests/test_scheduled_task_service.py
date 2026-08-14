@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -14,10 +15,18 @@ class DummyTaskRepo:
         self.claimed = False
         self.updated = None
         self.cancelled_stuck_once = None
+        self.reconciled_stuck_once = None
 
     async def cancel_stuck_once_tasks(self, *, error):
         self.cancelled_stuck_once = error
         return 0
+
+    async def reconcile_stuck_once_tasks(self, **kwargs):
+        self.reconciled_stuck_once = kwargs
+        return 0
+
+    async def claim_dispatch_lease(self, task_id, **_kwargs):
+        return next((dict(row) for row in self.rows if row["id"] == task_id), None)
 
     async def claim_due_tasks(self, **_kwargs):
         if self.claimed:
@@ -47,6 +56,8 @@ class DummyRunRepo:
         self.active = active
         self.active_count = active_count
         self.stale_marked = None
+        self.reconciled = None
+        self.reconcile_count = 0
 
     async def count_active_runs(self):
         return self.active_count
@@ -63,6 +74,11 @@ class DummyRunRepo:
 
     async def mark_stale_active_runs(self, *, error):
         self.stale_marked = error
+        return 0
+
+    async def reconcile_active_runs(self, **kwargs):
+        self.reconcile_count += 1
+        self.reconciled = kwargs
         return 0
 
 
@@ -577,6 +593,33 @@ async def test_startup_sweep_reconciles_stale_runs_and_stuck_once_tasks():
 
 
 @pytest.mark.asyncio
+async def test_multi_instance_start_uses_lease_aware_reconciliation():
+    task_repo = DummyTaskRepo([])
+    run_repo = DummyRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        multi_instance=True,
+        run_lease_grace_seconds=17,
+    )
+
+    await service.start()
+    await asyncio.sleep(0)
+    await service.stop()
+
+    assert run_repo.reconcile_count == 1
+    assert run_repo.reconciled is not None
+    assert run_repo.reconciled["lease_grace_seconds"] == 17
+    assert task_repo.reconciled_stuck_once is not None
+    assert task_repo.reconciled_stuck_once["lease_grace_seconds"] == 17
+    assert task_repo.cancelled_stuck_once is None
+
+
+@pytest.mark.asyncio
 async def test_manual_trigger_with_active_run_returns_conflict_without_launching():
     launched = []
 
@@ -668,12 +711,12 @@ class _StatefulRunRepo:
 
     _ACTIVE = {"queued", "running"}
 
-    def __init__(self, *, fail_first_update: bool = False) -> None:
+    def __init__(self, *, fail_first_update: bool = False, fail_updates: int = 0) -> None:
         self.created: list[dict] = []
         self.updates: list[tuple[str, dict]] = []
         self.rows: dict[str, dict] = {}
-        self._fail_first_update = fail_first_update
-        self._first_update_raised = False
+        self._fail_updates = max(fail_updates, 1 if fail_first_update else 0)
+        self._updates_raised = 0
 
     async def count_active_runs(self) -> int:
         return sum(1 for row in self.rows.values() if row["status"] in self._ACTIVE)
@@ -689,10 +732,11 @@ class _StatefulRunRepo:
 
     async def update_status(self, run_record_id: str, **kwargs) -> None:
         self.updates.append((run_record_id, kwargs))
-        if self._fail_first_update and not self._first_update_raised:
-            # The launch-path queued->running write fails once, AFTER
-            # _launch_run has already returned a live run_id.
-            self._first_update_raised = True
+        if self._updates_raised < self._fail_updates:
+            # The launch-path queued->running write fails AFTER _launch_run has
+            # already returned a live run_id. Some tests fail both attempts to
+            # pin the last-resort active-slot behavior.
+            self._updates_raised += 1
             raise RuntimeError("simulated transient DB error on queued->running write")
         row = self.rows.get(run_record_id)
         if row is None:
@@ -782,6 +826,64 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
     # success path's clear-on-launch model). The real terminal outcome is
     # written by handle_run_completion.
     assert task_repo.updated[1]["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_both_post_launch_association_writes_can_fail_without_releasing_slot():
+    launched: list[dict] = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"run_id": "run-live", "thread_id": kwargs["thread_id"]}
+
+    class FailingTaskRepo(DummyTaskRepo):
+        def __init__(self, rows):
+            super().__init__(rows)
+            self.failures_remaining = 1
+
+        async def update_after_launch(self, *args, **kwargs):
+            if self.failures_remaining:
+                self.failures_remaining -= 1
+                raise RuntimeError("simulated parent bookkeeping failure")
+            await super().update_after_launch(*args, **kwargs)
+
+    task = {
+        "id": "task-double-failure",
+        "user_id": "user-1",
+        "thread_id": None,
+        "context_mode": "fresh_thread_per_run",
+        "assistant_id": "lead_agent",
+        "prompt": "do the thing",
+        "schedule_type": "cron",
+        "schedule_spec": {"cron": "*/5 * * * *"},
+        "timezone": "UTC",
+        "status": "enabled",
+        "overlap_policy": "skip",
+    }
+    task_repo = FailingTaskRepo([task])
+    run_repo = _StatefulRunRepo(fail_updates=2)
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=fake_launch,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+    now = datetime.now(UTC)
+
+    first = await service.dispatch_task(dict(task), now=now, trigger="scheduled")
+    assert first["outcome"] == "launched"
+    first_row_id = run_repo.created[0]["run_record_id"]
+    assert run_repo.rows[first_row_id] == {
+        "task_id": "task-double-failure",
+        "status": "queued",
+        "run_id": None,
+    }
+
+    second = await service.dispatch_task(dict(task), now=now, trigger="scheduled")
+    assert len(launched) == 1
+    assert second["outcome"] == "skipped"
 
 
 @pytest.mark.asyncio

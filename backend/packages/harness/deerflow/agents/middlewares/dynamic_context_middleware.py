@@ -66,6 +66,20 @@ _SUMMARY_MESSAGE_NAME = "summary"
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
 
 
+def _format_current_date() -> str:
+    return datetime.now().strftime("%Y-%m-%d, %A")
+
+
+def _format_current_date_reminder(current_date: str) -> str:
+    return "\n".join(
+        [
+            "<system-reminder>",
+            f"<current_date>{current_date}</current_date>",
+            "</system-reminder>",
+        ]
+    )
+
+
 def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
     """Return the id *message_id* had before the reminder ID-swap.
 
@@ -143,6 +157,42 @@ def _is_user_injection_target(message: object) -> bool:
     return True
 
 
+class SubagentDateContextMiddleware(AgentMiddleware):
+    """Inject hidden current-date context once per built-in subagent execution.
+
+    Built-in subagents need the same temporal anchor as the lead agent, but not
+    its user-memory lookup, frozen-conversation ID swap, or midnight refresh
+    lifecycle. Each subagent graph is one-shot and starts from fresh state, so a
+    single ``before_agent`` update makes the date available before its first
+    model call without coupling the two runtime paths.
+    """
+
+    @staticmethod
+    def _inject() -> dict:
+        current_date = _format_current_date()
+        reminder = _format_current_date_reminder(current_date)
+        return {
+            "messages": [
+                SystemMessage(
+                    content=reminder,
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _REMINDER_DATE_KEY: current_date,
+                    },
+                )
+            ]
+        }
+
+    @override
+    def before_agent(self, state, runtime: Runtime) -> dict:
+        return self._inject()
+
+    @override
+    async def abefore_agent(self, state, runtime: Runtime) -> dict:
+        return self._inject()
+
+
 class DynamicContextMiddleware(AgentMiddleware):
     """Inject memory and current date as a SystemMessage <system-reminder>.
 
@@ -186,29 +236,15 @@ class DynamicContextMiddleware(AgentMiddleware):
             if injection_enabled
             else ""
         )
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-
-        date_reminder = "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        current_date = _format_current_date()
+        date_reminder = _format_current_date_reminder(current_date)
 
         memory_block = memory_context.strip() if memory_context else None
 
         return date_reminder, memory_block
 
     def _build_date_update_reminder(self) -> str:
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        return _format_current_date_reminder(_format_current_date())
 
     @staticmethod
     def _make_reminder_and_user_messages(
@@ -270,7 +306,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         if not messages:
             return None
 
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
+        current_date = _format_current_date()
         last_date = _last_injected_date(messages)
         logger.debug(
             "DynamicContextMiddleware._inject: msg_count=%d last_date=%r current_date=%r",
