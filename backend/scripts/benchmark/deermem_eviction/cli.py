@@ -13,7 +13,7 @@ from .protocol import build_protocol_cases, validate_official_selection
 from .results import write_policy_run
 
 EVAL_ROOT = Path(__file__).resolve().parent
-BACKEND_ROOT = EVAL_ROOT.parents[1]
+BACKEND_ROOT = EVAL_ROOT.parents[2]
 DEFAULT_CONFIG = EVAL_ROOT / "configs" / "pr4789-reproduction-v1.yaml"
 DEFAULT_OFFICIAL_MANIFEST = EVAL_ROOT / "manifests" / "longmemeval-pr4789-v1.json"
 DEFAULT_SYNTHETIC_MANIFEST = EVAL_ROOT / "manifests" / "synthetic-corrections-pr4789-v1.json"

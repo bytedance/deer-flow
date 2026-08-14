@@ -3,11 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from evals.deermem_eviction.config import load_evaluation_config
-from evals.deermem_eviction.io import sha256_file
-from evals.deermem_eviction.manifest import load_official_manifest, load_synthetic_manifest
+from scripts.benchmark.deermem_eviction.config import load_evaluation_config
+from scripts.benchmark.deermem_eviction.io import sha256_file
+from scripts.benchmark.deermem_eviction.manifest import load_official_manifest, load_synthetic_manifest
 
-EVAL_ROOT = Path(__file__).parents[3] / "evals" / "deermem_eviction"
+EVAL_ROOT = Path(__file__).parents[1] / "scripts" / "benchmark" / "deermem_eviction"
 
 
 def _all_keys(value: object) -> set[str]:
@@ -57,7 +57,7 @@ def test_committed_protocol_is_pinned_and_does_not_copy_longmemeval_text() -> No
 
 
 def test_cli_contract_validation_is_offline(capsys) -> None:
-    from evals.deermem_eviction.cli import main
+    from scripts.benchmark.deermem_eviction.cli import main
 
     assert main(["validate-contracts"]) == 0
     assert "validated 40 official and 5 synthetic cases" in capsys.readouterr().out

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from evals.deermem_eviction.dataset import DatasetIntegrityError, build_distractor_bank, extract_evidence, load_longmemeval
+from scripts.benchmark.deermem_eviction.dataset import DatasetIntegrityError, build_distractor_bank, extract_evidence, load_longmemeval
 
 
 def _row(question_id: str, question_type: str, content: str) -> dict[str, object]:

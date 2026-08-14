@@ -66,8 +66,8 @@ deer-flow/
 │   │   │   ├── app.py         # FastAPI application
 │   │   │   └── routers/       # FastAPI route modules (models, mcp, memory, skills, uploads, threads, artifacts, agents, suggestions, channels)
 │   │   └── channels/          # IM platform integrations
+│   ├── scripts/benchmark/       # Standalone reproducible backend benchmarks
 │   ├── tests/                 # Test suite
-│   ├── evals/                 # Reproducible offline/live evaluations
 │   └── docs/                  # Documentation
 ├── frontend/                   # Next.js frontend application
 └── skills/                     # Agent skills directory
@@ -86,11 +86,12 @@ When making code changes, you MUST update the relevant documentation:
 - Keep documentation synchronized with the codebase at all times
 - Ensure accuracy and timeliness of all documentation
 
-### Backend Evaluations
+### Backend Benchmarks
 
-`evals/` contains standalone, reproducible evaluations of production backend
-behavior. An evaluation may import the production function it measures, but it
-must not duplicate or introduce an alternative runtime implementation.
+`scripts/benchmark/` contains standalone, reproducible measurements and
+evaluations of production backend behavior. A benchmark may import the
+production function it measures, but it must not duplicate or introduce an
+alternative runtime implementation.
 
 - Pin every external dataset by immutable revision and SHA-256. Callers provide
   the local dataset path; evaluation commands must not silently download data.
@@ -107,19 +108,19 @@ must not duplicate or introduce an alternative runtime implementation.
 - Use fixed clocks and deterministic ordering for offline selection. Results
   must record the config, manifest, prompt, dataset, and git revisions used.
 
-`evals/deermem_eviction/` evaluates the production
+`scripts/benchmark/deermem_eviction/` evaluates the production
 `select_facts_for_capacity()` implementation used by DeerMem. It compares only
 the historical `confidence` policy and PR #4789's opt-in `hybrid-v1`; do not add
 another eviction strategy to this evaluation. Run its offline checks from
 `backend/`:
 
 ```bash
-PYTHONPATH=. uv run python -m evals.deermem_eviction validate-contracts
-PYTHONPATH=. uv run python -m evals.deermem_eviction validate --dataset "$LONGMEMEVAL_ORACLE_PATH"
-PYTHONPATH=. uv run python -m evals.deermem_eviction run-policy \
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate-contracts
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate --dataset "$LONGMEMEVAL_ORACLE_PATH"
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-policy \
   --dataset "$LONGMEMEVAL_ORACLE_PATH" \
   --output-dir /tmp/deermem-eviction-policy-run
-PYTHONPATH=. uv run pytest tests/evals/deermem_eviction -q
+PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_*.py -q
 ```
 
 The offline test suite must not require network access, provider credentials,

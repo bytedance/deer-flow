@@ -47,20 +47,20 @@ Run all commands from `backend/`.
 Validate the committed config, manifests, and prompt without an upstream dataset:
 
 ```bash
-PYTHONPATH=. uv run python -m evals.deermem_eviction validate-contracts
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate-contracts
 ```
 
 Validate the dataset hash, recompute the declared sample-selection rule, build the distractor bank, and prepare all 45 cases:
 
 ```bash
-PYTHONPATH=. uv run python -m evals.deermem_eviction validate \
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction validate \
   --dataset "$LONGMEMEVAL_ORACLE_PATH"
 ```
 
 Run deterministic capacity selection without any provider calls:
 
 ```bash
-PYTHONPATH=. uv run python -m evals.deermem_eviction run-policy \
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-policy \
   --dataset "$LONGMEMEVAL_ORACLE_PATH" \
   --output-dir /tmp/deermem-eviction-policy-run
 ```
@@ -114,7 +114,7 @@ The row-level artifacts disclosed in #4789 corrected the PR text's noisy-signal 
 The default tests are offline and use only synthetic LongMemEval-shaped rows:
 
 ```bash
-PYTHONPATH=. uv run pytest tests/evals/deermem_eviction -q
+PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_*.py -q
 ```
 
 They cover config and manifest contracts, prompt hashing, dataset-integrity rejection, evidence extraction, distractor filtering, deterministic pool construction, production selector behavior, correction reservation, public-result redaction, and overwrite protection.

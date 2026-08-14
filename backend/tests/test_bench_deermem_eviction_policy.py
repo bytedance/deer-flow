@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from evals.deermem_eviction.dataset import EvidenceRecord
-from evals.deermem_eviction.policy import evaluate_case
-from evals.deermem_eviction.pool import build_case
+from scripts.benchmark.deermem_eviction.dataset import EvidenceRecord
+from scripts.benchmark.deermem_eviction.policy import evaluate_case
+from scripts.benchmark.deermem_eviction.pool import build_case
 
 NOW = datetime(2026, 8, 13, tzinfo=UTC)
 

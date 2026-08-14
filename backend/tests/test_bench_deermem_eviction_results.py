@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from evals.deermem_eviction.config import load_evaluation_config
-from evals.deermem_eviction.dataset import EvidenceRecord
-from evals.deermem_eviction.policy import evaluate_case
-from evals.deermem_eviction.pool import PreparedCase, build_case
-from evals.deermem_eviction.results import summarize_policy_results, write_policy_run
+from scripts.benchmark.deermem_eviction.config import load_evaluation_config
+from scripts.benchmark.deermem_eviction.dataset import EvidenceRecord
+from scripts.benchmark.deermem_eviction.policy import evaluate_case
+from scripts.benchmark.deermem_eviction.pool import PreparedCase, build_case
+from scripts.benchmark.deermem_eviction.results import summarize_policy_results, write_policy_run
 
-BACKEND_ROOT = Path(__file__).parents[3]
-EVAL_ROOT = BACKEND_ROOT / "evals" / "deermem_eviction"
+BACKEND_ROOT = Path(__file__).parents[1]
+EVAL_ROOT = BACKEND_ROOT / "scripts" / "benchmark" / "deermem_eviction"
 
 
 def _case() -> PreparedCase:
