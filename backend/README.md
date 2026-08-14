@@ -121,7 +121,8 @@ FastAPI application providing REST endpoints for frontend integration:
 | `GET/PUT /api/mcp/config` | Manage MCP server configurations |
 | `POST /api/mcp/cache/reset` | Reset cached MCP tools so they reload on next use |
 | `GET/PUT /api/skills` | List and manage skills |
-| `POST /api/skills/install` | Install skill from `.skill` archive |
+| `POST /api/skills/install` | Install a `.skill` archive from a thread path |
+| `POST /api/skills/install/upload` | Upload and install an offline `.skill` package (admin-only, maximum 512 MiB) |
 | `GET /api/memory` | Retrieve memory data |
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |

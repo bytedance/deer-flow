@@ -1,11 +1,14 @@
 import asyncio
 import logging
+import shutil
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from starlette.datastructures import UploadFile
+from starlette.types import Message, Receive
 
 from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
@@ -38,6 +41,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["skills"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage skills."
+_UPLOAD_CHUNK_SIZE = 1024 * 1024
+_MAX_SKILL_ARCHIVE_SIZE = 512 * 1024 * 1024
+# Leave one MiB for the multipart boundary and headers. The exact nginx route
+# uses the same 513 MiB request ceiling, while the archive itself remains
+# capped at 512 MiB below.
+_MAX_SKILL_UPLOAD_BODY_SIZE = _MAX_SKILL_ARCHIVE_SIZE + _UPLOAD_CHUNK_SIZE
+
+
+class _SkillUploadTooLarge(OSError):
+    """Raised while receiving or copying an oversized skill upload."""
 
 
 class SkillResponse(BaseModel):
@@ -147,6 +160,55 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     return get_or_new_user_skill_storage(get_effective_user_id(), app_config=config)
 
 
+def _copy_skill_upload(source: BinaryIO, destination: Path) -> None:
+    total_size = 0
+    with destination.open("wb") as output:
+        while chunk := source.read(_UPLOAD_CHUNK_SIZE):
+            total_size += len(chunk)
+            if total_size > _MAX_SKILL_ARCHIVE_SIZE:
+                raise _SkillUploadTooLarge
+            output.write(chunk)
+
+
+def _limit_skill_upload_receive(receive: Receive, *, max_bytes: int) -> Receive:
+    """Wrap an ASGI receive channel with a streaming request-body ceiling."""
+
+    received_bytes = 0
+
+    async def _receive() -> Message:
+        nonlocal received_bytes
+        message = await receive()
+        if message["type"] == "http.request":
+            received_bytes += len(message.get("body", b""))
+            if received_bytes > max_bytes:
+                # MultiPartParser catches OSError and closes any partially
+                # spooled UploadFile before propagating this exception.
+                raise _SkillUploadTooLarge
+        return message
+
+    return _receive
+
+
+def _raise_for_oversized_skill_upload_content_length(request: Request) -> None:
+    content_length = request.headers.get("content-length")
+    if content_length is None:
+        return
+    try:
+        body_size = int(content_length)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid Content-Length header.") from exc
+    if body_size < 0:
+        raise HTTPException(status_code=400, detail="Invalid Content-Length header.")
+    if body_size > _MAX_SKILL_UPLOAD_BODY_SIZE:
+        raise HTTPException(status_code=413, detail="Skill archive is too large.")
+
+
+async def _install_skill_archive(skill_file_path: Path, config: AppConfig) -> SkillInstallResponse:
+    result = await _get_user_skill_storage(config).ainstall_skill_from_archive(skill_file_path)
+    await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+    return SkillInstallResponse(**result)
+
+
 @router.get(
     "/skills",
     response_model=SkillsListResponse,
@@ -173,9 +235,7 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
-        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(skill_file_path)
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
-        return SkillInstallResponse(**result)
+        return await _install_skill_archive(skill_file_path, config)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except SkillAlreadyExistsError as e:
@@ -198,6 +258,82 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
     except Exception as e:
         logger.error(f"Failed to install skill: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}")
+
+
+@router.post(
+    "/skills/install/upload",
+    response_model=SkillInstallResponse,
+    summary="Upload and Install Skill",
+    description="Upload and install an offline .skill package.",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "properties": {"file": {"type": "string", "format": "binary"}},
+                        "required": ["file"],
+                    }
+                }
+            },
+        }
+    },
+)
+async def upload_and_install_skill(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> SkillInstallResponse:
+    # Keep authorization ahead of multipart parsing. Declaring File(...) in the
+    # signature would make FastAPI materialize the upload before this guard.
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    _raise_for_oversized_skill_upload_content_length(request)
+
+    upload_request = Request(
+        request.scope,
+        receive=_limit_skill_upload_receive(request.receive, max_bytes=_MAX_SKILL_UPLOAD_BODY_SIZE),
+    )
+    temp_dir: Path | None = None
+    try:
+        form = await upload_request.form(max_files=1, max_fields=0)
+        file = form.get("file")
+        if not isinstance(file, UploadFile) or not file.filename or not file.filename.lower().endswith(".skill"):
+            raise HTTPException(status_code=400, detail="A .skill package is required.")
+        if file.size is not None and file.size > _MAX_SKILL_ARCHIVE_SIZE:
+            raise _SkillUploadTooLarge
+
+        temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="deerflow-skill-upload-"))
+        skill_file_path = temp_dir / "uploaded.skill"
+        await asyncio.to_thread(_copy_skill_upload, file.file, skill_file_path)
+        return await _install_skill_archive(skill_file_path, config)
+    except SkillAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except SkillSecurityScanError as e:
+        if e.findings:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": str(e),
+                    "skill_name": e.skill_name,
+                    "findings": e.findings,
+                },
+            )
+        raise HTTPException(status_code=400, detail=str(e))
+    except _SkillUploadTooLarge as e:
+        raise HTTPException(status_code=413, detail="Skill archive is too large.") from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to install uploaded skill: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}")
+    finally:
+        try:
+            await upload_request.close()
+        finally:
+            if temp_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, temp_dir, True)
 
 
 @router.post(

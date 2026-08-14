@@ -26,6 +26,7 @@ from uuid import uuid4
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.formparsers import MultiPartParser
 
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
@@ -79,6 +80,21 @@ def test_non_admin_is_forbidden_on_all_mutating_skills_endpoints():
         for method, path, body in _GUARDED_ENDPOINTS:
             resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
             assert resp.status_code == 403, f"{method.upper()} {path} expected 403 for non-admin, got {resp.status_code}"
+
+
+def test_non_admin_is_forbidden_from_uploading_skill_package(monkeypatch):
+    async def _multipart_must_not_be_parsed(_parser):
+        raise AssertionError("multipart parsing ran before the admin guard")
+
+    monkeypatch.setattr(MultiPartParser, "parse", _multipart_must_not_be_parsed)
+    app = _make_app(system_role="user")
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"file": ("demo.skill", b"archive", "application/octet-stream")},
+        )
+
+    assert response.status_code == 403
 
 
 def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
