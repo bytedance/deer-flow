@@ -342,13 +342,14 @@ def test_update_agent_preserves_github_block_on_description_change(tmp_path, pat
     assert cfg["github"] == github_block
 
 
-def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, patched_paths):
-    """UI/API-owned model behavior must survive agent self-edits.
+def test_update_agent_preserves_runtime_defaults_on_description_change(tmp_path, patched_paths):
+    """Config-only runtime defaults must survive agent self-edits.
 
     ``update_agent`` does not expose temperature / max_tokens / thinking /
-    reasoning arguments to the LLM, but it still rewrites config.yaml for
-    ordinary self-edits. Those fields therefore need an explicit carry-forward
-    path or a description tweak would silently reset the agent's model defaults.
+    reasoning or subagent arguments to the LLM, but it still rewrites
+    config.yaml for ordinary self-edits. Those fields therefore need a
+    carry-forward path or a description tweak would silently reset the agent's
+    runtime defaults.
     """
     agent_dir = _seed_agent(tmp_path, description="old desc")
     cfg = yaml.safe_load((agent_dir / "config.yaml").read_text())
@@ -357,6 +358,8 @@ def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, p
             "model_settings": {"temperature": 0.2, "max_tokens": 12000},
             "thinking_enabled": True,
             "reasoning_effort": "high",
+            "subagent_enabled": True,
+            "max_concurrent_subagents": 2,
         }
     )
     (agent_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -368,6 +371,8 @@ def test_update_agent_preserves_model_behavior_on_description_change(tmp_path, p
     assert out["model_settings"] == {"temperature": 0.2, "max_tokens": 12000}
     assert out["thinking_enabled"] is True
     assert out["reasoning_effort"] == "high"
+    assert out["subagent_enabled"] is True
+    assert out["max_concurrent_subagents"] == 2
 
 
 def test_update_agent_skills_empty_list_disables_all(tmp_path, patched_paths):
