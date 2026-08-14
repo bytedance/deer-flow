@@ -201,6 +201,7 @@ class FeishuChannel(Channel):
         logger.info("[Feishu] using domain: %s", domain)
         self._main_loop = asyncio.get_event_loop()
 
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -260,11 +261,17 @@ class FeishuChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
-        for task in list(self._background_tasks):
+        await self._close_and_drain_threadsafe_futures()
+
+        background_tasks = tuple(self._background_tasks)
+        running_card_tasks = tuple(self._running_card_tasks.values())
+        for task in background_tasks:
             task.cancel()
+        for task in running_card_tasks:
+            task.cancel()
+        if background_tasks or running_card_tasks:
+            await asyncio.gather(*background_tasks, *running_card_tasks, return_exceptions=True)
         self._background_tasks.clear()
-        for task in list(self._running_card_tasks.values()):
-            task.cancel()
         self._running_card_tasks.clear()
         if self._thread:
             self._thread.join(timeout=5)
@@ -837,34 +844,33 @@ class FeishuChannel(Channel):
             if reservation is None:
                 return
             logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", inbound.msg_type.value, msg_id)
-            try:
-                fut = asyncio.run_coroutine_threadsafe(
-                    self._prepare_inbound(
-                        msg_id,
-                        inbound,
-                        source_message_ids=source_message_ids,
-                        reservation=reservation,
-                    ),
-                    self._main_loop,
-                )
-                fut.add_done_callback(
-                    lambda f, res=reservation, mid=msg_id: self._finalize_reserved_inbound_future(
-                        f,
-                        res,
-                        "prepare_inbound",
-                        mid,
-                    )
-                )
-            except RuntimeError:
-                reservation.release()
+            future = self._submit_threadsafe_coroutine(
+                self._prepare_inbound(
+                    msg_id,
+                    inbound,
+                    source_message_ids=source_message_ids,
+                    reservation=reservation,
+                ),
+                self._main_loop,
+                name="prepare_inbound",
+                msg_id=msg_id,
+                reservation=reservation,
+            )
+            if future is None:
                 logger.info("[Feishu] main loop stopped before reserved inbound could be scheduled")
         else:
             logger.warning("[Feishu] main loop not running, cannot publish inbound message")
 
     def _schedule_batch_flush(self, key: tuple[str, str], source_message_id: str) -> None:
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._flush_pending_inbound_batch_after(key, source_message_id), self._main_loop)
-            fut.add_done_callback(lambda f, mid=source_message_id: self._log_future_error(f, "flush_inbound_batch", mid))
+            future = self._submit_threadsafe_coroutine(
+                self._flush_pending_inbound_batch_after(key, source_message_id),
+                self._main_loop,
+                name="flush_inbound_batch",
+                msg_id=source_message_id,
+            )
+            if future is None:
+                logger.info("[Feishu] main loop stopped before inbound batch flush could be scheduled")
         else:
             logger.warning("[Feishu] main loop not running, cannot flush inbound batch")
 
@@ -1109,7 +1115,7 @@ class FeishuChannel(Channel):
             connect_code = self._pending_connect_code(text)
             if connect_code:
                 if self._main_loop and self._main_loop.is_running():
-                    fut = asyncio.run_coroutine_threadsafe(
+                    future = self._submit_threadsafe_coroutine(
                         self._bind_connection_from_connect_code(
                             message_id=msg_id,
                             chat_id=chat_id,
@@ -1117,8 +1123,11 @@ class FeishuChannel(Channel):
                             code=connect_code,
                         ),
                         self._main_loop,
+                        name="bind_connection",
+                        msg_id=msg_id,
                     )
-                    fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
+                    if future is None:
+                        logger.info("[Feishu] main loop stopped before channel connection bind could be scheduled")
                 else:
                     logger.warning("[Feishu] main loop not running, cannot bind channel connection")
                 return

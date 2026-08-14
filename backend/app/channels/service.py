@@ -275,25 +275,26 @@ class ChannelService:
         # manager.stop(), and channel transports remain alive until that drain
         # completes so an already-sent "Working on it..." can still receive its
         # final update.
-        try:
-            await self.manager.stop()
-            for _name, channel in list(self._channels.items()):
-                try:
-                    await channel.stop()
-                    logger.info("Channel stopped")
-                except asyncio.CancelledError:
-                    # The manager has already completed its bounded ownership
-                    # cleanup. Propagate the Gateway deadline immediately;
-                    # continuing through more channel stops would extend it.
-                    raise
-                except Exception:
-                    logger.exception("Error stopping channel")
-        finally:
-            # The Gateway's outer deadline may cancel manager draining before
-            # transport shutdown can begin. It is no longer safe to await SDK
-            # cleanup then, but this stopped service must not retain live
-            # channel objects or become reusable through the singleton.
-            self._channels.clear()
+        await self.manager.stop()
+        stop_errors: list[Exception] = []
+        for name, channel in list(self._channels.items()):
+            try:
+                await channel.stop()
+            except asyncio.CancelledError:
+                # Keep this and the remaining transports owned by the service.
+                # The Gateway deadline interrupted shutdown, so detaching them
+                # would hide resources that may still be in use.
+                raise
+            except Exception as exc:
+                logger.exception("Error stopping channel")
+                stop_errors.append(exc)
+            else:
+                if self._channels.get(name) is channel:
+                    self._channels.pop(name, None)
+                logger.info("Channel stopped")
+
+        if stop_errors:
+            raise ExceptionGroup("one or more channels failed to stop", stop_errors)
 
         logger.info("ChannelService stopped")
 
@@ -502,7 +503,6 @@ async def stop_channel_service() -> None:
     global _channel_service
     if _channel_service is not None:
         service = _channel_service
-        # Detach first so cancellation or a bounded shutdown timeout cannot
-        # leave callers observing a half-stopped singleton on a later startup.
-        _channel_service = None
         await service.stop()
+        if _channel_service is service:
+            _channel_service = None

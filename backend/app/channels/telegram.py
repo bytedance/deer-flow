@@ -98,6 +98,7 @@ class TelegramChannel(Channel):
             return
 
         self._main_loop = asyncio.get_event_loop()
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -135,6 +136,7 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
         shutdown_loop = asyncio.get_running_loop()
         deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
         telegram_loop = self._tg_loop
@@ -855,7 +857,7 @@ class TelegramChannel(Channel):
                 return
             try:
                 inbound = await self._attach_connection_identity(inbound)
-                fut = asyncio.run_coroutine_threadsafe(
+                future = self._submit_threadsafe_coroutine(
                     self._process_incoming_with_reply(
                         chat_id,
                         update.message.message_id,
@@ -863,15 +865,12 @@ class TelegramChannel(Channel):
                         reservation=reservation,
                     ),
                     self._main_loop,
+                    name="process_incoming_with_reply",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
                 )
-                fut.add_done_callback(
-                    lambda f, res=reservation: self._finalize_reserved_inbound_future(
-                        f,
-                        res,
-                        "process_incoming_with_reply",
-                        update.message.message_id,
-                    )
-                )
+                if future is None:
+                    logger.info("[Telegram] main loop stopped before reserved command could be scheduled")
             except Exception:
                 reservation.release()
                 raise
@@ -929,7 +928,7 @@ class TelegramChannel(Channel):
                 return
             try:
                 inbound = await self._attach_connection_identity(inbound)
-                fut = asyncio.run_coroutine_threadsafe(
+                future = self._submit_threadsafe_coroutine(
                     self._process_incoming_with_reply(
                         chat_id,
                         update.message.message_id,
@@ -937,15 +936,12 @@ class TelegramChannel(Channel):
                         reservation=reservation,
                     ),
                     self._main_loop,
+                    name="process_incoming_with_reply",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
                 )
-                fut.add_done_callback(
-                    lambda f, res=reservation: self._finalize_reserved_inbound_future(
-                        f,
-                        res,
-                        "process_incoming_with_reply",
-                        update.message.message_id,
-                    )
-                )
+                if future is None:
+                    logger.info("[Telegram] main loop stopped before reserved inbound could be scheduled")
             except Exception:
                 reservation.release()
                 raise

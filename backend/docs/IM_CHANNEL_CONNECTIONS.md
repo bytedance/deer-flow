@@ -139,7 +139,7 @@ Admission never waits for queue space, because waiting producer coroutines would
 - Buzz leaves the per-channel replay watermark unchanged and reconnects, allowing relay history to replay the event.
 - GitHub webhook fan-out returns `503`. GitHub records the delivery as failed; an operator or recovery job can retry it through the Recent Deliveries UI or REST redelivery API (GitHub does not retry failed deliveries automatically).
 
-Shutdown first closes admission and cancels follow-up watchers, but keeps provider transports alive while workers drain accepted messages for up to `shutdown_grace_period_seconds`. Once that grace expires, it cancels active handlers within a separate bounded cleanup interval and discards queue entries that never began. Cancellation-resistant SDK calls are logged and may outlive the local deadline; a stopped manager cannot be restarted while one of its old workers is still running.
+Shutdown first closes admission and cancels follow-up watchers, but keeps provider transports alive while workers drain accepted messages for up to `shutdown_grace_period_seconds`. Once that grace expires, it cancels active handlers, discards queue entries that never began, and awaits every manager-owned worker and watcher. Provider coroutines submitted from SDK threads are likewise retained, cancelled, and awaited before their channel tears down SDK resources. A successful stop therefore leaves no owned handler able to use a closed transport. The Gateway's outer shutdown timeout remains the process-level bound; if it cancels cleanup, the service retains its transports and singleton instead of reporting a successful stop or hiding unfinished ownership.
 
 ## Sync vs Streaming Channels
 

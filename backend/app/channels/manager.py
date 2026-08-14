@@ -57,7 +57,6 @@ DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
 DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
 DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
-DEFAULT_CHANNEL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS = 1.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
@@ -990,7 +989,6 @@ class ChannelManager:
         *,
         max_concurrency: int = DEFAULT_CHANNEL_MAX_CONCURRENCY,
         shutdown_grace_period_seconds: float = DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS,
-        shutdown_cancel_timeout_seconds: float = DEFAULT_CHANNEL_SHUTDOWN_CANCEL_TIMEOUT_SECONDS,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
@@ -1003,17 +1001,12 @@ class ChannelManager:
     ) -> None:
         if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
             raise ValueError("max_concurrency must be a positive integer")
-        for setting_name, setting_value in (
-            ("shutdown_grace_period_seconds", shutdown_grace_period_seconds),
-            ("shutdown_cancel_timeout_seconds", shutdown_cancel_timeout_seconds),
-        ):
-            if isinstance(setting_value, bool) or not isinstance(setting_value, (int, float)) or not math.isfinite(setting_value) or setting_value < 0:
-                raise ValueError(f"{setting_name} must be a non-negative finite number")
+        if isinstance(shutdown_grace_period_seconds, bool) or not isinstance(shutdown_grace_period_seconds, (int, float)) or not math.isfinite(shutdown_grace_period_seconds) or shutdown_grace_period_seconds < 0:
+            raise ValueError("shutdown_grace_period_seconds must be a non-negative finite number")
         self.bus = bus
         self.store = store
         self._max_concurrency = max_concurrency
         self._shutdown_grace_period_seconds = float(shutdown_grace_period_seconds)
-        self._shutdown_cancel_timeout_seconds = float(shutdown_cancel_timeout_seconds)
         self._langgraph_url = langgraph_url
         self._gateway_url = gateway_url
         self._assistant_id = assistant_id
@@ -1590,7 +1583,7 @@ class ChannelManager:
             return
         unfinished_workers = {task for task in self._worker_tasks if not task.done()}
         if unfinished_workers:
-            raise RuntimeError("cannot restart ChannelManager while shutdown-resistant workers are still running")
+            raise RuntimeError("cannot restart ChannelManager while workers are still running")
         self._worker_tasks.clear()
         self._running = True
         self._stopped = False
@@ -1619,20 +1612,19 @@ class ChannelManager:
         return self.bus.close_inbound()
 
     async def stop(self) -> None:
-        """Drain accepted work, then cancel within one absolute deadline.
+        """Drain accepted work, then cancel and await every owned task.
 
         Admission closes immediately, but workers keep processing the accepted
         queue for ``shutdown_grace_period_seconds`` so provider acknowledgments
         are normally followed by a final response. Once that grace expires,
-        workers are cancelled and get only the bounded cancellation interval.
-        An outer Gateway cancellation consumes the remaining budget entirely:
-        cleanup requests cancellation but never starts an unbounded second
-        gather.
+        workers are cancelled. A successful return means no worker or follow-up
+        watcher can continue using channel resources. The Gateway lifespan owns
+        the process-level timeout; if it cancels this coroutine, transports stay
+        attached to the service and shutdown can be retried.
         """
         invalidated_reservations = self.begin_shutdown()
         loop = asyncio.get_running_loop()
         grace_deadline = loop.time() + self._shutdown_grace_period_seconds
-        hard_deadline = grace_deadline + self._shutdown_cancel_timeout_seconds
         worker_tasks = list(self._worker_tasks)
         watcher_tasks = list(self._followup_watcher_tasks)
 
@@ -1643,26 +1635,31 @@ class ChannelManager:
             task.cancel()
 
         join_task = asyncio.create_task(self.bus.join_inbound(), name="deerflow-channel-inbound-drain")
-        cancellation: asyncio.CancelledError | None = None
         drained = False
         try:
             done, _ = await asyncio.wait({join_task}, timeout=max(0.0, grace_deadline - loop.time()))
             drained = join_task in done and not join_task.cancelled() and join_task.exception() is None
-        except asyncio.CancelledError as exc:
-            # The caller's deadline has already expired. Synchronous cleanup
-            # below is still safe, but no further wait may extend that deadline.
-            cancellation = exc
-            hard_deadline = loop.time()
+        except asyncio.CancelledError:
+            for task in worker_tasks:
+                task.cancel()
+            discarded_messages = self.bus.discard_pending_inbound()
+            if not join_task.done():
+                join_task.cancel()
+            if invalidated_reservations or discarded_messages:
+                logger.warning(
+                    "[Manager] cancelled shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                    invalidated_reservations,
+                    discarded_messages,
+                )
+            raise
 
-        if not drained and cancellation is None:
+        if not drained:
             logger.warning(
                 "[Manager] graceful shutdown period expired after %.1fs; cancelling active handlers",
                 self._shutdown_grace_period_seconds,
             )
 
         for task in worker_tasks:
-            task.cancel()
-        for task in watcher_tasks:
             task.cancel()
 
         # Anything still queued never started and must not keep Queue.join()
@@ -1672,16 +1669,8 @@ class ChannelManager:
             join_task.cancel()
 
         owned_tasks = {task for task in (*worker_tasks, *watcher_tasks, join_task) if not task.done()}
-        pending_tasks = owned_tasks
         if owned_tasks:
-            try:
-                _, pending_tasks = await asyncio.wait(owned_tasks, timeout=max(0.0, hard_deadline - loop.time()))
-            except asyncio.CancelledError as exc:
-                # This is the only bounded join attempt. A second cancellation
-                # is propagated without another gather/wait cycle.
-                if cancellation is None:
-                    cancellation = exc
-                pending_tasks = {task for task in owned_tasks if not task.done()}
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
 
         for task in tuple(self._worker_tasks):
             if task.done():
@@ -1689,15 +1678,6 @@ class ChannelManager:
         for task in tuple(self._followup_watcher_tasks):
             if task.done():
                 self._followup_watcher_tasks.discard(task)
-
-        pending_workers = [task for task in pending_tasks if task in worker_tasks]
-        pending_watchers = [task for task in pending_tasks if task in watcher_tasks]
-        if pending_workers or pending_watchers:
-            logger.error(
-                "[Manager] channel shutdown deadline reached with cancellation-resistant tasks still running: workers=%d, watchers=%d",
-                len(pending_workers),
-                len(pending_watchers),
-            )
 
         if invalidated_reservations or discarded_messages:
             logger.warning(
@@ -1707,8 +1687,6 @@ class ChannelManager:
             )
 
         logger.info("ChannelManager stopped")
-        if cancellation is not None:
-            raise cancellation
 
     # -- worker pool -------------------------------------------------------
 

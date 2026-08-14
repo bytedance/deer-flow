@@ -2221,7 +2221,8 @@ run_ownership:
 #   # Fixed number of long-lived inbound handler workers. Must be a positive integer.
 #   max_concurrency: 5
 #   # Seconds to drain accepted inbound work before cancelling active handlers.
-#   # Must be a non-negative finite number; the Gateway's outer shutdown timeout still caps it.
+#   # Must be a non-negative finite number. Cancelled handlers are awaited; the Gateway's
+#   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
 #   shutdown_grace_period_seconds: 3
 #   #
 #   # Docker Compose note:

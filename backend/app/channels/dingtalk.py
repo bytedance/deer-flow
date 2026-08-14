@@ -188,6 +188,7 @@ class DingTalkChannel(Channel):
         if self._card_template_id:
             logger.info("[DingTalk] AI Card mode enabled (template=%s)", self._card_template_id)
 
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -202,6 +203,7 @@ class DingTalkChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
 
         stream_client = self._stream_client
         if stream_client is not None:
@@ -396,7 +398,7 @@ class DingTalkChannel(Channel):
             connect_code = self._pending_connect_code(text)
             if connect_code:
                 if self._main_loop and self._main_loop.is_running():
-                    fut = asyncio.run_coroutine_threadsafe(
+                    future = self._submit_threadsafe_coroutine(
                         self._bind_connection_from_connect_code(
                             conversation_type=conversation_type,
                             sender_staff_id=sender_staff_id,
@@ -405,8 +407,11 @@ class DingTalkChannel(Channel):
                             code=connect_code,
                         ),
                         self._main_loop,
+                        name="bind_connection",
+                        msg_id=msg_id,
                     )
-                    fut.add_done_callback(lambda f, mid=msg_id: self._log_future_error(f, "bind_connection", mid))
+                    if future is None:
+                        logger.info("[DingTalk] main loop stopped before channel connection bind could be scheduled")
                 else:
                     logger.warning("[DingTalk] main loop not running, cannot bind channel connection")
                 return
@@ -487,21 +492,14 @@ class DingTalkChannel(Channel):
                     with self._incoming_messages_lock:
                         self._incoming_messages[source_key] = message
                 logger.info("[DingTalk] publishing inbound message to bus (type=%s, msg_id=%s)", msg_type.value, msg_id)
-                try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        self._prepare_inbound(chat_id, inbound, reservation=reservation),
-                        self._main_loop,
-                    )
-                    fut.add_done_callback(
-                        lambda f, res=reservation, mid=msg_id: self._finalize_reserved_inbound_future(
-                            f,
-                            res,
-                            "prepare_inbound",
-                            mid,
-                        )
-                    )
-                except RuntimeError:
-                    reservation.release()
+                future = self._submit_threadsafe_coroutine(
+                    self._prepare_inbound(chat_id, inbound, reservation=reservation),
+                    self._main_loop,
+                    name="prepare_inbound",
+                    msg_id=msg_id,
+                    reservation=reservation,
+                )
+                if future is None:
                     logger.info("[DingTalk] main loop stopped before reserved inbound could be scheduled")
             else:
                 logger.warning("[DingTalk] main loop not running, cannot publish inbound message")

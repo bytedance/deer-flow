@@ -8134,6 +8134,7 @@ class TestSlackAllowedUsers:
         channel = SlackChannel(bus=bus, config={})
         channel._SocketModeResponse = lambda envelope_id: SimpleNamespace(envelope_id=envelope_id)
         channel._loop = self._immediate_loop()
+        channel._running = True
         channel._add_reaction = MagicMock()
         channel._send_running_reply = MagicMock()
 

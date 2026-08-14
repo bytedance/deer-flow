@@ -253,17 +253,18 @@ async def test_stop_cancels_after_grace_drops_queue_and_releases_dedupe(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_stop_deadline_is_not_extended_by_a_cancel_resistant_handler(tmp_path: Path) -> None:
+async def test_successful_stop_waits_for_cancel_resistant_workers_and_watchers(tmp_path: Path) -> None:
     bus = MessageBus(inbound_queue_maxsize=1)
     manager = ChannelManager(
         bus=bus,
         store=ChannelStore(path=tmp_path / "store.json"),
         max_concurrency=1,
         shutdown_grace_period_seconds=0.01,
-        shutdown_cancel_timeout_seconds=0.01,
     )
     handler_started = asyncio.Event()
     handler_cancelled = asyncio.Event()
+    watcher_started = asyncio.Event()
+    watcher_cancelled = asyncio.Event()
     release_after_cancel = asyncio.Event()
 
     async def cancellation_resistant_handler(_msg: InboundMessage) -> None:
@@ -272,28 +273,42 @@ async def test_stop_deadline_is_not_extended_by_a_cancel_resistant_handler(tmp_p
             await asyncio.Event().wait()
         except asyncio.CancelledError:
             handler_cancelled.set()
-            # Model an SDK call that suppresses cancellation until its own IO
-            # eventually returns. Channel shutdown must not wait indefinitely.
+            await release_after_cancel.wait()
+
+    async def cancellation_resistant_watcher() -> None:
+        watcher_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            watcher_cancelled.set()
             await release_after_cancel.wait()
 
     manager._handle_message = cancellation_resistant_handler  # type: ignore[method-assign]
     await manager.start()
+    watcher = asyncio.create_task(cancellation_resistant_watcher())
+    manager._followup_watcher_tasks.add(watcher)
+    watcher.add_done_callback(manager._followup_watcher_tasks.discard)
     await bus.publish_inbound(_message(1))
     await asyncio.wait_for(handler_started.wait(), timeout=1)
+    await asyncio.wait_for(watcher_started.wait(), timeout=1)
     workers = tuple(manager._worker_tasks)
 
-    loop = asyncio.get_running_loop()
-    started_at = loop.time()
-    await manager.stop()
-    elapsed = loop.time() - started_at
+    stop_task = asyncio.create_task(manager.stop())
+    await asyncio.wait_for(handler_cancelled.wait(), timeout=1)
+    await asyncio.wait_for(watcher_cancelled.wait(), timeout=1)
+    await asyncio.sleep(0.02)
 
-    assert elapsed < 0.2
-    assert handler_cancelled.is_set()
+    assert not stop_task.done()
     assert any(not worker.done() for worker in workers)
+    assert not watcher.done()
 
     release_after_cancel.set()
-    await asyncio.wait_for(asyncio.gather(*workers), timeout=1)
+    await asyncio.wait_for(stop_task, timeout=1)
+
     assert manager._worker_tasks == set()
+    assert manager._followup_watcher_tasks == set()
+    assert all(worker.done() for worker in workers)
+    assert watcher.done()
     await asyncio.wait_for(bus.join_inbound(), timeout=1)
 
 
@@ -305,7 +320,6 @@ async def test_outer_shutdown_cancellation_does_not_start_an_unbounded_second_jo
         store=ChannelStore(path=tmp_path / "store.json"),
         max_concurrency=1,
         shutdown_grace_period_seconds=60,
-        shutdown_cancel_timeout_seconds=60,
     )
     handler_started = asyncio.Event()
     handler_cancelled = asyncio.Event()
@@ -335,11 +349,63 @@ async def test_outer_shutdown_cancellation_does_not_start_an_unbounded_second_jo
     assert asyncio.get_running_loop().time() - started_at < 0.2
     assert handler_cancelled.is_set()
     assert any(not worker.done() for worker in workers)
+    assert manager._worker_tasks
 
     release_after_cancel.set()
-    await asyncio.wait_for(asyncio.gather(*workers), timeout=1)
+    await asyncio.wait_for(manager.stop(), timeout=1)
     assert manager._worker_tasks == set()
+    assert all(worker.done() for worker in workers)
     await asyncio.wait_for(bus.join_inbound(), timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_provider_stop_drains_cross_thread_preparation_futures() -> None:
+    from app.channels.dingtalk import DingTalkChannel
+    from app.channels.feishu import FeishuChannel
+    from app.channels.telegram import TelegramChannel
+
+    loop = asyncio.get_running_loop()
+    providers = (
+        FeishuChannel(MessageBus(), config={}),
+        DingTalkChannel(MessageBus(), config={}),
+        TelegramChannel(MessageBus(), config={}),
+        SlackChannel(MessageBus(), config={}),
+    )
+
+    for channel in providers:
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def preparation() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            finally:
+                finished.set()
+
+        channel._running = True
+        channel._main_loop = loop
+        channel._open_threadsafe_future_intake()
+        future = await asyncio.to_thread(
+            channel._submit_threadsafe_coroutine,
+            preparation(),
+            loop,
+            name="test_preparation",
+            msg_id="message-1",
+        )
+        assert future is not None
+        await asyncio.wait_for(started.wait(), timeout=1)
+
+        await asyncio.wait_for(channel.stop(), timeout=1)
+
+        assert cancelled.is_set()
+        assert finished.is_set()
+        assert future.done()
+        assert channel._threadsafe_futures == set()
 
 
 def test_channel_service_threads_intake_limits_into_bus_and_worker_pool() -> None:
@@ -370,17 +436,19 @@ def test_invalid_shutdown_grace_period_uses_finite_default(invalid_value: object
 
 
 @pytest.mark.asyncio
-async def test_cancelled_service_stop_still_drains_manager_workers() -> None:
+async def test_cancelled_service_stop_preserves_unfinished_channel_for_retry() -> None:
     service = ChannelService(channels_config={"inbound_queue_maxsize": 1, "max_concurrency": 1})
     await service.start()
     channel_stop_started = asyncio.Event()
+    release_channel_stop = asyncio.Event()
 
     class SlowChannel:
         async def stop(self) -> None:
             channel_stop_started.set()
-            await asyncio.Event().wait()
+            await release_channel_stop.wait()
 
-    service._channels["slow"] = SlowChannel()  # type: ignore[assignment]
+    slow_channel = SlowChannel()
+    service._channels["slow"] = slow_channel  # type: ignore[assignment]
     workers = tuple(service.manager._worker_tasks)
     stop_task = asyncio.create_task(service.stop())
     await asyncio.wait_for(channel_stop_started.wait(), timeout=1)
@@ -391,22 +459,33 @@ async def test_cancelled_service_stop_still_drains_manager_workers() -> None:
 
     assert service.manager._worker_tasks == set()
     assert all(worker.done() for worker in workers)
-    assert service._channels == {}
+    assert service._channels == {"slow": slow_channel}
     with pytest.raises(InboundQueueClosedError):
         await service.bus.publish_inbound(_message(9))
 
+    release_channel_stop.set()
+    await asyncio.wait_for(service.stop(), timeout=1)
+    assert service._channels == {}
+
 
 @pytest.mark.asyncio
-async def test_cancelled_manager_drain_still_releases_service_channels() -> None:
+async def test_cancelled_manager_drain_preserves_service_channels() -> None:
     service = ChannelService(channels_config={})
     manager_stop_started = asyncio.Event()
+    channel_stop_calls = 0
 
     async def blocked_manager_stop() -> None:
         manager_stop_started.set()
         await asyncio.Event().wait()
 
+    class Transport:
+        async def stop(self) -> None:
+            nonlocal channel_stop_calls
+            channel_stop_calls += 1
+
+    transport = Transport()
     service.manager.stop = blocked_manager_stop  # type: ignore[method-assign]
-    service._channels["transport"] = MagicMock()  # type: ignore[assignment]
+    service._channels["transport"] = transport  # type: ignore[assignment]
     stop_task = asyncio.create_task(service.stop())
     await asyncio.wait_for(manager_stop_started.wait(), timeout=1)
 
@@ -414,26 +493,49 @@ async def test_cancelled_manager_drain_still_releases_service_channels() -> None
     with pytest.raises(asyncio.CancelledError):
         await stop_task
 
-    assert service._channels == {}
+    assert service._channels == {"transport": transport}
+    assert channel_stop_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_global_service_is_detached_before_cancelled_shutdown() -> None:
+async def test_failed_channel_stop_preserves_service_ownership() -> None:
+    service = ChannelService(channels_config={})
+
+    class BrokenTransport:
+        async def stop(self) -> None:
+            raise RuntimeError("provider cleanup failed")
+
+    transport = BrokenTransport()
+    service._channels["transport"] = transport  # type: ignore[assignment]
+
+    with pytest.raises(ExceptionGroup, match="one or more channels failed to stop"):
+        await service.stop()
+
+    assert service._channels == {"transport": transport}
+
+
+@pytest.mark.asyncio
+async def test_global_service_is_retained_until_shutdown_succeeds() -> None:
     service = ChannelService(channels_config={})
     stop_started = asyncio.Event()
+    release_stop = asyncio.Event()
 
     async def blocked_stop() -> None:
         stop_started.set()
-        await asyncio.Event().wait()
+        await release_stop.wait()
 
     service.stop = blocked_stop  # type: ignore[method-assign]
     service_module._channel_service = service
     stop_task = asyncio.create_task(service_module.stop_channel_service())
     await asyncio.wait_for(stop_started.wait(), timeout=1)
 
-    assert service_module.get_channel_service() is None
+    assert service_module.get_channel_service() is service
 
     stop_task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await stop_task
+    assert service_module.get_channel_service() is service
+
+    release_stop.set()
+    await service_module.stop_channel_service()
     assert service_module.get_channel_service() is None

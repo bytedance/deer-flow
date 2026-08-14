@@ -566,13 +566,6 @@ class DiscordChannel(Channel):
             if not reservation_transferred:
                 reservation.release()
 
-    def _publish(self, inbound) -> bool:
-        """Publish an inbound message to the main event loop."""
-        reservation = self._reserve_inbound(inbound)
-        if reservation is None:
-            return False
-        return self._publish_reserved(inbound, reservation)
-
     def _publish_reserved(self, inbound: InboundMessage, reservation: InboundReservation) -> bool:
         """Transfer an already-reserved message to the Gateway loop."""
         if self._main_loop and self._main_loop.is_running():
