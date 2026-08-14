@@ -41,7 +41,8 @@ logging:
 # lead-only vs subagent-only configuration is not expressible yet. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
-# lets extensions_config.json remain the source of truth for extension packages.
+# lets extensions_config.json remain the source of truth for this legacy
+# config-declared middleware list. Packaged plugins use the `plugins:` block below.
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
@@ -2531,8 +2532,27 @@ authorization:
 # entry names an install entry point as "module.path:install"; the `config`
 # block is handed to that package verbatim and validated by the package itself.
 #
-# Loading is explicit on purpose: an installed package does nothing until it is
-# listed here, and the list order is what fixes middleware ordering.
+# Prefer the extension manager over editing this list by hand:
+#   make extension-install SOURCE="deerflow-extension-acme==1.2.3"
+#   make extension-install SOURCE="git+https://github.com/acme/deerflow-extension-acme.git@<commit>"
+#   make extension-install SOURCE="/absolute/path/to/local-extension"
+#   make extension-list
+#   make extension-enable NAME=acme
+#   make extension-disable NAME=acme
+#   make extension-remove NAME=acme
+# The installer updates backend/pyproject.toml, backend/uv.lock, and this block
+# together. It also asks the operator to confirm that the source is trusted;
+# extensions and their build systems execute with Gateway privileges.
+#
+# Every install, enable, disable, remove, or manual edit requires a Gateway
+# restart. Development launchers may fetch missing locked artifacts before
+# handoff; a built production Gateway never installs plugins during startup.
+# Local directories are copied to backend/extensions/sources as deployable
+# snapshots; use a pinned version or public HTTPS Git commit for reproducible
+# remote sources. SSH Git URLs are rejected because the stock Docker builder
+# does not forward host SSH credentials.
+# Loading remains explicit: a package installed outside the manager does nothing
+# until it is listed here, and list order fixes contribution ordering.
 #
 # This is deliberately separate from the `extensions:` block above (MCP servers,
 # skills, config-declared middlewares). That one is backed by
@@ -2540,20 +2560,16 @@ authorization:
 # endpoint; a list that causes code to be imported must stay in this
 # operator-controlled file only.
 #
-# This initial extension-system slice accepts middleware contributors. Their
-# install functions register semantically placed middlewares for the lead and/or
-# subagent stack; the examples below intentionally cover only that surface.
+# Plugins can contribute semantically placed middleware, task-lifecycle hooks,
+# system-model observers, Gateway-lifetime services, and eager FastAPI HTTP routers.
+# See examples/deerflow-extension-example for a package that exercises all five.
 #
 # plugins:
-#   - use: acme_request_observer:install
+#   - name: example                       # PEP 621 entry-point name
+#     package: deerflow-extension-example # Python distribution managed by uv
+#     use: deerflow_extension_example:install
+#     enabled: true                       # false skips import and registration
+#     required: false                     # true makes load failure abort Gateway startup
+#                                         # (install --required opts in)
 #     config:
-#       enabled: true
-#       placement: model_logical
-#   - use: acme_tool_observer:install
-#     config:
-#       enabled: true
-#       placement: tool_raw
-#   # `required: true` turns a load failure into a startup failure. Use it for
-#   # packages whose absence changes behaviour rather than just observability.
-#   - use: acme_required_middleware:install
-#     required: true
+#       label: example                    # extension-private values, if any

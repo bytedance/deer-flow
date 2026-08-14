@@ -740,7 +740,7 @@ An enabled skill's `allowed-tools` policy applies only after that skill is expli
 
 When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
 
-Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
+Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Structured `read_file` calls (including line ranges and read-before-write checks) use the sandbox provider's mount mapping, so the user identity captured when the sandbox was acquired remains authoritative. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
 
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
@@ -835,21 +835,117 @@ Advanced deployments can enable pluggable authorization with `authorization.enab
 
 Advanced deployments can also extend the agent runtime itself by declaring zero-argument `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. DeerFlow loads the same configured class list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, and broken modules fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Per-context parameterization and separate lead-only/subagent-only middleware lists are not supported yet.
 
-For packaged and configurable runtime integrations, use the top-level `plugins:` list in
-`config.yaml`. A plugin exposes `module.path:install`, depends only on the standalone
-`deerflow-extension-api` contract package, and can register exactly three contribution
-kinds: isolated middleware at semantic lead/subagent model or tool positions, lead and
-subagent task-lifecycle hooks, and observers for DeerFlow-owned system model calls such as
-goal evaluation, memory extraction, title generation, and summarization. DeerFlow allocates
-a task-scoped extension store only when one of those contribution kinds is registered and
-uses the Gateway's canonical notification loop for lifecycle and system-model callbacks,
-including subagents that execute on isolated loops. Plugin order is deterministic,
-per-plugin configuration is passed to `install()`, and `required: true` makes load failure
-abort startup; otherwise failures are reported and skipped. Plugins load once when the
-Gateway app is constructed, so changes require a restart. Because this imports Python code,
-`plugins:` is intentionally unavailable through the API-writable
-`extensions_config.json`. In Docker deployments, install the plugin in the Gateway image
-rather than only in the host environment. See `config.example.yaml` for configuration.
+For packaged and configurable runtime integrations, use DeerFlow's extension manager.
+It accepts a Python package requirement, a public HTTPS Git URL, or a local directory, installs the
+package into the backend's dedicated `extensions` dependency group, updates
+`backend/uv.lock`, and adds an enabled entry to the startup-only top-level `plugins:` list
+in `config.yaml`:
+
+```bash
+# PyPI — pin a version for a reproducible deployment
+make extension-install SOURCE="deerflow-extension-acme==1.2.3"
+
+# Public HTTPS Git — pin an immutable commit
+make extension-install \
+  SOURCE="git+https://github.com/acme/deerflow-extension-acme.git@0123456789abcdef0123456789abcdef01234567"
+
+# Local package — an absolute path avoids Make's backend-relative working directory
+make extension-install SOURCE="$PWD/examples/deerflow-extension-example"
+
+make extension-list
+make extension-disable NAME=acme
+make extension-enable NAME=acme
+make extension-remove NAME=acme
+```
+
+Installation is interactive because package installation can execute Python build hooks,
+and the loaded extension later runs with Gateway privileges. For an already-reviewed
+source, automation can acknowledge that boundary explicitly with
+`cd backend && uv run --frozen --no-group extensions deerflow extensions install <source> --yes`.
+The manager requires uv 0.8.0 or newer; the provided Docker images pin uv 0.11.1.
+The other direct
+commands are `deerflow extensions list`, `enable NAME`, `disable NAME`, and `remove NAME`;
+`NAME` may be the extension name, Python distribution, or `module:install` value. Do not
+put credentials in a source URL — a URL carrying embedded userinfo or a credential-looking
+query parameter is rejected before uv runs. Remote Git sources must use public HTTPS; SSH
+Git URLs are rejected because the stock Docker builder does not forward host SSH
+credentials. Installing from a loopback URL is allowed for local tooling but warns, because
+`127.0.0.1` recorded in the lock is a different machine inside the Docker builder.
+
+A managed package declares exactly one standard PEP 621 entry point:
+
+```toml
+[project.entry-points."deerflow.extensions"]
+acme = "acme_deerflow_extension:install"
+```
+
+That callable uses the standalone `deerflow-extension-api` contract and can register five
+contribution kinds: isolated middleware at semantic lead/subagent model or tool positions,
+lead and subagent task-lifecycle hooks, observers for DeerFlow-owned model calls that are
+not wrapped by middleware model-call hooks (goal, memory, title, and summarization),
+Gateway-lifetime services, and eager FastAPI HTTP routers. The contract package has no
+framework dependencies; extensions must declare FastAPI, LangChain, LangGraph, or other
+libraries they import.
+
+DeerFlow allocates a task-scoped extension store only for middleware, lifecycle, or
+system-model observation. Services receive app-scoped runtime dependencies after Gateway
+persistence is ready and stop in reverse order after active runs drain. Extension HTTP
+routers are mounted after every host route; definite shadows and routes entering the
+host's authentication- or CSRF-exempt paths are rejected with attributed diagnostics,
+while unrelated routers continue to load. Because the host's public paths are a reserved
+prefix list that extensions cannot enter, **every contributed endpoint requires an
+authenticated session** — there is currently no way for an extension to expose an
+unauthenticated route, so inbound provider webhooks and public status endpoints are out of
+scope for this release. Router startup/shutdown hooks, custom lifespans,
+Mounts, and WebSocket routes are not accepted; lifetime resources belong in
+`ExtensionService`, and WebSocket contributions require a future host-owned
+authentication/Origin wrapper. Lifecycle and system-model callbacks use the Gateway's
+canonical notification loop, including subagents on isolated loops.
+Plugin order is deterministic, per-plugin configuration is passed to `install()`, and
+`required: true` makes load failure abort startup; otherwise failures are reported and
+skipped. `enabled: false` skips resolution and import. The manager preserves the extension's
+private `config` when toggling it and writes `name`, `package`, `use`, `enabled`, and
+`required` metadata for managed installs. Installs are recorded `required: false` so a
+later broken extension is reported rather than blocking Gateway startup; pass
+`extensions install <source> --required` when the package's absence should abort startup
+instead. Plugins load once when the Gateway app is
+constructed, so install, enable, disable, remove, and manual `plugins:` edits all require a
+Gateway restart. Because this imports Python code, `plugins:` is intentionally unavailable
+through the API-writable `extensions_config.json`.
+
+Management commands bootstrap the checkout environment without the extension group via
+`uv run --frozen --no-group extensions`. Frozen mode lets `disable` and `remove` start even
+when an installed extension's remote source or managed snapshot has become unavailable,
+while a fresh checkout can still create the non-extension environment from the existing lock. The
+manager itself owns the subsequent locked dependency transaction.
+Mutations for one checkout are serialized through a process lock. The initial manager
+surface is create/remove rather than in-place upgrade: to change an installed source, save
+its private `plugins[].config`, remove it, reinstall the new pin, and restore that config.
+
+Local-directory installs are copied into
+`backend/extensions/sources/<normalized-distribution>/`; this deployable snapshot, rather
+than the original directory, is recorded in the lock. Git metadata, virtual environments,
+bytecode caches, symbolic links, and likely credential files are not accepted as snapshot
+content. Review what you install anyway: filtering accidental files does not sandbox an
+extension, its build backend, or its runtime code.
+
+Local `make dev`/`make start`, Docker development, and the production Gateway image all
+consume the same `backend/pyproject.toml` and `backend/uv.lock`. Local and Docker-dev
+launchers perform a locked sync before starting; the production image performs that sync
+during its build and includes managed local snapshots in the build context. Gateway runtime
+commands then use the already-created environment without resolving or installing packages.
+Local and Docker-development pre-start syncs may download missing locked artifacts. A
+production deployment instead downloads them only during the explicit install or image
+build; starting the resulting production Gateway container never resolves or installs
+extensions from the network. A local wheel or `file://` Git URL is rejected because it
+would not exist in the Docker build context; pass a source directory to create a managed
+snapshot instead. Because environment configuration (such as a `UV_FIND_LINKS` wheelhouse)
+can still resolve a plain package name to a local wheel, the manager audits every new lock
+before enabling the extension: any local reference the stock image build cannot reproduce
+rolls back the entire install or removal.
+Rebuild with `make up` after changing the managed extension set. See
+`config.example.yaml` and the
+[reference extension](examples/deerflow-extension-example/) for a complete example.
 
 Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
 
