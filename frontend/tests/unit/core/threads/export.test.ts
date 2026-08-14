@@ -218,13 +218,13 @@ describe("formatThreadAsJSON", () => {
     expect(raw).toContain("final visible text");
   });
 
-  it("strips <uploaded_files> markers from content", () => {
+  it("strips <current_uploads> markers from content", () => {
     const message = human(
-      "real prompt\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
+      "real prompt\n<current_uploads>\n/mnt/user-data/uploads/secret.pdf\n</current_uploads>",
       { id: "h-clean" } as Partial<Message>,
     );
     const raw = formatThreadAsJSON(makeThread(), [message]);
-    expect(raw).not.toContain("<uploaded_files>");
+    expect(raw).not.toContain("<current_uploads>");
     expect(raw).not.toContain("secret.pdf");
     expect(raw).toContain("real prompt");
   });
@@ -281,7 +281,7 @@ describe("formatThreadAsJSON", () => {
       id: "t-leak",
       type: "tool",
       content:
-        "Task Succeeded. Result: payload\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
+        "Task Succeeded. Result: payload\n<current_uploads>\n/mnt/user-data/uploads/secret.pdf\n</current_uploads>",
       name: "task",
       tool_call_id: "call-leak",
     } as unknown as Message;
@@ -290,7 +290,7 @@ describe("formatThreadAsJSON", () => {
       includeToolMessages: true,
     });
     expect(raw).toContain("Task Succeeded");
-    expect(raw).not.toContain("<uploaded_files>");
+    expect(raw).not.toContain("<current_uploads>");
     expect(raw).not.toContain("secret.pdf");
   });
 

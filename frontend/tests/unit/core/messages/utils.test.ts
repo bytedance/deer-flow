@@ -582,15 +582,18 @@ describe("isHiddenFromUIMessage", () => {
 });
 
 describe("human message internal context stripping", () => {
-  test("strips uploaded file context from copy data", () => {
+  test("legacy uploaded_files tag is plain user content in copy data", () => {
+    // Scope decision for #4212: the pre-#4174 tag is no longer stripped, so
+    // old blocks pass through copy data verbatim like ordinary user text.
+    const content =
+      "<uploaded_files>\nThe following files were uploaded in this message:\n\n- paper.pdf (1.0 MB)\n  Path: /mnt/user-data/uploads/paper.pdf\n</uploaded_files>\n\nSummarize this paper";
     const message = {
-      id: "human-with-upload",
+      id: "human-with-legacy-upload",
       type: "human",
-      content:
-        "<uploaded_files>\nThe following files were uploaded in this message:\n\n- paper.pdf (1.0 MB)\n  Path: /mnt/user-data/uploads/paper.pdf\n</uploaded_files>\n\nSummarize this paper",
+      content,
     } as Message;
 
-    expect(getMessageCopyData(message)).toBe("Summarize this paper");
+    expect(getMessageCopyData(message)).toBe(content);
   });
 
   test("strips current_uploads context from copy data", () => {

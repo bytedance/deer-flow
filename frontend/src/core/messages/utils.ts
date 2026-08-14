@@ -758,7 +758,7 @@ export interface FileInMessage {
 export function stripUploadedFilesTag(content: string): string {
   return content
     .replace(
-      /<(current_uploads|uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g,
+      /<(current_uploads|slash_skill_activation)>[\s\S]*?<\/\1>/g,
       "",
     )
     .trim();
@@ -770,8 +770,9 @@ export function stripUploadedFilesTag(content: string): string {
  *
  * These markers are *not* user copy — they come from:
  *
- * - ``UploadsMiddleware`` → ``<current_uploads>`` (``<uploaded_files>``
- *   before #4174; still emitted by IM channels and present in history)
+ * - ``UploadsMiddleware`` → ``<current_uploads>`` (the pre-#4174
+ *   ``<uploaded_files>`` tag is no longer emitted and no longer stripped —
+ *   see #4212)
  * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
  *   ``<memory>`` / ``<current_date>`` inside)
@@ -786,7 +787,6 @@ export function stripUploadedFilesTag(content: string): string {
  */
 export const INTERNAL_MARKER_TAGS = [
   "current_uploads",
-  "uploaded_files",
   "slash_skill_activation",
   "system-reminder",
   "memory",
@@ -834,10 +834,8 @@ function parseHumanReadableSize(raw: string): number {
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {
-  // Match the upload context block; the tag name depends on backend version
-  // (<current_uploads> since #4174, <uploaded_files> before / on IM paths).
-  const uploadedFilesRegex =
-    /<(current_uploads|uploaded_files)>([\s\S]*?)<\/\1>/;
+  // Match the upload context block UploadsMiddleware emits (#4174).
+  const uploadedFilesRegex = /<current_uploads>([\s\S]*?)<\/current_uploads>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
@@ -845,7 +843,7 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
     return [];
   }
 
-  const uploadedFilesContent = match[2];
+  const uploadedFilesContent = match[1];
 
   // Check if it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {

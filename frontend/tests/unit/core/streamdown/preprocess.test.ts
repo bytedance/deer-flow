@@ -321,10 +321,18 @@ test("stripLeakedSystemTags handles no tags present", () => {
   expect(stripLeakedSystemTags(input)).toBe(input);
 });
 
-test("stripLeakedSystemTags strips <uploaded_files> tag", () => {
+test("stripLeakedSystemTags strips <current_uploads> tag", () => {
+  expect(
+    stripLeakedSystemTags("<current_uploads>file.pdf</current_uploads>"),
+  ).toBe("file.pdf");
+});
+
+test("stripLeakedSystemTags leaves legacy <uploaded_files> tag untouched", () => {
+  // Scope decision for #4212: the pre-#4174 tag is no longer treated as an
+  // internal marker, so it passes through like ordinary user text.
   expect(
     stripLeakedSystemTags("<uploaded_files>file.pdf</uploaded_files>"),
-  ).toBe("file.pdf");
+  ).toBe("<uploaded_files>file.pdf</uploaded_files>");
 });
 
 test("stripLeakedSystemTags strips <slash_skill_activation> tag", () => {
