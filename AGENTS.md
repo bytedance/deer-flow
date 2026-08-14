@@ -57,6 +57,7 @@ deer-flow/
 ├── extensions_config.example.json  # Template → copy to extensions_config.json (gitignored): MCP servers + skills
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
+│   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
 │   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
@@ -66,6 +67,7 @@ deer-flow/
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
 ├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
 ├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
 ├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
@@ -73,8 +75,15 @@ deer-flow/
 
 Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
 (operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). See the Extension System section in
-[backend/AGENTS.md](backend/AGENTS.md).
+kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
+middleware, task lifecycle, system-model observers, Gateway services, and FastAPI HTTP
+routers; the [reference extension](examples/deerflow-extension-example/) demonstrates all
+five. Manage them with `deerflow extensions install/list/enable/disable/remove` or the root
+`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
+hooks and extension code execute with Gateway privileges, so only trusted operator sources
+belong in this path. The manager transaction, accepted source forms, lock discipline, and
+contribution contract live in
+[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -105,6 +114,11 @@ make support-bundle  # Generate redacted troubleshooting summary, AI issue draft
 make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
+make extension-install SOURCE=...  # Install and enable a trusted Python extension
+make extension-list                # List configured Python extensions
+make extension-enable NAME=...     # Enable an installed extension (restart required)
+make extension-disable NAME=...    # Disable without uninstalling (restart required)
+make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
 make start       # Start all services in production mode (local, optimized)
 make stop        # Stop all running services
