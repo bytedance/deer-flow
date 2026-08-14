@@ -1,5 +1,7 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
+import { fetch } from "@/core/api/fetcher";
+
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
