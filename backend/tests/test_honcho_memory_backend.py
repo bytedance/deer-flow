@@ -96,6 +96,19 @@ class TestHonchoConfig:
         with pytest.raises(ValueError, match=key):
             HonchoConfig.from_backend_config({key: value})
 
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            pytest.param("timeout_seconds", float("inf"), id="timeout"),
+            pytest.param("connect_timeout_seconds", 0, id="connect-timeout"),
+            pytest.param("message_char_limit", -1, id="message-limit"),
+            pytest.param("max_injection_chars", 0, id="injection-limit"),
+        ],
+    )
+    def test_direct_construction_enforces_limits(self, key, value):
+        with pytest.raises(ValueError, match=key):
+            HonchoConfig(**{key: value})
+
     def test_accepts_custom_positive_timeouts_and_character_limits(self):
         cfg = HonchoConfig.from_backend_config(
             {
