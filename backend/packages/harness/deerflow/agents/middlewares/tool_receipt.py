@@ -4,7 +4,8 @@ Every tool result gets a receipt stamped into ``additional_kwargs`` by
 ``ToolReceiptMiddleware``. Receipts are *derived* from the message stream
 (never stored separately), so rendering for the model and harvesting for the
 parent agent always agree. Display ids (``r1..rN``) are positional over the
-append-only message list, which keeps them stable across turns.
+append-only message list, which keeps them stable across turns — but only
+while history stays append-only (see the renumbering caveat below).
 
 Layering contract: a tool receipt is an immutable *fact* record per tool call,
 message-carried. It is distinct from the runtime-layer run delivery receipt
@@ -19,6 +20,14 @@ stamped before sanitization/truncation rewrites content further out the
 chain). After compaction, only the sanitized ``content`` survives — so
 ``output_sha256`` is a *freshness stamp*, not a re-checkable fingerprint
 against the persisted message.
+
+Renumbering caveat: compaction/summarization (which long subagent runs use)
+drops older ``ToolMessage``s, and since display ids are assigned positionally
+in ``extract_tool_receipts``, the surviving receipts renumber — an ``[r3]``
+cited before compaction can point at a different tool call (or nothing)
+after. Layer 2 citation verification must therefore resolve ``[rN]``
+references against the ledger as of the citing turn, not the post-compaction
+ledger.
 """
 
 from __future__ import annotations
