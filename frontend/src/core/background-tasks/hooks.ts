@@ -3,11 +3,18 @@ import { toast } from "sonner";
 
 import { useI18n } from "@/core/i18n/hooks";
 
-import { cancelBackgroundTask, fetchBackgroundTasks } from "./api";
+import {
+  cancelBackgroundTask,
+  fetchBackgroundTask,
+  fetchBackgroundTasks,
+} from "./api";
 import { isActiveBackgroundTask } from "./types";
 
 export const backgroundTasksQueryKey = (threadId: string) =>
   ["background-tasks", threadId] as const;
+
+export const backgroundTaskQueryKey = (threadId: string, taskId: string) =>
+  [...backgroundTasksQueryKey(threadId), taskId] as const;
 
 export function useBackgroundTasks(
   threadId: string,
@@ -23,12 +30,33 @@ export function useBackgroundTasks(
   });
 }
 
+export function useBackgroundTask(
+  threadId: string,
+  taskId: string,
+  options: { enabled?: boolean } = {},
+) {
+  return useQuery({
+    queryKey: backgroundTaskQueryKey(threadId, taskId),
+    queryFn: () => fetchBackgroundTask(threadId, taskId),
+    enabled: options.enabled !== false && Boolean(threadId) && Boolean(taskId),
+    refetchInterval: (query) =>
+      query.state.data && isActiveBackgroundTask(query.state.data)
+        ? 3000
+        : false,
+    refetchIntervalInBackground: false,
+  });
+}
+
 export function useCancelBackgroundTask(threadId: string) {
   const queryClient = useQueryClient();
   const { t } = useI18n();
   return useMutation({
     mutationFn: (taskId: string) => cancelBackgroundTask(threadId, taskId),
     onSuccess: (task) => {
+      queryClient.setQueryData(
+        backgroundTaskQueryKey(threadId, task.task_id),
+        task,
+      );
       queryClient.setQueryData(
         backgroundTasksQueryKey(threadId),
         (current: unknown) =>

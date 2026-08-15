@@ -2289,6 +2289,38 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     assert result == {"run_id": "run-notification", "thread_id": "thread-notification"}
 
 
+def test_launch_mcp_task_notification_run_restores_busy_thread_conflict(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import launch_mcp_task_notification_run
+    from deerflow.runtime.runs.manager import ConflictError
+
+    async def _scenario():
+        with (
+            patch(
+                "app.gateway.services.start_run",
+                side_effect=HTTPException(status_code=409, detail="Thread already has an active run"),
+            ),
+            pytest.raises(ConflictError, match="Thread already has an active run"),
+        ):
+            await launch_mcp_task_notification_run(
+                app=SimpleNamespace(state=SimpleNamespace()),
+                thread_id="thread-notification",
+                assistant_id="lead_agent",
+                owner_user_id="user-1",
+                task_id="task-1",
+                dispatch_version=2,
+                dispatch_attempt=3,
+                event={"status": "completed", "result": "done"},
+            )
+
+    asyncio.run(_scenario())
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

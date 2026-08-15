@@ -16,6 +16,7 @@ from deerflow.mcp.tasks import (
 )
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError
 from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
 
 
@@ -330,6 +331,32 @@ async def test_cancel_task_calls_remote_once_and_persists_terminal_snapshot():
 
 
 @pytest.mark.asyncio
+async def test_cancel_failure_schedules_retry_from_call_completion_time():
+    record = {**_claimed_row(), "cancel_attempt_count": 1}
+    repo = SimpleNamespace(
+        claim_cancel_requests=AsyncMock(return_value=[record]),
+        release_cancel_claim=AsyncMock(return_value=True),
+        claim_due_tasks=AsyncMock(return_value=[]),
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(cancel_error=RuntimeError("cancel unavailable")))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    scan_started_at = datetime(2000, 1, 1, tzinfo=UTC)
+
+    await service.run_once(now=scan_started_at)
+
+    released = repo.release_cancel_claim.await_args.kwargs
+    retry_started_at = released["next_cancel_at"] - timedelta(seconds=5)
+    assert retry_started_at > scan_started_at
+
+
+@pytest.mark.asyncio
 async def test_notification_delivery_waits_for_successful_agent_run():
     repo = SimpleNamespace(
         mark_notification_dispatched=AsyncMock(return_value=True),
@@ -373,6 +400,38 @@ async def test_notification_delivery_waits_for_successful_agent_run():
     )
     repo.finish_notification_run.assert_awaited_once()
     assert repo.finish_notification_run.await_args.kwargs["delivered"] is True
+
+
+@pytest.mark.asyncio
+async def test_notification_busy_thread_replaces_claim_with_latest_event():
+    repo = SimpleNamespace(
+        release_notification_claim=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(side_effect=ConflictError("thread busy")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    now = datetime.now(UTC)
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "claimed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "dispatch_event": {"status": "input_required"},
+        },
+        now=now,
+    )
+
+    released = repo.release_notification_claim.await_args.kwargs
+    assert released["replace_with_latest"] is True
+    assert released["next_notification_at"] == now + timedelta(seconds=5)
 
 
 @pytest.mark.asyncio

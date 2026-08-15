@@ -212,7 +212,7 @@ class McpTaskService:
             task_id=task_id,
         )
         if claimed:
-            await self._cancel_one(claimed[0], now=requested_at)
+            await self._cancel_one(claimed[0])
         return await self._repository.get(task_id, user_id=user_id)
 
     async def cancel_matching_task(
@@ -253,9 +253,9 @@ class McpTaskService:
             limit=self._max_concurrent_polls,
         )
         if records:
-            await asyncio.gather(*(self._cancel_one(record, now=now) for record in records))
+            await asyncio.gather(*(self._cancel_one(record) for record in records))
 
-    async def _cancel_one(self, record: dict[str, Any], *, now: datetime) -> None:
+    async def _cancel_one(self, record: dict[str, Any]) -> None:
         driver_name = str(record.get("driver_name") or "")
         driver = self._drivers.get(driver_name)
         try:
@@ -279,10 +279,11 @@ class McpTaskService:
         except Exception as exc:  # noqa: BLE001 - remote cancellation is retryable
             attempts = max(0, int(record.get("cancel_attempt_count") or 1) - 1)
             retry_seconds = min(self._poll_interval_seconds * (2 ** min(attempts, 16)), self._max_poll_backoff_seconds)
+            failed_at = datetime.now(UTC)
             await self._repository.release_cancel_claim(
                 record["id"],
                 lease_owner=self._lease_owner,
-                next_cancel_at=now + timedelta(seconds=retry_seconds),
+                next_cancel_at=failed_at + timedelta(seconds=retry_seconds),
                 error=_bound_error(str(exc) or type(exc).__name__),
             )
 

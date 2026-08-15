@@ -11,6 +11,7 @@ rs.mock("@/core/config", () => ({
 import { fetch } from "@/core/api/fetcher";
 import {
   cancelBackgroundTask,
+  fetchBackgroundTask,
   fetchBackgroundTasks,
 } from "@/core/background-tasks/api";
 
@@ -45,6 +46,28 @@ describe("background task API", () => {
     await expect(fetchBackgroundTasks("thread / 1")).resolves.toEqual([TASK]);
     expect(mockedFetch).toHaveBeenCalledWith(
       "/api/threads/thread%20%2F%201/mcp-tasks?limit=20",
+    );
+  });
+
+  it("loads one task's bounded detail through local ids", async () => {
+    const detail = {
+      ...TASK,
+      status: "completed" as const,
+      result: { summary: "Quarterly report ready" },
+      result_preview: null,
+      result_truncated: false,
+      result_artifact: null,
+      input_required: null,
+      last_poll_error: null,
+      last_polled_at: "2026-08-08T00:02:00+00:00",
+    };
+    mockedFetch.mockResolvedValueOnce(jsonResponse(detail));
+
+    await expect(
+      fetchBackgroundTask("thread / 1", "task / 1"),
+    ).resolves.toEqual(detail);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/api/threads/thread%20%2F%201/mcp-tasks/task%20%2F%201",
     );
   });
 

@@ -318,6 +318,15 @@ export const enUS: Translations = {
     cancelling: "Cancelling…",
     cancelFailed: "Failed to cancel task",
     trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
+    viewDetails: "View details",
+    hideDetails: "Hide details",
+    detailsFailed: "Couldn't load task details",
+    result: "Result",
+    resultArtifact: "Result artifact",
+    inputRequired: "Input required",
+    inputUnavailable:
+      "This integration cannot send your response back to the remote task yet.",
+    lastPollError: "Latest status error",
     created: (time) => `Started ${time}`,
     updated: (time) => `Updated ${time}`,
     status: {

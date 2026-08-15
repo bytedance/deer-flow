@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ChevronDownIcon,
+  ChevronUpIcon,
   CircleCheckIcon,
   CircleStopIcon,
   Clock3Icon,
@@ -9,6 +11,7 @@ import {
   MessageCircleQuestionIcon,
   TriangleAlertIcon,
 } from "lucide-react";
+import { useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,7 +26,9 @@ import {
 import {
   isActiveBackgroundTask,
   type BackgroundTask,
+  type BackgroundTaskDetail,
   type BackgroundTaskStatus,
+  useBackgroundTask,
   useBackgroundTasks,
   useCancelBackgroundTask,
 } from "@/core/background-tasks";
@@ -107,6 +112,7 @@ export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
             <div className="space-y-5">
               {activeTasks.length > 0 && (
                 <TaskSection
+                  threadId={threadId}
                   title={t.backgroundTasks.active}
                   tasks={activeTasks}
                   cancellingTaskId={
@@ -117,6 +123,7 @@ export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
               )}
               {recentTasks.length > 0 && (
                 <TaskSection
+                  threadId={threadId}
                   title={t.backgroundTasks.recent}
                   tasks={recentTasks}
                 />
@@ -130,11 +137,13 @@ export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
 }
 
 function TaskSection({
+  threadId,
   title,
   tasks,
   cancellingTaskId,
   onCancel,
 }: {
+  threadId: string;
   title: string;
   tasks: BackgroundTask[];
   cancellingTaskId?: string;
@@ -149,6 +158,7 @@ function TaskSection({
         {tasks.map((task) => (
           <BackgroundTaskCard
             key={task.task_id}
+            threadId={threadId}
             task={task}
             isCancelling={cancellingTaskId === task.task_id}
             onCancel={onCancel}
@@ -160,18 +170,27 @@ function TaskSection({
 }
 
 function BackgroundTaskCard({
+  threadId,
   task,
   isCancelling,
   onCancel,
 }: {
+  threadId: string;
   task: BackgroundTask;
   isCancelling: boolean;
   onCancel?: (taskId: string) => void;
 }) {
   const { t } = useI18n();
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsQuery = useBackgroundTask(threadId, task.task_id, {
+    enabled: detailsOpen,
+  });
   const active = isActiveBackgroundTask(task);
   const cancelling = active && (task.cancel_requested || isCancelling);
   const status = taskStatusPresentation(task.status, t.backgroundTasks.status);
+  const canShowDetails =
+    task.status !== "submitted" &&
+    (task.status !== "working" || task.tracking_degraded);
 
   return (
     <article
@@ -212,26 +231,161 @@ function BackgroundTaskCard({
           {task.error}
         </p>
       )}
-      {active && onCancel && (
-        <div className="mt-3 flex justify-end">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={cancelling}
-            onClick={() => onCancel(task.task_id)}
-          >
-            {isCancelling && (
-              <LoaderCircleIcon className="size-3.5 animate-spin" />
-            )}
-            {cancelling
-              ? t.backgroundTasks.cancelling
-              : t.backgroundTasks.cancel}
-          </Button>
+      {(canShowDetails || (active && onCancel)) && (
+        <div className="mt-3 flex items-center justify-between gap-2">
+          {canShowDetails ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              aria-expanded={detailsOpen}
+              onClick={() => setDetailsOpen((open) => !open)}
+            >
+              {detailsOpen
+                ? t.backgroundTasks.hideDetails
+                : t.backgroundTasks.viewDetails}
+              {detailsOpen ? (
+                <ChevronUpIcon className="size-3.5" />
+              ) : (
+                <ChevronDownIcon className="size-3.5" />
+              )}
+            </Button>
+          ) : (
+            <span />
+          )}
+          {active && onCancel && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={cancelling}
+              onClick={() => onCancel(task.task_id)}
+            >
+              {isCancelling && (
+                <LoaderCircleIcon className="size-3.5 animate-spin" />
+              )}
+              {cancelling
+                ? t.backgroundTasks.cancelling
+                : t.backgroundTasks.cancel}
+            </Button>
+          )}
         </div>
+      )}
+      {detailsOpen && (
+        <BackgroundTaskDetails
+          task={detailsQuery.data}
+          isLoading={detailsQuery.isLoading}
+          error={detailsQuery.error}
+          onRetry={() => void detailsQuery.refetch()}
+        />
       )}
     </article>
   );
+}
+
+function BackgroundTaskDetails({
+  task,
+  isLoading,
+  error,
+  onRetry,
+}: {
+  task: BackgroundTaskDetail | undefined;
+  isLoading: boolean;
+  error: Error | null;
+  onRetry: () => void;
+}) {
+  const { t } = useI18n();
+
+  if (isLoading) {
+    return (
+      <div
+        role="status"
+        className="text-muted-foreground mt-3 flex items-center gap-2 border-t pt-3 text-xs"
+      >
+        <LoaderCircleIcon className="size-3.5 animate-spin" />
+        {t.common.loading}
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="border-destructive/30 mt-3 border-t pt-3 text-xs">
+        <p className="text-destructive">{t.backgroundTasks.detailsFailed}</p>
+        <p className="text-muted-foreground mt-1 break-words">
+          {error.message}
+        </p>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="mt-2"
+          onClick={onRetry}
+        >
+          {t.backgroundTasks.retry}
+        </Button>
+      </div>
+    );
+  }
+
+  if (!task) return null;
+
+  return (
+    <div className="border-border mt-3 space-y-3 border-t pt-3">
+      <TaskDetailField
+        label={t.backgroundTasks.result}
+        value={task.result_preview ?? task.result}
+      />
+      <TaskDetailField
+        label={t.backgroundTasks.resultArtifact}
+        value={task.result_artifact}
+      />
+      <TaskDetailField
+        label={t.backgroundTasks.lastPollError}
+        value={task.last_poll_error}
+      />
+      {task.input_required != null && (
+        <div>
+          <TaskDetailField
+            label={t.backgroundTasks.inputRequired}
+            value={task.input_required}
+          />
+          <p className="text-muted-foreground mt-1 text-[11px]">
+            {t.backgroundTasks.inputUnavailable}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TaskDetailField({ label, value }: { label: string; value: unknown }) {
+  const formatted = formatTaskDetailValue(value);
+  if (formatted === null) return null;
+
+  return (
+    <div>
+      <p className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+        {label}
+      </p>
+      <pre className="bg-muted/60 mt-1 max-h-48 overflow-auto rounded-md px-2 py-1.5 font-sans text-xs break-words whitespace-pre-wrap">
+        {formatted}
+      </pre>
+    </div>
+  );
+}
+
+function formatTaskDetailValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  try {
+    return JSON.stringify(value, null, 2) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 type StatusTranslations = {

@@ -21,8 +21,10 @@
    Current-chat MCP background tasks use `core/background-tasks`: the header
    trigger is hidden for new/mock/static-demo threads, lists at most 20 local
    task records, refreshes every 3 seconds while any task is active (15 seconds
-   otherwise), and cancels through the thread-scoped local-ID endpoint. The UI
-   must never request or render a remote MCP task handle; a persisted cancel
+   otherwise), fetches bounded task details only while a user expands a card,
+   and cancels through the thread-scoped local-ID endpoint. The expanded view
+   shows result/preview, artifact metadata, input requests, and the latest poll
+   error without exposing the persisted remote handle. A persisted cancel
    request remains "Cancelling…" only while the task status is still active.
    Settings > Integrations uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every

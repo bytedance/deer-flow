@@ -1397,7 +1397,12 @@ async def launch_mcp_task_notification_run(
         feedback_keys=None,
     )
     idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
-    record = await start_run(body, thread_id, request, idempotency_key=idempotency_key)
+    try:
+        record = await start_run(body, thread_id, request, idempotency_key=idempotency_key)
+    except HTTPException as exc:
+        if exc.status_code != 409:
+            raise
+        raise ConflictError(str(exc.detail)) from exc
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

@@ -244,6 +244,14 @@ export interface Translations {
     cancelling: string;
     cancelFailed: string;
     trackingDegraded: string;
+    viewDetails: string;
+    hideDetails: string;
+    detailsFailed: string;
+    result: string;
+    resultArtifact: string;
+    inputRequired: string;
+    inputUnavailable: string;
+    lastPollError: string;
     created: (time: string) => string;
     updated: (time: string) => string;
     status: {

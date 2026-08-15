@@ -17,6 +17,16 @@ export type BackgroundTask = {
   cancel_requested: boolean;
 };
 
+export type BackgroundTaskDetail = BackgroundTask & {
+  last_polled_at: string | null;
+  last_poll_error: string | null;
+  result: unknown | null;
+  result_preview: string | null;
+  result_truncated: boolean;
+  result_artifact: unknown | null;
+  input_required: unknown | null;
+};
+
 export const ACTIVE_BACKGROUND_TASK_STATUSES: ReadonlySet<BackgroundTaskStatus> =
   new Set(["submitted", "working", "input_required"]);
 
