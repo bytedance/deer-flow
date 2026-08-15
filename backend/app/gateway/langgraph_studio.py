@@ -1,128 +1,180 @@
-"""Standalone LangGraph Server lifecycle integration.
+"""Pre-runtime persistence repair for standalone LangGraph Studio.
 
-The embedded Gateway does not load this module. ``langgraph.json`` attaches its
-empty FastAPI application to the standalone server so the lifespan can repair
-assistant provenance before the server accepts Studio requests.
+``langgraph dev`` imports this custom application before entering the locked
+in-memory runtime lifespan. That ordering is intentional: runtime 0.30.0 loads
+and purges persisted ``created_by=system`` assistants before graph registration
+and before a user application lifespan can run.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-from collections.abc import Callable, Collection
-from contextlib import asynccontextmanager
+import os
+from collections.abc import Collection, MutableMapping
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+from uuid import UUID, uuid5
 
 from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
 
+_OPS_PATH = Path(".langgraph_api/.langgraph_ops.pckl")
 
-async def reconcile_assistant_provenance(
-    *,
-    connect: Callable[..., Any] | None = None,
-    assistants_ops: Any = None,
-    system_assistant_ids: Collection[str] | None = None,
-    page_size: int = 100,
-) -> int:
-    """Demote persisted client-forged system assistant markers.
 
-    LangGraph registers graph definitions before running this custom lifespan
-    and records their deterministic IDs in ``SYSTEM_ASSISTANT_IDS``. That
-    registry, rather than mutable assistant metadata, is the authority used to
-    distinguish genuine server assistants from rows created by older versions
-    that accepted a caller-supplied ``created_by=system`` marker.
+@dataclass(frozen=True)
+class ProvenanceRepair:
+    """Summary of one atomic pre-runtime persistence repair."""
 
-    Returns the number of repaired rows.
-    """
-    if page_size < 1:
-        raise ValueError("page_size must be positive")
+    removed_registered_assistants: int = 0
+    removed_registered_versions: int = 0
+    demoted_assistants: int = 0
+    demoted_versions: int = 0
 
-    if connect is None:
-        from langgraph_runtime.database import connect as runtime_connect
-
-        connect = runtime_connect
-    if assistants_ops is None:
-        from langgraph_runtime.ops import Assistants
-
-        assistants_ops = Assistants
-    if system_assistant_ids is None:
-        from langgraph_api.graph import SYSTEM_ASSISTANT_IDS
-
-        system_assistant_ids = SYSTEM_ASSISTANT_IDS
-
-    registered_ids = {str(assistant_id) for assistant_id in system_assistant_ids}
-    if not registered_ids:
-        logger.warning("Skipping assistant provenance reconciliation because no registered system assistants are available")
-        return 0
-
-    marked_ids: list[str] = []
-
-    async with connect() as conn:
-        offset = 0
-        while True:
-            rows, next_offset = await assistants_ops.search(
-                conn,
-                graph_id=None,
-                name=None,
-                metadata={"created_by": "system"},
-                limit=page_size,
-                offset=offset,
-                sort_by="assistant_id",
-                sort_order="ASC",
-                select=None,
-                ctx=None,
+    @property
+    def changed(self) -> bool:
+        return any(
+            (
+                self.removed_registered_assistants,
+                self.removed_registered_versions,
+                self.demoted_assistants,
+                self.demoted_versions,
             )
-            async for assistant in rows:
-                marked_ids.append(str(assistant["assistant_id"]))
-
-            if next_offset is None:
-                break
-            if next_offset <= offset:
-                raise RuntimeError("assistant search returned a non-advancing cursor")
-            offset = next_offset
-
-        forged_ids = [assistant_id for assistant_id in marked_ids if assistant_id not in registered_ids]
-        repaired = 0
-        failures: list[tuple[str, Exception]] = []
-        for assistant_id in forged_ids:
-            try:
-                updated = await assistants_ops.patch(
-                    conn,
-                    assistant_id,
-                    metadata={"created_by": "user"},
-                    ctx=None,
-                )
-                async for _ in updated:
-                    pass
-            except Exception as exc:
-                failures.append((assistant_id, exc))
-                logger.exception(
-                    "Failed to reconcile assistant provenance for %s",
-                    assistant_id,
-                )
-                continue
-            repaired += 1
-
-    if failures:
-        failed_ids = ", ".join(assistant_id for assistant_id, _ in failures)
-        raise RuntimeError(f"Failed to reconcile {len(failures)} assistant provenance row(s): {failed_ids}") from failures[0][1]
-
-    return repaired
-
-
-@asynccontextmanager
-async def _lifespan(_app: FastAPI):
-    repaired = await reconcile_assistant_provenance()
-    if repaired:
-        logger.warning(
-            "Demoted %d persisted assistant system marker(s) that were not registered by this server",
-            repaired,
         )
-    yield
 
+
+def configured_system_assistant_ids(
+    graphs_json: str | None,
+    *,
+    namespace: UUID | None = None,
+) -> set[str]:
+    """Derive registered assistant IDs from the CLI-provided graph registry."""
+    if not graphs_json:
+        return set()
+
+    graphs = json.loads(graphs_json)
+    if not isinstance(graphs, dict):
+        raise ValueError("LANGSERVE_GRAPHS must contain a JSON object")
+    if not graphs:
+        return set()
+
+    if namespace is None:
+        from langgraph_api.graph import NAMESPACE_GRAPH
+
+        namespace = NAMESPACE_GRAPH
+
+    return {str(uuid5(namespace, str(graph_id))) for graph_id in graphs}
+
+
+def _demote_system_marker(row: MutableMapping[str, Any]) -> tuple[MutableMapping[str, Any], bool]:
+    metadata = row.get("metadata") or {}
+    if metadata.get("created_by") != "system":
+        return row, False
+
+    repaired = dict(row)
+    repaired_metadata = dict(metadata)
+    repaired_metadata["created_by"] = "user"
+    repaired["metadata"] = repaired_metadata
+    return repaired, True
+
+
+def repair_persisted_assistant_provenance(
+    store: MutableMapping[str, Any],
+    *,
+    registered_system_ids: Collection[str],
+) -> ProvenanceRepair:
+    """Repair legacy assistant rows before the in-memory runtime loads them.
+
+    Configured graph assistant IDs are removed so graph registration recreates
+    them with server-owned provenance. Every other legacy system marker is
+    demoted in both the active row and its version history. The replacement
+    lists are built before either store key is assigned, so a malformed row
+    cannot leave a partially repaired store.
+    """
+    registered_ids = {str(assistant_id) for assistant_id in registered_system_ids}
+    if not registered_ids:
+        return ProvenanceRepair()
+
+    assistants: list[MutableMapping[str, Any]] = []
+    removed_registered_assistants = 0
+    demoted_assistants = 0
+    for row in store.get("assistants") or []:
+        if str(row.get("assistant_id")) in registered_ids:
+            removed_registered_assistants += 1
+            continue
+        repaired, demoted = _demote_system_marker(row)
+        assistants.append(repaired)
+        demoted_assistants += int(demoted)
+
+    versions: list[MutableMapping[str, Any]] = []
+    removed_registered_versions = 0
+    demoted_versions = 0
+    for row in store.get("assistant_versions") or []:
+        if str(row.get("assistant_id")) in registered_ids:
+            removed_registered_versions += 1
+            continue
+        repaired, demoted = _demote_system_marker(row)
+        versions.append(repaired)
+        demoted_versions += int(demoted)
+
+    result = ProvenanceRepair(
+        removed_registered_assistants=removed_registered_assistants,
+        removed_registered_versions=removed_registered_versions,
+        demoted_assistants=demoted_assistants,
+        demoted_versions=demoted_versions,
+    )
+    store["assistants"] = assistants
+    store["assistant_versions"] = versions
+    return result
+
+
+def repair_local_dev_persistence_before_runtime(
+    *,
+    persistence_path: Path = _OPS_PATH,
+    graphs_json: str | None = None,
+) -> ProvenanceRepair:
+    """Load, repair, and atomically rewrite a locked local-dev store."""
+    if graphs_json is None:
+        graphs_json = os.getenv("LANGSERVE_GRAPHS")
+    registered_ids = configured_system_assistant_ids(graphs_json)
+    if not registered_ids or not persistence_path.is_file():
+        return ProvenanceRepair()
+
+    from langgraph.checkpoint.memory import PersistentDict
+
+    store = PersistentDict(dict, filename=str(persistence_path))
+    store.load()
+    result = repair_persisted_assistant_provenance(
+        store,
+        registered_system_ids=registered_ids,
+    )
+    if result.changed:
+        store.sync()
+    return result
+
+
+def _prepare_locked_local_dev_runtime() -> None:
+    if os.getenv("LANGSMITH_LANGGRAPH_API_VARIANT") != "local_dev":
+        return
+    if "__inmem" not in os.getenv("MIGRATIONS_PATH", ""):
+        return
+
+    result = repair_local_dev_persistence_before_runtime()
+    if result.changed:
+        logger.warning(
+            "Repaired standalone Studio persistence before runtime startup: %d registered assistant(s) and %d registered version(s) reset; %d legacy assistant marker(s) and %d version marker(s) demoted",
+            result.removed_registered_assistants,
+            result.removed_registered_versions,
+            result.demoted_assistants,
+            result.demoted_versions,
+        )
+
+
+_prepare_locked_local_dev_runtime()
 
 langgraph_app = FastAPI(
-    lifespan=_lifespan,
     docs_url=None,
     redoc_url=None,
     openapi_url=None,

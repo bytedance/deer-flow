@@ -393,8 +393,11 @@ handled automatically, so the connection does not require custom headers. Use
 DeerFlow's documented production startup modes or a supported LangSmith
 deployment for production workloads. Assistant ownership and provenance in this
 standalone mode are server-owned: Studio can discover registered graphs and the
-assistants it creates, but the assistant-version rollback endpoint is disabled
-so historical client metadata cannot restore server privileges.
+assistants it creates, and normal assistant-version selection remains available.
+Before the locked local runtime loads its persisted development store, DeerFlow
+repairs legacy assistant rows and version history so historical client metadata
+cannot restore server privileges or be discarded by the runtime's startup
+cleanup.
 
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity

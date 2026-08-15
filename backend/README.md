@@ -291,8 +291,10 @@ flag permits DeerFlow's synchronous configuration and graph-factory setup
 during local Studio requests; it is not a production-server setting. Its local
 Studio authentication and registered graph discovery are handled automatically;
 no custom connection headers are required. Assistant ownership/provenance is
-stamped by the server, and assistant-version rollback is disabled so metadata
-persisted by an older server cannot reactivate server-only privileges.
+stamped by the server, and normal assistant-version selection remains available.
+Before the locked local runtime loads its persisted development store, DeerFlow
+repairs legacy assistant rows and version history so older metadata cannot
+reactivate server-only privileges or be discarded by runtime startup cleanup.
 
 ---
 

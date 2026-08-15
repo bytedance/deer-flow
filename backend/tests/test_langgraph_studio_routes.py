@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,19 +18,7 @@ import pytest
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 
-
-def _free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-@pytest.fixture(scope="module")
-def studio_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[httpx.Client]:
-    """Run the locked dev server with a tiny graph and DeerFlow's real auth."""
-    runtime_dir = tmp_path_factory.mktemp("langgraph-studio-routes")
-    (runtime_dir / "graph.py").write_text(
-        """
+_GRAPH_SOURCE = """
 from langgraph.graph import END, START, StateGraph
 
 builder = StateGraph(dict)
@@ -37,13 +26,48 @@ builder.add_node("noop", lambda state: {})
 builder.add_edge(START, "noop")
 builder.add_edge("noop", END)
 graph = builder.compile()
-""".lstrip(),
-        encoding="utf-8",
-    )
-    (runtime_dir / "auth_shim.py").write_text(
-        "from app.gateway.langgraph_auth import auth\nfrom app.gateway.langgraph_studio import langgraph_app\n",
-        encoding="utf-8",
-    )
+""".lstrip()
+
+_CURRENT_AUTH_SHIM = """
+from app.gateway.langgraph_auth import auth
+from app.gateway.langgraph_studio import langgraph_app
+""".lstrip()
+
+_LEGACY_AUTH_SHIM = """
+from fastapi import FastAPI
+from langgraph_sdk import Auth
+
+auth = Auth()
+
+@auth.authenticate
+async def authenticate(request):
+    return "langgraph-studio-user"
+
+@auth.on
+async def legacy_owner_filter(ctx, value):
+    metadata = value.setdefault("metadata", {})
+    metadata["user_id"] = ctx.user.identity
+    return {"user_id": ctx.user.identity}
+
+langgraph_app = FastAPI()
+""".lstrip()
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@contextmanager
+def _running_studio_server(
+    runtime_dir: Path,
+    *,
+    auth_source: str,
+) -> Iterator[httpx.Client]:
+    """Run the locked dev server against one persistent runtime directory."""
+    (runtime_dir / "graph.py").write_text(_GRAPH_SOURCE, encoding="utf-8")
+    (runtime_dir / "auth_shim.py").write_text(auth_source, encoding="utf-8")
     config_path = runtime_dir / "langgraph.json"
     config_path.write_text(
         json.dumps(
@@ -64,7 +88,7 @@ graph = builder.compile()
     )
 
     port = _free_port()
-    log_path = runtime_dir / "server.log"
+    log_path = runtime_dir / f"server-{uuid4()}.log"
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(BACKEND_DIR), env.get("PYTHONPATH")]))
     env["LANGSMITH_LANGGRAPH_API_VARIANT"] = "local_dev"
@@ -126,6 +150,17 @@ graph = builder.compile()
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def studio_client(tmp_path_factory: pytest.TempPathFactory) -> Iterator[httpx.Client]:
+    """Run the locked dev server with a tiny graph and DeerFlow's real auth."""
+    runtime_dir = tmp_path_factory.mktemp("langgraph-studio-routes")
+    with _running_studio_server(
+        runtime_dir,
+        auth_source=_CURRENT_AUTH_SHIM,
+    ) as client:
+        yield client
 
 
 @pytest.mark.parametrize("requested_created_by", [None, "system"])
@@ -208,5 +243,130 @@ def test_studio_update_cannot_forge_system_provenance(
         f"/assistants/{assistant_id}/latest",
         json={"version": 1},
     )
-    assert response.status_code == 403, response.text
-    assert "version rollback" in response.json()["detail"].lower()
+    assert response.status_code == 200, response.text
+    assert response.json()["version"] == 1
+    assert response.json()["metadata"]["created_by"] == "user"
+
+    response = studio_client.post(
+        f"/assistants/{assistant_id}/latest",
+        json={"version": 2},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["version"] == 2
+    assert response.json()["metadata"]["created_by"] == "user"
+
+
+def test_ordinary_authenticated_user_can_select_older_and_newer_versions(
+    studio_client: httpx.Client,
+):
+    assistant_id = str(uuid4())
+    with httpx.Client(
+        base_url=studio_client.base_url,
+        timeout=10,
+        trust_env=False,
+    ) as client:
+        response = client.post(
+            "/assistants",
+            json={"assistant_id": assistant_id, "graph_id": "test_graph"},
+        )
+        assert response.status_code == 200, response.text
+        owner_id = response.json()["metadata"]["user_id"]
+        assert owner_id != "langgraph-studio-user"
+
+        response = client.patch(
+            f"/assistants/{assistant_id}",
+            json={"metadata": {"revision": 2}},
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["version"] == 2
+
+        for version in (1, 2):
+            response = client.post(
+                f"/assistants/{assistant_id}/latest",
+                json={"version": version},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["version"] == version
+            assert response.json()["metadata"] == {
+                **({"revision": 2} if version == 2 else {}),
+                "created_by": "user",
+                "user_id": owner_id,
+            }
+
+
+def test_persisted_legacy_assistants_survive_cross_version_restart(
+    tmp_path: Path,
+):
+    """Old forged rows are repaired before the locked runtime can purge them."""
+    assistant_ids = [str(uuid4()) for _ in range(4)]
+
+    with _running_studio_server(
+        tmp_path,
+        auth_source=_LEGACY_AUTH_SHIM,
+    ) as legacy_client:
+        for assistant_id in assistant_ids:
+            response = legacy_client.post(
+                "/assistants",
+                json={
+                    "assistant_id": assistant_id,
+                    "graph_id": "test_graph",
+                    "metadata": {
+                        "created_by": "system",
+                        "legacy": assistant_id,
+                    },
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["metadata"]["created_by"] == "system"
+
+            response = legacy_client.patch(
+                f"/assistants/{assistant_id}",
+                json={
+                    "metadata": {
+                        "created_by": "system",
+                        "legacy": assistant_id,
+                        "revision": 2,
+                    }
+                },
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["version"] == 2
+
+    assert (tmp_path / ".langgraph_api" / ".langgraph_ops.pckl").is_file()
+
+    with _running_studio_server(
+        tmp_path,
+        auth_source=_CURRENT_AUTH_SHIM,
+    ) as repaired_client:
+        for assistant_id in assistant_ids:
+            response = repaired_client.get(f"/assistants/{assistant_id}")
+            assert response.status_code == 200, response.text
+            assert response.json()["metadata"] == {
+                "created_by": "user",
+                "legacy": assistant_id,
+                "revision": 2,
+                "user_id": "langgraph-studio-user",
+            }
+
+            response = repaired_client.post(
+                f"/assistants/{assistant_id}/versions",
+                json={"limit": 10},
+            )
+            assert response.status_code == 200, response.text
+            versions = response.json()
+            assert {item["version"] for item in versions} == {1, 2}
+            assert all(item["metadata"]["created_by"] == "user" for item in versions)
+
+            response = repaired_client.post(
+                f"/assistants/{assistant_id}/latest",
+                json={"version": 1},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["metadata"]["created_by"] == "user"
+
+            response = repaired_client.post(
+                f"/assistants/{assistant_id}/latest",
+                json={"version": 2},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["metadata"]["created_by"] == "user"

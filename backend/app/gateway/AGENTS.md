@@ -15,16 +15,18 @@ selects genuine server-registered assistants plus assistants owned by Studio;
 all other resources remain owner-scoped. Assistant create/update handlers make
 both `user_id` and `created_by=user` server-owned, because LangGraph gives
 `created_by=system` privileged ownership semantics during run creation. The
-custom application lifespan in `langgraph_studio.py` runs after graph
-registration and demotes persisted `created_by=system` rows whose deterministic
-IDs are absent from LangGraph's `SYSTEM_ASSISTANT_IDS`, so metadata written by
-older vulnerable versions is not trusted. Reconciliation skips without writing
-when that registry is empty, and it attempts every candidate before failing
-startup if any repair fails; this avoids both destructive mass demotion and
-running with known privileged rows still active. Standalone external assistant
-version rollback is denied because upstream restores a historical version's
-metadata without passing it through the update handler. Ordinary authenticated
-users retain owner-scoped assistant reads/searches.
+custom application module in `langgraph_studio.py` is imported before the
+locked in-memory runtime lifespan. At that pre-runtime boundary it derives
+genuine system assistant IDs from the CLI-provided graph registry, removes
+their persisted active/version rows so graph registration recreates them, and
+demotes every other legacy `created_by=system` marker in both active assistants
+and version history. This must happen before runtime 0.30.0 loads and purges
+system-marked rows; a user application lifespan is too late. An empty graph
+registry or absent persistence file is a no-op, while persistence parse/write
+errors fail startup closed. Because current create/update writes and all legacy
+versions are sanitized, ordinary owner-scoped assistant version selection
+remains enabled. Ordinary authenticated users retain owner-scoped assistant
+reads/searches.
 
 **Routers**:
 

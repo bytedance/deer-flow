@@ -120,22 +120,12 @@ async def add_owner_filter(ctx: Auth.types.AuthContext, value: dict):
             ]
         }
 
-    # The upstream set-latest operation restores an old version's entire
-    # metadata without passing it back through the update handler. Rows created
-    # before provenance became server-owned may therefore contain a privileged
-    # marker in version history. Deny that external operation instead of
-    # allowing an old forged marker to become active again.
-    if ctx.resource == "assistants" and ctx.action == "update" and value.get("version") is not None:
-        raise Auth.exceptions.HTTPException(
-            status_code=403,
-            detail="Assistant version rollback is disabled by the server",
-        )
-
     # Ownership and provenance on external assistant writes are server-owned.
     # LangGraph treats ``created_by=system`` as privileged during run creation,
     # so accepting that marker from request metadata would cross the auth
-    # boundary. Startup reconciliation separately demotes rows persisted before
-    # this rule existed.
+    # boundary. The standalone pre-runtime persistence repair also scrubs this
+    # marker from legacy active rows and their version history before normal
+    # version selection becomes available.
     metadata = value.setdefault("metadata", {})
     metadata["user_id"] = ctx.user.identity
     if ctx.resource == "assistants" and ctx.action in {"create", "update"}:

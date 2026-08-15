@@ -322,17 +322,23 @@ def test_regular_user_cannot_forge_system_assistant_provenance(action):
     assert result == {"user_id": "user-a"}
 
 
-def test_assistant_version_rollback_is_rejected():
-    with pytest.raises(Auth.exceptions.HTTPException) as exc:
-        asyncio.run(
-            add_owner_filter(
-                _studio_ctx(action="update"),
-                {"assistant_id": uuid4(), "version": 1},
-            )
-        )
+@pytest.mark.parametrize(
+    "ctx,user_id",
+    [
+        (_studio_ctx(action="update"), "langgraph-studio-user"),
+        (_make_ctx("user-a", resource="assistants", action="update"), "user-a"),
+    ],
+)
+def test_assistant_version_selection_remains_owner_scoped(ctx, user_id):
+    value = {"assistant_id": uuid4(), "version": 1}
 
-    assert exc.value.status_code == 403
-    assert "version rollback" in str(exc.value.detail).lower()
+    result = asyncio.run(add_owner_filter(ctx, value))
+
+    assert value["metadata"] == {
+        "created_by": "user",
+        "user_id": user_id,
+    }
+    assert result == {"user_id": user_id}
 
 
 # ── Gateway parity ───────────────────────────────────────────────────────
