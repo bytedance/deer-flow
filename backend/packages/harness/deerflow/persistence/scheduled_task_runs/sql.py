@@ -1,17 +1,28 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
 
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
 ACTIVE_RUN_STATUSES: tuple[str, ...] = ("queued", "running")
+
+
+def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_seconds: int) -> bool:
+    if lease_expires_at is None:
+        return False
+    if lease_expires_at.tzinfo is None:
+        lease_expires_at = lease_expires_at.replace(tzinfo=UTC)
+    return lease_expires_at >= now - timedelta(seconds=grace_seconds)
 
 
 class ActiveScheduledRunConflict(Exception):
@@ -35,8 +46,14 @@ class ActiveScheduledRunConflict(Exception):
 
 
 class ScheduledTaskRunRepository:
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        run_repository: RunRepository | None = None,
+    ) -> None:
         self._sf = session_factory
+        self._run_repository = run_repository or RunRepository(session_factory)
 
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
@@ -169,3 +186,67 @@ class ScheduledTaskRunRepository:
                 row.finished_at = now
             await session.commit()
             return len(rows)
+
+    async def reconcile_active_runs(
+        self,
+        *,
+        error: str,
+        now: datetime,
+        lease_grace_seconds: int = 10,
+    ) -> int:
+        """Reconcile only rows whose underlying owner is no longer live.
+
+        ``RunManager`` owns the durable run lease. A scheduled row with a live
+        underlying run, or a queued row whose parent task still has a dispatch
+        lease, belongs to another process and must survive this startup.
+        """
+        async with self._sf() as session:
+            result = await session.execute(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)))
+            row_ids = list(result.scalars())
+            stale = 0
+            for row_id in row_ids:
+                row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
+                if row is None or row.status not in ACTIVE_RUN_STATUSES:
+                    continue
+                task = await session.get(ScheduledTaskRow, row.task_id, with_for_update=True)
+                candidate = await self._find_underlying_run(session, row, task)
+                if candidate is not None and candidate.status in {"pending", "running"}:
+                    if _lease_is_alive(candidate.lease_expires_at, now=now, grace_seconds=lease_grace_seconds):
+                        continue
+                    # Run takeover commits in its own short transaction. If this
+                    # outer commit fails, the next poll finishes scheduled-row
+                    # bookkeeping while the run remains safely terminal.
+                    claimed = await self._run_repository.claim_for_takeover(
+                        candidate.run_id,
+                        grace_seconds=lease_grace_seconds,
+                        error=error,
+                        stop_reason="scheduled_task_orphan_recovered",
+                    )
+                    if not claimed:
+                        refreshed = await self._run_repository.get(candidate.run_id, user_id=None)
+                        if refreshed is not None and refreshed.get("status") in {"pending", "running"}:
+                            continue
+                if row.run_id is None and task is not None and _lease_is_alive(task.lease_expires_at, now=now, grace_seconds=0):
+                    continue
+                row.status = "interrupted"
+                row.error = error
+                row.finished_at = now
+                stale += 1
+            await session.commit()
+            return stale
+
+    @staticmethod
+    async def _find_underlying_run(session: AsyncSession, row: ScheduledTaskRunRow, task: ScheduledTaskRow | None) -> RunRow | None:
+        run_ids = [candidate for candidate in (row.run_id, task.last_run_id if task is not None else None) if candidate]
+        for run_id in dict.fromkeys(run_ids):
+            candidate = await session.get(RunRow, run_id)
+            if candidate is None:
+                continue
+            linked_task_run_id = (candidate.metadata_json or {}).get("scheduled_task_run_id")
+            # A stale parent ``last_run_id`` may point at a previous occurrence.
+            # Let the current scheduled-run metadata lookup recover the live row.
+            if linked_task_run_id is None or linked_task_run_id == row.id:
+                return candidate
+
+        result = await session.execute(select(RunRow).where(RunRow.metadata_json["scheduled_task_run_id"].as_string() == row.id).order_by(RunRow.created_at.desc()).limit(1))
+        return result.scalars().first()

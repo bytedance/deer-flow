@@ -6,7 +6,7 @@ import os
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
-from deerflow.constants import BROWSER_FRAMES_DIRNAME
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
 
 from .types import (
     DiffUnavailableReason,
@@ -27,6 +27,14 @@ EXCLUDED_DIR_NAMES = {
     # the browser panel + inline thumbnails, not workspace deliverables. Shared
     # constant with the browser tools so the name cannot drift out of sync.
     BROWSER_FRAMES_DIRNAME,
+    # Externalized oversized tool outputs (the tool-output budget middleware's
+    # default storage_subdir): process feedback the model reads back via
+    # read_file, not workspace deliverables — same intent as the browser frames
+    # exclusion above. Without this, a run that externalizes any tool output
+    # would trip run delivery verification (produced output never presented)
+    # and fail as an error. Custom storage_subdir values are passed through
+    # ``extra_excluded_dir_names`` instead.
+    TOOL_RESULTS_DIRNAME,
     "__pycache__",
     "build",
     "dist",
@@ -102,11 +110,19 @@ def scan_workspace_roots(
     include_text: bool = True,
     text_paths: set[str] | None = None,
     text_cache_dir: Path | None = None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> WorkspaceSnapshot:
     resolved_limits = limits or WorkspaceChangeLimits()
     cache_dir = Path(text_cache_dir) if text_cache_dir is not None else None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+    # Operator-customized tool_output.storage_subdir values arrive here; the
+    # default name is already part of EXCLUDED_DIR_NAMES, so merging is safe.
+    # Only single-segment directory names are meaningful: os.walk yields
+    # one-segment dirnames, so a nested value like "cache/tool-results" would
+    # never match. ToolOutputConfig enforces the single-segment contract, so a
+    # multi-segment value is a caller error, not a silent no-op.
+    excluded_dir_names = EXCLUDED_DIR_NAMES | extra_excluded_dir_names if extra_excluded_dir_names else EXCLUDED_DIR_NAMES
     files: dict[str, FileSnapshot] = {}
     scanned = 0
     truncated = False
@@ -116,7 +132,7 @@ def scan_workspace_roots(
             continue
 
         for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False):
-            dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_DIR_NAMES and not (Path(dirpath) / dirname).is_symlink()]
+            dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
             for filename in sorted(filenames):
                 if scanned >= resolved_limits.max_scanned_files:
                     truncated = True

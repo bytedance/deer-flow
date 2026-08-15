@@ -70,19 +70,23 @@ LARK_CLI_RUNTIME_VOLUME_NAME = "lark-cli-runtime"
 # Optional "lark-cli broker" image (Pattern B, issue #4338). When set, sandbox
 # Pods requesting the broker get an init container that stages a shim + a
 # long-running broker sidecar that holds the credentials, instead of mounting the
-# plaintext config/data credential dirs into the sandbox container. Empty ⇒ broker
-# off (Pattern A / legacy behavior). Broker supersedes Pattern A when both are set.
+# plaintext config/locks/data credential dirs into the sandbox container. Empty ⇒
+# broker off (Pattern A / legacy behavior). Broker supersedes Pattern A when both
+# are set.
 LARK_CLI_BROKER_IMAGE = os.environ.get("LARK_CLI_BROKER_IMAGE", "")
 # Optional comma-separated lark-cli subcommand denylist forwarded to the broker
 # sidecar (issue #4338 hardening). Empty ⇒ no subcommand is blocked. See the
 # broker README's "subcommand denylist" section.
 LARK_CLI_BROKER_DENY_SUBCOMMANDS = os.environ.get("DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS", "")
 LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
+LARK_CLI_LOCKS_CONTAINER_PATH = f"{LARK_CLI_CONFIG_CONTAINER_PATH}/locks"
 LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
 # Where the broker sidecar reads the per-user credentials (sidecar-only paths).
 LARK_BROKER_SIDECAR_CONFIG_PATH = "/var/lark/config"
+LARK_BROKER_SIDECAR_LOCKS_PATH = f"{LARK_BROKER_SIDECAR_CONFIG_PATH}/locks"
 LARK_BROKER_SIDECAR_DATA_PATH = "/var/lark/data"
 LARK_BROKER_CONFIG_VOLUME_NAME = "lark-cli-config"
+LARK_BROKER_LOCKS_VOLUME_NAME = "lark-cli-locks"
 LARK_BROKER_DATA_VOLUME_NAME = "lark-cli-data"
 LARK_BROKER_URL = "http://127.0.0.1:8788"
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
@@ -103,12 +107,13 @@ if SANDBOX_SERVICE_TYPE not in {"NodePort", "ClusterIP"}:
 SAFE_THREAD_ID_PATTERN = r"^[A-Za-z0-9_-]{1,64}$"
 SAFE_USER_ID_PATTERN = r"^[A-Za-z0-9_\-]+$"
 DEFAULT_USER_ID = "default"
-MAX_EXTRA_MOUNTS = 9
+MAX_EXTRA_MOUNTS = 10
 ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
     "/mnt/skills/custom",
     "/mnt/skills/integrations",
     "/mnt/integrations/lark-cli/config",
+    "/mnt/integrations/lark-cli/config/locks",
     "/mnt/integrations/lark-cli/data",
     "/mnt/integrations/lark-cli/runtime",
 }
@@ -231,18 +236,20 @@ def _runtime_provided_extra_mounts(
 
     Pattern A (init container + emptyDir) provides
     ``/mnt/integrations/lark-cli/runtime``, so a hostPath/PVC mount at the same
-    path would collide — it is dropped, leaving the per-user ``config`` / ``data``
-    credential mounts intact.
+    path would collide — it is dropped, leaving the per-user ``config`` /
+    ``config/locks`` / ``data`` mounts intact. The nested locks mount is writable
+    so lark-cli can coordinate API calls while the config root remains read-only.
 
-    Pattern B (broker sidecar) additionally moves the ``config`` / ``data``
-    credential mounts off the *sandbox* container and into the sidecar, so those
-    are dropped here too — the sandbox never sees plaintext credentials.
+    Pattern B (broker sidecar) additionally moves all three mounts off the
+    *sandbox* container and into the sidecar, so those are dropped here too —
+    the sandbox never sees plaintext credentials.
     """
     dropped: set[str] = set()
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         dropped = {
             LARK_CLI_RUNTIME_CONTAINER_PATH,
             LARK_CLI_CONFIG_CONTAINER_PATH,
+            LARK_CLI_LOCKS_CONTAINER_PATH,
             LARK_CLI_DATA_CONTAINER_PATH,
         }
     elif _lark_cli_runtime_enabled(provision_lark_cli_runtime):
@@ -253,15 +260,19 @@ def _runtime_provided_extra_mounts(
 
 
 def _lark_broker_credential_mounts(extra_mounts: list["ExtraMount"] | None) -> dict[str, "ExtraMount"]:
-    """Extract the config/data credential mounts the broker sidecar needs.
+    """Extract the config/locks/data mounts the broker sidecar needs.
 
     Keyed by container path so the caller can wire each into the sidecar's fixed
-    ``/var/lark/{config,data}`` paths.
+    ``/var/lark/{config,config/locks,data}`` paths.
     """
     result: dict[str, ExtraMount] = {}
     for mount in _validated_extra_mounts(extra_mounts):
         normalized = posixpath.normpath(mount.container_path)
-        if normalized in (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_CLI_DATA_CONTAINER_PATH):
+        if normalized in (
+            LARK_CLI_CONFIG_CONTAINER_PATH,
+            LARK_CLI_LOCKS_CONTAINER_PATH,
+            LARK_CLI_DATA_CONTAINER_PATH,
+        ):
             result[normalized] = mount
     return result
 
@@ -590,11 +601,12 @@ def _build_volumes(
                 empty_dir=k8s_client.V1EmptyDirVolumeSource(),
             )
         )
-    # Pattern B: the config/data credential volumes go to the broker sidecar only.
+    # Pattern B: config/locks/data volumes go to the broker sidecar only.
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         credential_mounts = _lark_broker_credential_mounts(extra_mounts)
         for container_path, volume_name in (
             (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_BROKER_CONFIG_VOLUME_NAME),
+            (LARK_CLI_LOCKS_CONTAINER_PATH, LARK_BROKER_LOCKS_VOLUME_NAME),
             (LARK_CLI_DATA_CONTAINER_PATH, LARK_BROKER_DATA_VOLUME_NAME),
         ):
             mount = credential_mounts.get(container_path)
@@ -757,9 +769,10 @@ def _build_lark_cli_broker_sidecars(
 ) -> list[k8s_client.V1Container]:
     """Broker sidecar that holds lark-cli + the per-user credentials (Pattern B).
 
-    The config/data credential dirs are mounted **only** here (never on the
-    sandbox container), so the plaintext app secret / OAuth tokens stay out of
-    the sandbox filesystem. The broker serves the command surface on loopback.
+    The config/locks/data dirs are mounted **only** here (never on the sandbox
+    container), so the plaintext app secret / OAuth tokens stay out of the
+    sandbox filesystem. The config root is read-only and its nested locks mount
+    is writable. The broker serves the command surface on loopback.
     """
     if not _lark_cli_broker_enabled(provision_lark_cli_broker):
         return []
@@ -767,6 +780,7 @@ def _build_lark_cli_broker_sidecars(
     volume_mounts: list[k8s_client.V1VolumeMount] = []
     for container_path, volume_name, sidecar_path in (
         (LARK_CLI_CONFIG_CONTAINER_PATH, LARK_BROKER_CONFIG_VOLUME_NAME, LARK_BROKER_SIDECAR_CONFIG_PATH),
+        (LARK_CLI_LOCKS_CONTAINER_PATH, LARK_BROKER_LOCKS_VOLUME_NAME, LARK_BROKER_SIDECAR_LOCKS_PATH),
         (LARK_CLI_DATA_CONTAINER_PATH, LARK_BROKER_DATA_VOLUME_NAME, LARK_BROKER_SIDECAR_DATA_PATH),
     ):
         mount = credential_mounts.get(container_path)

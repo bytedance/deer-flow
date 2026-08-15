@@ -15,6 +15,7 @@ from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
     InboundMessageType,
+    InboundReservation,
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
@@ -97,6 +98,7 @@ class TelegramChannel(Channel):
             return
 
         self._main_loop = asyncio.get_event_loop()
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -134,6 +136,7 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
         shutdown_loop = asyncio.get_running_loop()
         deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
         telegram_loop = self._tg_loop
@@ -799,9 +802,23 @@ class TelegramChannel(Channel):
             return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
-    async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
-        await self._send_running_reply(chat_id, msg_id)
-        await self.bus.publish_inbound(inbound)
+    async def _process_incoming_with_reply(
+        self,
+        chat_id: str,
+        msg_id: int,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        try:
+            await self._send_running_reply(chat_id, msg_id)
+            if reservation is None:
+                await self.bus.publish_inbound(inbound)
+            else:
+                self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            if reservation is not None:
+                reservation.release()
 
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
@@ -833,11 +850,30 @@ class TelegramChannel(Channel):
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
-        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
-            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
+            try:
+                inbound = await self._attach_connection_identity(inbound)
+                scheduled = self._submit_threadsafe_coroutine(
+                    self._process_incoming_with_reply(
+                        chat_id,
+                        update.message.message_id,
+                        inbound,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                    name="process_incoming_with_reply",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
+                )
+                if not scheduled:
+                    logger.info("[Telegram] main loop stopped before reserved command could be scheduled")
+            except Exception:
+                reservation.release()
+                raise
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
 
@@ -885,10 +921,29 @@ class TelegramChannel(Channel):
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
-        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
-            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
+            try:
+                inbound = await self._attach_connection_identity(inbound)
+                scheduled = self._submit_threadsafe_coroutine(
+                    self._process_incoming_with_reply(
+                        chat_id,
+                        update.message.message_id,
+                        inbound,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                    name="process_incoming_with_reply",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
+                )
+                if not scheduled:
+                    logger.info("[Telegram] main loop stopped before reserved inbound could be scheduled")
+            except Exception:
+                reservation.release()
+                raise
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")

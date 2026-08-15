@@ -4,7 +4,9 @@ Each subfolder under `agents/memory/backends/` is a pluggable memory backend. Sw
 
 - `deermem/` - the default backend (deer-flow's own: structured facts + JSON storage).
 - `noop/` - an empty backend and the **template** to copy when adding a new one.
-- `openviking/` - optional remote OpenViking backend over HTTP (middleware mode).
+- `openviking/` - optional remote backend using the official
+  `langchain-openviking` package (single-user middleware mode).
+- `honcho/` - optional remote Honcho backend over HTTP: user-model memory (representations built by Honcho's server-side deriver; no local LLM calls). Workspace-per-user isolation with per-user overrides.
 
 This guide tells you **which files to touch** when you change, swap, or add a memory system. Paths are relative to `backend/` unless noted.
 
@@ -125,6 +127,31 @@ Lessons from integrating external backends:
 4. **Don't import `runtime_home`.** Read `storage_path` from `backend_config`. (The `noop` template shows the correct pattern; importing deer-flow path helpers breaks portability - contract #4.)
 5. **Restart deer-flow after changes.** The manager is a process-level singleton; a running process does not hot-reload config or backend code.
 6. **Cap `get_context` length yourself.** The host applies no token budget; the backend must truncate (DeerMem has `max_injection_tokens`; noop does not).
+
+## Honcho Backend
+
+The optional `honcho/` backend is a remote-only HTTP adapter for user-model memory over Honcho (self-hosted or via api.honcho.dev). Middleware mode is the default; tool mode is also supported (search is implemented) and retains passive writes via `MemoryMiddleware` (`requires_passive_writes_in_tool_mode = True`) so Honcho's server-side deriver keeps building representations from every turn (no local LLM calls).
+
+**Configuration** (under `memory.backend_config`):
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `base_url` | str | `http://localhost:8000` | Honcho instance URL (e.g., `http://localhost:8000` or `https://api.honcho.dev`) |
+| `api_key` | str | optional | API key for hosted Honcho; required if `base_url` is `api.honcho.dev`. Can use `$HONCHO_API_KEY` env var syntax. Requires `allow_insecure_http: true` when using plain HTTP |
+| `allow_insecure_http` | bool | false | Allow HTTP (non-HTTPS) connections; needed for localhost development with api_key |
+| `timeout_seconds` | float | `10.0` | HTTP client timeout (seconds) for calls to Honcho — read/write/pool; see `connect_timeout_seconds` for the connect phase |
+| `connect_timeout_seconds` | float | `3.0` | HTTP connect timeout (seconds) for establishing the connection to Honcho |
+| `workspace_prefix` | str | `deerflow-u-` | Prefix for isolated workspaces; each user gets one workspace named `{prefix}{sanitized_id}` |
+| `workspace_overrides` | dict | `{}` | Map specific user ids to custom workspace names; overrides the prefix-based derivation. Values must be non-empty (parse error otherwise). Mapping several users to one workspace shares its search index across them (see Workspace Resolution) |
+| `user_peer_overrides` | dict | `{}` | Map specific user ids to custom names for the user's own peer; overrides the stable-id derivation. Values must be non-empty (parse error otherwise) |
+| `assistant_peer` | str | `deerflow` | Default peer name for the assistant when storing messages |
+| `message_char_limit` | int | `8000` | Character limit per message; longer messages are truncated |
+| `max_injection_chars` | int | `6000` | Character limit for injected memory into the system prompt |
+| `failure_policy.read` | str | `fail_open` | Recall failure handling: `fail_open` (log and return empty) or `fail_closed` (rethrow) |
+
+**Workspace Resolution**: Each DeerFlow user maps to one Honcho workspace. The workspace name is derived as: `workspace_overrides[user_id]` (if present) else `workspace_prefix + sanitized_id`, where `sanitized_id` is a collision-resistant hash suffix (sanitize[:48]-sha256[:8]). Missing user fails closed to no memory. The default derivation is isolated per user; a `workspace_overrides` entry that maps several users to one workspace deliberately shares that workspace's **search index** across them (`search` uses Honcho's workspace-scoped `/search`, which has no peer filter), while `get_context` / `get_memory` remain peer-scoped.
+
+**Tool Mode**: While tool-mode memory tools are not fully supported, the backend implements `requires_passive_writes_in_tool_mode = True` to retain passive writes via MemoryMiddleware while also enabling memory search through the `memory_search` tool.
 
 ## Reference
 

@@ -5,6 +5,8 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   DEMO_THREAD_IDS,
+  isDemoThreadId,
+  pathOfPublicDemoThread,
   resolveStaticDemoArtifact,
   STATIC_DEMO_ARTIFACTS,
 } from "@/core/threads/static-demo";
@@ -63,5 +65,18 @@ describe("resolveStaticDemoArtifact", () => {
         [...(STATIC_DEMO_ARTIFACTS[fixtureThreadId] ?? [])].sort(),
       ).toEqual(fixtureFiles);
     }
+  });
+});
+
+describe("public demo threads", () => {
+  it("recognizes only bundled demo thread IDs", () => {
+    expect(isDemoThreadId(DEMO_THREAD_IDS[0])).toBe(true);
+    expect(isDemoThreadId("not-a-demo-thread")).toBe(false);
+  });
+
+  it("builds an encoded public route in mock mode", () => {
+    expect(pathOfPublicDemoThread("thread/id?")).toBe(
+      "/showcase/thread%2Fid%3F",
+    );
   });
 });

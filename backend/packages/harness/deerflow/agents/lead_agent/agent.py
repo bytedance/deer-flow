@@ -235,14 +235,23 @@ def _authorize_model_name(
     return model_name
 
 
-def _create_summarization_middleware(*, app_config: AppConfig | None = None, run_model_name: str | None = None) -> DeerFlowSummarizationMiddleware | None:
+def _create_summarization_middleware(
+    *,
+    app_config: AppConfig | None = None,
+    run_model_name: str | None = None,
+    extensions=None,
+) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config.
 
     ``run_model_name`` is the resolved run model; it is the source of truth for
     ``model_name: null`` summarization and the explicit-summary-model fallback, so a
     custom agent's model is used instead of ``config.models[0]``.
     """
-    return create_summarization_middleware(app_config=app_config, run_model_name=run_model_name)
+    return create_summarization_middleware(
+        app_config=app_config,
+        run_model_name=run_model_name,
+        extensions=extensions,
+    )
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
@@ -382,6 +391,7 @@ def build_middlewares(
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    extensions=None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -404,11 +414,16 @@ def build_middlewares(
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
             filtering. Reused by the execution-time authorization middleware.
+        extensions: Loaded extensions whose middleware contributions are merged
+            into the final stack. Defaults to the process-wide set.
 
     Returns:
         List of middleware instances.
     """
     resolved_app_config = app_config or get_app_config()
+    from deerflow.extensions import get_agent_build_extensions
+
+    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
     runtime_middleware_kwargs = {
         "app_config": resolved_app_config,
         "lazy_init": True,
@@ -466,7 +481,11 @@ def build_middlewares(
     )
 
     # Add summarization middleware if enabled
-    summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config, run_model_name=model_name)
+    summarization_middleware = _create_summarization_middleware(
+        app_config=resolved_app_config,
+        run_model_name=model_name,
+        extensions=resolved_extensions,
+    )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
@@ -482,7 +501,12 @@ def build_middlewares(
         middlewares.append(TokenUsageMiddleware())
 
     # Add TitleMiddleware
-    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
+    middlewares.append(
+        TitleMiddleware(
+            app_config=resolved_app_config,
+            extensions=resolved_extensions,
+        )
+    )
 
     # Add MemoryMiddleware after TitleMiddleware. Tool mode normally skips it;
     # conversation-extraction backends may explicitly retain passive writes.
@@ -528,9 +552,11 @@ def build_middlewares(
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     subagent_enabled = cfg.get("subagent_enabled", False)
+    effective_max_subagents_per_run: int | None = None
     if subagent_enabled:
         max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
         max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
+        effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
@@ -575,7 +601,37 @@ def build_middlewares(
 
     # ClarificationMiddleware should always be last
     middlewares.append(ClarificationMiddleware())
-    return middlewares
+
+    # Extension contributions are merged only here, once the full stack exists.
+    # Doing it inside build_lead_runtime_middlewares() would place
+    # MODEL_PHYSICAL contributions above the lead-specific middlewares appended
+    # above, changing what "the final request" means for observers.
+    from deerflow_extension_api import AgentScope
+
+    from deerflow.extensions.stack import compose_with_extensions
+
+    if not resolved_extensions.has_middleware_contributors:
+        return compose_with_extensions(middlewares, AgentScope.LEAD, None, resolved_extensions)
+
+    from deerflow_extension_api import AgentBuildContext
+
+    from deerflow.extensions.policy import project_host_policy
+
+    return compose_with_extensions(
+        middlewares,
+        AgentScope.LEAD,
+        AgentBuildContext(
+            scope=AgentScope.LEAD,
+            agent_name=agent_name,
+            model_name=model_name,
+            policy=project_host_policy(
+                resolved_app_config,
+                token_budget_config=token_budget_config,
+                max_subagents_per_run=effective_max_subagents_per_run,
+            ),
+        ),
+        resolved_extensions,
+    )
 
 
 def _available_skill_names(agent_config, is_bootstrap: bool) -> set[str] | None:
