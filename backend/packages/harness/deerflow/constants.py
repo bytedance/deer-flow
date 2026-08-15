@@ -28,6 +28,15 @@ TOOL_RESULTS_DIRNAME = ".tool-results"
 # ``mcpServers.<name>.session_init_timeout``; ``None`` disables the timeout.
 DEFAULT_MCP_SESSION_INIT_TIMEOUT = 60.0
 
+# Durable MCP task storage/protocol limits. The runtime validators and ORM use
+# the same constants so SQLite cannot accept values that PostgreSQL later
+# rejects at its VARCHAR boundaries.
+MCP_TASK_SERVER_NAME_MAX_LENGTH = 128
+MCP_TASK_REMOTE_ID_MAX_LENGTH = 255
+MCP_TASK_NAME_MAX_LENGTH = 255
+MCP_TASK_RESULT_ARTIFACT_MAX_BYTES = 65_536
+MCP_TASK_POLL_AFTER_MAX_SECONDS = 86_400
+
 # Persisted run-event envelope limits. Runtime definitions and the ORM both
 # import these from this dependency-free module so lower layers never need to
 # initialize deerflow.runtime just to validate storage constraints.

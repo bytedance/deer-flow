@@ -375,6 +375,7 @@ async def test_provider_stop_drains_cross_thread_preparation_futures() -> None:
     for channel in providers:
         started = asyncio.Event()
         cancelled = asyncio.Event()
+        release_after_cancel = asyncio.Event()
         finished = asyncio.Event()
 
         async def preparation() -> None:
@@ -383,29 +384,108 @@ async def test_provider_stop_drains_cross_thread_preparation_futures() -> None:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
                 cancelled.set()
-                raise
+                await release_after_cancel.wait()
             finally:
                 finished.set()
 
         channel._running = True
         channel._main_loop = loop
         channel._open_threadsafe_future_intake()
-        future = await asyncio.to_thread(
+        scheduled = await asyncio.to_thread(
             channel._submit_threadsafe_coroutine,
             preparation(),
             loop,
             name="test_preparation",
             msg_id="message-1",
         )
-        assert future is not None
+        assert scheduled is True
         await asyncio.wait_for(started.wait(), timeout=1)
 
-        await asyncio.wait_for(channel.stop(), timeout=1)
+        stop_task = asyncio.create_task(channel.stop())
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        await asyncio.sleep(0)
 
-        assert cancelled.is_set()
+        assert not stop_task.done()
+        assert not finished.is_set()
+
+        release_after_cancel.set()
+        await asyncio.wait_for(stop_task, timeout=1)
+
         assert finished.is_set()
-        assert future.done()
-        assert channel._threadsafe_futures == set()
+        assert channel._threadsafe_submissions == set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_closes_cross_thread_submission_before_task_start() -> None:
+    channel = SlackChannel(MessageBus(), config={})
+    channel._open_threadsafe_future_intake()
+    coroutine_started = False
+
+    async def preparation() -> None:
+        nonlocal coroutine_started
+        coroutine_started = True
+
+    scheduled = channel._submit_threadsafe_coroutine(
+        preparation(),
+        asyncio.get_running_loop(),
+        name="test_preparation",
+        msg_id="message-1",
+    )
+    assert scheduled is True
+
+    await asyncio.wait_for(channel._close_and_drain_threadsafe_futures(), timeout=1)
+
+    assert coroutine_started is False
+    assert channel._threadsafe_submissions == set()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_cross_thread_drain_remains_retryable() -> None:
+    channel = SlackChannel(MessageBus(), config={})
+    channel._open_threadsafe_future_intake()
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_after_cancel = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def preparation() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_after_cancel.wait()
+        finally:
+            finished.set()
+
+    assert channel._submit_threadsafe_coroutine(
+        preparation(),
+        asyncio.get_running_loop(),
+        name="test_preparation",
+        msg_id="message-1",
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    submission = next(iter(channel._threadsafe_submissions))
+
+    first_drain = asyncio.create_task(channel._close_and_drain_threadsafe_futures())
+    await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+    first_drain.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_drain
+
+    assert not finished.is_set()
+    assert channel._threadsafe_submissions
+    assert not submission.completion.done()
+
+    second_drain = asyncio.create_task(channel._close_and_drain_threadsafe_futures())
+    await asyncio.sleep(0)
+    assert not second_drain.done()
+
+    release_after_cancel.set()
+    await asyncio.wait_for(second_drain, timeout=1)
+
+    assert finished.is_set()
+    assert channel._threadsafe_submissions == set()
 
 
 def test_channel_service_threads_intake_limits_into_bus_and_worker_pool() -> None:

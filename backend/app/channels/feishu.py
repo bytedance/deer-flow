@@ -844,7 +844,7 @@ class FeishuChannel(Channel):
             if reservation is None:
                 return
             logger.info("[Feishu] publishing inbound message to bus (type=%s, msg_id=%s)", inbound.msg_type.value, msg_id)
-            future = self._submit_threadsafe_coroutine(
+            scheduled = self._submit_threadsafe_coroutine(
                 self._prepare_inbound(
                     msg_id,
                     inbound,
@@ -856,20 +856,20 @@ class FeishuChannel(Channel):
                 msg_id=msg_id,
                 reservation=reservation,
             )
-            if future is None:
+            if not scheduled:
                 logger.info("[Feishu] main loop stopped before reserved inbound could be scheduled")
         else:
             logger.warning("[Feishu] main loop not running, cannot publish inbound message")
 
     def _schedule_batch_flush(self, key: tuple[str, str], source_message_id: str) -> None:
         if self._main_loop and self._main_loop.is_running():
-            future = self._submit_threadsafe_coroutine(
+            scheduled = self._submit_threadsafe_coroutine(
                 self._flush_pending_inbound_batch_after(key, source_message_id),
                 self._main_loop,
                 name="flush_inbound_batch",
                 msg_id=source_message_id,
             )
-            if future is None:
+            if not scheduled:
                 logger.info("[Feishu] main loop stopped before inbound batch flush could be scheduled")
         else:
             logger.warning("[Feishu] main loop not running, cannot flush inbound batch")
@@ -1115,7 +1115,7 @@ class FeishuChannel(Channel):
             connect_code = self._pending_connect_code(text)
             if connect_code:
                 if self._main_loop and self._main_loop.is_running():
-                    future = self._submit_threadsafe_coroutine(
+                    scheduled = self._submit_threadsafe_coroutine(
                         self._bind_connection_from_connect_code(
                             message_id=msg_id,
                             chat_id=chat_id,
@@ -1126,7 +1126,7 @@ class FeishuChannel(Channel):
                         name="bind_connection",
                         msg_id=msg_id,
                     )
-                    if future is None:
+                    if not scheduled:
                         logger.info("[Feishu] main loop stopped before channel connection bind could be scheduled")
                 else:
                     logger.warning("[Feishu] main loop not running, cannot bind channel connection")

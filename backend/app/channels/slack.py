@@ -338,7 +338,7 @@ class SlackChannel(Channel):
         connect_code = self._pending_connect_code(text)
         if connect_code:
             if self._loop and self._loop.is_running():
-                future = self._submit_threadsafe_coroutine(
+                scheduled = self._submit_threadsafe_coroutine(
                     self._bind_connection_from_connect_code(
                         event=event,
                         team_id=str(team_id or ""),
@@ -348,7 +348,7 @@ class SlackChannel(Channel):
                     name="bind_connection",
                     msg_id=event.get("ts"),
                 )
-                if future is None:
+                if not scheduled:
                     logger.info("[Slack] main loop stopped before channel connection bind could be scheduled")
             return
 
@@ -398,14 +398,14 @@ class SlackChannel(Channel):
                     # thread; no coroutine/Future waits for queue capacity.
                     self._loop.call_soon_threadsafe(self._commit_reserved_inbound, reservation, inbound)
                 else:
-                    future = self._submit_threadsafe_coroutine(
+                    scheduled = self._submit_threadsafe_coroutine(
                         self._publish_inbound_with_connection(inbound, reservation=reservation, team_id=team_id),
                         self._loop,
                         name="publish_inbound",
                         msg_id=event.get("ts", thread_ts),
                         reservation=reservation,
                     )
-                    if future is None:
+                    if not scheduled:
                         logger.info("[Slack] main loop stopped before reserved inbound could be scheduled")
             except RuntimeError:
                 reservation.release()
