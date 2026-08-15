@@ -2075,8 +2075,9 @@ scheduler:
 # ============================================================================
 # Long-running MCP Tasks Configuration
 # ============================================================================
-# Protocol-neutral durable task runtime. This foundation is disabled by
-# default; an MCP task driver must be configured before tasks can be submitted.
+# Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is
+# disabled by default; task_toolsets are configured per server in
+# extensions_config.json.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
 # mcp_tasks:
@@ -2084,11 +2085,21 @@ scheduler:
 #   poll_interval_seconds: 5     # Scan interval and default task retry interval
 #   lease_seconds: 120           # Expired claims become recoverable after this delay
 #   max_concurrent_polls: 8      # Maximum status calls started by one worker per scan
+#   max_poll_backoff_seconds: 300             # Cap for exponential retries after transient errors
+#   input_required_poll_interval_seconds: 60  # Minimum poll interval while waiting for user input
+#   tracking_degraded_after_errors: 3         # Consecutive errors before query API reports degraded tracking
+#   max_result_bytes: 65536                    # Full JSON result storage limit
+#   result_preview_max_chars: 2000             # Text preview retained when a result exceeds the limit
 mcp_tasks:
   enabled: false
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_polls: 8
+  max_poll_backoff_seconds: 300
+  input_required_poll_interval_seconds: 60
+  tracking_degraded_after_errors: 3
+  max_result_bytes: 65536
+  result_preview_max_chars: 2000
 
 # ============================================================================
 # Run Ownership Configuration
