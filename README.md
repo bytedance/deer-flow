@@ -400,6 +400,8 @@ cannot restore server privileges or be discarded by the runtime's startup
 cleanup. Keep the backend dependencies synchronized with `uv sync`; this
 compatibility path requires the declared LangGraph runtime versions and logs a
 warning if the persisted-store contract no longer matches its expectations.
+The documented command uses LangGraph's file-based custom-app loader, which is
+also covered directly by DeerFlow's regression tests.
 
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity

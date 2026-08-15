@@ -22,8 +22,11 @@ locked in-memory runtime lifespan. At that pre-runtime boundary it derives
 genuine system assistant IDs from the CLI-provided graph registry, removes
 their persisted active/version rows so graph registration recreates them, and
 demotes every other legacy `created_by=system` marker in both active assistants
-and version history. This must happen before runtime 0.30.0 loads and purges
-system-marked rows; a user application lifespan is too late. An empty graph
+and version history. LangGraph executes this file-backed custom app without
+first registering its module in `sys.modules`; keep its annotations eager so
+dataclass processing remains compatible with that loader, and preserve the
+direct file-loader regression test. This must happen before runtime 0.30.0
+loads and purges system-marked rows; a user application lifespan is too late. An empty graph
 registry or absent persistence file is a no-op, while persistence parse/write
 errors fail startup closed. The harness requires in-memory runtime 0.30.0 or
 newer, and a persisted store containing no expected registered assistant row
