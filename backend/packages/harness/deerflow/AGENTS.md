@@ -25,6 +25,15 @@ same helper for the embedded gate.
 trace id and not a DeerFlow `run_id`. Keep the existing subagent `trace_id` field
 separate: that short id is still only for subagent execution logs/status.
 
+### Browser Progress Screenshots (`community/browser_automation/`)
+
+Hidden per-action browser progress frames use JPEG at quality 80 to keep their
+storage and transfer cost bounded relative to lossless PNG. The explicit
+`browser_screenshot` tool remains PNG because it creates a user-requested
+artifact. New automatic capture entry points must reuse the shared progress
+encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
+drift.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
