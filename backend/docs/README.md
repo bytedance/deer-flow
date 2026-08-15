@@ -8,7 +8,9 @@ This directory contains detailed documentation for the DeerFlow backend.
 |----------|-------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | System architecture overview |
 | [API.md](API.md) | Complete API reference |
-| [AUTH_DESIGN.md](AUTH_DESIGN.md) | User authentication, CSRF, and per-user isolation design |
+| [AUTH_DESIGN.md](AUTH_DESIGN.md) | User authentication, CSRF, platform-trust (IM / Internal Auth), and per-user isolation |
+| [SSO.md](SSO.md) | OIDC / SSO single sign-on |
+| [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) | IM channel user binding (`channel_connections`) |
 | [CONFIGURATION.md](CONFIGURATION.md) | Configuration options |
 | [SETUP.md](SETUP.md) | Quick setup guide |
 
@@ -17,6 +19,7 @@ This directory contains detailed documentation for the DeerFlow backend.
 | Document | Description |
 |----------|-------------|
 | [STREAMING.md](STREAMING.md) | Token-level streaming design: Gateway vs DeerFlowClient paths, `stream_mode` semantics, per-id dedup |
+| [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md) | Persisted run event stream contract: envelope, producers, consumers, and known gaps |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
 | [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
 | [SANDBOX_MEMORY_PROFILING.md](SANDBOX_MEMORY_PROFILING.md) | Sandbox memory baseline and runtime comparison guide |
@@ -52,6 +55,7 @@ docs/
 ├── summarization.md           # Summarization feature
 ├── plan_mode_usage.md         # Plan mode feature
 ├── STREAMING.md               # Token-level streaming design
+├── RUN_EVENT_STREAM.md        # Persisted run event stream contract
 ├── AUTO_TITLE_GENERATION.md   # Title generation
 ├── TITLE_GENERATION_IMPLEMENTATION.md  # Title implementation details
 └── TODO.md                    # Roadmap and issues

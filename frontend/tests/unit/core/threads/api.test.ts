@@ -112,3 +112,62 @@ test("branchThreadFromTurn surfaces gateway detail on failure", async () => {
     }),
   ).rejects.toThrow("This turn can no longer be branched from.");
 });
+
+test("compactThreadContext posts agent attribution and abort signal", async () => {
+  const controller = new AbortController();
+  fetchWithAuth.mockResolvedValue({
+    ok: true,
+    json: async () => ({
+      thread_id: "thread-1",
+      compacted: true,
+      removed_message_count: 4,
+      preserved_message_count: 2,
+      summary_updated: true,
+      checkpoint_id: "checkpoint-3",
+      total_tokens: 123,
+    }),
+  });
+
+  const { compactThreadContext } = await import("@/core/threads/api");
+
+  await expect(
+    compactThreadContext("thread-1", {
+      agentName: "research-agent",
+      signal: controller.signal,
+    }),
+  ).resolves.toMatchObject({
+    compacted: true,
+    checkpoint_id: "checkpoint-3",
+  });
+
+  expect(fetchWithAuth).toHaveBeenCalledWith(
+    expect.stringContaining("/api/threads/thread-1/compact"),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        force: true,
+        agent_name: "research-agent",
+      }),
+      signal: controller.signal,
+    },
+  );
+});
+
+test("compactThreadContext surfaces an active-run conflict", async () => {
+  fetchWithAuth.mockResolvedValue({
+    ok: false,
+    status: 409,
+    json: async () => ({
+      detail: "Thread has a run in flight. Compact after the run finishes.",
+    }),
+  });
+
+  const { compactThreadContext } = await import("@/core/threads/api");
+
+  await expect(compactThreadContext("thread-1")).rejects.toThrow(
+    "Thread has a run in flight. Compact after the run finishes.",
+  );
+});

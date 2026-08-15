@@ -24,6 +24,8 @@ import pytest
 from _agent_e2e_helpers import FakeToolCallingModel, build_single_tool_call_model
 from langchain_core.messages import AIMessage, HumanMessage
 
+from deerflow.runtime.checkpoint_state import build_state_mutation_graph
+
 pytestmark = pytest.mark.no_auto_user
 
 
@@ -95,6 +97,28 @@ class _ScriptedAgent:
         self.interrupt_before_nodes = None
         self.interrupt_after_nodes = None
         self.model = FakeToolCallingModel(responses=[AIMessage(content=self.answer)])
+        # Gateway read paths consume graph-materialized snapshots
+        # (``aget_state``/``get_state_history``), so the double delegates those
+        # reads to a real state-only graph bound to the same checkpointer.
+        self._state_graph = build_state_mutation_graph("scripted_state", "full")
+
+    def _bound_state_graph(self):
+        self._state_graph.checkpointer = self.checkpointer
+        self._state_graph.store = self.store
+        return self._state_graph
+
+    async def aget_state(self, config):
+        return await self._bound_state_graph().aget_state(config)
+
+    def get_state(self, config):
+        return self._bound_state_graph().get_state(config)
+
+    async def aget_state_history(self, config, **kwargs):
+        async for snapshot in self._bound_state_graph().aget_state_history(config, **kwargs):
+            yield snapshot
+
+    def get_state_history(self, config, **kwargs):
+        yield from self._bound_state_graph().get_state_history(config, **kwargs)
 
     async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
         del subgraphs

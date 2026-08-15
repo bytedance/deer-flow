@@ -20,6 +20,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
 
+## 姐妹项目
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - 认识 DeerFlow 背后的秘密武器——一款桌面工具，用于原型化 agent 想法、检查 harness 的每个步骤、回放失败用例并基准测试性能。
+
 ## 字节跳动火山引擎方舟 Coding Plan
 
 - 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow
@@ -55,11 +61,14 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
       - [MCP Server](#mcp-server)
       - [IM 渠道](#im-渠道)
       - [LangSmith 链路追踪](#langsmith-链路追踪)
+      - [Langfuse 链路追踪](#langfuse-链路追踪)
+      - [同时使用两种追踪服务](#同时使用两种追踪服务)
   - [从 Deep Research 到 Super Agent Harness](#从-deep-research-到-super-agent-harness)
   - [核心特性](#核心特性)
     - [Skills 与 Tools](#skills-与-tools)
       - [Claude Code 集成](#claude-code-集成)
     - [Session Goals](#session-goals)
+    - [手动上下文压缩](#手动上下文压缩)
     - [Sub-Agents](#sub-agents)
     - [Sandbox 与文件系统](#sandbox-与文件系统)
     - [Context Engineering](#context-engineering)
@@ -418,6 +427,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 
 1. 打开 [@BotFather](https://t.me/BotFather)，发送 `/newbot`，复制生成的 HTTP API token。
 2. 在 `.env` 中设置 `TELEGRAM_BOT_TOKEN`，并在 `config.yaml` 里启用该渠道。
+3. 机器人支持接收入站文本、图片和文档（可带说明文字，也可不带）；托管版 Bot API 的单个附件下载上限为 20 MB。
 
 **Slack 配置**
 
@@ -484,6 +494,37 @@ LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
 
+#### Langfuse 链路追踪
+
+DeerFlow 同样支持 [Langfuse](https://langfuse.com) 可观测性，适用于兼容 LangChain 的运行。
+
+在 `.env` 文件中添加以下配置：
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+如果你使用自托管的 Langfuse 实例，请将 `LANGFUSE_BASE_URL` 设置为你的部署地址。
+
+**链路关联字段。** 每次 agent 运行都会标注 Langfuse 的保留追踪属性，这样 Sessions 和 Users 页面就能自动填充数据：
+
+- `session_id` = LangGraph 的 `thread_id`——将同一会话的所有 trace 归为一组
+- `user_id` = 来自 `get_effective_user_id()` 的有效用户（在无鉴权模式下回退为 `default`）
+- `trace_name` = assistant id（默认为 `lead-agent`）
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未设置时省略）
+- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，当启用请求链路关联（request trace correlation）时与 `X-Trace-Id` 一致
+
+这些字段会在图（graph）调用的根部注入到 `RunnableConfig.metadata`，同时覆盖 gateway 路径（`runtime/runs/worker.py::run_agent`）和内嵌路径（`client.py::DeerFlowClient.stream`），因此任何兼容 LangChain 的 callback 都能读取到它们。设置 `DEER_FLOW_ENV`（或 `ENVIRONMENT`）可按部署环境为 trace 打标签。
+
+#### 同时使用两种追踪服务
+
+如果同时启用 LangSmith 和 Langfuse，DeerFlow 会挂载两个追踪 callback，并将相同的模型活动上报到两个系统。
+
+如果某个 provider 被显式启用但缺少必要的凭据，或其 callback 初始化失败，DeerFlow 会在创建模型、初始化追踪时快速失败（fail fast），错误信息会指明导致失败的 provider。
+
 Docker 部署时，追踪默认关闭。在 `.env` 中设置 `LANGSMITH_TRACING=true` 和 `LANGSMITH_API_KEY` 即可启用。
 
 ## 从 Deep Research 到 Super Agent Harness
@@ -514,7 +555,7 @@ Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索�
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
-Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。新 thread 会从该回复对应的 checkpoint 开始，并尽力复制当前 thread 的工作区文件。
+Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
 
 ```text
 # sandbox 容器内的路径
@@ -558,6 +599,8 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 完整 API 说明见 [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md)。
 
+Web UI 输入框支持浏览器侧语音听写。浏览器提供 Web Speech API 时，麦克风按钮会把语音转写为本地草稿；DeerFlow 只接收转写后的文本，音频处理交由浏览器或操作系统语音识别服务按其环境策略完成。用户可以在发送前继续检查和编辑文本。
+
 ### Session Goals
 
 用 `/goal <完成条件>` 为当前 thread 绑定一个激活态的完成条件。这个 goal 是 thread 维度的状态，而不是技能激活，所以它会跨轮次持续生效，直到 DeerFlow 判定它已被满足、或者你手动清除它。
@@ -574,13 +617,17 @@ DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
 
 Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 和受支持的 IM 渠道里也可用。在 Web UI 和受支持的 IM 渠道里，设置 `/goal <完成条件>` 还会以该条件作为任务启动一次 run；状态查询和清除命令则只管理 goal 状态本身。
 
+### 手动上下文压缩
+
+在 Web UI 输入框中使用 `/compact`，可以把当前 thread 的早期上下文压缩成摘要。完整聊天记录仍会保留在界面上，但后续模型调用会基于压缩摘要和最近消息继续。当前历史不足时不会压缩；thread 正在运行任务时会阻止压缩。
+
 ### Sub-Agents
 
-复杂任务通常不可能一次完成，DeerFlow 会先拆解，再执行。
+Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 
-lead agent 可以按需动态拉起 sub-agents。每个 sub-agent 都有自己独立的上下文、工具和终止条件。只要条件允许，它们就会并行运行，返回结构化结果，最后再由 lead agent 汇总成一份完整输出。
+lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例如真正缩短耗时的并行工作、专业能力收益或上下文隔离收益。存在跨 Agent 依赖或重叠副作用的工作不会并行分派；当专业能力或上下文隔离收益明显占优时，一条有界的顺序任务链仍可交给一个 sub-agent 完成。lead agent 会使用能取得收益的最少 sub-agents，并在每一批完成后重新评估，而不会仅仅因为任务规模大或步骤多就继续拆分。每个 sub-agent 都有自己独立的上下文、工具和终止条件，返回结构化结果后由 lead agent 验证并汇总成完整输出。
 
-这也是 DeerFlow 能处理从几分钟到几小时任务的原因。比如一个研究任务，可以拆成十几个 sub-agents，分别探索不同方向，最后合并成一份报告，或者一个网站，或者一套带生成视觉内容的演示文稿。一个 harness，多路并行。
+例如，彼此独立的只读研究可以在并行节省的时间明显高于重复检索和结果合并成本时并发执行；而会修改相同文件、依赖连续测试反馈的仓库重构则由 lead agent 直接完成。当 `max_concurrent_subagents` 为 `1` 时，提示词会关闭并行和多批次路由指导，仅在专业能力或上下文隔离具有明确收益时保留委派。
 
 ### Sandbox 与文件系统
 
@@ -609,6 +656,8 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 大多数 agents 会在对话结束后把一切都忘掉，DeerFlow 不一样。
 
 跨 session 使用时，DeerFlow 会逐步积累关于你的持久 memory，包括你的个人偏好、知识背景，以及长期沉淀下来的工作习惯。你用得越多，它越了解你的写作风格、技术栈和重复出现的工作流。memory 保存在本地，控制权也始终在你手里。
+
+默认 DeerMem `middleware` 模式会先判断候选信息的作用域、持久性和授权属性，再由确定性写入门决定是否保存。只有稳定、描述性的用户级事实能进入长期 memory；当前对话或项目的约束、一次性操作授权仍留在对话状态中。用户全局 summary 必须同时具有用户级作用域和描述性授权属性，基于矛盾的删除也会经过作用域保护；如果删除依赖一条替代事实，只有替代事实真正通过校验并保留下来后才执行删除。这些分类字段只用于本次抽取，不写入 fact 文件，也不增加 LLM 调用次数。`memory.mode: tool` 的显式 CRUD 仍是独立的模型直写路径。如果通过 `memory.backend_config.prompts_dir` 覆盖了内置抽取模板，必须同步在自定义模板中加入新的分类字段（`memory_update` 的 fact/summary/removal 格式与 `consolidation` 的合并 fact 结构）：写入门是 fail closed 的，未迁移的旧模板会导致所有抽取驱动的 fact、summary 与删除写入停止，只能通过 `rejected_by_scope_gate` 指标和高拒绝率告警发现。
 
 ## 推荐模型
 

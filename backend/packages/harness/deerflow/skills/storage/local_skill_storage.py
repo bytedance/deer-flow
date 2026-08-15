@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterable
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -47,8 +48,15 @@ class LocalSkillStorage(SkillStorage):
             from deerflow.config import get_app_config
 
             config = app_config or get_app_config()
+            self._app_config = config
             self._host_root: Path = config.skills.get_skills_path()
         else:
+            # Keep app_config as-is (may be None). This host_path constructor is used by
+            # tests and non-user-scoped storage; eagerly calling get_app_config() here would
+            # break config-free environments (e.g. CI). The skill_scan.enabled kill switch is
+            # resolved lazily at scan time by skill_scan_enabled(), which also picks up
+            # hot-reloaded config, so a None here is honored, not ignored.
+            self._app_config = app_config
             self._host_root = resolve_path(host_path)
 
     # ------------------------------------------------------------------
@@ -76,6 +84,12 @@ class LocalSkillStorage(SkillStorage):
                 dir_names[:] = sorted(name for name in dir_names if not name.startswith("."))
                 if SKILL_MD_FILE not in file_names:
                     continue
+                # A directory containing SKILL.md is a package boundary. Any
+                # nested SKILL.md files belong to that package's supporting
+                # resources (for example eval fixtures), not to the runtime
+                # skill registry. Namespace directories without SKILL.md still
+                # recurse, preserving layouts such as public/team/helper.
+                dir_names.clear()
                 yield category, category_path, Path(current_root) / SKILL_MD_FILE
 
     def read_custom_skill(self, name: str) -> str:
@@ -94,8 +108,18 @@ class LocalSkillStorage(SkillStorage):
         ) as tmp_file:
             tmp_file.write(content)
             tmp_path = Path(tmp_file.name)
-        tmp_path.replace(target)
-        make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        try:
+            with self._skill_projection_mutation():
+                tmp_path.replace(target)
+                make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        with self._skill_projection_mutation(remove=removal):
+            return super().remove_custom_skill_file(name, relative_path)
 
     async def ainstall_skill_from_archive(self, archive_path: str | Path) -> dict:
         from deerflow.skills.installer import _scan_skill_archive_contents_or_raise
@@ -110,7 +134,7 @@ class LocalSkillStorage(SkillStorage):
         try:
             skill_dir, skill_name, target = await asyncio.to_thread(self._prepare_skill_archive, path, Path(tmp), custom_dir, archive_path)
 
-            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name)
+            await _scan_skill_archive_contents_or_raise(skill_dir, skill_name, app_config=self._app_config)
 
             await asyncio.to_thread(self._commit_skill_install, skill_dir, skill_name, custom_dir, target)
             logger.info("Skill %r installed to %s", skill_name, target)
@@ -145,6 +169,7 @@ class LocalSkillStorage(SkillStorage):
             SkillAlreadyExistsError,
             resolve_skill_dir_from_archive,
             safe_extract_skill_archive,
+            scan_archive_preflight_or_raise,
         )
         from deerflow.skills.validation import _validate_skill_frontmatter
 
@@ -165,6 +190,7 @@ class LocalSkillStorage(SkillStorage):
             raise ValueError("File is not a valid ZIP archive") from None
 
         with zf:
+            scan_archive_preflight_or_raise(path, app_config=self._app_config)
             safe_extract_skill_archive(zf, tmp_path)
 
         skill_dir = resolve_skill_dir_from_archive(tmp_path)
@@ -185,11 +211,12 @@ class LocalSkillStorage(SkillStorage):
         """Stage and move the validated skill into place (blocking; runs off the event loop)."""
         from deerflow.skills.installer import _move_staged_skill_into_reserved_target
 
-        with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
-            staging_target = Path(staging_root) / skill_name
-            shutil.copytree(skill_dir, staging_target)
-            _move_staged_skill_into_reserved_target(staging_target, target)
-        make_skill_written_path_sandbox_readable(custom_dir, target)
+        with self._skill_projection_mutation():
+            with tempfile.TemporaryDirectory(prefix=f".installing-{skill_name}-", dir=custom_dir) as staging_root:
+                staging_target = Path(staging_root) / skill_name
+                shutil.copytree(skill_dir, staging_target)
+                _move_staged_skill_into_reserved_target(staging_target, target)
+            make_skill_written_path_sandbox_readable(custom_dir, target)
 
     def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
         self.validate_skill_name(name)
@@ -207,8 +234,22 @@ class LocalSkillStorage(SkillStorage):
                     name,
                     e,
                 )
-        if target.exists():
-            shutil.rmtree(target)
+        removal = ((SkillCategory.CUSTOM, Path(name)),)
+        with self._skill_projection_mutation(remove=removal):
+            if target.exists():
+                shutil.rmtree(target)
+
+    def _skill_projection_mutation(
+        self,
+        *,
+        remove: tuple[tuple[SkillCategory, Path], ...] = (),
+        remove_names: tuple[str, ...] = (),
+    ):
+        if getattr(self, "user_id", None) is None:
+            return nullcontext()
+        from deerflow.skills.projection import skill_projection_mutation
+
+        return skill_projection_mutation(self, "user", remove=remove, remove_names=remove_names)
 
     def append_history(self, name: str, record: dict) -> None:
         self.validate_skill_name(name)

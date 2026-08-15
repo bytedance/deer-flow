@@ -92,6 +92,7 @@ _PROVIDER_META: dict[str, dict[str, str]] = {
     "dingtalk": {"display_name": "DingTalk", "auth_mode": "binding_code"},
     "wechat": {"display_name": "WeChat", "auth_mode": "binding_code"},
     "wecom": {"display_name": "WeCom", "auth_mode": "binding_code"},
+    "buzz": {"display_name": "Buzz", "auth_mode": "binding_code"},
 }
 
 _CREDENTIAL_FIELDS: dict[str, tuple[dict[str, str], ...]] = {
@@ -117,6 +118,10 @@ _CREDENTIAL_FIELDS: dict[str, tuple[dict[str, str], ...]] = {
         {"name": "bot_id", "label": "Bot ID", "type": "text"},
         {"name": "bot_secret", "label": "Bot secret", "type": "password"},
     ),
+    "buzz": (
+        {"name": "relay_url", "label": "Relay URL", "type": "text"},
+        {"name": "private_key", "label": "Private key (hex or nsec)", "type": "password"},
+    ),
 }
 
 _RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
@@ -127,6 +132,7 @@ _RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "dingtalk": ("client_id", "client_secret"),
     "wechat": ("bot_token",),
     "wecom": ("bot_id", "bot_secret"),
+    "buzz": ("relay_url", "private_key"),
 }
 
 
@@ -201,6 +207,13 @@ def _get_repository(request: Request, config: ChannelConnectionsConfig) -> Chann
 
 
 def _provider_config(config: ChannelConnectionsConfig, provider: str):
+    # Resolve provider configs only for known providers. An unrestricted
+    # getattr would let a request-supplied name that happens to match another
+    # config attribute (e.g. the "enabled" / "require_bound_identity" bool
+    # fields) slip past the 404 and return a non-provider value, which callers
+    # then dereference as a provider config (AttributeError -> HTTP 500).
+    if provider not in _PROVIDER_META:
+        raise HTTPException(status_code=404, detail="Unknown channel provider")
     provider_config = getattr(config, provider, None)
     if provider_config is None:
         raise HTTPException(status_code=404, detail="Unknown channel provider")

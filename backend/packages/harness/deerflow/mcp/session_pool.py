@@ -351,6 +351,19 @@ class MCPSessionPool:
         for loop, _ready, task, close_evt in inflight:
             await self._shutdown_entry(loop, task, close_evt, cancel=True)
 
+    async def close_session(self, server_name: str, scope_key: str) -> None:
+        """Close one exact server/scope session so a retry reconnects cleanly."""
+        key = (server_name, scope_key)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            inflight = self._inflight.pop(key, None)
+        if entry is not None:
+            _session, loop, task, close_evt = entry
+            await self._shutdown_entry(loop, task, close_evt)
+        if inflight is not None:
+            loop, _ready, task, close_evt = inflight
+            await self._shutdown_entry(loop, task, close_evt, cancel=True)
+
     async def close_server(self, server_name: str) -> None:
         """Close all sessions for a given server."""
         with self._lock:
@@ -442,14 +455,19 @@ _pool_lock = threading.Lock()
 def get_session_pool() -> MCPSessionPool:
     """Return the global session-pool singleton."""
     global _pool
-    if _pool is None:
-        with _pool_lock:
-            if _pool is None:
-                _pool = MCPSessionPool()
-    return _pool
+    # Build and return under the lock so racing cold-start callers construct
+    # exactly one pool and reset_session_pool() can't null the global between
+    # reading it and returning it (which previously could hand back None). The
+    # critical section is tiny and never awaits, so a threading.Lock is safe to
+    # hold from both the async and sync/worker-thread paths.
+    with _pool_lock:
+        if _pool is None:
+            _pool = MCPSessionPool()
+        return _pool
 
 
 def reset_session_pool() -> None:
-    """Reset the singleton (for tests)."""
+    """Reset the singleton (used in tests and the MCP cache reset path)."""
     global _pool
-    _pool = None
+    with _pool_lock:
+        _pool = None

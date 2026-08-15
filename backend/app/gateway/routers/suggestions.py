@@ -1,18 +1,16 @@
 import json
 import logging
-import os
 
 from fastapi import APIRouter, Depends, Request
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 import deerflow.utils.llm_text as llm_text
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
-from deerflow.models import create_chat_model
-from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.tracing import inject_langfuse_metadata
+from deerflow.config.suggestions_config import DEFAULT_MAX_SUGGESTIONS, MAX_SUGGESTIONS_LIMIT
+from deerflow.utils.oneshot_llm import run_oneshot_llm
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +24,7 @@ class SuggestionMessage(BaseModel):
 
 class SuggestionsRequest(BaseModel):
     messages: list[SuggestionMessage] = Field(..., description="Recent conversation messages")
-    n: int = Field(default=3, ge=1, le=5, description="Number of suggestions to generate")
+    n: int = Field(default=DEFAULT_MAX_SUGGESTIONS, ge=1, le=MAX_SUGGESTIONS_LIMIT, description="Number of suggestions to generate")
     model_name: str | None = Field(default=None, description="Optional model override")
 
 
@@ -36,9 +34,9 @@ class SuggestionsResponse(BaseModel):
 
 class SuggestionsConfigResponse(BaseModel):
     enabled: bool = Field(..., description="Whether follow-up suggestions are enabled globally")
+    max_suggestions: int = Field(..., ge=1, le=MAX_SUGGESTIONS_LIMIT, description="Maximum number of follow-up suggestions to generate")
 
 
-_extract_response_text = llm_text.extract_response_text
 _strip_markdown_code_fence = llm_text.strip_markdown_code_fence
 _strip_think_blocks = llm_text.strip_think_blocks
 
@@ -81,6 +79,10 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     return "\n".join(parts).strip()
 
 
+def _configured_max_suggestions(config: AppConfig) -> int:
+    return getattr(config.suggestions, "max_suggestions", DEFAULT_MAX_SUGGESTIONS)
+
+
 @router.get(
     "/suggestions/config",
     response_model=SuggestionsConfigResponse,
@@ -90,7 +92,7 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
 async def get_suggestions_config(
     config: AppConfig = Depends(get_config),
 ) -> SuggestionsConfigResponse:
-    return SuggestionsConfigResponse(enabled=config.suggestions.enabled)
+    return SuggestionsConfigResponse(enabled=config.suggestions.enabled, max_suggestions=_configured_max_suggestions(config))
 
 
 @router.post(
@@ -101,7 +103,7 @@ async def get_suggestions_config(
 )
 @require_permission("threads", "read", owner_check=True)
 async def generate_suggestions(
-    thread_id: str,
+    thread_id: ThreadId,
     body: SuggestionsRequest,
     request: Request,
     config: AppConfig = Depends(get_config),
@@ -111,7 +113,7 @@ async def generate_suggestions(
     if not body.messages:
         return SuggestionsResponse(suggestions=[])
 
-    n = body.n
+    n = min(body.n, _configured_max_suggestions(config))
     conversation = _format_conversation(body.messages)
     if not conversation:
         return SuggestionsResponse(suggestions=[])
@@ -129,18 +131,14 @@ async def generate_suggestions(
     user_content = f"Conversation Context:\n{conversation}\n\nGenerate {n} follow-up questions"
 
     try:
-        model = create_chat_model(name=body.model_name, thinking_enabled=False, app_config=config)
-        invoke_config: dict = {"run_name": "suggest_agent"}
-        inject_langfuse_metadata(
-            invoke_config,
-            thread_id=thread_id,
-            user_id=get_effective_user_id(),
-            assistant_id="suggest_agent",
+        raw = await run_oneshot_llm(
+            system_instruction=system_instruction,
+            user_content=user_content,
+            run_name="suggest_agent",
+            app_config=config,
             model_name=body.model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            thread_id=thread_id,
         )
-        response = await model.ainvoke([SystemMessage(content=system_instruction), HumanMessage(content=user_content)], config=invoke_config)
-        raw = _extract_response_text(response.content)
         suggestions = _parse_json_string_list(raw) or []
         cleaned = [s.replace("\n", " ").strip() for s in suggestions if s.strip()]
         cleaned = cleaned[:n]

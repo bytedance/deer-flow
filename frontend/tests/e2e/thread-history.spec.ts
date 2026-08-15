@@ -94,6 +94,286 @@ test.describe("Thread history", () => {
     ).toBeVisible({ timeout: 15_000 });
   });
 
+  test("keeps a thousand-turn history DOM bounded while preserving navigation", async ({
+    page,
+  }) => {
+    const messages = Array.from({ length: 1_000 }, (_, turn) => [
+      {
+        type: "human",
+        id: `long-human-${turn}`,
+        content: `Long history question ${turn}`,
+      },
+      {
+        type: "ai",
+        id: `long-ai-${turn}`,
+        content: `Long history answer ${turn}`,
+      },
+    ]).flat();
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Virtualized long history",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages,
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Long history answer 999")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    const conversation = page.getByRole("log");
+    const scroller = conversation.locator(":scope > div").first();
+    await expect
+      .poll(() => conversation.locator("[data-index]").count())
+      .toBeLessThan(60);
+
+    await scroller.dispatchEvent("wheel", { deltaY: -1_000 });
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText("Long history question 0")).toBeVisible({
+      timeout: 15_000,
+    });
+    expect(await conversation.locator("[data-index]").count()).toBeLessThan(60);
+  });
+
+  test("keeps rendered messages ordered when the latest history page advances", async ({
+    page,
+  }) => {
+    const originalPrompt = "/ppt-master Build the quarterly presentation";
+    const followUpPrompt = "Continue with the approved default layout";
+    const olderRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 1;
+      if (index === 0) {
+        return {
+          run_id: "run-initial",
+          seq,
+          content: {
+            type: "human",
+            id: "history-prompt",
+            content: [{ type: "text", text: originalPrompt }],
+          },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-03T12:00:00Z",
+        };
+      }
+      if (index === 1) {
+        return {
+          run_id: "run-initial",
+          seq,
+          content: {
+            type: "ai",
+            id: "history-answer",
+            content: "Initial design is ready",
+          },
+          metadata: { caller: "lead_agent" },
+          created_at: "2025-06-03T12:00:01Z",
+        };
+      }
+      return {
+        run_id: "run-initial",
+        seq,
+        content: {
+          type: "ai",
+          id: `history-step-${seq}`,
+          content: `Historical presentation step ${seq}`,
+          ...(index === 49
+            ? { additional_kwargs: { turn_duration: 704 } }
+            : {}),
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:00:02Z",
+      };
+    });
+    const initialRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 51;
+      return {
+        run_id: "run-initial",
+        seq,
+        content: {
+          type: "ai",
+          id: `history-step-${seq}`,
+          content: `Historical presentation step ${seq}`,
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:00:03Z",
+      };
+    });
+    const shiftedRows = Array.from({ length: 50 }, (_, index) => {
+      const seq = index + 101;
+      return {
+        run_id: "run-shifted",
+        seq,
+        content: {
+          type: "ai",
+          id: `shifted-step-${seq}`,
+          content: `New presentation step ${seq}`,
+        },
+        metadata: { caller: "lead_agent" },
+        created_at: "2025-06-03T12:01:00Z",
+      };
+    });
+    let latestPageRequestCount = 0;
+    let cursorPageRequestCount = 0;
+
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Long presentation task",
+          updated_at: "2025-06-03T12:00:00Z",
+          // This scenario exercises persisted run-event pagination. Keep the
+          // checkpoint empty so its generic mock messages do not interfere
+          // with optimistic -> server reconciliation after the follow-up.
+          messages: [],
+        },
+      ],
+    });
+    await page.route(
+      new RegExp(`/api/threads/${MOCK_THREAD_ID}/messages/page(?:\\?.*)?$`),
+      async (route) => {
+        if (route.request().method() !== "GET") {
+          return route.fallback();
+        }
+
+        const beforeSeq = new URL(route.request().url()).searchParams.get(
+          "before_seq",
+        );
+        const isLatestPage = beforeSeq === null;
+        const rows = isLatestPage
+          ? latestPageRequestCount === 0
+            ? initialRows
+            : shiftedRows
+          : beforeSeq === "101"
+            ? initialRows
+            : olderRows;
+        const hasMore = isLatestPage || beforeSeq === "101";
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: rows,
+            has_more: hasMore,
+            next_before_seq: hasMore ? (rows[0]?.seq ?? null) : null,
+          }),
+        });
+        if (isLatestPage) {
+          latestPageRequestCount += 1;
+        } else {
+          cursorPageRequestCount += 1;
+        }
+      },
+    );
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect
+      .poll(() => cursorPageRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(0);
+    const conversation = page.getByRole("log");
+    const scroller = conversation.locator(":scope > div").first();
+    await scroller.dispatchEvent("wheel", { deltaY: -1_000 });
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText(originalPrompt)).toBeVisible({
+      timeout: 15_000,
+    });
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText("Completed in 11m 44s")).toBeVisible();
+
+    const latestPageRequestsBeforeSubmit = latestPageRequestCount;
+    const textarea = page.locator("textarea[name='message']");
+    await textarea.fill(followUpPrompt);
+    await textarea.press("Enter");
+
+    await expect
+      .poll(() => latestPageRequestCount, { timeout: 15_000 })
+      .toBeGreaterThan(latestPageRequestsBeforeSubmit);
+    await expect(page.getByText(followUpPrompt)).toBeVisible();
+
+    let preservedDurationFound = false;
+    for (let step = 0; step <= 12; step += 1) {
+      await scroller.evaluate((element, ratio) => {
+        element.scrollTop =
+          (element.scrollHeight - element.clientHeight) * ratio;
+        element.dispatchEvent(new Event("scroll"));
+      }, step / 12);
+      if (await page.getByText("Completed in 11m 44s").isVisible()) {
+        preservedDurationFound = true;
+        break;
+      }
+    }
+    expect(preservedDurationFound).toBe(true);
+
+    await scroller.evaluate((element) => {
+      element.scrollTop = 0;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText(originalPrompt)).toBeVisible();
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
+    await expect(page.getByText(followUpPrompt)).toBeVisible();
+  });
+
+  test("shows a completed run duration once after multi-step history", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: MOCK_THREAD_ID,
+          title: "Multi-step duration",
+          updated_at: "2025-06-03T12:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-duration",
+              content: [{ type: "text", text: "Complete several steps" }],
+            },
+            {
+              type: "ai",
+              id: "msg-ai-duration-1",
+              content: "Intermediate result",
+              additional_kwargs: { turn_duration: 114 },
+            },
+            {
+              type: "ai",
+              id: "msg-ai-duration-2",
+              content: "Final result",
+              additional_kwargs: {
+                turn_duration: 114,
+                reasoning_content: "Final synthesis reasoning",
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    await expect(page.getByText("Final result")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await expect(page.getByTestId("run-duration")).toHaveCount(1);
+    await expect(page.getByText("Completed in 1m 54s")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Reasoning", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("Thought for 114 seconds")).toHaveCount(0);
+  });
+
   test("input box recalls previous prompts with arrow keys", async ({
     page,
   }) => {
@@ -448,7 +728,7 @@ test.describe("Thread history", () => {
       },
     );
 
-    await page.goto(`/workspace/chats/${DEMO_THREAD_ID}?mock=true`);
+    await page.goto(`/showcase/${DEMO_THREAD_ID}`);
 
     await expect(
       page.getByText("What might be the trends and opportunities in 2026?"),
@@ -457,6 +737,12 @@ test.describe("Thread history", () => {
       page.getByText("I've created a modern, minimalist website"),
     ).toBeVisible();
     expect(backendRunHistoryUrls).toEqual([]);
+  });
+
+  test("public showcase rejects unknown thread IDs", async ({ page }) => {
+    const response = await page.goto("/showcase/not-a-bundled-demo");
+
+    expect(response?.status()).toBe(404);
   });
 
   test("chats list page shows all threads", async ({ page }) => {

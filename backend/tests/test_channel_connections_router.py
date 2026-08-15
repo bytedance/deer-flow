@@ -598,6 +598,29 @@ def test_connect_unconfigured_runtime_channel_returns_400(tmp_path):
     anyio.run(repo.close)
 
 
+@pytest.mark.parametrize("provider", ["enabled", "require_bound_identity", "provider_status", "unknown_provider"])
+def test_connect_rejects_non_provider_config_attribute_with_404(tmp_path, provider):
+    import anyio
+
+    # A request-supplied provider name that collides with a real (non-provider)
+    # ChannelConnectionsConfig attribute -- e.g. the "enabled" /
+    # "require_bound_identity" bool fields, or the "provider_status" method --
+    # must resolve to the intended 404. Before the allowlist check, an
+    # unrestricted getattr returned that attribute instead of falling through to
+    # the 404, and the connect handler then dereferenced it as a provider config
+    # (AttributeError -> HTTP 500) for any authenticated user.
+    repo = anyio.run(_make_repo, tmp_path)
+    app = _make_app(_enabled_connections_config(), repo, _channels_config())
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(f"/api/channels/{provider}/connect")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Unknown channel provider"
+
+    anyio.run(repo.close)
+
+
 def test_configure_provider_runtime_credentials_enables_connect_without_file_edits(tmp_path):
     import anyio
 

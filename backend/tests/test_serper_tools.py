@@ -269,6 +269,11 @@ class TestSafePublicUrl:
 
         assert _safe_public_url("http://[::ffff:127.0.0.1]/x.jpg") == ""
 
+    def test_malformed_ipv6_url_does_not_raise(self):
+        from deerflow.community.serper.tools import _safe_public_url
+
+        assert _safe_public_url("http://[::1/i.jpg") == ""
+
     def test_non_http_scheme_is_filtered(self):
         from deerflow.community.serper.tools import _safe_public_url
 

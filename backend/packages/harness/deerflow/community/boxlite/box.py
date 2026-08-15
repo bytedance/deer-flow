@@ -57,6 +57,23 @@ class BoxliteBox(Sandbox):
             per-call ``env`` (request-scoped secrets).
     """
 
+    TERMINAL_ERROR_MARKERS = (
+        "vsock",
+        "disconnected",
+        "broken pipe",
+        "connection reset",
+        "connection refused",
+        "no such box",
+        "box has been stopped",
+        "engine reported an error",
+    )
+    RETRYABLE_ERROR_MARKERS = (
+        "transport not ready",
+        "retry later",
+        "temporarily unavailable",
+        "resource busy",
+    )
+
     def __init__(
         self,
         id: str,
@@ -64,25 +81,56 @@ class BoxliteBox(Sandbox):
         run: Callable[..., T],
         *,
         default_env: dict[str, str] | None = None,
+        on_terminal_failure: Callable[[str, str], None] | None = None,
     ) -> None:
         super().__init__(id)
         self._box = box
         self._run = run
         self._default_env = dict(default_env or {})
+        self._on_terminal_failure = on_terminal_failure
         self._lock = threading.Lock()
         self._closed = False
 
+    @classmethod
+    def _is_terminal_box_failure(cls, error: Exception) -> bool:
+        if isinstance(error, (BrokenPipeError, ConnectionError, EOFError)):
+            return True
+        if not isinstance(error, RuntimeError | OSError):
+            return False
+        msg = str(error).lower()
+        if any(marker in msg for marker in cls.RETRYABLE_ERROR_MARKERS):
+            return False
+        return any(marker in msg for marker in cls.TERMINAL_ERROR_MARKERS)
+
     # ── bridge helpers ──────────────────────────────────────────────────
 
-    def _exec(self, *argv: str, env: dict[str, str] | None = None):
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("sandbox has been closed")
-            box = self._box
-        return self._run(box.exec(*argv, env=env))
+    def _exec(
+        self,
+        *argv: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ):
+        try:
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("sandbox has been closed")
+                box = self._box
+            return self._run(box.exec(*argv, env=env, timeout=timeout), timeout=timeout)
+        except Exception as e:
+            if self._on_terminal_failure is not None and self._is_terminal_box_failure(e):
+                try:
+                    self._on_terminal_failure(self.id, str(e))
+                except Exception:
+                    logger.exception("Terminal BoxLite failure callback errored for %s", self.id)
+            raise
 
-    def _sh(self, script: str, env: dict[str, str] | None = None):
-        return self._exec("sh", "-lc", script, env=env)
+    def _sh(
+        self,
+        script: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ):
+        return self._exec("sh", "-lc", script, env=env, timeout=timeout)
 
     def close(self) -> None:
         with self._lock:
@@ -93,6 +141,11 @@ class BoxliteBox(Sandbox):
             self._run(self._box.stop())
         except Exception as e:
             logger.warning("Error stopping BoxLite box %s: %s", self.id, e)
+
+    @property
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
 
     # ── path safety (mirrors community/e2b_sandbox) ─────────────────────
 
@@ -131,13 +184,11 @@ class BoxliteBox(Sandbox):
         block the caller forever if the SDK future itself never resolves.
         """
         _validate_extra_env(env)  # POSIX env-var key rule; raises ValueError on a bad key
+        if self.is_closed:
+            return "Error: sandbox has been closed"
         merged_env = {**self._default_env, **(env or {})} or None
-        with self._lock:
-            if self._closed:
-                return "Error: sandbox has been closed"
-            box = self._box
         try:
-            result = self._run(box.exec("sh", "-lc", command, env=merged_env, timeout=timeout), timeout=timeout)
+            result = self._exec("sh", "-lc", command, env=merged_env, timeout=timeout)
         except Exception as e:
             logger.error("Failed to execute command in BoxLite box %s: %s", self.id, e)
             return f"Error: {e}"
@@ -154,7 +205,12 @@ class BoxliteBox(Sandbox):
 
     # ── file operations ─────────────────────────────────────────────────
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved = self._resolve_path(path)
         try:
             r = self._exec("cat", "--", resolved)
@@ -163,7 +219,13 @@ class BoxliteBox(Sandbox):
             return f"Error: {e}"
         if r.exit_code not in (0, None):
             return f"Error: {(r.stderr or '').strip() or 'cannot read file'}"
-        return r.stdout or ""
+        content = r.stdout or ""
+        if start_line is None and end_line is None:
+            return content
+        lines = content.splitlines()
+        start = start_line or 1
+        end = end_line if end_line is not None else len(lines)
+        return "\n".join(lines[start - 1 : end])
 
     def write_file(self, path: str, content: str, append: bool = False) -> None:
         self._write_bytes(self._resolve_path(path), content.encode("utf-8"), append=append)
@@ -274,11 +336,11 @@ class BoxliteBox(Sandbox):
             re.compile(pattern, 0 if case_sensitive else re.IGNORECASE)
 
         resolved = self._resolve_path(path)
-        # busybox+GNU-portable flags: -r recursive (also prints the filename),
-        # -n line numbers, -I skip binary, -E/-F regex vs fixed. --include and -m
-        # are omitted for busybox portability; glob-scoping and the result cap are
-        # applied in Python below.
-        flags = ["-r", "-n", "-I"]
+        # busybox+GNU-portable flags: -r recursive, -H always print the filename
+        # (including when path is a single file), -n line numbers, -I skip
+        # binary, -E/-F regex vs fixed. --include and -m are omitted for busybox
+        # portability; glob-scoping and the result cap are applied in Python.
+        flags = ["-r", "-H", "-n", "-I"]
         if not case_sensitive:
             flags.append("-i")
         flags.append("-F" if literal else "-E")

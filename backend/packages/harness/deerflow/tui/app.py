@@ -20,6 +20,7 @@ from textual.widgets.option_list import Option
 
 from deerflow.runtime.goal import parse_goal_command
 
+from .command_registry import format_command_help
 from .input_history import InputHistory
 from .render import render_header, render_status, render_transcript
 from .runtime import stream_actions
@@ -36,7 +37,22 @@ from .view_state import (
 )
 from .widgets.composer import ComposerInput
 
-_HELP_TEXT = "Commands:  /new  /threads  /goal  /model  /skills  /tools  /mcp  /memory  /usage  /config  /quit\nKeys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_KEYS = "Keys:  Enter send · Ctrl+C interrupt or quit · Ctrl+L redraw · / commands · Esc close overlay"
+_HELP_TEXT = f"{format_command_help()}\n{_HELP_KEYS}"
+
+
+_TRANSPARENT_CSS = """
+Screen,
+#header,
+#scroll,
+#status,
+#palette,
+#composer,
+SelectScreen #dialog,
+SelectScreen OptionList {
+    background: ansi_default;
+}
+"""
 
 
 class SelectScreen(ModalScreen):
@@ -156,7 +172,10 @@ class DeerFlowTUI(App):
     ]
 
     def __init__(self, session, plan) -> None:
-        super().__init__()
+        transparent = bool(getattr(plan, "transparent", False))
+        if transparent:
+            self.CSS = f"{self.CSS}\n{_TRANSPARENT_CSS}"
+        super().__init__(ansi_color=True if transparent else None)
         self.session = session
         self.plan = plan
         self.state = initial_state()
@@ -353,16 +372,32 @@ class DeerFlowTUI(App):
         # which applies skill-activation semantics on the raw text.
         self._send_to_agent(text)
 
+    def _dispatch_still_working(self) -> None:
+        self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
+
     def _handle_builtin(self, name: str, args: str) -> None:
         if name == "quit":
+            # Mirror action_interrupt (Ctrl+C): an active run must be interrupted
+            # before we tear the app down. Otherwise the worker thread is left
+            # running against an app that no longer exists — its next
+            # call_from_thread fails silently and the in-flight turn (plus any
+            # post-run persistence, e.g. thread title) is quietly abandoned.
+            if self._streaming:
+                self._interrupt_run()
             self.exit()
         elif name == "help":
             self._dispatch(SystemMessage(_HELP_TEXT))
         elif name == "new":
+            if self._streaming:
+                self._dispatch_still_working()
+                return
             self._conv_thread_id = None
             self.state = initial_state()
             self._dispatch(SystemMessage("Started a new thread."))
         elif name == "clear":
+            if self._streaming:
+                self._dispatch_still_working()
+                return
             self._dispatch(ClearRows())
         elif name == "model":
             self._open_model_picker()
@@ -546,7 +581,7 @@ class DeerFlowTUI(App):
 
     def _send_to_agent(self, text: str) -> None:
         if self._streaming:
-            self._dispatch(SystemMessage("Still working — wait for the current run to finish.", tone="info"))
+            self._dispatch_still_working()
             return
         if self._conv_thread_id is None:
             self._conv_thread_id = str(uuid.uuid4())

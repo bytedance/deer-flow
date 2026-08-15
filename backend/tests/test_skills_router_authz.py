@@ -19,6 +19,7 @@ These tests pin the access-control boundary: a normal authenticated
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -56,6 +57,7 @@ def _make_app(*, system_role: str) -> FastAPI:
 # tenant's injected skill set.
 _GUARDED_ENDPOINTS = [
     ("post", "/api/skills/install", {"thread_id": "t1", "path": "mnt/user-data/outputs/x.skill"}),
+    ("post", "/api/skills/reload", None),
     ("get", "/api/skills/custom/demo", None),
     ("put", "/api/skills/custom/demo", {"content": "---\nname: demo\ndescription: hijacked\n---\n"}),
     ("delete", "/api/skills/custom/demo", None),
@@ -123,6 +125,17 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     from deerflow.skills.types import Skill
 
     config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {},
+                "skills": {},
+                "middlewares": ["pkg:Middleware"],
+                "mcpInterceptors": ["pkg.interceptor:build"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
     def _load_skills(*, enabled_only: bool):
         return [
@@ -139,10 +152,12 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         ]
 
     app = _make_app(system_role="admin")
+    # Not a real LocalSkillStorage instance, so _write_extensions_skill_state's
+    # projection-mutation branch is skipped (nullcontext) and it reads the
+    # config_path fresh via ExtensionsConfig.from_file.
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
-    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: SimpleNamespace(mcp_servers={}, skills={}))
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda: config_path))
+    monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _config_path=None: config_path))
 
     async def _refresh(_user_id: str):
         return None
@@ -151,3 +166,6 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
     with TestClient(app) as client:
         resp = client.put("/api/skills/demo", json={"enabled": False})
         assert resp.status_code == 200, f"admin toggle should succeed, got {resp.status_code}"
+    written = json.loads(config_path.read_text(encoding="utf-8"))
+    assert written["middlewares"] == ["pkg:Middleware"]
+    assert written["mcpInterceptors"] == ["pkg.interceptor:build"]

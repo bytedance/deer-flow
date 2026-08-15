@@ -305,9 +305,13 @@ before review.
 ## Testing
 
 ```bash
-# Backend tests
+# Backend tests (offline by default; excludes live external-API tests)
 cd backend
 make test
+
+# Live DeerFlowClient integration tests (explicit opt-in)
+# Requires a valid root config.yaml and API credentials.
+make test-live
 
 # Frontend unit tests
 cd frontend
@@ -317,6 +321,11 @@ make test
 cd frontend
 make test-e2e
 ```
+
+`make test-live` calls real external APIs and may incur API costs or create
+local sandboxes, artifacts, and files. It is never run by the default backend
+test command or CI. Direct pytest invocations of `tests/test_client_live.py`
+must also set `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 ### PR Regression Checks
 

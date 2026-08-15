@@ -14,7 +14,7 @@ When a large model provider decides that an input or output has triggered a safe
 
 These partial tool calls must not be executed as normal intent. A truncated `write_file` call may write an incomplete report. A truncated `bash` call may enter the sandbox with incomplete arguments. After seeing the failed result, the Agent may retry and trigger the same safety rule repeatedly.
 
-[PR #3035](https://github.com/bytedance/deer-flow/pull/3035) addresses this boundary: when a provider stops generation with a safety signal while the response still contains tool calls, DeerFlow should suppress those tool calls first and record the turn as a safety termination event.
+[the implementation commit](https://github.com/bytedance/deer-flow/commit/be0eae9825619b63ca0c67b253d40b5eee76a2d6) addresses this boundary: when a provider stops generation with a safety signal while the response still contains tool calls, DeerFlow should suppress those tool calls first and record the turn as a safety termination event.
 
 ## Why Safety Termination Needs Dedicated Handling
 

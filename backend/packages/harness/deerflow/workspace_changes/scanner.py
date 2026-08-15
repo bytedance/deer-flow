@@ -6,6 +6,8 @@ import os
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
+
 from .types import (
     DiffUnavailableReason,
     FileSnapshot,
@@ -21,6 +23,18 @@ EXCLUDED_DIR_NAMES = {
     ".cache",
     ".next",
     ".venv",
+    # Transient per-step browser screenshots: live progress feedback surfaced in
+    # the browser panel + inline thumbnails, not workspace deliverables. Shared
+    # constant with the browser tools so the name cannot drift out of sync.
+    BROWSER_FRAMES_DIRNAME,
+    # Externalized oversized tool outputs (the tool-output budget middleware's
+    # default storage_subdir): process feedback the model reads back via
+    # read_file, not workspace deliverables — same intent as the browser frames
+    # exclusion above. Without this, a run that externalizes any tool output
+    # would trip run delivery verification (produced output never presented)
+    # and fail as an error. Custom storage_subdir values are passed through
+    # ``extra_excluded_dir_names`` instead.
+    TOOL_RESULTS_DIRNAME,
     "__pycache__",
     "build",
     "dist",
@@ -96,11 +110,19 @@ def scan_workspace_roots(
     include_text: bool = True,
     text_paths: set[str] | None = None,
     text_cache_dir: Path | None = None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> WorkspaceSnapshot:
     resolved_limits = limits or WorkspaceChangeLimits()
     cache_dir = Path(text_cache_dir) if text_cache_dir is not None else None
     if cache_dir is not None:
         cache_dir.mkdir(parents=True, exist_ok=True)
+    # Operator-customized tool_output.storage_subdir values arrive here; the
+    # default name is already part of EXCLUDED_DIR_NAMES, so merging is safe.
+    # Only single-segment directory names are meaningful: os.walk yields
+    # one-segment dirnames, so a nested value like "cache/tool-results" would
+    # never match. ToolOutputConfig enforces the single-segment contract, so a
+    # multi-segment value is a caller error, not a silent no-op.
+    excluded_dir_names = EXCLUDED_DIR_NAMES | extra_excluded_dir_names if extra_excluded_dir_names else EXCLUDED_DIR_NAMES
     files: dict[str, FileSnapshot] = {}
     scanned = 0
     truncated = False
@@ -110,7 +132,7 @@ def scan_workspace_roots(
             continue
 
         for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False):
-            dirnames[:] = [dirname for dirname in dirnames if dirname not in EXCLUDED_DIR_NAMES and not (Path(dirpath) / dirname).is_symlink()]
+            dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
             for filename in sorted(filenames):
                 if scanned >= resolved_limits.max_scanned_files:
                     truncated = True
@@ -121,7 +143,18 @@ def scan_workspace_roots(
                     )
 
                 host_file = Path(dirpath) / filename
-                if host_file.is_symlink() or not host_file.is_file():
+                if host_file.is_symlink():
+                    # A symlink must never be followed for stat/content purposes: its
+                    # target can point anywhere on the host (including outside the
+                    # scanned root), so it is recorded as a metadata-only stub -
+                    # mirroring how binary/large/sensitive-looking files are handled
+                    # below - instead of being silently omitted from the snapshot.
+                    symlink_snapshot = _snapshot_symlink(root, host_file)
+                    if symlink_snapshot is not None:
+                        files[symlink_snapshot.path] = symlink_snapshot
+                        scanned += 1
+                    continue
+                if not host_file.is_file():
                     continue
 
                 snapshot = _snapshot_file(
@@ -219,6 +252,41 @@ def _snapshot_file(
         text=text,
         text_path=text_path,
         content_unavailable_reason=reason,
+    )
+
+
+def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | None:
+    # Deliberately never follows the link (no read_bytes()/open() on the target):
+    # the target may point anywhere on the host, including outside the scanned
+    # root, so stat'ing or reading through it here would risk exposing arbitrary
+    # host file content/metadata as if it belonged to the workspace.
+    try:
+        stat = host_file.lstat()
+        size = stat.st_size
+        mtime_ns = stat.st_mtime_ns
+        relative = host_file.relative_to(root.host_path).as_posix()
+        virtual_path = f"{root.virtual_prefix}/{relative}"
+        sensitive = is_sensitive_workspace_path(virtual_path)
+    except OSError:
+        return None
+
+    try:
+        target = os.readlink(host_file)
+    except OSError:
+        target = None
+
+    return FileSnapshot(
+        path=virtual_path,
+        root=root.name,
+        size=size,
+        mtime_ns=mtime_ns,
+        sha256=None,
+        binary=False,
+        sensitive=sensitive,
+        text=None,
+        content_unavailable_reason="symlink",
+        symlink=True,
+        symlink_target=target,
     )
 
 

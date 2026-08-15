@@ -39,22 +39,71 @@ logger = logging.getLogger(__name__)
 _SUMMARY_MESSAGE_NAME = "summary"
 
 # Finite set of blocked tag names: system-reserved + common injection patterns.
+#
+# Maintenance: when adding a new framework block tag that the system emits into
+# model input, you MUST also update the expected count in
+# test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+# The test pins the exact number of blocked tags so a new framework tag cannot
+# be added without the corresponding regression guard.
 _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
     {
-        # System-reserved tags (used by the agent framework for structured context)
+        # Framework-injected structured/authority blocks. The lead-agent system
+        # prompt's "System-Context Confidentiality" section (agents/lead_agent/
+        # prompt.py) declares *every* such tag trusted internal data — it names a
+        # few then says "and all other structured tags". So the denylist must
+        # cover the framework's authority blocks as a class, not a hand-picked
+        # subset: any one of them, forged in untrusted input, mimics trusted
+        # framework context. Enumerated from the block tags the framework actually
+        # emits into model input (system prompt + hidden-context/reminder
+        # middlewares) and pinned against drift by
+        # test_input_sanitization_middleware.py::test_denylist_covers_framework_authority_blocks.
+        # Both spellings of the reminder block are covered: "system-reminder"
+        # (dynamic-context) and "system_reminder" (todo/terminal middlewares).
+        #
+        # Subagents share this denylist: build_subagent_runtime_middlewares reuses
+        # the same _build_runtime_middlewares base, so both sanitization paths guard
+        # subagent model input too. The subagent system-prompt blocks
+        # (file_editing_workflow / guidelines / output_format / working_directory)
+        # are therefore authority blocks of the same class as the lead-agent ones.
         "system-reminder",
+        "system_reminder",
         "memory",
         "current_date",
         "think",
         "analysis",
+        "role",
+        "soul",
+        "self_update",
+        "thinking_style",
+        "clarification_system",
+        "critical_reminders",
+        "response_style",
+        "citations",
+        "uploaded_files",  # old uploads tag — still processed by deermem for backward-compat
+        "current_uploads",
         "subagent_system",
         "skill_system",
-        "uploaded_files",
+        "skill_index",
+        "available_skills",
+        "disabled_skills",
+        "memory_tool_system",
         "todo_list_system",
+        "durable_context_data",
+        "slash_skill_activation",
+        "mcp_routing_hints",
+        "available-deferred-tools",
+        "goal_continuation",
+        "file_editing_workflow",
+        "guidelines",
+        "output_format",
+        "working_directory",
+        # Subagent system-prompt block (general_purpose.py): declares the task
+        # tool off-limits. Forging this in untrusted input could trick the
+        # model into believing it has (or lacks) tool restrictions it does not.
+        "tool_restrictions",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
-        "role",
         "important",
         "override",
         "ignore",
@@ -86,6 +135,42 @@ _BOUNDARY_TOKEN_RE = re.compile(
 def _escape_tag_match(match: re.Match) -> str:
     """Escape < and > in a blocked-tag match so it renders as literal text."""
     return match.group(0).replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _neutralize_boundary_tokens(text: str) -> str:
+    """Replace real BEGIN/END USER INPUT markers with look-alike inert forms."""
+    return _BOUNDARY_TOKEN_RE.sub(
+        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
+        text,
+    )
+
+
+def neutralize_untrusted_tags(text: str) -> str:
+    """Neutralize framework/injection control tokens in untrusted text.
+
+    Shared primitive for any content that originates outside the trust boundary
+    and is about to enter the model context as *data* — currently the genuine
+    user message (via :func:`_check_user_content`) and remote tool results
+    (web_fetch / web_search and friends, via
+    :class:`ToolResultSanitizationMiddleware`).
+
+    Applies exactly the two structural defenses, and nothing else:
+
+    * blocked framework/injection tags (e.g. ``<system-reminder>``) are
+      HTML-escaped to ``&lt;system-reminder&gt;`` so they lose their structural
+      meaning while staying human-readable;
+    * the plain-text ``--- BEGIN/END USER INPUT ---`` boundary markers are
+      neutralized so untrusted content cannot forge or break out of the
+      user-input boundary.
+
+    It intentionally does **not** wrap the text in boundary markers: that
+    framing is specific to the user message. Empty/whitespace-only text is
+    returned unchanged so callers do not emit marker noise.
+    """
+    if not text.strip():
+        return text
+    text = _BLOCKED_TAG_PATTERN.sub(_escape_tag_match, text)
+    return _neutralize_boundary_tokens(text)
 
 
 def _is_genuine_user_message(message: object) -> bool:
@@ -122,20 +207,14 @@ def _check_user_content(text: str) -> str:
         # can forge the outer wrapping to bypass the neutralization below
         # and inject inner boundary markers (break-out attack).
         inner = text[len(_USER_INPUT_BEGIN) : -len(_USER_INPUT_END)]
-        neutralized_inner = _BOUNDARY_TOKEN_RE.sub(
-            lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-            inner,
-        )
+        neutralized_inner = _neutralize_boundary_tokens(inner)
         if neutralized_inner == inner:
             return text
         return f"{_USER_INPUT_BEGIN}{neutralized_inner}{_USER_INPUT_END}"
     # Neutralize any boundary tokens the user may have embedded, preventing
     # both self-suppression (begin token skips wrapping) and break-out
     # (end token creates a premature boundary inside the payload).
-    text = _BOUNDARY_TOKEN_RE.sub(
-        lambda m: _NEUTRALIZED_BEGIN if m.group(0) == _USER_INPUT_BEGIN else _NEUTRALIZED_END,
-        text,
-    )
+    text = _neutralize_boundary_tokens(text)
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
 
 
@@ -153,17 +232,30 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         """Extract concatenated text from a plain-string or content-block-list.
 
         Returns ``(text, extracted_blocks)``. *extracted_blocks* is None when
-        *content* is a string, or the list of text-content-block dicts when a list.
+        *content* is a string, or the list of text-content blocks when a list.
+
+        A list can hold bare ``str`` items next to content-block dicts
+        (``message_content_to_text`` treats both as text, and some IM/SDK
+        clients send exactly that shape), so bare strings are collected too —
+        skipping them would skip sanitization entirely for that message.
         """
         if isinstance(content, str):
             return content, None
         if not isinstance(content, list):
             return "", None
         text_parts: list[str] = []
-        text_blocks: list[dict] = []
+        text_blocks: list[dict | str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
-                text_parts.append(block["text"])
+            if isinstance(block, str):
+                if not block:  # skip empty items — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(block)
+                text_blocks.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                text = block["text"]
+                if not text:  # skip empty blocks — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(text)
                 text_blocks.append(block)
         return "\n".join(text_parts), text_blocks
 
@@ -171,7 +263,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
     def _rebuild_content(
         original_content: list,
         processed_text: str,
-        text_blocks: list[dict],
+        text_blocks: list,
     ) -> list:
         """Replace text blocks with a single merged text block, preserving interleaved non-text blocks.
 
@@ -225,10 +317,82 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
                 logger.debug("_process_request: no text content in message — passing through")
                 return request
 
-            processed = _check_user_content(text_content)
+            # Sanitize only the user's original input when available (set by
+            # UploadsMiddleware before it prepends the <current_uploads> block),
+            # so server-injected trusted blocks are never scanned for blocked
+            # tags.  Fall back to full-content scanning only when the marker is
+            # absent — UploadsMiddleware sets it on upload turns, so plain text
+            # messages without uploads won't have it.  Full-content scanning is
+            # safe for those: no server-injected <current_uploads> block exists
+            # to accidentally escape.
+            preserved_kwargs = dict(msg.additional_kwargs or {})
+            original_user_content = preserved_kwargs.get(ORIGINAL_USER_CONTENT_KEY)
+            if isinstance(original_user_content, str) and original_user_content:
+                processed_user = _check_user_content(original_user_content)
+                if processed_user != original_user_content:
+                    # Replace only the user's text suffix within the full
+                    # content — server-prepended blocks stay untouched.
+                    idx = text_content.rfind(original_user_content)
+                    if idx >= 0:
+                        processed = text_content[:idx] + processed_user
+                    else:
+                        # _extract_text_from_content and message_content_to_text
+                        # disagreed on text extraction — rfind failed (only
+                        # reachable for multimodal list content; see Decision 18).
+                        if isinstance(content, list) and len(content) >= 2:
+                            # content[0] is the server-injected
+                            # <current_uploads> block (UploadsMiddleware
+                            # prepends it as the first element for list
+                            # content).  Sanitize only user blocks (content[1:])
+                            # and rebuild directly — _rebuild_content only
+                            # handles type:"text" blocks and would miss raw
+                            # strings or non-standard dict blocks that
+                            # message_content_to_text sees.
+                            logger.warning(
+                                "rfind failed on multimodal content; sanitizing user content blocks individually",
+                            )
+                            new_content: list = [content[0]]
+                            for block in content[1:]:
+                                if isinstance(block, str):
+                                    new_content.append(neutralize_untrusted_tags(block))
+                                elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+                                    sanitized = neutralize_untrusted_tags(block["text"])
+                                    if sanitized != block["text"]:
+                                        new_content.append({**block, "text": sanitized})
+                                    else:
+                                        new_content.append(block)
+                                else:
+                                    new_content.append(block)
+                            messages[i] = HumanMessage(
+                                content=new_content,
+                                id=msg.id,
+                                name=msg.name,
+                                additional_kwargs=preserved_kwargs,
+                            )
+                            return request.override(messages=messages)
+                        else:
+                            # Cannot distinguish server block from user blocks
+                            # (non-list content or len(content) < 2).
+                            # Degrade to full-content sanitization — server
+                            # block may be escaped (UX degradation) but user
+                            # forgeries are still neutralized (no security
+                            # regression).
+                            logger.warning(
+                                "rfind failed with original_user_content set; cannot distinguish blocks, falling back to full-content sanitization",
+                            )
+                            processed = _check_user_content(text_content)
+                else:
+                    processed = text_content  # no change needed
+            elif isinstance(original_user_content, str):
+                # Key is present but empty string (e.g. file upload with no
+                # text input).  No user text to sanitize; server-injected
+                # blocks must survive untouched.
+                processed = text_content
+            else:
+                processed = _check_user_content(text_content)  # fallback
 
             if processed == text_content:
-                # Already wrapped — no override needed
+                # Already clean / already wrapped — no override needed
                 return request
 
             if text_blocks:
@@ -238,10 +402,17 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
 
             # Preserve the pre-sanitization user text so downstream consumers that
             # must see the genuine input (slash skill activation, regenerate) can
-            # recover it after the BEGIN/END wrapping. setdefault keeps an existing
-            # value (e.g. set by UploadsMiddleware or an IM channel) authoritative.
-            preserved_kwargs = dict(msg.additional_kwargs or {})
-            preserved_kwargs.setdefault(ORIGINAL_USER_CONTENT_KEY, message_content_to_text(content))
+            # recover it after the BEGIN/END wrapping. Keep a valid value set by
+            # UploadsMiddleware or an IM channel, but repair malformed metadata so
+            # persistence never falls back to the wrapped model-facing content.
+            if not isinstance(original_user_content, str):
+                if ORIGINAL_USER_CONTENT_KEY in preserved_kwargs:
+                    logger.warning(
+                        "InputSanitizationMiddleware replaced non-string %s metadata: type=%s",
+                        ORIGINAL_USER_CONTENT_KEY,
+                        type(original_user_content).__name__,
+                    )
+                preserved_kwargs[ORIGINAL_USER_CONTENT_KEY] = message_content_to_text(content)
             messages[i] = HumanMessage(
                 content=new_content,
                 id=msg.id,

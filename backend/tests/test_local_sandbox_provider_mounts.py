@@ -544,6 +544,36 @@ class TestMultipleMounts:
 
 
 class TestLocalSandboxProviderMounts:
+    def test_thread_mappings_mount_per_user_integration_projections(self, tmp_path):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path / "home")
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "public").mkdir(parents=True)
+        (skills_dir / "custom").mkdir()
+        config = SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: skills_dir,
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            )
+        )
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=config),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+        ):
+            alice = LocalSandboxProvider._build_thread_path_mappings("thread-a", user_id="alice")
+            bob = LocalSandboxProvider._build_thread_path_mappings("thread-b", user_id="bob")
+
+        alice_integrations = next(mapping for mapping in alice if mapping.container_path == "/mnt/skills/integrations")
+        bob_integrations = next(mapping for mapping in bob if mapping.container_path == "/mnt/skills/integrations")
+        assert alice_integrations.local_path == str(paths.user_integration_skills_view_dir("alice"))
+        assert bob_integrations.local_path == str(paths.user_integration_skills_view_dir("bob"))
+        assert alice_integrations.local_path != bob_integrations.local_path
+        assert alice_integrations.read_only is True
+        assert bob_integrations.read_only is True
+
     def test_setup_path_mappings_uses_configured_skills_container_path_as_reserved_prefix(self, tmp_path):
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
@@ -767,6 +797,77 @@ class TestLocalSandboxProviderMounts:
         result = sandbox.read_file("/mnt/data/settings.py")
         # The container path should be preserved through roundtrip
         assert "/mnt/data/config.json" in result
+
+    def test_read_file_line_range_streams_without_full_read(self, tmp_path):
+        """Bounded line reads should stream without slurping the whole file."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        big_file = data_dir / "huge.log"
+        big_file.write_text("\n".join(f"line {i}" for i in range(1, 2000)), encoding="utf-8")
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+
+        class GuardedFile:
+            def __init__(self, wrapped):
+                self._wrapped = wrapped
+
+            def __enter__(self):
+                self._wrapped.__enter__()
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return self._wrapped.__exit__(exc_type, exc, tb)
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                return next(self._wrapped)
+
+            def read(self, *args, **kwargs):
+                raise AssertionError("full read() should not be used for ranged reads")
+
+            def __getattr__(self, name):
+                return getattr(self._wrapped, name)
+
+        import builtins
+
+        real_open = builtins.open
+
+        def guarded_open(file, *args, **kwargs):
+            handle = real_open(file, *args, **kwargs)
+            if Path(file) == big_file:
+                return GuardedFile(handle)
+            return handle
+
+        with patch("builtins.open", side_effect=guarded_open):
+            content = sandbox.read_file("/mnt/data/huge.log", start_line=1, end_line=10)
+
+        assert content == "\n".join(f"line {i}" for i in range(1, 11))
+
+    def test_read_file_single_sided_line_ranges_supported(self, tmp_path):
+        """LocalSandbox should support partial reads when only one bound is provided."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "range.txt").write_text(
+            "\n".join(f"line {i}" for i in range(1, 11)),
+            encoding="utf-8",
+        )
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(data_dir)),
+            ],
+        )
+
+        assert sandbox.read_file("/mnt/data/range.txt", start_line=8) == "line 8\nline 9\nline 10"
+        assert sandbox.read_file("/mnt/data/range.txt", end_line=3) == "line 1\nline 2\nline 3"
 
     def test_setup_path_mappings_normalizes_container_path_trailing_slash(self, tmp_path):
         skills_dir = tmp_path / "skills"

@@ -13,9 +13,13 @@ module (including the tool loader) can import it without an import cycle.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from langchain.tools import BaseTool
 
 MCP_TOOL_METADATA_KEY = "deerflow_mcp"
+MCP_TOOL_ROUTING_METADATA_KEY = "deerflow_mcp_routing"
 
 
 def tag_mcp_tool(tool: BaseTool) -> BaseTool:
@@ -27,3 +31,22 @@ def tag_mcp_tool(tool: BaseTool) -> BaseTool:
 def is_mcp_tool(tool: BaseTool) -> bool:
     """True when ``tool`` carries the MCP-source tag written by :func:`tag_mcp_tool`."""
     return (getattr(tool, "metadata", None) or {}).get(MCP_TOOL_METADATA_KEY) is True
+
+
+def tag_mcp_routing(tool: BaseTool, routing: Mapping[str, Any]) -> BaseTool:
+    """Attach serialized MCP routing metadata to ``tool``."""
+    tool.metadata = {
+        **(tool.metadata or {}),
+        MCP_TOOL_ROUTING_METADATA_KEY: dict(routing),
+    }
+    return tool
+
+
+def get_mcp_routing(tool: BaseTool) -> dict[str, Any] | None:
+    """Return routing metadata only for MCP tools whose routing mode is active."""
+    if not is_mcp_tool(tool):
+        return None
+    routing = (getattr(tool, "metadata", None) or {}).get(MCP_TOOL_ROUTING_METADATA_KEY)
+    if not isinstance(routing, dict) or routing.get("mode") == "off":
+        return None
+    return routing

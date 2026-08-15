@@ -119,7 +119,7 @@ def image_search_tool(
     normalized_results = [
         {
             "title": r.get("title", ""),
-            "image_url": r.get("thumbnail", ""),
+            "image_url": r.get("image", ""),
             "thumbnail_url": r.get("thumbnail", ""),
         }
         for r in results

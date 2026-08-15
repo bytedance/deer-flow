@@ -1,0 +1,106 @@
+{{- if .Values.redis.enabled -}}
+{{- $password := .Values.redis.auth.password -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "deer-flow.redisFullname" . }}
+  namespace: {{ include "deer-flow.namespace" . }}
+  labels:
+    {{- include "deer-flow.labels" . | nindent 4 }}
+    app.kubernetes.io/component: redis
+spec:
+  serviceName: {{ include "deer-flow.redisFullname" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "deer-flow.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: redis
+  template:
+    metadata:
+      labels:
+        {{- include "deer-flow.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: redis
+    spec:
+      {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        # Non-root: redis:7-alpine ships a `redis` user (uid 999). The official
+        # entrypoint detects non-root and skips the gosu dance. fsGroup 999
+        # makes the data PVC group-writable.
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: "{{ .Values.redis.image.repository }}:{{ .Values.redis.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: tcp-redis
+              containerPort: 6379
+          {{- if $password }}
+          # AUTH password is read at runtime so it never appears in the pod spec
+          # args. `redis-server --requirepass` + `redis-cli -a` both read it
+          # from this env.
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deer-flow.redisUrlSecret" . }}
+                  key: redis-password
+          {{- end }}
+          command: ["sh", "-c"]
+          args:
+            - exec redis-server --appendonly yes{{ if $password }} --requirepass "$REDIS_PASSWORD"{{ end }}
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - {{ if $password }}redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping{{ else }}redis-cli ping{{ end }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - {{ if $password }}redis-cli --no-auth-warning -a "$REDIS_PASSWORD" ping{{ else }}redis-cli ping{{ end }}
+            initialDelaySeconds: 30
+            periodSeconds: 20
+          {{- with .Values.redis.primary.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      {{- if not .Values.redis.primary.persistence.enabled }}
+      # emptyDir fallback (testing only — data is lost on pod restart).
+      volumes:
+        - name: data
+          emptyDir: {}
+      {{- end }}
+  {{- if .Values.redis.primary.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "deer-flow.labels" . | nindent 10 }}
+          app.kubernetes.io/component: redis
+      spec:
+        accessModes:
+          - {{ .Values.redis.primary.persistence.accessMode | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.redis.primary.persistence.size | quote }}
+        {{- with .Values.redis.primary.persistence.storageClass }}
+        storageClassName: {{ . | quote }}
+        {{- end }}
+  {{- end }}
+{{- end -}}

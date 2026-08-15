@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import inspect
 import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
@@ -21,6 +22,18 @@ from app.channels.message_bus import (
 logger = logging.getLogger(__name__)
 
 
+def _file_md5(path: str) -> str:
+    md5_hasher = hashlib.md5()
+    with open(path, "rb") as file_obj:
+        for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+            md5_hasher.update(chunk)
+    return md5_hasher.hexdigest()
+
+
+def _open_binary(path: str):
+    return open(path, "rb")
+
+
 class WeComChannel(Channel):
     def __init__(self, bus: MessageBus, config: dict[str, Any]) -> None:
         super().__init__(name="wecom", bus=bus, config=config)
@@ -28,6 +41,8 @@ class WeComChannel(Channel):
         self._bot_secret: str | None = None
         self._ws_client = None
         self._ws_task: asyncio.Task | None = None
+        self._ws_shutdown_task: asyncio.Future[Any] | None = None
+        self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
         self._working_message = "Working on it..."
@@ -55,40 +70,41 @@ class WeComChannel(Channel):
         return await send_reply_async(req_id, body, cmd)
 
     async def start(self) -> None:
-        if self._running:
-            return
+        async with self._lifecycle_lock:
+            if self._running:
+                return
 
-        bot_id = self.config.get("bot_id")
-        bot_secret = self.config.get("bot_secret")
-        working_message = self.config.get("working_message")
+            bot_id = self.config.get("bot_id")
+            bot_secret = self.config.get("bot_secret")
+            working_message = self.config.get("working_message")
 
-        self._bot_id = bot_id if isinstance(bot_id, str) and bot_id else None
-        self._bot_secret = bot_secret if isinstance(bot_secret, str) and bot_secret else None
-        self._working_message = working_message if isinstance(working_message, str) and working_message else "Working on it..."
+            self._bot_id = bot_id if isinstance(bot_id, str) and bot_id else None
+            self._bot_secret = bot_secret if isinstance(bot_secret, str) and bot_secret else None
+            self._working_message = working_message if isinstance(working_message, str) and working_message else "Working on it..."
 
-        if not self._bot_id or not self._bot_secret:
-            logger.error("WeCom channel requires bot_id and bot_secret")
-            return
+            if not self._bot_id or not self._bot_secret:
+                logger.error("WeCom channel requires bot_id and bot_secret")
+                return
 
-        try:
-            from aibot import WSClient, WSClientOptions
-        except ImportError:
-            logger.error("wecom-aibot-python-sdk is not installed. Install it with: uv add wecom-aibot-python-sdk")
-            return
-        else:
-            self._ws_client = WSClient(WSClientOptions(bot_id=self._bot_id, secret=self._bot_secret, logger=logger))
-            self._ws_client.on("message.text", self._on_ws_text)
-            self._ws_client.on("message.mixed", self._on_ws_mixed)
-            self._ws_client.on("message.image", self._on_ws_image)
-            self._ws_client.on("message.file", self._on_ws_file)
-            self._ws_client.on("error", self._on_ws_error)
-            self._ws_client.on("disconnected", self._on_ws_disconnected)
-            self._ws_task = asyncio.create_task(self._ws_client.connect())
-            self._ws_task.add_done_callback(self._on_ws_task_done)
+            try:
+                from aibot import WSClient, WSClientOptions
+            except ImportError:
+                logger.error("wecom-aibot-python-sdk is not installed. Install it with: uv add wecom-aibot-python-sdk")
+                return
+            else:
+                self._ws_client = WSClient(WSClientOptions(bot_id=self._bot_id, secret=self._bot_secret, logger=logger))
+                self._ws_client.on("message.text", self._on_ws_text)
+                self._ws_client.on("message.mixed", self._on_ws_mixed)
+                self._ws_client.on("message.image", self._on_ws_image)
+                self._ws_client.on("message.file", self._on_ws_file)
+                self._ws_client.on("error", self._on_ws_error)
+                self._ws_client.on("disconnected", self._on_ws_disconnected)
+                self._ws_task = asyncio.create_task(self._ws_client.connect())
+                self._ws_task.add_done_callback(self._on_ws_task_done)
 
-            self._running = True
-            self.bus.subscribe_outbound(self._on_outbound)
-        logger.info("WeCom channel started")
+                self._running = True
+                self.bus.subscribe_outbound(self._on_outbound)
+            logger.info("WeCom channel started")
 
     def _on_ws_task_done(self, task: asyncio.Task) -> None:
         if task.cancelled():
@@ -108,24 +124,69 @@ class WeComChannel(Channel):
         detail = f" ({args[0]})" if args else ""
         logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
+    def _begin_ws_shutdown(self, ws_client: Any) -> asyncio.Future[Any] | None:
+        ws_manager = getattr(ws_client, "_ws_manager", None)
+        async_disconnect = getattr(ws_manager, "_async_disconnect", None)
+        stop_heartbeat = getattr(ws_manager, "_stop_heartbeat", None)
+        clear_pending_messages = getattr(ws_manager, "_clear_pending_messages", None)
+
+        if inspect.iscoroutinefunction(async_disconnect) and callable(stop_heartbeat) and callable(clear_pending_messages):
+            # wecom-aibot-python-sdk 1.0.2 makes disconnect() synchronous and
+            # discards the task created for _async_disconnect(). Perform its
+            # synchronous bookkeeping here so DeerFlow can own and await the
+            # actual SDK shutdown operation without scheduling a duplicate.
+            try:
+                if hasattr(ws_client, "_started"):
+                    ws_client._started = False
+                ws_manager._is_manual_close = True
+                stop_heartbeat()
+                clear_pending_messages("Connection manually closed")
+            except Exception:
+                logger.exception("Failed to prepare WeCom WebSocket shutdown")
+            return asyncio.create_task(async_disconnect())
+
+        try:
+            result = ws_client.disconnect()
+        except Exception:
+            logger.exception("Failed to request WeCom WebSocket disconnect")
+            return None
+        if inspect.isawaitable(result):
+            return asyncio.ensure_future(result)
+        return None
+
     async def stop(self) -> None:
-        self._running = False
-        self.bus.unsubscribe_outbound(self._on_outbound)
-        if self._ws_task:
+        async with self._lifecycle_lock:
+            self._running = False
+            self.bus.unsubscribe_outbound(self._on_outbound)
+            ws_client = self._ws_client
+            ws_task = self._ws_task
+            if ws_task and not ws_task.done():
+                ws_task.cancel()
+
+            shutdown_task = None
             try:
-                self._ws_task.cancel()
-            except Exception:
-                pass
-            self._ws_task = None
-        if self._ws_client:
-            try:
-                self._ws_client.disconnect()
-            except Exception:
-                pass
-        self._ws_client = None
-        self._ws_frames.clear()
-        self._ws_stream_ids.clear()
-        logger.info("WeCom channel stopped")
+                shutdown_task = self._begin_ws_shutdown(ws_client) if ws_client else None
+                self._ws_shutdown_task = shutdown_task
+                tasks = [task for task in (ws_task, shutdown_task) if task is not None]
+                drain_future = asyncio.gather(*tasks, return_exceptions=True) if tasks else None
+                if drain_future is not None:
+                    try:
+                        await asyncio.shield(drain_future)
+                    except asyncio.CancelledError:
+                        # Caller cancellation still propagates, but only after
+                        # the channel-owned tasks have completed their cleanup.
+                        await drain_future
+                        raise
+            finally:
+                if self._ws_task is ws_task:
+                    self._ws_task = None
+                if self._ws_client is ws_client:
+                    self._ws_client = None
+                if self._ws_shutdown_task is shutdown_task:
+                    self._ws_shutdown_task = None
+                self._ws_frames.clear()
+                self._ws_stream_ids.clear()
+            logger.info("WeCom channel stopped")
 
     async def send(self, msg: OutboundMessage, *, _max_retries: int = 3) -> None:
         if self._ws_client:
@@ -199,7 +260,7 @@ class WeComChannel(Channel):
     async def _on_ws_text(self, frame: dict[str, Any]) -> None:
         body = frame.get("body", {}) or {}
         text = ((body.get("text") or {}).get("content") or "").strip()
-        quote = body.get("quote", {}).get("text", {}).get("content", "").strip()
+        quote = (((body.get("quote") or {}).get("text") or {}).get("content") or "").strip()
         if not text and not quote:
             return
         await self._publish_ws_inbound(frame, text + (f"\nQuote message: {quote}" if quote else ""))
@@ -324,13 +385,21 @@ class WeComChannel(Channel):
         self._ws_frames[msg_id] = frame
         self._ws_stream_ids[msg_id] = stream_id
 
+        reservation = self._reserve_inbound(inbound)
+        if reservation is None:
+            self._ws_frames.pop(msg_id, None)
+            self._ws_stream_ids.pop(msg_id, None)
+            return
         try:
-            await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
-        except Exception:
-            pass
+            try:
+                await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
+            except Exception:
+                pass
 
-        inbound = await self._attach_connection_identity(inbound)
-        await self.bus.publish_inbound(inbound)
+            inbound = await self._attach_connection_identity(inbound)
+            self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            reservation.release()
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(
@@ -428,11 +497,7 @@ class WeComChannel(Channel):
             logger.warning("[WeCom] invalid total_chunks=%d for %s", total_chunks, filename)
             return None
 
-        md5_hasher = hashlib.md5()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                md5_hasher.update(chunk)
-        md5 = md5_hasher.hexdigest()
+        md5 = await asyncio.to_thread(_file_md5, path)
 
         init_req_id = generate_req_id("aibot_upload_media_init")
         init_body = {
@@ -448,9 +513,10 @@ class WeComChannel(Channel):
             logger.warning("[WeCom] upload init returned no upload_id: %s", init_ack)
             return None
 
-        with open(path, "rb") as f:
+        file_obj = await asyncio.to_thread(_open_binary, path)
+        try:
             for idx in range(total_chunks):
-                data = f.read(chunk_size)
+                data = await asyncio.to_thread(file_obj.read, chunk_size)
                 if not data:
                     break
                 chunk_req_id = generate_req_id("aibot_upload_media_chunk")
@@ -460,6 +526,8 @@ class WeComChannel(Channel):
                     "base64_data": base64.b64encode(data).decode("utf-8"),
                 }
                 await self._send_ws_upload_command(chunk_req_id, chunk_body, "aibot_upload_media_chunk")
+        finally:
+            await asyncio.to_thread(file_obj.close)
 
         finish_req_id = generate_req_id("aibot_upload_media_finish")
         finish_ack = await self._send_ws_upload_command(finish_req_id, {"upload_id": upload_id}, "aibot_upload_media_finish")

@@ -46,12 +46,20 @@ services:
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      # Optional lark-cli init image (Pattern A). Empty ⇒ legacy runtime mount.
+      # Set to a published tag (e.g. deer-flow/lark-cli-init:v1.0.65) to provision
+      # the sandbox lark-cli runtime via an init container + emptyDir.
+      - LARK_CLI_INIT_IMAGE=${LARK_CLI_INIT_IMAGE:-}
+      # Optional lark-cli broker image (Pattern B, issue #4338). Empty ⇒ broker
+      # off. Supersedes LARK_CLI_INIT_IMAGE when both are set.
+      - LARK_CLI_BROKER_IMAGE=${LARK_CLI_BROKER_IMAGE:-}
       # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
       #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
       - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      # Per-user data base directory for user-scoped skill mounts
+      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
       # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
@@ -62,6 +70,9 @@ services:
       # Override K8S API server URL since kubeconfig uses 127.0.0.1
       # which is unreachable from inside the container
       - K8S_API_SERVER=https://host.docker.internal:26443
+      # Optional: set PROVISIONER_API_KEY in .env to enable provisioner auth.
+      # The same value must be set on the gateway side via config.yaml sandbox.provisioner_api_key.
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
     env_file:
       - ../.env
     extra_hosts:
@@ -81,8 +92,11 @@ services:
   nginx:
     image: nginx:alpine
     container_name: deer-flow-nginx
+    # Loopback-only by default; see the note in docker-compose.yaml. Override
+    # with BIND_HOST when you deliberately need the dev stack reachable from
+    # another machine.
     ports:
-      - "2026:2026"
+      - "${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
     command:
@@ -91,7 +105,7 @@ services:
       - |
         set -e
         cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
-        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026;/d' /etc/nginx/nginx.conf
+        test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /etc/nginx/nginx.conf
         exec nginx -g 'daemon off;'
     depends_on:
       - frontend
@@ -139,8 +153,10 @@ services:
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-gateway
       args:
         APT_MIRROR: ${APT_MIRROR:-}
-        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.11.1}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
+        NPM_REGISTRY: ${NPM_REGISTRY:-}
+        LARK_CLI_NPM_VERSION: ${LARK_CLI_NPM_VERSION:-1.0.65}
     container_name: deer-flow-gateway
     # Startup logic lives in docker/dev-entrypoint.sh — UV_EXTRAS validation,
     # `uv sync --all-packages`, .venv self-heal, and uvicorn handoff. Keeps
@@ -187,12 +203,14 @@ services:
       - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
-      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
       - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      # Pass PROVISIONER_API_KEY into the gateway container so config.yaml can reference it
+      # as sandbox.provisioner_api_key: $PROVISIONER_API_KEY
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
       # Proxy values (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) are inherited from ../.env via env_file.
       # Only NO_PROXY is declared here so internal service hostnames are always exempt from the proxy.
-      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
-      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,host.docker.internal
+      - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
+      - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
       - ../.env
     extra_hosts:

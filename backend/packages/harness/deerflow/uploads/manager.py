@@ -7,13 +7,13 @@ Both Gateway and Client delegate to these functions.
 import errno
 import logging
 import os
-import re
 import stat
 from pathlib import Path
 from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.thread_id import validate_thread_id
 
 
 class PathTraversalError(ValueError):
@@ -26,20 +26,8 @@ class UnsafeUploadPathError(ValueError):
 
 logger = logging.getLogger(__name__)
 
-# thread_id must be alphanumeric, hyphens, underscores, or dots only.
-_SAFE_THREAD_ID = re.compile(r"^[a-zA-Z0-9._-]+$")
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
-
-
-def validate_thread_id(thread_id: str) -> None:
-    """Reject thread IDs containing characters unsafe for filesystem paths.
-
-    Raises:
-        ValueError: If thread_id is empty or contains unsafe characters.
-    """
-    if not thread_id or not _SAFE_THREAD_ID.match(thread_id):
-        raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:

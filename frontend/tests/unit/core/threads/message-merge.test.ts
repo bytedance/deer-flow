@@ -1,30 +1,37 @@
-import type { Message, Run } from "@langchain/langgraph-sdk";
-import { expect, test } from "@rstest/core";
+import type { Message } from "@langchain/langgraph-sdk";
+import { expect, rs, test } from "@rstest/core";
+import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 
 import {
-  buildRunMessagesUrl,
+  buildThreadMessagesPageUrl,
   buildVisibleHistoryMessages,
-  computeSummarizationMovedMessages,
-  findLatestUnloadedRunIndex,
-  getNextRunMessagesBeforeSeq,
-  getOldestRunMessageSeq,
-  getSupersededRunIds,
+  areOptimisticMessagesConfirmed,
+  computeSummarizationTransientMessages,
+  countHumanMessagesExcludingSuperseded,
+  flattenThreadHistoryPages,
   getSummarizationMiddlewareMessages,
+  getThreadHistoryNextPageParam,
   getVisibleOptimisticMessages,
-  MAX_CONSECUTIVE_EMPTY_RUN_LOADS,
+  mergeRenderedMessageLedger,
+  mergeTransientHistoryBridge,
+  mergeTransientHistoryBridgeOrder,
   mergeMessages,
-  pruneConfirmedArchivedMessages,
+  parseThreadMessagesPageResponse,
+  pruneConfirmedTransientMessages,
+  reconcileThreadHistoryRows,
   removeSetItems,
-  resolvePreservedHistory,
-  runMessagesPageHasMore,
-  shouldAutoContinueOnEmptyRun,
+  resolveThreadTransientHistoryBridge,
+  resolveTransientHistoryBridge,
+  restoreLocalTurnMessageOrder,
+  restoreReconnectedTurnMessageOrder,
+  type ThreadMessagesPageResponse,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
-function runMessage(seq?: number): RunMessage {
+function runMessage(seq: number): RunMessage {
   return {
     run_id: "run-1",
-    ...(seq === undefined ? {} : { seq }),
+    seq,
     content: {} as Message,
     metadata: { caller: "" },
     created_at: "2026-05-22T00:00:00Z",
@@ -44,6 +51,28 @@ test("mergeMessages removes duplicate messages already present in history", () =
   } as Message;
 
   expect(mergeMessages([human, ai, human, ai], [], [])).toEqual([human, ai]);
+});
+
+test("mergeMessages does not collapse an unloaded gap before the first shared anchor", () => {
+  const protectedEarly = {
+    id: "protected-early",
+    type: "human",
+    content: "写一个算法PDF",
+  } as Message;
+  const latestHuman = {
+    id: "latest-human",
+    type: "human",
+    content: "写一本超级小说",
+  } as Message;
+  const latestAi = {
+    id: "latest-ai",
+    type: "ai",
+    content: "latest answer",
+  } as Message;
+
+  expect(
+    mergeMessages([latestHuman, latestAi], [protectedEarly, latestHuman], []),
+  ).toEqual([latestHuman, latestAi]);
 });
 
 test("mergeMessages lets live thread messages replace overlapping history", () => {
@@ -71,6 +100,146 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
   expect(mergeMessages([oldHuman, oldAi], [liveHuman, liveAi], [])).toEqual([
     liveHuman,
     liveAi,
+  ]);
+});
+
+test("mergeMessages preserves historical run metadata on a live checkpoint replacement", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "persisted",
+    additional_kwargs: { turn_duration: 114 },
+  } as Message;
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-1",
+        seq: 1,
+        content: persistedAi,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-07-21T00:00:00Z",
+      },
+    ],
+    new Set(),
+  );
+  const checkpointAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live checkpoint",
+  } as Message;
+
+  expect(mergeMessages(history, [checkpointAi], [])).toEqual([
+    {
+      ...checkpointAi,
+      run_id: "run-1",
+      additional_kwargs: { turn_duration: 114 },
+    },
+  ]);
+});
+
+test("mergeMessages keeps a protected pre-compression input at its canonical position", () => {
+  const canonicalInput = {
+    id: "input-1",
+    type: "human",
+    content: "写一个算法PDF",
+  } as Message;
+  const checkpointInput = {
+    id: "input-1",
+    type: "human",
+    content: [{ type: "text", text: "写一个算法PDF" }],
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    type: "tool",
+    tool_call_id: "clarification-call",
+    content: "Create a new PDF",
+  } as Message;
+  const directionAnswer = {
+    id: "input-3",
+    type: "human",
+    content: "二叉树相关的即可",
+  } as Message;
+  const canonicalRetainedTail = {
+    id: "retained-ai",
+    type: "ai",
+    content: "persisted tail",
+  } as Message;
+  const checkpointRetainedTail = {
+    id: "retained-ai",
+    type: "ai",
+    content: "live tail",
+  } as Message;
+
+  expect(
+    mergeMessages(
+      [
+        canonicalInput,
+        clarificationCard,
+        directionAnswer,
+        canonicalRetainedTail,
+      ],
+      [checkpointInput, checkpointRetainedTail],
+      [],
+    ),
+  ).toEqual([
+    checkpointInput,
+    clarificationCard,
+    directionAnswer,
+    checkpointRetainedTail,
+  ]);
+});
+
+test("mergeMessages keeps source order when history and live tail do not overlap", () => {
+  const historyAi = {
+    id: "history-ai",
+    type: "ai",
+    content: "persisted",
+  } as Message;
+  const liveHuman = {
+    id: "live-human",
+    type: "human",
+    content: "live",
+  } as Message;
+
+  expect(mergeMessages([historyAi], [liveHuman], [])).toEqual([
+    historyAi,
+    liveHuman,
+  ]);
+});
+
+test("mergeMessages appends a trailing live-only segment after newer canonical rows", () => {
+  const message = (id: string) =>
+    ({ id, type: "human", content: id }) as Message;
+  const [a, b, c, d, y] = ["a", "b", "c", "d", "y"].map(message) as [
+    Message,
+    Message,
+    Message,
+    Message,
+    Message,
+  ];
+
+  expect(mergeMessages([a, b, c, d], [b, y], [])).toEqual([a, b, c, d, y]);
+});
+
+test("mergeMessages keeps live-only messages between shared anchors in place", () => {
+  const message = (id: string) =>
+    ({ id, type: "human", content: id }) as Message;
+  const [a, b, c, d, x, y] = ["a", "b", "c", "d", "x", "y"].map(message) as [
+    Message,
+    Message,
+    Message,
+    Message,
+    Message,
+    Message,
+  ];
+
+  expect(mergeMessages([a, b, c, d], [b, x, d, y], [])).toEqual([
+    a,
+    b,
+    c,
+    x,
+    d,
+    y,
   ]);
 });
 
@@ -221,6 +390,58 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
   ]);
 });
 
+test("edit replay of the only turn hides the optimistic copy once the server human arrives", () => {
+  // The runtime re-keys the first user message of a thread, so the persisted
+  // replacement never matches the optimistic id and only the count can confirm
+  // it. Masking the superseded turn drops the live count to zero first.
+  const supersededHuman = {
+    id: "human-1__user",
+    type: "human",
+    content: "introduce Li Bai",
+  } as Message;
+  const optimisticHuman = {
+    id: "replacement-1",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+  const serverHuman = {
+    id: "replacement-1__user",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+
+  const baseline = countHumanMessagesExcludingSuperseded(
+    [supersededHuman],
+    ["human-1__user", "ai-1"],
+  );
+  expect(baseline).toBe(0);
+
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 0)).toEqual([
+    optimisticHuman,
+  ]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 1)).toEqual(
+    [],
+  );
+  expect(mergeMessages([], [serverHuman], [])).toEqual([serverHuman]);
+});
+
+test("countHumanMessagesExcludingSuperseded keeps turns the replay does not supersede", () => {
+  const keptHuman = { id: "human-1", type: "human", content: "one" } as Message;
+  const supersededHuman = {
+    id: "human-2",
+    type: "human",
+    content: "two",
+  } as Message;
+  const ai = { id: "ai-1", type: "ai", content: "answer" } as Message;
+
+  expect(
+    countHumanMessagesExcludingSuperseded(
+      [keptHuman, ai, supersededHuman],
+      ["human-2", "ai-2"],
+    ),
+  ).toBe(1);
+});
+
 test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
   const optimisticHuman = {
     id: "opt-human-1",
@@ -279,124 +500,322 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   ]);
 });
 
-test("runMessagesPageHasMore reads backend snake_case pagination field", () => {
-  expect(runMessagesPageHasMore({ data: [], has_more: true })).toBe(true);
-  expect(runMessagesPageHasMore({ data: [], has_more: false })).toBe(false);
-});
+test("areOptimisticMessagesConfirmed returns true when server messages contain every optimistic id", () => {
+  const optimisticHuman = {
+    id: "replacement-human-1",
+    type: "human",
+    content: "edited question",
+  } as Message;
+  const serverHuman = {
+    id: "replacement-human-1",
+    type: "human",
+    content: "edited question",
+  } as Message;
+  const serverAi = {
+    id: "replacement-ai-1",
+    type: "ai",
+    content: "new answer",
+  } as Message;
 
-test("runMessagesPageHasMore keeps compatibility with camelCase pagination field", () => {
-  expect(runMessagesPageHasMore({ data: [], hasMore: true })).toBe(true);
-});
-
-test("getOldestRunMessageSeq returns the cursor for the next older run page", () => {
   expect(
-    getOldestRunMessageSeq([runMessage(8), runMessage(9), runMessage(10)]),
-  ).toBe(8);
+    areOptimisticMessagesConfirmed([optimisticHuman], [serverHuman, serverAi]),
+  ).toBe(true);
 });
 
-test("getOldestRunMessageSeq ignores rows without seq", () => {
-  expect(getOldestRunMessageSeq([runMessage()])).toBeNull();
+test("areOptimisticMessagesConfirmed ignores optimistic messages without stable ids", () => {
+  const optimisticHuman = {
+    type: "human",
+    content: "edited question",
+  } as Message;
+
+  expect(areOptimisticMessagesConfirmed([optimisticHuman], [])).toBe(false);
 });
 
-test("getNextRunMessagesBeforeSeq keeps runs pending when has_more lacks seq", () => {
+test("buildThreadMessagesPageUrl encodes the thread and backward cursor", () => {
   expect(
-    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: true }),
-  ).toBeUndefined();
-});
-
-test("getNextRunMessagesBeforeSeq marks runs loaded when no more pages exist", () => {
-  expect(
-    getNextRunMessagesBeforeSeq({ data: [runMessage()], has_more: false }),
-  ).toBeNull();
-});
-
-test("buildRunMessagesUrl encodes path segments and optional before_seq", () => {
-  expect(
-    buildRunMessagesUrl(
+    buildThreadMessagesPageUrl(
       "https://api.example.test/",
       "thread/with space",
-      "run?one",
       18,
     ),
   ).toBe(
-    "https://api.example.test/api/threads/thread%2Fwith%20space/runs/run%3Fone/messages?before_seq=18",
+    "https://api.example.test/api/threads/thread%2Fwith%20space/messages/page?before_seq=18",
   );
 });
 
-test("buildRunMessagesUrl omits before_seq when loading the latest page", () => {
+test("buildThreadMessagesPageUrl omits before_seq for the latest page", () => {
   expect(
-    buildRunMessagesUrl("https://api.example.test", "thread-1", "run-1"),
-  ).toBe("https://api.example.test/api/threads/thread-1/runs/run-1/messages");
+    buildThreadMessagesPageUrl("https://api.example.test", "thread-1"),
+  ).toBe("https://api.example.test/api/threads/thread-1/messages/page");
 });
 
-test("buildRunMessagesUrl returns a relative URL when using the nginx proxy", () => {
-  expect(buildRunMessagesUrl("", "thread-1", "run-1", 42)).toBe(
-    "/api/threads/thread-1/runs/run-1/messages?before_seq=42",
+test("buildThreadMessagesPageUrl returns a relative URL behind nginx", () => {
+  expect(buildThreadMessagesPageUrl("", "thread-1", 42)).toBe(
+    "/api/threads/thread-1/messages/page?before_seq=42",
   );
 });
 
-test("findLatestUnloadedRunIndex loads the newest run first from a newest-first list", () => {
-  const runs = [
-    { run_id: "R6" },
-    { run_id: "R5" },
-    { run_id: "R4" },
-    { run_id: "R3" },
-    { run_id: "R2" },
-    { run_id: "R1" },
-  ] as unknown as Run[];
-  expect(findLatestUnloadedRunIndex(runs, new Set())).toBe(0);
+test("parseThreadMessagesPageResponse accepts a valid history page", () => {
+  const response = {
+    data: [runMessage(1), runMessage(2)],
+    has_more: true,
+    next_before_seq: 1,
+  };
+
+  expect(parseThreadMessagesPageResponse(response)).toBe(response);
 });
 
-test("findLatestUnloadedRunIndex skips already-loaded runs and returns the next newest unloaded run", () => {
-  const runs = [
-    { run_id: "R6" },
-    { run_id: "R5" },
-    { run_id: "R4" },
-  ] as unknown as Run[];
-  expect(findLatestUnloadedRunIndex(runs, new Set(["R6"]))).toBe(1);
+test.each([
+  ["missing", undefined],
+  ["non-numeric", "2"],
+  ["fractional", 2.5],
+  ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+])(
+  "parseThreadMessagesPageResponse rejects a %s row seq",
+  (_description, seq) => {
+    expect(() =>
+      parseThreadMessagesPageResponse({
+        data: [{ ...runMessage(1), seq }],
+        has_more: false,
+        next_before_seq: null,
+      }),
+    ).toThrow("invalid seq");
+  },
+);
+
+test("parseThreadMessagesPageResponse rejects duplicate row seq values", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1), runMessage(1)],
+      has_more: false,
+      next_before_seq: null,
+    }),
+  ).toThrow("duplicate seq");
 });
 
-test("findLatestUnloadedRunIndex returns -1 when every run is already loaded", () => {
-  const runs = [{ run_id: "R2" }, { run_id: "R1" }] as unknown as Run[];
-  expect(findLatestUnloadedRunIndex(runs, new Set(["R1", "R2"]))).toBe(-1);
+test("parseThreadMessagesPageResponse rejects an invalid pagination cursor", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1)],
+      has_more: true,
+      next_before_seq: null,
+    }),
+  ).toThrow("invalid next_before_seq");
 });
 
-test("getSupersededRunIds combines completed regenerate metadata with pending ids", () => {
-  const runs = [
-    {
-      run_id: "run-new",
-      status: "success",
-      metadata: { regenerate_from_run_id: "run-old" },
-    },
-    {
-      run_id: "run-normal",
-      status: "success",
-      metadata: {},
-    },
-  ] as unknown as Run[];
+test("flattenThreadHistoryPages prepends backward pages in global seq order", () => {
+  expect(
+    flattenThreadHistoryPages([
+      {
+        data: [runMessage(5), runMessage(6)],
+        has_more: true,
+        next_before_seq: 5,
+      },
+      {
+        data: [runMessage(3), runMessage(4)],
+        has_more: true,
+        next_before_seq: 3,
+      },
+      {
+        data: [runMessage(1), runMessage(2)],
+        has_more: false,
+        next_before_seq: null,
+      },
+    ]).map((message) => message.seq),
+  ).toEqual([1, 2, 3, 4, 5, 6]);
+});
 
-  expect(getSupersededRunIds(runs, new Set(["run-pending"]))).toEqual(
-    new Set(["run-old", "run-pending"]),
+test("flattenThreadHistoryPages retains backward pages when the latest page refreshes", () => {
+  const olderPage = {
+    data: [runMessage(1), runMessage(2)],
+    has_more: false,
+    next_before_seq: null,
+  };
+
+  expect(
+    flattenThreadHistoryPages([
+      {
+        data: [runMessage(3), runMessage(4), runMessage(5)],
+        has_more: true,
+        next_before_seq: 3,
+      },
+      olderPage,
+    ]).map((message) => message.seq),
+  ).toEqual([1, 2, 3, 4, 5]);
+});
+
+test("reconcileThreadHistoryRows retains rows displaced from a moving latest page", () => {
+  const previousRows = Array.from({ length: 50 }, (_, index) =>
+    runMessage(index + 1),
   );
+  const currentRows = Array.from({ length: 50 }, (_, index) =>
+    runMessage(index + 51),
+  );
+
+  expect(
+    reconcileThreadHistoryRows(previousRows, currentRows, false).map(
+      (message) => message.seq,
+    ),
+  ).toEqual(Array.from({ length: 100 }, (_, index) => index + 1));
 });
 
-test("getSupersededRunIds ignores failed regenerate runs but keeps pending ids", () => {
-  const runs = [
-    {
-      run_id: "run-error",
-      status: "error",
-      metadata: { regenerate_from_run_id: "run-old" },
-    },
-    {
-      run_id: "run-interrupted",
-      status: "interrupted",
-      metadata: { regenerate_from_run_id: "run-older" },
-    },
-  ] as unknown as Run[];
+test("reconcileThreadHistoryRows refreshes overlapping rows without moving them", () => {
+  const stale = runMessage(50);
+  const refreshed = {
+    ...runMessage(50),
+    content: {
+      id: "message-50",
+      type: "ai",
+      content: "final response",
+      additional_kwargs: { turn_duration: 704 },
+    } as Message,
+  };
 
-  expect(getSupersededRunIds(runs, new Set(["run-pending"]))).toEqual(
-    new Set(["run-pending"]),
+  const reconciled = reconcileThreadHistoryRows(
+    [runMessage(49), stale],
+    [refreshed, runMessage(51)],
+    false,
   );
+
+  expect(reconciled.map((message) => message.seq)).toEqual([49, 50, 51]);
+  expect(reconciled[1]).toBe(refreshed);
+});
+
+test("reconcileThreadHistoryRows trusts a complete snapshot and prunes missing rows", () => {
+  const currentRows = [runMessage(2), runMessage(3)];
+
+  expect(
+    reconcileThreadHistoryRows(
+      [runMessage(1), ...currentRows],
+      currentRows,
+      true,
+    ),
+  ).toEqual(currentRows);
+});
+
+test("reconcileThreadHistoryRows preserves existing history when a row seq is invalid", () => {
+  const previousRows = [runMessage(1), runMessage(2)];
+  const invalidRow = {
+    ...runMessage(3),
+    seq: undefined,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  expect(reconcileThreadHistoryRows(previousRows, [invalidRow], false)).toBe(
+    previousRows,
+  );
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
+});
+
+test("reconcileThreadHistoryRows keeps insertion order on an invalid initial snapshot", () => {
+  const first = {
+    ...runMessage(1),
+    seq: undefined,
+    content: { id: "first", type: "human", content: "first" } as Message,
+  } as unknown as RunMessage;
+  const second = {
+    ...runMessage(2),
+    seq: undefined,
+    content: { id: "second", type: "ai", content: "second" } as Message,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  const currentRows = [first, second];
+
+  expect(reconcileThreadHistoryRows([], currentRows, false)).toBe(currentRows);
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
+});
+
+test("infinite history refetch recalculates older-page cursors from the refreshed newest page", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const queryKey = ["thread-messages", "thread-1"] as const;
+  const requestedCursors: Array<number | null> = [];
+  let availableSeqs = Array.from({ length: 9 }, (_, index) => index + 1);
+
+  const observer = new InfiniteQueryObserver(queryClient, {
+    queryKey,
+    initialPageParam: null as number | null,
+    queryFn: ({ pageParam }): ThreadMessagesPageResponse => {
+      requestedCursors.push(pageParam);
+      const eligible = availableSeqs.filter(
+        (seq) => pageParam === null || seq < pageParam,
+      );
+      const pageSeqs = eligible.slice(-3);
+      return {
+        data: pageSeqs.map(runMessage),
+        has_more: eligible.length > pageSeqs.length,
+        next_before_seq:
+          eligible.length > pageSeqs.length ? (pageSeqs[0] ?? null) : null,
+      };
+    },
+    getNextPageParam: getThreadHistoryNextPageParam,
+  });
+  const unsubscribe = observer.subscribe(() => undefined);
+
+  await observer.refetch();
+  await observer.fetchNextPage();
+  expect(requestedCursors).toEqual([null, 7]);
+
+  availableSeqs = Array.from({ length: 12 }, (_, index) => index + 1);
+  requestedCursors.length = 0;
+  await queryClient.invalidateQueries({ queryKey });
+
+  expect(requestedCursors).toEqual([null, 10]);
+  expect(
+    observer
+      .getCurrentResult()
+      .data?.pages.map((page) => page.data.map((message) => message.seq)),
+  ).toEqual([
+    [10, 11, 12],
+    [7, 8, 9],
+  ]);
+  expect(observer.getCurrentResult().data?.pageParams).toEqual([null, 10]);
+
+  unsubscribe();
+  queryClient.clear();
+});
+
+test("infinite history stops and warns when has_more has no cursor", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const requestedCursors: Array<number | null> = [];
+  const warnSpy = rs.spyOn(console, "warn").mockImplementation(() => ({}));
+  const observer = new InfiniteQueryObserver(queryClient, {
+    queryKey: ["thread-messages", "invalid-cursor"],
+    initialPageParam: null as number | null,
+    queryFn: ({ pageParam }): ThreadMessagesPageResponse => {
+      requestedCursors.push(pageParam);
+      return { data: [], has_more: true, next_before_seq: null };
+    },
+    getNextPageParam: getThreadHistoryNextPageParam,
+  });
+  const unsubscribe = observer.subscribe(() => undefined);
+
+  try {
+    await observer.refetch();
+    await observer.fetchNextPage();
+
+    expect(requestedCursors).toEqual([null]);
+    expect(observer.getCurrentResult().hasNextPage).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "Thread history returned has_more without next_before_seq; pagination cannot continue.",
+    );
+  } finally {
+    unsubscribe();
+    warnSpy.mockRestore();
+    queryClient.clear();
+  }
 });
 
 test("removeSetItems removes pending superseded ids after submit failure", () => {
@@ -429,24 +848,28 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   const rows: RunMessage[] = [
     {
       run_id: "run-old",
+      seq: 1,
       content: oldHuman,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:00Z",
     },
     {
       run_id: "run-old",
+      seq: 2,
       content: oldAi,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:01Z",
     },
     {
       run_id: "run-new",
+      seq: 3,
       content: newHuman,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:02Z",
     },
     {
       run_id: "run-new",
+      seq: 4,
       content: newAi,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:03Z",
@@ -455,7 +878,7 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
 
   // run_id is carried onto each content message (#3779) so historical subtask
   // cards can fetch their persisted step history on expand.
-  expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]), [])).toEqual([
+  expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]))).toEqual([
     { ...newHuman, run_id: "run-new" },
     { ...newAi, run_id: "run-new" },
   ]);
@@ -465,157 +888,22 @@ test("buildVisibleHistoryMessages attaches run_id to each content message (#3779
   const rows: RunMessage[] = [
     {
       run_id: "run-1",
+      seq: 1,
       content: { id: "ai-1", type: "ai", content: "answer" } as Message,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-26T00:00:00Z",
     },
   ];
 
-  const result = buildVisibleHistoryMessages(rows, new Set(), []);
+  const result = buildVisibleHistoryMessages(rows, new Set());
 
   expect((result[0] as { run_id?: string }).run_id).toBe("run-1");
 });
 
-test("loading runs in newest-first order and prepending pages yields chronological messages (regression for #3352)", () => {
-  // Simulate backend list_by_thread returning newest first.
-  const runs = [
-    { run_id: "R6" },
-    { run_id: "R5" },
-    { run_id: "R4" },
-    { run_id: "R3" },
-    { run_id: "R2" },
-    { run_id: "R1" },
-  ] as unknown as Run[];
-  const runIdToContent: Record<string, string> = {
-    R1: "A",
-    R2: "B",
-    R3: "C",
-    R4: "D",
-    R5: "E",
-    R6: "F",
-  };
-
-  const loaded = new Set<string>();
-  let messages: Message[] = [];
-
-  while (true) {
-    const index = findLatestUnloadedRunIndex(runs, loaded);
-    if (index === -1) break;
-    const run = runs[index]!;
-    const pageMessages = [
-      {
-        id: run.run_id,
-        type: "human",
-        content: runIdToContent[run.run_id],
-      } as Message,
-    ];
-    // Mirror loadMessages: prepend new page to existing messages.
-    messages = [...pageMessages, ...messages];
-    loaded.add(run.run_id);
-  }
-
-  expect(messages.map((m) => m.content)).toEqual([
-    "A",
-    "B",
-    "C",
-    "D",
-    "E",
-    "F",
-  ]);
-});
-
-test("shouldAutoContinueOnEmptyRun does not continue when the run produced messages", () => {
-  expect(shouldAutoContinueOnEmptyRun(3, 0)).toBe(false);
-  expect(shouldAutoContinueOnEmptyRun(1, 4)).toBe(false);
-});
-
-test("shouldAutoContinueOnEmptyRun continues when an empty run is below the safety cap", () => {
-  expect(shouldAutoContinueOnEmptyRun(0, 0)).toBe(true);
-  expect(
-    shouldAutoContinueOnEmptyRun(0, MAX_CONSECUTIVE_EMPTY_RUN_LOADS - 1),
-  ).toBe(true);
-});
-
-test("shouldAutoContinueOnEmptyRun stops once consecutive empty loads reach the cap", () => {
-  expect(shouldAutoContinueOnEmptyRun(0, MAX_CONSECUTIVE_EMPTY_RUN_LOADS)).toBe(
-    false,
-  );
-  expect(
-    shouldAutoContinueOnEmptyRun(0, MAX_CONSECUTIVE_EMPTY_RUN_LOADS + 1),
-  ).toBe(false);
-});
-
-test("shouldAutoContinueOnEmptyRun honors a custom safety cap when provided", () => {
-  expect(shouldAutoContinueOnEmptyRun(0, 0, 1)).toBe(true);
-  expect(shouldAutoContinueOnEmptyRun(0, 1, 1)).toBe(false);
-});
-
-test("simulating auto-continue across empty runs skips empty contributions and lands on the next run with content (issue #3352 follow-up)", () => {
-  const runs = [
-    { run_id: "R6" },
-    { run_id: "R5" },
-    { run_id: "R4" },
-    { run_id: "R3" },
-    { run_id: "R2" },
-    { run_id: "R1" },
-  ] as unknown as Run[];
-  const runIdToMessages: Record<string, Message[]> = {
-    R6: [{ id: "R6", type: "human", content: "F" } as Message],
-    R5: [{ id: "R5", type: "human", content: "E" } as Message],
-    R4: [],
-    R3: [],
-    R2: [],
-    R1: [{ id: "R1", type: "human", content: "A" } as Message],
-  };
-
-  const loaded = new Set<string>();
-  let messages: Message[] = [];
-
-  loaded.add("R6");
-  loaded.add("R5");
-  messages = [...runIdToMessages.R5!, ...runIdToMessages.R6!];
-
-  let consecutiveEmptyLoads = 0;
-  let visited = 0;
-  const visitedRunIds: string[] = [];
-  while (true) {
-    const index = findLatestUnloadedRunIndex(runs, loaded);
-    if (index === -1) break;
-    const run = runs[index]!;
-    visited += 1;
-    visitedRunIds.push(run.run_id);
-    const pageMessages = runIdToMessages[run.run_id] ?? [];
-    messages = [...pageMessages, ...messages];
-    loaded.add(run.run_id);
-    if (
-      !shouldAutoContinueOnEmptyRun(pageMessages.length, consecutiveEmptyLoads)
-    ) {
-      consecutiveEmptyLoads = 0;
-      break;
-    }
-    consecutiveEmptyLoads += 1;
-  }
-
-  expect(visitedRunIds).toEqual(["R4", "R3", "R2", "R1"]);
-  expect(visited).toBe(4);
-  expect(messages.map((m) => m.content)).toEqual(["A", "E", "F"]);
-});
-
-test("shouldAutoContinueOnEmptyRun input must use the post-filter visible count, not the raw page size (middleware-only runs should still trigger auto-continue)", () => {
-  const filteredVisibleCount = 0;
-  const rawPageSize = 3; // pretend the raw page had 3 middleware-only entries
-  expect(shouldAutoContinueOnEmptyRun(filteredVisibleCount, 0)).toBe(true);
-  expect(shouldAutoContinueOnEmptyRun(rawPageSize, 0)).toBe(false);
-});
-
 // Regression coverage for #3825: after context summarization the backend emits
 // RemoveMessage(ALL) + summary + retained, and onUpdateEvent rescues the removed
-// messages into history via an async setState. The live thread.messages (an
-// external store) and the archived history (React state) update through two
-// independent scheduling channels, so a render can observe the post-summary
-// (shrunk) thread while the rescued messages have NOT yet landed in
-// visibleHistory. resolvePreservedHistory overlays a synchronous archive buffer
-// so the merge never loses those messages regardless of the interleaving.
+// messages into a current-stream transient bridge. The bridge fills only the
+// journal flush/refetch gap and never mutates canonical history pages.
 
 const summarizationHuman1 = {
   id: "human-1",
@@ -643,17 +931,15 @@ const summarizationMovedMessages = [
   summarizationHuman2,
 ];
 
-test("resolvePreservedHistory keeps rescued messages while history state is still stale (regression for #3825)", () => {
-  // visibleHistory has not yet absorbed the rescued messages (async setState
-  // from appendMessages is still pending in this render).
+test("resolveTransientHistoryBridge keeps rescued messages while history state is stale", () => {
   const staleHistory: Message[] = [];
 
   expect(
-    resolvePreservedHistory(staleHistory, summarizationMovedMessages),
+    resolveTransientHistoryBridge(staleHistory, summarizationMovedMessages),
   ).toEqual(summarizationMovedMessages);
 });
 
-test("resolvePreservedHistory appends rescued messages after already-loaded history", () => {
+test("resolveTransientHistoryBridge appends rescued messages after canonical history", () => {
   const olderLoadedHuman = {
     id: "older-human",
     type: "human",
@@ -661,24 +947,305 @@ test("resolvePreservedHistory appends rescued messages after already-loaded hist
   } as Message;
 
   expect(
-    resolvePreservedHistory([olderLoadedHuman], summarizationMovedMessages),
+    resolveTransientHistoryBridge(
+      [olderLoadedHuman],
+      summarizationMovedMessages,
+    ),
   ).toEqual([olderLoadedHuman, ...summarizationMovedMessages]);
 });
 
-test("resolvePreservedHistory does not duplicate or reorder once history state catches up", () => {
-  // visibleHistory now contains the rescued messages (appendMessages committed),
-  // but the synchronous buffer still holds them this render.
+test("resolveTransientHistoryBridge does not collapse an unloaded gap before its first canonical anchor", () => {
+  // Real regression shape from thread 4e81444d-c6ce-471e-93fd-b6ddb18dc938:
+  // the default history page starts at event seq=35, while the clarification
+  // conversation lives at seq=2..14. Context compression captured both the
+  // old turns and a later message that overlaps the canonical page. The old
+  // turns must stay suppressed until their canonical page loads; otherwise
+  // the unloaded seq=15..34 gap is visually collapsed before the page anchor.
+  const clarificationRequest = {
+    id: "clarification-request",
+    type: "ai",
+    content: "Which PDF should I create?",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    tool_call_id: "clarification-call",
+    type: "tool",
+    content: "Create a new algorithm PDF",
+  } as Message;
+  const clarificationAnswer = {
+    id: "clarification-answer",
+    type: "human",
+    content: "Create a new algorithm PDF",
+  } as Message;
+  const directionQuestion = {
+    id: "direction-question",
+    type: "ai",
+    content: "Which topic?",
+  } as Message;
+  const directionAnswer = {
+    id: "direction-answer",
+    type: "human",
+    content: "Binary trees",
+  } as Message;
+  const pageAnchor = {
+    id: "event-seq-35",
+    type: "tool",
+    tool_call_id: "event-seq-35-call",
+    content: "first message on the latest history page",
+  } as Message;
+  const latestAnswer = {
+    id: "event-seq-88",
+    type: "ai",
+    content: "latest answer",
+  } as Message;
+  const captured = [
+    summarizationHuman1,
+    clarificationRequest,
+    clarificationCard,
+    clarificationAnswer,
+    directionQuestion,
+    directionAnswer,
+    pageAnchor,
+  ];
+  const canonical = [pageAnchor, latestAnswer];
+  const missingAfterCanonicalRefetch = pruneConfirmedTransientMessages(
+    captured,
+    canonical,
+  );
+  const bridgeOrder = mergeTransientHistoryBridgeOrder([], captured);
+
   expect(
-    resolvePreservedHistory(
+    resolveTransientHistoryBridge(
+      canonical,
+      missingAfterCanonicalRefetch,
+      bridgeOrder,
+    ).map((message) => message.id),
+  ).toEqual(["event-seq-35", "event-seq-88"]);
+});
+
+test("resolveTransientHistoryBridge restores a prefix that was already rendered", () => {
+  const protectedPrompt = {
+    id: "protected-prompt",
+    type: "human",
+    content: "/ppt-master 帮我做个ppt",
+  } as Message;
+  const intermediateReply = {
+    id: "intermediate-reply",
+    type: "ai",
+    content: "正在生成页面",
+  } as Message;
+  const pageAnchor = {
+    id: "page-anchor",
+    type: "ai",
+    content: "继续导出 SVG",
+  } as Message;
+  const latestAnswer = {
+    id: "latest-answer",
+    type: "ai",
+    content: "任务仍在执行",
+  } as Message;
+  const captured = [protectedPrompt, intermediateReply, pageAnchor];
+  const bridgeOrder = mergeTransientHistoryBridgeOrder([], captured);
+  const previouslyRenderedOrder = [
+    protectedPrompt,
+    intermediateReply,
+    pageAnchor,
+    latestAnswer,
+  ]
+    .map((message) => `message:${message.id}`)
+    .filter((identity): identity is string => Boolean(identity));
+
+  expect(
+    resolveTransientHistoryBridge(
+      [pageAnchor, latestAnswer],
+      captured,
+      bridgeOrder,
+      previouslyRenderedOrder,
+    ).map((message) => message.id),
+  ).toEqual([
+    "protected-prompt",
+    "intermediate-reply",
+    "page-anchor",
+    "latest-answer",
+  ]);
+});
+
+test("resolveTransientHistoryBridge does not duplicate once canonical history catches up", () => {
+  expect(
+    resolveTransientHistoryBridge(
       summarizationMovedMessages,
       summarizationMovedMessages,
     ),
   ).toEqual(summarizationMovedMessages);
 });
 
-test("resolvePreservedHistory returns history unchanged when nothing is pending archival", () => {
+test("resolveTransientHistoryBridge returns history unchanged when the bridge is empty", () => {
   const history = [summarizationHuman1, summarizationAi1];
-  expect(resolvePreservedHistory(history, [])).toBe(history);
+  expect(resolveTransientHistoryBridge(history, [])).toBe(history);
+});
+
+test("resolveThreadTransientHistoryBridge never leaks a bridge across threads", () => {
+  const canonical = [
+    { id: "older-human", type: "human", content: "older" } as Message,
+  ];
+  expect(
+    resolveThreadTransientHistoryBridge(
+      canonical,
+      summarizationMovedMessages,
+      "thread-a",
+      "thread-b",
+    ),
+  ).toBe(canonical);
+  expect(
+    resolveThreadTransientHistoryBridge(
+      canonical,
+      summarizationMovedMessages,
+      null,
+      null,
+    ),
+  ).toBe(canonical);
+  expect(
+    resolveThreadTransientHistoryBridge(
+      canonical,
+      summarizationMovedMessages,
+      "thread-a",
+      "thread-a",
+    ),
+  ).toEqual([canonical[0], ...summarizationMovedMessages]);
+});
+
+test("mergeTransientHistoryBridge preserves chronology across repeated compression", () => {
+  const human3 = {
+    id: "human-3",
+    type: "human",
+    content: "round 3 question",
+  } as Message;
+  const firstBridge = mergeTransientHistoryBridge(
+    [],
+    [summarizationHuman1, summarizationAi1],
+  );
+  const secondBridge = mergeTransientHistoryBridge(firstBridge, [
+    summarizationAi1,
+    summarizationHuman2,
+    human3,
+  ]);
+
+  expect(secondBridge.map((message) => message.id)).toEqual([
+    "human-1",
+    "ai-1",
+    "human-2",
+    "human-3",
+  ]);
+});
+
+test("mergeTransientHistoryBridge does not move a protected input recaptured by later compression", () => {
+  const protectedInput = {
+    id: "protected-input",
+    type: "human",
+    content: "写一个算法PDF",
+  } as Message;
+  const clarification = {
+    id: "clarification",
+    type: "ai",
+    content: "Which kind?",
+  } as Message;
+  const laterTail = {
+    id: "later-tail",
+    type: "ai",
+    content: "Working on the PDF",
+  } as Message;
+
+  const firstBridge = mergeTransientHistoryBridge(
+    [],
+    [protectedInput, clarification],
+  );
+  const secondBridge = mergeTransientHistoryBridge(firstBridge, [
+    { ...protectedInput, content: [{ type: "text", text: "写一个算法PDF" }] },
+    laterTail,
+  ]);
+
+  expect(secondBridge.map((message) => message.id)).toEqual([
+    "protected-input",
+    "clarification",
+    "later-tail",
+  ]);
+  expect(secondBridge[0]?.content).toEqual([
+    { type: "text", text: "写一个算法PDF" },
+  ]);
+});
+
+test("mergeTransientHistoryBridgeOrder retains confirmed overlap as a non-rendering anchor", () => {
+  const firstOrder = mergeTransientHistoryBridgeOrder(
+    [],
+    [summarizationHuman1, summarizationAi1, summarizationHuman2],
+  );
+  const secondOrder = mergeTransientHistoryBridgeOrder(firstOrder, [
+    summarizationHuman2,
+    summarizationAi2,
+  ]);
+
+  expect(secondOrder).toEqual([
+    "message:human-1",
+    "message:ai-1",
+    "message:human-2",
+    "message:ai-2",
+  ]);
+});
+
+test("mergeTransientHistoryBridgeOrder returns the same array when nothing is new", () => {
+  const order = mergeTransientHistoryBridgeOrder(
+    [],
+    [summarizationHuman1, summarizationAi1],
+  );
+
+  // Identity, not just equality: this runs per render while the bridge is
+  // active and feeds the coalesced render memo (#4409 Phase 1).
+  expect(mergeTransientHistoryBridgeOrder(order, [summarizationAi1])).toBe(
+    order,
+  );
+  expect(
+    mergeTransientHistoryBridgeOrder(order, [
+      summarizationHuman1,
+      summarizationAi1,
+    ]),
+  ).toBe(order);
+  expect(mergeTransientHistoryBridgeOrder(order, [])).toBe(order);
+  expect(
+    mergeTransientHistoryBridgeOrder(order, [summarizationHuman2]),
+  ).not.toBe(order);
+});
+
+test("mergeTransientHistoryBridgeOrder keeps a recaptured protected prefix in place", () => {
+  const protectedInput = {
+    id: "protected-input",
+    type: "human",
+    content: "first",
+  } as Message;
+  const oldTail = {
+    id: "old-tail",
+    type: "ai",
+    content: "old",
+  } as Message;
+  const newTail = {
+    id: "new-tail",
+    type: "ai",
+    content: "new",
+  } as Message;
+
+  const firstOrder = mergeTransientHistoryBridgeOrder(
+    [],
+    [protectedInput, oldTail],
+  );
+  const secondOrder = mergeTransientHistoryBridgeOrder(firstOrder, [
+    protectedInput,
+    newTail,
+  ]);
+
+  expect(secondOrder).toEqual([
+    "message:protected-input",
+    "message:old-tail",
+    "message:new-tail",
+  ]);
 });
 
 test("merge keeps the full conversation across summarization even when visibleHistory lags (regression for #3825)", () => {
@@ -694,7 +1261,7 @@ test("merge keeps the full conversation across summarization even when visibleHi
 
   // The bad render: visibleHistory is still empty, so without the buffer the
   // rescued round-1/2 messages exist in neither merge input and are lost.
-  const effectiveHistory = resolvePreservedHistory(
+  const effectiveHistory = resolveTransientHistoryBridge(
     [],
     summarizationMovedMessages,
   );
@@ -709,23 +1276,23 @@ test("merge keeps the full conversation across summarization even when visibleHi
   ]);
 });
 
-test("pruneConfirmedArchivedMessages drops messages history has absorbed but keeps the rest", () => {
+test("pruneConfirmedTransientMessages drops canonical identities but keeps the rest", () => {
   // History has caught up on the first two rescued messages only.
   expect(
-    pruneConfirmedArchivedMessages(summarizationMovedMessages, [
+    pruneConfirmedTransientMessages(summarizationMovedMessages, [
       summarizationHuman1,
       summarizationAi1,
     ]),
   ).toEqual([summarizationHuman2]);
 });
 
-test("pruneConfirmedArchivedMessages keeps every pending message while history has not caught up", () => {
+test("pruneConfirmedTransientMessages keeps entries while canonical history is stale", () => {
   expect(
-    pruneConfirmedArchivedMessages(summarizationMovedMessages, []),
+    pruneConfirmedTransientMessages(summarizationMovedMessages, []),
   ).toEqual(summarizationMovedMessages);
 });
 
-test("resolvePreservedHistory prefers the live history copy over a stale buffered duplicate (#3825 review #3)", () => {
+test("resolveTransientHistoryBridge prefers canonical copy over stale transient copy", () => {
   // Same identity, but the buffered copy is an older snapshot. The live history
   // copy (e.g. the finalized answer) must win — the buffer only fills gaps, it
   // must never overwrite a message history already shows.
@@ -740,12 +1307,12 @@ test("resolvePreservedHistory prefers the live history copy over a stale buffere
     content: "finalized answer",
   } as Message;
 
-  expect(resolvePreservedHistory([liveFinal], [staleBuffered])).toEqual([
+  expect(resolveTransientHistoryBridge([liveFinal], [staleBuffered])).toEqual([
     liveFinal,
   ]);
 });
 
-test("computeSummarizationMovedMessages returns the live turns dropped before the retained boundary (regression for #3825)", () => {
+test("computeSummarizationTransientMessages captures live turns dropped before the retained boundary", () => {
   const removeAll = {
     id: "__remove_all__",
     type: "remove",
@@ -767,7 +1334,7 @@ test("computeSummarizationMovedMessages returns the live turns dropped before th
   const summarizationMessages = [removeAll, hiddenSummary, summarizationAi2];
 
   expect(
-    computeSummarizationMovedMessages(
+    computeSummarizationTransientMessages(
       liveThreadBeforeSummary,
       summarizationMessages,
       new Set([hiddenSummary.id!]),
@@ -775,7 +1342,664 @@ test("computeSummarizationMovedMessages returns the live turns dropped before th
   ).toEqual([summarizationHuman1, summarizationAi1, summarizationHuman2]);
 });
 
-test("computeSummarizationMovedMessages excludes already-summarized control messages", () => {
+test("computeSummarizationTransientMessages rescues rendered processing steps missing from a stale live snapshot", () => {
+  const processingMessages = Array.from({ length: 10 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `processing-${step}`,
+      type: step % 2 === 0 ? "tool" : "ai",
+      ...(step % 2 === 0 ? { tool_call_id: `call-${step - 1}` } : {}),
+      content: `step ${step}`,
+    } as Message;
+  });
+  // The SDK has already advanced to the 10-message post-compaction window,
+  // while the UI's previous committed frame still contains steps 1..10.
+  const staleLiveSnapshot = processingMessages.slice(4);
+  const summarizationMessages = [
+    {
+      id: "__remove_all__",
+      type: "remove",
+      content: "",
+    } as Message,
+    ...staleLiveSnapshot,
+  ];
+
+  expect(
+    computeSummarizationTransientMessages(
+      staleLiveSnapshot,
+      summarizationMessages,
+      new Set(),
+      processingMessages,
+    ),
+  ).toEqual(processingMessages.slice(0, 4));
+});
+
+test("computeSummarizationTransientMessages rescues steps between a protected input and retained tail", () => {
+  const protectedInput = {
+    id: "protected-input",
+    type: "human",
+    content: "Run a long sequential research task",
+  } as Message;
+  const removedSteps = Array.from({ length: 4 }, (_, index) => ({
+    id: `protected-window-step-${index + 1}`,
+    type: "ai",
+    content: `completed ${index + 1}`,
+  })) as Message[];
+  const retainedTail = {
+    id: "retained-tail",
+    type: "tool",
+    tool_call_id: "retained-call",
+    content: "latest search result",
+  } as Message;
+  const renderedMessages = [protectedInput, ...removedSteps, retainedTail];
+  const retainedWindow = [protectedInput, retainedTail];
+
+  expect(
+    computeSummarizationTransientMessages(
+      retainedWindow,
+      [
+        {
+          id: "__remove_all__",
+          type: "remove",
+          content: "",
+        } as Message,
+        ...retainedWindow,
+      ],
+      new Set(),
+      renderedMessages,
+    ),
+  ).toEqual(removedSteps);
+});
+
+test("repeated compaction keeps every previously rendered processing step in order", () => {
+  const processingMessages = Array.from({ length: 12 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `repeat-processing-${step}`,
+      type: step % 2 === 0 ? "tool" : "ai",
+      ...(step % 2 === 0 ? { tool_call_id: `repeat-call-${step - 1}` } : {}),
+      content: `step ${step}`,
+    } as Message;
+  });
+  const removeAll = {
+    id: "__remove_all__",
+    type: "remove",
+    content: "",
+  } as Message;
+
+  const firstTail = processingMessages.slice(4, 10);
+  const firstMoved = computeSummarizationTransientMessages(
+    firstTail,
+    [removeAll, ...firstTail],
+    new Set(),
+    processingMessages.slice(0, 10),
+  );
+  const firstBridge = mergeTransientHistoryBridge([], firstMoved);
+  const firstMerged = mergeMessages(firstBridge, firstTail, []);
+
+  const secondTail = processingMessages.slice(6);
+  const secondMoved = computeSummarizationTransientMessages(
+    secondTail,
+    [removeAll, ...secondTail],
+    new Set(),
+    processingMessages,
+  );
+  const secondBridge = mergeTransientHistoryBridge(firstBridge, secondMoved);
+  const secondMerged = mergeMessages(secondBridge, secondTail, []);
+
+  expect(firstMerged.map((message) => message.id)).toEqual(
+    processingMessages.slice(0, 10).map((message) => message.id),
+  );
+  expect(secondMerged.map((message) => message.id)).toEqual(
+    processingMessages.map((message) => message.id),
+  );
+});
+
+test("rendered message ledger survives rolling live windows before repeated compaction", () => {
+  const processingMessages = Array.from({ length: 23 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `rolling-processing-${step}`,
+      type: "ai",
+      content: `completed ${step}/26`,
+    } as Message;
+  });
+  const firstVisibleWindow = processingMessages.slice(0, 13);
+  const secondVisibleWindow = processingMessages.slice(8, 18);
+  const thirdVisibleWindow = processingMessages.slice(13);
+
+  const firstLedger = mergeRenderedMessageLedger([], firstVisibleWindow);
+  const secondLedger = mergeRenderedMessageLedger(
+    firstLedger,
+    secondVisibleWindow,
+  );
+  const thirdLedger = mergeRenderedMessageLedger(
+    secondLedger,
+    thirdVisibleWindow,
+  );
+
+  expect(thirdLedger.map((message) => message.id)).toEqual(
+    processingMessages.map((message) => message.id),
+  );
+
+  // A later compaction retains only 19..23. The accumulated display ledger
+  // must still supply 14..18 (and every older displayed step) to the bridge.
+  const retainedTail = processingMessages.slice(18);
+  const moved = computeSummarizationTransientMessages(
+    retainedTail,
+    [
+      {
+        id: "__remove_all__",
+        type: "remove",
+        content: "",
+      } as Message,
+      ...retainedTail,
+    ],
+    new Set(),
+    thirdLedger,
+  );
+
+  expect(moved.map((message) => message.id)).toEqual(
+    processingMessages.slice(0, 18).map((message) => message.id),
+  );
+});
+
+test("rendered message ledger replaces a submitted user message with its injected server copy", () => {
+  const submittedHuman = {
+    id: "request-1",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedSystemReminder = {
+    id: "request-1",
+    type: "system",
+    content: "<system-reminder>today</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const injectedMemory = {
+    id: "request-1__memory",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const injectedHuman = {
+    id: "request-1__user",
+    type: "human",
+    content: "Build a presentation",
+    name: "user-input",
+  } as Message;
+  const assistantStep = {
+    id: "assistant-step-1",
+    type: "ai",
+    content: "Reading the presentation skill",
+  } as Message;
+
+  const firstLedger = mergeRenderedMessageLedger([], [submittedHuman]);
+  const nextFrame = mergeMessages(
+    [submittedHuman],
+    [injectedSystemReminder, injectedMemory, injectedHuman, assistantStep],
+    [],
+  ).filter((message) => message.additional_kwargs?.hide_from_ui !== true);
+  const nextLedger = mergeRenderedMessageLedger(firstLedger, nextFrame);
+
+  expect(nextLedger).toEqual([injectedHuman, assistantStep]);
+  expect(nextLedger.filter((message) => message.type === "human")).toHaveLength(
+    1,
+  );
+});
+
+test("local turn order keeps early streamed steps behind the user message", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Previous request",
+  } as Message;
+  const previousAssistant = {
+    id: "previous-assistant",
+    type: "ai",
+    content: "Previous answer",
+  } as Message;
+  const earlyAssistantStep = {
+    id: "early-assistant-step",
+    type: "ai",
+    content: "Reading the presentation skill",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-current",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedHuman = {
+    id: "current-request__user",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedMemory = {
+    id: "current-request__memory",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const laterAssistantStep = {
+    id: "later-assistant-step",
+    type: "ai",
+    content: "Writing the presentation plan",
+  } as Message;
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-assistant",
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, previousAssistant, earlyAssistantStep, optimisticHuman],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAssistant,
+    optimisticHuman,
+    earlyAssistantStep,
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAssistant,
+        earlyAssistantStep,
+        injectedMemory,
+        injectedHuman,
+        laterAssistantStep,
+      ],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAssistant,
+    injectedMemory,
+    injectedHuman,
+    earlyAssistantStep,
+    laterAssistantStep,
+  ]);
+});
+
+test("reconnected turn order moves same-run steps back behind the user message", () => {
+  // Reload mid-run: replayed `messages-tuple` steps reach the merged list
+  // before the turn's human message (the retained replay buffer may have
+  // dropped it). The live-only human is woven before the next shared anchor,
+  // leaving same-run steps above the user message they belong to.
+  const stepA1 = {
+    id: "step-a1",
+    type: "ai",
+    content: "Searching the web",
+    tool_calls: [{ id: "tc-a1", name: "web_search", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const stepA2 = {
+    id: "step-a2",
+    type: "tool",
+    content: "search results",
+    tool_call_id: "tc-a2",
+    run_id: "run-r",
+  } as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Analyze deerflow",
+  } as Message;
+  const stepB1 = {
+    id: "step-b1",
+    type: "ai",
+    content: "Reading the source",
+    run_id: "run-r",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([stepA1, stepA2, human, stepB1]),
+  ).toEqual([human, stepA1, stepA2, stepB1]);
+});
+
+test("reconnected turn order leaves a resent turn after an interrupted run untouched", () => {
+  // Legit layout: an interrupted earlier run left steps without a final
+  // answer, then the user sent a new message. The earlier run's steps must
+  // NOT be pulled below the new human message.
+  const interruptedStep = {
+    id: "step-old",
+    type: "ai",
+    content: "Interrupted run step",
+    run_id: "run-1",
+  } as Message;
+  const human = {
+    id: "human-2",
+    type: "human",
+    content: "Same question again",
+    run_id: "run-2",
+  } as Message;
+  const newStep = {
+    id: "step-new",
+    type: "ai",
+    content: "New run step",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([interruptedStep, human, newStep]),
+  ).toEqual([interruptedStep, human, newStep]);
+});
+
+test("reconnected turn order only moves steps of the sandwiched run in multi-turn history", () => {
+  const human1 = { id: "human-1", type: "human", content: "First" } as Message;
+  const step1 = {
+    id: "step-1",
+    type: "ai",
+    content: "First run step",
+    run_id: "run-1",
+  } as Message;
+  const answer1 = {
+    id: "answer-1",
+    type: "ai",
+    content: "First answer",
+    run_id: "run-1",
+  } as Message;
+  const misplacedStep = {
+    id: "step-misplaced",
+    type: "ai",
+    content: "Second run step above the human",
+    tool_calls: [{ id: "tc-misplaced", name: "read_file", args: {} }],
+    run_id: "run-2",
+  } as unknown as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Second run step below the human",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      step1,
+      answer1,
+      misplacedStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, step1, answer1, human2, misplacedStep, step2]);
+});
+
+test("reconnected turn order moves live-only steps before any history loads", () => {
+  // Right after reconnect no history page has landed yet: every live message
+  // lacks run_id. A run_id-less step below the human proves the live stream
+  // is past turn start, so run_id-less steps above the human belong to the
+  // same reconnected run.
+  const earlyStep = {
+    id: "live-early",
+    type: "ai",
+    content: "Replayed step",
+    tool_calls: [{ id: "tc-early", name: "web_search", args: {} }],
+  } as unknown as Message;
+  const human = {
+    id: "live-human",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "live-later",
+    type: "ai",
+    content: "Fresh step",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([earlyStep, human, laterStep]),
+  ).toEqual([human, earlyStep, laterStep]);
+});
+
+test("reconnected turn order keeps run_id-less steps when no run_id-less step follows the human", () => {
+  // A run_id-less step above the human is only attributable to the current
+  // run when the run_id-less live stream continues below the human. With
+  // every message below the human carrying a (different) run_id, the stray
+  // step may belong to an older turn and must stay put.
+  const human1 = { id: "human-1", type: "human", content: "First" } as Message;
+  const step1 = {
+    id: "step-1",
+    type: "ai",
+    content: "First run step",
+    run_id: "run-1",
+  } as Message;
+  const strayStep = {
+    id: "stray",
+    type: "ai",
+    content: "Ambiguous step",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second",
+    run_id: "run-2",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Second run step",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      step1,
+      strayStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, step1, strayStep, human2, step2]);
+});
+
+test("reconnected turn order keeps hidden control messages and older-run orphans in place", () => {
+  const orphanStep = {
+    id: "orphan",
+    type: "ai",
+    content: "Pagination orphan from an older run",
+    tool_calls: [{ id: "tc-orphan", name: "web_search", args: {} }],
+    run_id: "run-0",
+  } as unknown as Message;
+  const hiddenControl = {
+    id: "control",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const misplacedStep = {
+    id: "misplaced",
+    type: "ai",
+    content: "Same-run step",
+    tool_calls: [{ id: "tc-misplaced", name: "read_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "Later same-run step",
+    run_id: "run-r",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      orphanStep,
+      hiddenControl,
+      misplacedStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([orphanStep, hiddenControl, human, misplacedStep, laterStep]);
+});
+
+test("reconnected turn order is a no-op when the human message already leads its turn", () => {
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const step = {
+    id: "step",
+    type: "ai",
+    content: "Step",
+    run_id: "run-r",
+  } as Message;
+
+  expect(restoreReconnectedTurnMessageOrder([human, step])).toEqual([
+    human,
+    step,
+  ]);
+  expect(restoreReconnectedTurnMessageOrder([step])).toEqual([step]);
+  expect(restoreReconnectedTurnMessageOrder([])).toEqual([]);
+});
+
+test("reconnected turn order keeps a completed turn's answer above the next human message", () => {
+  // Regression for the branch-thread e2e shape: history feeds where every
+  // message shares one run_id (branch-seeded threads, mocked feeds). A
+  // terminal answer completes its turn and must never be pulled below the
+  // next human message even though the naive same-run check would match.
+  const human1 = {
+    id: "human-1",
+    type: "human",
+    content: "First question",
+    run_id: "run-x",
+  } as Message;
+  const answer1 = {
+    id: "ai-1",
+    type: "ai",
+    content: "First answer",
+    run_id: "run-x",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second question",
+    run_id: "run-x",
+  } as Message;
+  const intermediate = {
+    id: "ai-2",
+    type: "ai",
+    content: "Intermediate answer",
+    run_id: "run-x",
+  } as Message;
+  const toolCalling = {
+    id: "ai-3",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "write_todos", args: {} }],
+    run_id: "run-x",
+  } as unknown as Message;
+  const toolResult = {
+    id: "tool-1",
+    type: "tool",
+    tool_call_id: "tc-1",
+    content: "Todos updated",
+    run_id: "run-x",
+  } as Message;
+  const final = {
+    id: "ai-4",
+    type: "ai",
+    content: "Final answer",
+    run_id: "run-x",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      answer1,
+      human2,
+      intermediate,
+      toolCalling,
+      toolResult,
+      final,
+    ]),
+  ).toEqual([
+    human1,
+    answer1,
+    human2,
+    intermediate,
+    toolCalling,
+    toolResult,
+    final,
+  ]);
+});
+
+test("reconnected turn order treats a content-only streaming text as a boundary", () => {
+  // Accepted transient (#4304): a still-streaming text step looks like a
+  // terminal answer until its tool call arrives, so it stays above the human
+  // until canonical history heals the order. Tool-calling steps after the
+  // last such boundary are still restored.
+  const streamingText = {
+    id: "streaming-text",
+    type: "ai",
+    content: "Let me analyze this",
+    run_id: "run-r",
+  } as Message;
+  const toolStep = {
+    id: "tool-step",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "read_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-2", name: "write_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      streamingText,
+      toolStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([streamingText, human, toolStep, laterStep]);
+});
+
+test("rendered message ledger does not retain explicitly superseded messages", () => {
+  const retained = {
+    id: "retained-answer",
+    type: "ai",
+    content: "keep me",
+  } as Message;
+  const superseded = {
+    id: "superseded-answer",
+    type: "ai",
+    content: "replace me",
+  } as Message;
+
+  expect(
+    mergeRenderedMessageLedger(
+      [retained, superseded],
+      [retained],
+      new Set([superseded.id!]),
+    ),
+  ).toEqual([retained]);
+});
+
+test("computeSummarizationTransientMessages excludes already-summarized control messages", () => {
   const priorSummary = {
     id: "summary-0",
     type: "human",
@@ -799,9 +2023,9 @@ test("computeSummarizationMovedMessages excludes already-summarized control mess
     summarizationAi2,
   ];
 
-  // priorSummary is in the summarized set, so it must not be re-archived.
+  // priorSummary is in the summarized set, so it must not enter the bridge.
   expect(
-    computeSummarizationMovedMessages(
+    computeSummarizationTransientMessages(
       liveThreadBeforeSummary,
       summarizationMessages,
       new Set([priorSummary.id!, "summary-1"]),
@@ -812,7 +2036,7 @@ test("computeSummarizationMovedMessages excludes already-summarized control mess
 test("full summarization rescue pipeline keeps the conversation when history state lags (regression for #3825)", () => {
   // Exercises the whole rescue algorithm the hook runs: derive the moved
   // messages, buffer them, then merge against the post-summary thread while the
-  // archived-history React state is still stale (empty).
+  // canonical run-event page is still stale (empty).
   const removeAll = {
     id: "__remove_all__",
     type: "remove",
@@ -832,7 +2056,7 @@ test("full summarization rescue pipeline keeps the conversation when history sta
   ];
   const summarizationMessages = [removeAll, hiddenSummary, summarizationAi2];
 
-  const moved = computeSummarizationMovedMessages(
+  const moved = computeSummarizationTransientMessages(
     liveThreadBeforeSummary,
     summarizationMessages,
     new Set([hiddenSummary.id!]),
@@ -841,7 +2065,7 @@ test("full summarization rescue pipeline keeps the conversation when history sta
   const postSummaryThread = [hiddenSummary, summarizationAi2];
 
   const merged = mergeMessages(
-    resolvePreservedHistory(staleHistory, moved),
+    resolveTransientHistoryBridge(staleHistory, moved),
     postSummaryThread,
     [],
   );
@@ -853,4 +2077,19 @@ test("full summarization rescue pipeline keeps the conversation when history sta
     "summary-1",
     "ai-2",
   ]);
+});
+
+test("refresh reconstructs the same 1-to-6 order from run events without a bridge", () => {
+  const canonical = Array.from({ length: 6 }, (_, index) => ({
+    id: `message-${index + 1}`,
+    type: index % 2 === 0 ? "human" : "ai",
+    content: String(index + 1),
+  })) as Message[];
+  const checkpointTail = canonical.slice(4);
+
+  expect(
+    mergeMessages(canonical, checkpointTail, []).map(
+      (message) => message.content,
+    ),
+  ).toEqual(["1", "2", "3", "4", "5", "6"]);
 });

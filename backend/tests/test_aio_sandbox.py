@@ -7,6 +7,47 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+def test_local_sandbox_client_bypasses_environment_proxy():
+    """Local sandbox API calls must not inherit HTTP_PROXY (#3441)."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    sentinel_httpx = MagicMock()
+    with (
+        patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client", return_value=sentinel_httpx) as client_cls,
+        patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
+    ):
+        AioSandbox(id="test-sandbox", base_url="http://host.docker.internal:8080")
+
+    client_cls.assert_called_once_with(timeout=600, follow_redirects=True, trust_env=False)
+    sdk_cls.assert_called_once_with(
+        base_url="http://host.docker.internal:8080",
+        timeout=600,
+        httpx_client=sentinel_httpx,
+    )
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://sandbox.example.com",
+        "http://8.8.8.8:8080",
+        "http://[2606:4700:4700::1111]:8080",
+    ],
+)
+def test_external_sandbox_client_keeps_environment_proxy_support(base_url: str):
+    """Externally hosted sandbox URLs retain the SDK's default proxy behavior."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    with (
+        patch("deerflow.community.aio_sandbox.aio_sandbox.httpx.Client") as client_cls,
+        patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient") as sdk_cls,
+    ):
+        AioSandbox(id="test-sandbox", base_url=base_url)
+
+    client_cls.assert_not_called()
+    sdk_cls.assert_called_once_with(base_url=base_url, timeout=600)
+
+
 @pytest.fixture()
 def sandbox():
     """Create an AioSandbox with a mocked client."""
@@ -315,6 +356,20 @@ class TestNoChangeTimeout:
 
         assert len(calls) == 1
         assert calls[0].get("no_change_timeout") == sandbox._DEFAULT_NO_CHANGE_TIMEOUT
+
+
+class TestReadFile:
+    def test_read_file_forwards_requested_line_range(self, sandbox):
+        sandbox._client.file.read_file = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(content="line 1\nline 2")))
+
+        result = sandbox.read_file("/mnt/user-data/workspace/huge.log", start_line=1, end_line=10)
+
+        assert result == "line 1\nline 2"
+        sandbox._client.file.read_file.assert_called_once_with(
+            file="/mnt/user-data/workspace/huge.log",
+            start_line=0,
+            end_line=10,
+        )
 
 
 class TestConcurrentFileWrites:

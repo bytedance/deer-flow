@@ -20,6 +20,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 **実際のデモ**は[**公式ウェブサイト**](https://deerflow.tech)でご覧いただけます。
 
+## 姉妹プロジェクト
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - DeerFlow の秘密兵器をご紹介 — agent のアイデアをプロトタイピングし、ハーネスの各ステップを検査し、失敗を再生し、パフォーマンスをベンチマークするためのデスクトップツールです。
+
 ## ByteDance Volcengine のコーディングプラン
 
 - DeerFlowの実行には、Doubao-Seed-2.0-Code、DeepSeek v3.2、Kimi 2.5の使用を強く推奨します
@@ -56,6 +62,8 @@ DeerFlowは、BytePlusが独自に開発したインテリジェント検索・�
       - [MCPサーバー](#mcpサーバー)
       - [IMチャネル](#imチャネル)
       - [LangSmithトレーシング](#langsmithトレーシング)
+      - [Langfuseトレーシング](#langfuseトレーシング)
+      - [両方のプロバイダーを使用する](#両方のプロバイダーを使用する)
   - [Deep Researchからスーパーエージェントハーネスへ](#deep-researchからスーパーエージェントハーネスへ)
   - [コア機能](#コア機能)
     - [スキルとツール](#スキルとツール)
@@ -458,6 +466,37 @@ LANGSMITH_ENDPOINT=https://api.smith.langchain.com
 LANGSMITH_API_KEY=lsv2_pt_xxxxxxxxxxxxxxxx
 LANGSMITH_PROJECT=xxx
 ```
+
+#### Langfuseトレーシング
+
+DeerFlowは、LangChain互換の実行に対して[Langfuse](https://langfuse.com)による可観測性もサポートしています。
+
+`.env`ファイルに以下を追加します：
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+セルフホストのLangfuseインスタンスを使用している場合は、`LANGFUSE_BASE_URL`をデプロイ先のURLに設定します。
+
+**トレース関連付けフィールド。** 各エージェント実行には、Langfuseの予約済みトレース属性が付与されるため、SessionsページとUsersページが自動的に表示されます：
+
+- `session_id` = LangGraphの`thread_id`——同一会話のすべてのトレースをグループ化します
+- `user_id` = `get_effective_user_id()`から取得した有効なユーザー（認証なしモードでは`default`にフォールバック）
+- `trace_name` = assistant id（デフォルトは`lead-agent`）
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未設定の場合は省略）
+- `metadata.deerflow_trace_id` = DeerFlowのリクエスト関連付けid。リクエストトレース関連付けが有効な場合は`X-Trace-Id`と一致します
+
+これらは、gatewayパス（`runtime/runs/worker.py::run_agent`）と埋め込みパス（`client.py::DeerFlowClient.stream`）の両方で、グラフ呼び出しのルートで`RunnableConfig.metadata`に注入されるため、LangChain互換の任意のcallbackから読み取れます。`DEER_FLOW_ENV`（または`ENVIRONMENT`）を設定すると、デプロイ環境ごとにトレースにタグを付けられます。
+
+#### 両方のプロバイダーを使用する
+
+LangSmithとLangfuseの両方を有効にすると、DeerFlowは両方のトレーシングcallbackを取り付け、同じモデルアクティビティを両方のシステムに報告します。
+
+あるプロバイダーが明示的に有効化されているにもかかわらず必要な認証情報が欠けている場合、またはそのcallbackの初期化に失敗した場合、DeerFlowはモデル作成時のトレーシング初期化中に早期に失敗（fail fast）し、エラーメッセージには失敗の原因となったプロバイダー名が示されます。
 
 Dockerデプロイでは、トレーシングはデフォルトで無効です。`.env`で`LANGSMITH_TRACING=true`と`LANGSMITH_API_KEY`を設定して有効にします。
 

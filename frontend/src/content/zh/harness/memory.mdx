@@ -28,17 +28,25 @@ import { Callout } from "nextra/components";
 
 ## 工作原理
 
-记忆由 `MemoryMiddleware` 管理，在每次 Lead Agent 轮次上运行：
+记忆支持两种运行模式：
 
-1. **注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
-2. **学习**：对话结束后，后台任务提取新事实并更新相关记忆类别。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
-3. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+1. **两种模式都会注入**：每次对话开始时，Agent 当前记忆以受控的 token 预算（`max_injection_tokens`）注入到系统提示中。
+2. **中间件模式（默认）**：`MemoryMiddleware` 在每次 Lead Agent 轮次结束后运行，过滤对话、排队后台更新并自动提取新事实。更新通过 `debounce_seconds` 防抖以批量处理快速变化。
+3. **工具模式（实验性）**：DeerFlow 注册 `memory_search`、`memory_add`、`memory_update`、`memory_delete` 四个工具，并跳过 `MemoryMiddleware`。模型自行决定何时搜索或写入记忆，因此效果取决于模型的工具调用行为。这些显式 CRUD 工具不是被动的陈旧性复核路径；启用工具模式意味着运营方选择由模型主动更新/删除记忆，而不是依赖中间件的陈旧性保护栏。
+4. **按 Agent 记忆**：当自定义 Agent 激活时，其记忆独立于全局记忆存储。这保持不同 Agent 的知识隔离。
+
+在工具模式中，四个 `memory_*` 工具名是保留名。如果 MCP 服务或自定义工具已经使用 `memory_search`、`memory_add`、`memory_update` 或 `memory_delete`，已有工具会保留该名称，冲突的记忆工具会被跳过并记录告警。
 
 ## 配置
 
 ```yaml
 memory:
   enabled: true
+
+  # 运行模式：
+  #   middleware - 默认；每轮结束后被动后台提取
+  #   tool - 实验性；模型直接调用 memory_* 工具
+  mode: middleware
 
   # 全局记忆文件的存储路径。
   # 默认：{base_dir}/memory.json（解析为 backend/.deer-flow/memory.json）

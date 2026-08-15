@@ -58,6 +58,28 @@ class TestPutAndSeq:
         record = await store.put(thread_id="t1", run_id="r1", event_type="llm_end", category="trace", metadata=meta)
         assert record["metadata"] == meta
 
+    @pytest.mark.anyio
+    async def test_put_if_absent_preserves_first_run_scoped_event(self, store):
+        first, created = await store.put_if_absent(
+            thread_id="t1",
+            run_id="r1",
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 1},
+        )
+        duplicate, duplicate_created = await store.put_if_absent(
+            thread_id="t1",
+            run_id="r1",
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 0},
+        )
+
+        assert created is True
+        assert duplicate_created is False
+        assert duplicate == first
+        assert [event["content"] for event in await store.list_events("t1", "r1") if event["event_type"] == "run.delivery"] == [{"presented": 1}]
+
 
 # -- list_messages --
 
@@ -344,6 +366,24 @@ class TestDbRunEventStore:
         await close_engine()
 
     @pytest.mark.anyio
+    async def test_put_if_absent_is_idempotent(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        first, created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 2})
+        duplicate, duplicate_created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 0})
+
+        assert created is True
+        assert duplicate_created is False
+        assert duplicate["seq"] == first["seq"]
+        assert duplicate["content"] == {"presented": 2}
+        await close_engine()
+
+    @pytest.mark.anyio
     async def test_trace_content_truncation(self, tmp_path):
         from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
         from deerflow.runtime.events.store.db import DbRunEventStore
@@ -498,6 +538,109 @@ class TestDbRunEventStore:
         await close_engine()
 
 
+class TestDbRunEventStoreWriteLock:
+    """Per-thread seq-assignment lock (fixes SQLite UNIQUE(thread_id, seq) races).
+
+    Two in-process coroutines writing to the same thread can interleave between
+    the ``max(seq)`` read and the INSERT, both computing the same next seq and
+    colliding. A per-thread ``asyncio.Lock`` serializes seq assignment.
+    """
+
+    def test_get_write_lock_same_thread_returns_same_lock(self):
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        # The lock accessor does not touch the session factory, so a stub is fine.
+        store = DbRunEventStore(MagicMock())
+
+        lock = store._get_write_lock("thread-1")
+        assert isinstance(lock, asyncio.Lock)
+        assert store._get_write_lock("thread-1") is lock
+
+    def test_get_write_lock_distinct_threads_get_distinct_locks(self):
+        from unittest.mock import MagicMock
+
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        store = DbRunEventStore(MagicMock())
+
+        assert store._get_write_lock("thread-1") is not store._get_write_lock("thread-2")
+
+    @pytest.mark.anyio
+    async def test_concurrent_put_batch_same_thread_has_no_seq_collision(self, tmp_path):
+        import asyncio
+
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        def _batch(run_id: str):
+            return [{"thread_id": "t1", "run_id": run_id, "event_type": "trace", "category": "trace"} for _ in range(20)]
+
+        # Fire two concurrent batches at the same thread; without the per-thread
+        # lock this races on seq and raises IntegrityError / duplicates seq.
+        results = await asyncio.gather(s.put_batch(_batch("r1")), s.put_batch(_batch("r2")))
+
+        all_seqs = [r["seq"] for batch in results for r in batch]
+        assert len(all_seqs) == 40
+        # Seq values are unique and contiguous 1..40 across both writers.
+        assert sorted(all_seqs) == list(range(1, 41))
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_evicts_orphaned_write_lock(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        # A write materializes the per-thread lock in the registry.
+        await s.put_batch([{"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"}])
+        assert "t1" in s._write_locks
+
+        # Deleting the thread must evict the now-orphaned lock so the registry
+        # does not grow unbounded across the singleton store's lifetime.
+        await s.delete_by_thread("t1")
+        assert "t1" not in s._write_locks
+
+        # A subsequent write recreates a fresh lock and seq restarts from 1.
+        result = await s.put_batch([{"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace"}])
+        assert "t1" in s._write_locks
+        assert result[0]["seq"] == 1
+
+        await close_engine()
+
+    @pytest.mark.anyio
+    async def test_delete_by_thread_keeps_lock_held_by_inflight_writer(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'test.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        s = DbRunEventStore(get_session_factory())
+
+        # Simulate a writer mid-flight by holding the lock; the eviction must
+        # not drop a lock another coroutine is actively using.
+        lock = s._get_write_lock("t1")
+        await lock.acquire()
+        try:
+            await s.delete_by_thread("t1")
+            assert "t1" in s._write_locks
+            assert s._write_locks["t1"] is lock
+        finally:
+            lock.release()
+
+        await close_engine()
+
+
 # -- Factory tests --
 
 
@@ -583,6 +726,20 @@ class TestMakeRunEventStore:
 
 class TestJsonlRunEventStore:
     @pytest.mark.anyio
+    @pytest.mark.parametrize("thread_id", ["", "thread.with.dot", "../escape", "x" * 65])
+    async def test_rejects_noncanonical_thread_ids(self, tmp_path, thread_id):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        store = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        with pytest.raises(ValueError, match="Invalid thread_id"):
+            await store.put(
+                thread_id=thread_id,
+                run_id="r1",
+                event_type="human_message",
+                category="message",
+            )
+
+    @pytest.mark.anyio
     async def test_basic_crud(self, tmp_path):
         from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
 
@@ -591,6 +748,19 @@ class TestJsonlRunEventStore:
         assert r["seq"] == 1
         messages = await s.list_messages("t1")
         assert len(messages) == 1
+
+    @pytest.mark.anyio
+    async def test_put_if_absent_is_idempotent(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        first, created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 2})
+        duplicate, duplicate_created = await s.put_if_absent(thread_id="t1", run_id="r1", event_type="run.delivery", category="outputs", content={"presented": 0})
+
+        assert created is True
+        assert duplicate_created is False
+        assert duplicate == first
+        assert len(await s.list_events("t1", "r1", event_types=["run.delivery"])) == 1
 
     @pytest.mark.anyio
     async def test_file_at_correct_path(self, tmp_path):

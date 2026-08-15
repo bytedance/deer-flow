@@ -10,12 +10,23 @@ _THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.IGNORECASE | re
 _OPEN_THINK_RE = re.compile(r"<think\b[^>]*>", re.IGNORECASE)
 
 
-def strip_think_blocks(text: str) -> str:
-    """Remove inline reasoning ``<think>`` blocks from a model response."""
+def strip_think_blocks(text: str, *, truncate_unclosed: bool = True) -> str:
+    """Remove inline reasoning ``<think>`` blocks from a model response.
+
+    Complete ``<think>...</think>`` blocks are always removed. A dangling,
+    unclosed ``<think>`` open tag is treated as a model that was truncated
+    mid-thought: when ``truncate_unclosed`` is True (the default, used by JSON
+    parsers like suggestions/goal where trailing garbage must be dropped) the
+    text is cut at that tag. Callers that may legitimately echo a literal
+    ``<think>`` substring in their output (e.g. the input polisher rewriting a
+    draft that mentions the tag) pass ``truncate_unclosed=False`` so the tag is
+    preserved instead of silently discarding the rest of the text.
+    """
     text = _THINK_BLOCK_RE.sub("", text)
-    open_match = _OPEN_THINK_RE.search(text)
-    if open_match:
-        text = text[: open_match.start()]
+    if truncate_unclosed:
+        open_match = _OPEN_THINK_RE.search(text)
+        if open_match:
+            text = text[: open_match.start()]
     return text.strip()
 
 

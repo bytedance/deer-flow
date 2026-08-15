@@ -7,6 +7,8 @@ which need a live box.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import logging
 import sys
 import threading
 import time
@@ -16,6 +18,11 @@ import pytest
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+
+_LEGACY_COLLIDING_IDENTITIES = (
+    ("user-9721", "thread-9721"),
+    ("user-94361", "thread-94361"),
+)
 
 # ── Fake BoxLite SDK ──────────────────────────────────────────────────
 
@@ -158,6 +165,132 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+
+    def _fake_exec(*argv: str):
+        calls.append(argv)
+        return types.SimpleNamespace(
+            exit_code=0,
+            stdout="line 1\nline 2\nline 3\nline 4\nline 5",
+            stderr="",
+        )
+
+    monkeypatch.setattr(box, "_exec", _fake_exec)
+
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
+
+
+def test_grep_always_prints_filename_for_single_file_paths() -> None:
+    fake = _FakeBox(name="box-id")
+    box = BoxliteBox("box-id", box=fake, run=_fake_run)
+
+    box.grep("/mnt/user-data/uploads/report.md", "needle")
+
+    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and argv[0][2].startswith("grep ")]
+    assert grep_commands
+    assert "-H" in grep_commands[-1].split()
+
+
+def test_execute_command_invalidates_box_on_terminal_transport_error() -> None:
+    invalidated: list[tuple[str, str]] = []
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: vsock disconnected"
+    assert invalidated == [("box-id", "vsock disconnected")]
+
+
+def test_execute_command_does_not_invalidate_on_regular_command_error() -> None:
+    invalidated: list[tuple[str, str]] = []
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("user command failed")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: user command failed"
+    assert invalidated == []
+
+
+def test_execute_command_does_not_invalidate_on_retryable_transport_message() -> None:
+    invalidated: list[tuple[str, str]] = []
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("transport not ready, retry later")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: transport not ready, retry later"
+    assert invalidated == []
+
+
+def test_execute_command_uses_overridable_terminal_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    invalidated: list[tuple[str, str]] = []
+    monkeypatch.setattr(BoxliteBox, "TERMINAL_ERROR_MARKERS", ("custom terminal marker",))
+    monkeypatch.setattr(BoxliteBox, "RETRYABLE_ERROR_MARKERS", ())
+
+    def _failing_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("custom terminal marker")
+
+    box = BoxliteBox(
+        "box-id",
+        box=_FakeBox(name="box-id"),
+        run=_failing_run,
+        on_terminal_failure=lambda sandbox_id, reason: invalidated.append((sandbox_id, reason)),
+    )
+
+    output = box.execute_command("echo hi")
+
+    assert output == "Error: custom terminal marker"
+    assert invalidated == [("box-id", "custom terminal marker")]
+
+
+def test_execute_command_closed_box_returns_without_error_log(caplog) -> None:
+    box = BoxliteBox("box-id", box=_FakeBox(name="box-id"), run=_fake_run)
+    box.close()
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.community.boxlite.box"):
+        output = box.execute_command("echo hi")
+
+    assert output == "Error: sandbox has been closed"
+    assert "Failed to execute command in BoxLite box" not in caplog.text
+
+
 def test_sandbox_id_deterministic(monkeypatch):
     """_sandbox_id produces the same id for the same inputs."""
     monkeypatch.setattr(
@@ -168,7 +301,7 @@ def test_sandbox_id_deterministic(monkeypatch):
     id1 = provider._sandbox_id("thread-1", "user-a")
     id2 = provider._sandbox_id("thread-1", "user-a")
     assert id1 == id2
-    assert len(id1) == 8
+    assert len(id1) == 16
 
 
 def test_sandbox_id_different_users(monkeypatch):
@@ -343,6 +476,247 @@ def test_acquire_reclaims_from_warm_pool(monkeypatch):
     assert sid2 not in provider._warm_pool
 
 
+def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
+    """A configured skip window can reclaim recently released boxes without a ping."""
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box, _ = provider._warm_pool[sid]
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("health check should be skipped for recently released boxes")
+
+    monkeypatch.setattr(box, "execute_command", _fail_if_called)
+
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
+    assert reclaimed == sid
+    assert sid in provider._boxes
+    assert sid not in provider._warm_pool
+
+    provider.shutdown()
+
+
+def test_recent_reclaim_validates_by_default(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box, _ = provider._warm_pool[sid]
+    calls = 0
+    original_execute = box.execute_command
+
+    def _record_health_check(command: str, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_execute(command, *args, **kwargs)
+
+    monkeypatch.setattr(box, "execute_command", _record_health_check)
+
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
+    assert reclaimed == sid
+    assert calls == 1
+    assert sid in provider._boxes
+    assert sid not in provider._warm_pool
+
+    provider.shutdown()
+
+
+def test_default_recent_reclaim_drops_dead_warm_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box, _ = provider._warm_pool[sid]
+
+    def _dead_health_check(command: str, *args, **kwargs):
+        assert command == "echo ok"
+        return "Error: vsock disconnected"
+
+    monkeypatch.setattr(box, "execute_command", _dead_health_check)
+
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
+    assert reclaimed is None
+    assert sid not in provider._boxes
+    assert sid not in provider._warm_pool
+    assert sid not in provider._skip_health_check_warm_ids
+    assert box.is_closed is True
+
+    provider.shutdown()
+
+
+def test_dead_active_box_invalidation_closes_adapter(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    box = provider.get(sid)
+    assert box is not None
+
+    def _dead_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    box._run = _dead_run
+
+    output = box.execute_command("echo hi")
+    assert output == "Error: vsock disconnected"
+    assert box._closed is True
+    assert provider.get(sid) is None
+
+    provider.shutdown()
+
+
+def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
+    """Startup-adopted boxes must still pass a health check before reclaim."""
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+
+    provider = BoxliteProvider()
+    adopted = BoxliteBox(
+        "adopted",
+        _FakeBox(name="deer-flow-boxlite-adopted"),
+        _fake_run,
+        default_env={},
+    )
+    provider._warm_pool["adopted"] = (adopted, time.time())
+    calls = 0
+    original_execute = adopted.execute_command
+
+    def _record_health_check(command: str, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_execute(command, *args, **kwargs)
+
+    monkeypatch.setattr(adopted, "execute_command", _record_health_check)
+
+    reclaimed = provider._reclaim_warm_pool(
+        "adopted",
+        ("some-user", "some-thread"),
+    )
+    assert reclaimed == "adopted"
+    assert calls == 1
+    assert "adopted" in provider._boxes
+    assert "adopted" not in provider._warm_pool
+
+    provider.shutdown()
+
+
+def test_dead_active_box_is_invalidated_after_command_failure(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    box = provider.get(sid)
+    assert box is not None
+
+    def _dead_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    box._run = _dead_run
+
+    output = box.execute_command("echo hi")
+    assert output == "Error: vsock disconnected"
+    assert provider.get(sid) is None
+
+    sid2 = provider.acquire("thread-1", user_id="u1")
+    assert sid2 == sid
+    assert provider.get(sid2) is not None
+
+    provider.shutdown()
+
+
+def test_stale_closed_adapter_cannot_invalidate_recreated_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config({"health_check_skip_seconds": 5}),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sid = provider.acquire("thread-1", user_id="u1")
+    stale_box = provider.get(sid)
+    assert stale_box is not None
+
+    def _dead_run(coro, *, timeout=None):
+        coro.close()
+        raise RuntimeError("vsock disconnected")
+
+    stale_box._run = _dead_run
+    stale_box.execute_command("echo hi")
+    assert provider.get(sid) is None
+
+    provider._loop.run = _fake_run
+    sid2 = provider.acquire("thread-1", user_id="u1")
+    replacement = provider.get(sid2)
+    assert sid2 == sid
+    assert replacement is not None
+    assert replacement is not stale_box
+
+    stale_box.execute_command("echo again")
+
+    assert provider.get(sid) is replacement
+    assert replacement._closed is False
+
+    provider.shutdown()
+
+
 def test_acquire_different_threads_dont_reclaim_each_other(monkeypatch):
     """Thread A's box can't be reclaimed by thread B."""
     monkeypatch.setattr(
@@ -394,6 +768,10 @@ def test_warm_pool_reclaim_failed_health_check_creates_new(monkeypatch):
     sid2 = provider.acquire("thread-1", user_id="u1")
     assert sid2 == sid1  # Same deterministic ID
     assert sid2 in provider._boxes
+    replacement = provider.get(sid2)
+    assert replacement is not None
+    assert replacement is not box
+    assert replacement._closed is False
 
 
 def test_concurrent_same_thread_acquire_creates_one_box(monkeypatch):
@@ -708,3 +1086,143 @@ def test_shutdown_stops_idle_reaper_and_destroys_all_boxes(monkeypatch):
     assert len(provider._boxes) == 0
     assert len(provider._warm_pool) == 0
     assert len(provider._thread_boxes) == 0
+
+
+def test_wider_id_separates_known_legacy_collision():
+    identity_a, identity_b = _LEGACY_COLLIDING_IDENTITIES
+    user_a, thread_a = identity_a
+    user_b, thread_b = identity_b
+
+    old_a = hashlib.sha256(f"{user_a}:{thread_a}".encode()).hexdigest()[:8]
+    old_b = hashlib.sha256(f"{user_b}:{thread_b}".encode()).hexdigest()[:8]
+
+    assert old_a == old_b
+    assert BoxliteProvider._sandbox_id(thread_a, user_a) != BoxliteProvider._sandbox_id(
+        thread_b,
+        user_b,
+    )
+
+
+def test_forced_collision_never_overwrites_active_tenant(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: "deadbeefdeadbeef"),
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sandbox_id = provider.acquire("thread-a", user_id="user-a")
+    box_a = provider.get(sandbox_id)
+    provider.release(sandbox_id)
+
+    assert box_a is not None
+    assert sandbox_id in provider._warm_pool
+
+    with pytest.raises(RuntimeError, match="Sandbox ID collision"):
+        provider.acquire("thread-b", user_id="user-b")
+
+    assert provider._warm_pool[sandbox_id][0] is box_a
+    assert not box_a.is_closed
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert provider.get(sandbox_id) is box_a
+    provider.shutdown()
+
+
+def test_late_same_tenant_collision_reuses_active_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    sandbox_id = "deadbeefdeadbeef"
+    key = ("user-a", "thread-a")
+    active = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+    duplicate = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: sandbox_id),
+    )
+
+    def _create_box_with_late_registration(_sandbox_id):
+        with provider._lock:
+            provider._boxes[sandbox_id] = active
+            provider._active_box_identity[sandbox_id] = key
+        return duplicate
+
+    monkeypatch.setattr(provider, "_create_box", _create_box_with_late_registration)
+
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert duplicate.is_closed
+    assert provider.get(sandbox_id) is active
+    assert provider._thread_boxes[key] == sandbox_id
+    provider.shutdown()
+
+
+def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    stale = BoxliteBox(
+        "shared-id",
+        _FakeBox(name="deer-flow-boxlite-shared-id"),
+        _fake_run,
+        default_env={},
+    )
+    replacement = BoxliteBox(
+        "shared-id",
+        _FakeBox(name="deer-flow-boxlite-shared-id"),
+        _fake_run,
+        default_env={},
+    )
+    provider._warm_pool["shared-id"] = (stale, time.time())
+    provider._warm_pool_identity["shared-id"] = ("user-a", "thread-a")
+
+    def _swap_during_health_check(*args, **kwargs):
+        with provider._lock:
+            provider._warm_pool["shared-id"] = (replacement, time.time())
+            provider._warm_pool_identity["shared-id"] = (
+                "user-b",
+                "thread-b",
+            )
+        return "not healthy"
+
+    monkeypatch.setattr(stale, "execute_command", _swap_during_health_check)
+
+    with pytest.raises(RuntimeError, match="Sandbox ID collision"):
+        provider._reclaim_warm_pool(
+            "shared-id",
+            ("user-a", "thread-a"),
+        )
+    assert provider._warm_pool["shared-id"][0] is replacement
+    assert provider._warm_pool_identity["shared-id"] == (
+        "user-b",
+        "thread-b",
+    )
+    assert not replacement.is_closed
+    provider.shutdown()

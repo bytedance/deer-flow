@@ -21,6 +21,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 Больше информации и живые демо на [**официальном сайте**](https://deerflow.tech).
 
+## Родственные проекты
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - Познакомьтесь с нашим секретным оружием за DeerFlow — настольный инструмент для прототипирования идей агентов, проверки каждого шага харнесса, воспроизведения сбоев и тестирования производительности.
+
 ## Coding Plan от ByteDance Volcengine
 
 - Рекомендуем Doubao-Seed-2.0-Code, DeepSeek v3.2 и Kimi 2.5 для запуска DeerFlow
@@ -58,6 +64,8 @@ DeerFlow интегрирован с инструментарием для ум�
       - [MCP-сервер](#mcp-сервер)
       - [Мессенджеры](#мессенджеры)
       - [Трассировка LangSmith](#трассировка-langsmith)
+      - [Трассировка Langfuse](#трассировка-langfuse)
+      - [Использование обоих провайдеров](#использование-обоих-провайдеров)
   - [От Deep Research к Super Agent Harness](#от-deep-research-к-super-agent-harness)
   - [Core Features](#core-features)
     - [Skills & Tools](#skills--tools)
@@ -415,6 +423,37 @@ LANGSMITH_PROJECT=deer-flow
 ```
 
 `LANGSMITH_ENDPOINT` по умолчанию `https://api.smith.langchain.com` и может быть переопределён при необходимости. Устаревшие переменные `LANGCHAIN_*` (`LANGCHAIN_TRACING_V2`, `LANGCHAIN_API_KEY` и т.д.) также поддерживаются для обратной совместимости; `LANGSMITH_*` имеет приоритет, когда заданы обе.
+
+#### Трассировка Langfuse
+
+DeerFlow также поддерживает наблюдаемость через [Langfuse](https://langfuse.com) для запусков, совместимых с LangChain.
+
+Добавьте в файл `.env`:
+
+```bash
+LANGFUSE_TRACING=true
+LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxx
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
+```
+
+Если вы используете собственный экземпляр Langfuse, укажите `LANGFUSE_BASE_URL` в качестве URL вашего развёртывания.
+
+**Поля корреляции трасс.** Каждый запуск агента аннотируется зарезервированными атрибутами трассировки Langfuse, поэтому страницы Sessions и Users заполняются автоматически:
+
+- `session_id` = `thread_id` LangGraph — группирует все трассы одного диалога
+- `user_id` = эффективный пользователь из `get_effective_user_id()` (возвращается к `default` в режиме без аутентификации)
+- `trace_name` = assistant id (по умолчанию `lead-agent`)
+- `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (опускается, если не заданы)
+- `metadata.deerflow_trace_id` = идентификатор корреляции запросов DeerFlow, совпадающий с `X-Trace-Id`, когда корреляция трассировки запросов включена
+
+Эти поля внедряются в `RunnableConfig.metadata` в корне вызова графа как для gateway-пути (`runtime/runs/worker.py::run_agent`), так и для встроенного пути (`client.py::DeerFlowClient.stream`), поэтому любой LangChain-совместимый callback может их прочитать. Установите `DEER_FLOW_ENV` (или `ENVIRONMENT`) для тегирования трасс по среде развёртывания.
+
+#### Использование обоих провайдеров
+
+Если и LangSmith, и Langfuse включены, DeerFlow подключает оба callback'а трассировки и отправляет одну и ту же активность модели в обе системы.
+
+Если провайдер явно включён, но отсутствуют необходимые учётные данные, или если его callback не может инициализироваться, DeerFlow завершает работу с ошибкой (fail fast) при инициализации трассировки во время создания модели, а сообщение об ошибке указывает провайдера, вызвавшего сбой.
 
 В Docker-развёртываниях трассировка отключена по умолчанию. Установите `LANGSMITH_TRACING=true` и `LANGSMITH_API_KEY` в `.env` для включения.
 

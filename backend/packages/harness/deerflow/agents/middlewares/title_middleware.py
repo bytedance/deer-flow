@@ -32,10 +32,21 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     state_schema = TitleMiddlewareState
 
-    def __init__(self, *, app_config: "AppConfig | None" = None, title_config: "TitleConfig | None" = None):
+    def __init__(
+        self,
+        *,
+        app_config: "AppConfig | None" = None,
+        title_config: "TitleConfig | None" = None,
+        extensions=None,
+    ):
         super().__init__()
         self._app_config = app_config
         self._title_config = title_config
+        if extensions is None:
+            from deerflow.extensions import get_agent_build_extensions
+
+            extensions = get_agent_build_extensions()
+        self._extensions = extensions
 
     def _get_title_config(self):
         if self._title_config is not None:
@@ -162,7 +173,11 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         config = self._get_title_config()
         fallback_chars = min(config.max_chars, 50)
         if len(user_msg) > fallback_chars:
-            return user_msg[:fallback_chars].rstrip() + "..."
+            # Reserve room for the ellipsis so this path honours ``max_chars``
+            # exactly as ``_parse_title`` does on the model path.
+            ellipsis = "..."
+            body = min(fallback_chars, config.max_chars - len(ellipsis))
+            return user_msg[:body].rstrip() + ellipsis
         return user_msg if user_msg else "New Conversation"
 
     def _get_runnable_config(self) -> dict[str, Any]:
@@ -192,7 +207,12 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         user_msg = self._get_title_user_message(state)
         return {"title": self._fallback_title(user_msg)}
 
-    async def _agenerate_title_result(self, state: TitleMiddlewareState) -> dict | None:
+    async def _agenerate_title_result(
+        self,
+        state: TitleMiddlewareState,
+        *,
+        task_store=None,
+    ) -> dict | None:
         """Generate a configured LLM title asynchronously and fall back locally."""
         if not self._should_generate_title(state):
             return None
@@ -214,7 +234,21 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
             model = create_chat_model(name=config.model_name, **model_kwargs)
-            response = await model.ainvoke(prompt, config=self._get_runnable_config())
+            invoke_config = self._get_runnable_config()
+
+            from deerflow_extension_api import SystemOperationKind
+
+            from deerflow.extensions.notify import observe_system_model_call
+
+            response = await observe_system_model_call(
+                self._extensions,
+                SystemOperationKind.TITLE,
+                messages=prompt,
+                model_name=config.model_name,
+                invoke_config=invoke_config,
+                invoke=lambda: model.ainvoke(prompt, config=invoke_config),
+                task_store=task_store,
+            )
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}
@@ -228,4 +262,9 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
     @override
     async def aafter_model(self, state: TitleMiddlewareState, runtime: Runtime) -> dict | None:
-        return await self._agenerate_title_result(state)
+        from deerflow_extension_api import task_store_from_runtime
+
+        return await self._agenerate_title_result(
+            state,
+            task_store=task_store_from_runtime(runtime),
+        )
