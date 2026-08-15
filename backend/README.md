@@ -278,6 +278,27 @@ backend/
 deployments run the Gateway embedded runtime; the file is kept for LangGraph
 tooling, Studio, or direct LangGraph Server compatibility.
 
+To start the optional standalone development server and open its Studio URL:
+
+```bash
+cd backend
+uv run langgraph dev --allow-blocking
+```
+
+Run it from `backend/` so the CLI discovers `langgraph.json`. The in-memory
+server is intended for development and testing, not production deployment. The
+flag permits DeerFlow's synchronous configuration and graph-factory setup
+during local Studio requests; it is not a production-server setting. Its local
+Studio authentication and registered graph discovery are handled automatically;
+no custom connection headers are required. Assistant ownership/provenance is
+stamped by the server, and normal assistant-version selection remains available.
+Before the locked local runtime loads its persisted development store, DeerFlow
+repairs legacy assistant rows and version history so older metadata cannot
+reactivate server-only privileges or be discarded by runtime startup cleanup.
+Run `uv sync` after dependency changes; this compatibility path requires the
+declared LangGraph runtime versions and warns when the persisted-store contract
+does not match its expectations.
+
 ---
 
 ## Configuration
