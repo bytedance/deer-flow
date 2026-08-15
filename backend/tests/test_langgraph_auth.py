@@ -291,6 +291,15 @@ def test_identity_string_does_not_impersonate_studio_user():
     assert result == {"user_id": "langgraph-studio-user"}
 
 
+def test_missing_studio_user_type_degrades_to_owner_scoped_behavior():
+    value = {}
+    with patch("app.gateway.langgraph_auth._STUDIO_USER_TYPE", None):
+        result = asyncio.run(add_owner_filter(_studio_ctx(), value))
+
+    assert value["metadata"]["user_id"] == "langgraph-studio-user"
+    assert result == {"user_id": "langgraph-studio-user"}
+
+
 def test_regular_user_assistant_search_remains_owner_scoped():
     value = {}
     result = asyncio.run(

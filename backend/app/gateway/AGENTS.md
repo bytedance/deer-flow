@@ -10,6 +10,8 @@ Localhost persistence deliberately reads the direct request `Host` and ignores `
 
 Standalone local LangGraph Studio is recognized only through the upstream
 `Auth.types.StudioUser` principal type, never by its reusable identity string.
+The type is resolved once at import; an older SDK without it degrades to normal
+owner scoping instead of failing requests.
 For that principal's assistant reads/searches, `langgraph_auth.add_owner_filter`
 selects genuine server-registered assistants plus assistants owned by Studio;
 all other resources remain owner-scoped. Assistant create/update handlers make
@@ -23,7 +25,10 @@ demotes every other legacy `created_by=system` marker in both active assistants
 and version history. This must happen before runtime 0.30.0 loads and purges
 system-marked rows; a user application lifespan is too late. An empty graph
 registry or absent persistence file is a no-op, while persistence parse/write
-errors fail startup closed. Because current create/update writes and all legacy
+errors fail startup closed. The harness requires in-memory runtime 0.30.0 or
+newer, and a persisted store containing no expected registered assistant row
+emits a drift warning so changes to LangGraph's internal persistence contract
+are observable. Because current create/update writes and all legacy
 versions are sanitized, ordinary owner-scoped assistant version selection
 remains enabled. Ordinary authenticated users retain owner-scoped assistant
 reads/searches.

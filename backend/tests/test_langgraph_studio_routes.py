@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -92,11 +93,16 @@ def _running_studio_server(
     env = os.environ.copy()
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(BACKEND_DIR), env.get("PYTHONPATH")]))
     env["LANGSMITH_LANGGRAPH_API_VARIANT"] = "local_dev"
-    executable = Path(sys.executable).with_name("langgraph")
+    executable = shutil.which(
+        "langgraph",
+        path=os.pathsep.join([str(Path(sys.executable).parent), os.environ.get("PATH", "")]),
+    )
+    if executable is None:
+        pytest.fail("langgraph executable is unavailable; install the backend development dependencies before running Studio route tests")
     with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
             [
-                str(executable),
+                executable,
                 "dev",
                 "--config",
                 str(config_path),
@@ -256,9 +262,10 @@ def test_studio_update_cannot_forge_system_provenance(
     assert response.json()["metadata"]["created_by"] == "user"
 
 
-def test_ordinary_authenticated_user_can_select_older_and_newer_versions(
+def test_non_studio_auth_disabled_principal_can_select_older_and_newer_versions(
     studio_client: httpx.Client,
 ):
+    """Exercise non-Studio owner scoping without claiming JWT-path coverage."""
     assistant_id = str(uuid4())
     with httpx.Client(
         base_url=studio_client.base_url,

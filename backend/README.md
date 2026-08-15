@@ -295,6 +295,9 @@ stamped by the server, and normal assistant-version selection remains available.
 Before the locked local runtime loads its persisted development store, DeerFlow
 repairs legacy assistant rows and version history so older metadata cannot
 reactivate server-only privileges or be discarded by runtime startup cleanup.
+Run `uv sync` after dependency changes; this compatibility path requires the
+declared LangGraph runtime versions and warns when the persisted-store contract
+does not match its expectations.
 
 ---
 

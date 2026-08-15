@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from uuid import NAMESPACE_DNS, uuid4, uuid5
 
 from app.gateway.langgraph_studio import (
     configured_system_assistant_ids,
+    repair_local_dev_persistence_before_runtime,
     repair_persisted_assistant_provenance,
 )
 
@@ -155,6 +157,41 @@ def test_pre_runtime_repair_skips_when_no_system_assistants_are_configured():
 
     assert not result.changed
     assert store == original
+
+
+def test_pre_runtime_repair_warns_when_registered_ids_match_no_persisted_rows(
+    tmp_path: Path,
+    caplog,
+    monkeypatch,
+):
+    from langgraph.checkpoint.memory import PersistentDict
+
+    persistence_path = tmp_path / ".langgraph_ops.pckl"
+    store = PersistentDict(dict, filename=str(persistence_path))
+    store["assistants"] = [
+        {
+            "assistant_id": str(uuid4()),
+            "metadata": {
+                "created_by": "system",
+                "user_id": "langgraph-studio-user",
+            },
+        }
+    ]
+    store["assistant_versions"] = []
+    store.sync()
+    monkeypatch.setattr(
+        "app.gateway.langgraph_studio.configured_system_assistant_ids",
+        lambda _graphs_json: {"registered-assistant-id"},
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.gateway.langgraph_studio"):
+        result = repair_local_dev_persistence_before_runtime(
+            persistence_path=persistence_path,
+            graphs_json=json.dumps({"registered_graph": "./graph.py:graph"}),
+        )
+
+    assert result.demoted_assistants == 1
+    assert "matched no persisted registered assistant rows" in caplog.text
 
 
 def test_langgraph_config_loads_the_pre_runtime_studio_app():

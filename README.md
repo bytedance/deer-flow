@@ -397,7 +397,9 @@ assistants it creates, and normal assistant-version selection remains available.
 Before the locked local runtime loads its persisted development store, DeerFlow
 repairs legacy assistant rows and version history so historical client metadata
 cannot restore server privileges or be discarded by the runtime's startup
-cleanup.
+cleanup. Keep the backend dependencies synchronized with `uv sync`; this
+compatibility path requires the declared LangGraph runtime versions and logs a
+warning if the persisted-store contract no longer matches its expectations.
 
 For workflows that invoke `backend/langgraph.json` through LangGraph Studio or
 a direct LangGraph Server, DeerFlow consumes the authenticated identity

@@ -150,6 +150,10 @@ def repair_local_dev_persistence_before_runtime(
         store,
         registered_system_ids=registered_ids,
     )
+    if not (result.removed_registered_assistants or result.removed_registered_versions):
+        logger.warning(
+            "Standalone Studio persistence repair matched no persisted registered assistant rows; verify the LangGraph runtime persistence contract before trusting provenance repair",
+        )
     if result.changed:
         store.sync()
     return result
