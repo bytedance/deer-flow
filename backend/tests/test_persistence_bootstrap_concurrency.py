@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0011_admin_role_unique_index"
+HEAD = "0013_admin_role_unique_index"
 
 
 def _url(tmp_path: Path) -> str:

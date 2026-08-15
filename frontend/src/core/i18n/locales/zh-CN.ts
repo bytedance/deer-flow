@@ -574,6 +574,7 @@ export const zhCN: Translations = {
     saveAndConnect: "保存并连接",
     saveChanges: "保存修改",
     descriptions: {
+      buzz: "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
       discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
@@ -872,6 +873,19 @@ export const zhCN: Translations = {
         requestPermissions: "申请新权限",
         alreadyConnected:
           "飞书已连接，无需重复授权。如果授权已过期，刷新状态后可重新连接。",
+        changeAppButton: "切换飞书 Bot",
+        changeAppTitle: "切换到其他飞书 App",
+        changeAppDescription:
+          "把你的 DeerFlow 账号指向另一个 Lark/飞书 App。只影响你自己的账号，不影响其他用户。",
+        changeAppIdLabel: "App ID",
+        changeAppSecretLabel: "App Secret",
+        changeAppAuthResetNote:
+          "切换时会撤销旧 App 的授权，随后需要授权新 App。",
+        changeAppSubmit: "切换 App",
+        changeAppReRegister: "在浏览器重新注册",
+        changeAppSwitched: "已切换飞书 App。请重新连接以授权新 App。",
+        brandFeishu: "飞书",
+        brandLark: "Lark",
         connectionStarted: "连接链接已打开",
         connectionReady: "连接准备已完成，正在打开授权链接",
         authStarted: "授权页已打开，DeerFlow 会自动检测授权结果。",

@@ -119,7 +119,7 @@ async def get_or_provision_oidc_user(
             status_code=status.HTTP_409_CONFLICT,
             detail=("An account with this email already exists. Contact your administrator to link it to your SSO account."),
         ) from None
-    logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, role)
+    logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, user.system_role)
     return {"user": user, "created": True}
 
 

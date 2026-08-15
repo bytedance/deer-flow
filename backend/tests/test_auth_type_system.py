@@ -76,6 +76,7 @@ class _FakeRequest:
 
     def __init__(self, path: str, method: str = "POST"):
         self.method = method
+        self.scope = {"path": path, "root_path": ""}
 
         class _URL:
             def __init__(self, p):

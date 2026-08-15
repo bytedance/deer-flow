@@ -464,7 +464,7 @@ _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
 # accounts (TOCTOU); the email uniqueness constraint only blocks same-email
 # races. NOTE: an asyncio.Lock only serializes within a single process — for
 # GATEWAY_WORKERS > 1 deployments the partial unique index uq_users_admin_role
-# (migration 0011) is the cross-process backstop; the loser surfaces as
+# (migration 0013) is the cross-process backstop; the loser surfaces as
 # IntegrityError -> ValueError and is re-counted to 409 here.
 _INITIALIZE_ADMIN_GUARD = asyncio.Lock()
 

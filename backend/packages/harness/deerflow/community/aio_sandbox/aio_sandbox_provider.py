@@ -40,7 +40,7 @@ from deerflow.community.warm_pool_lifecycle import (
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
-from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
+from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -1019,8 +1019,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         ``lark-cli config init`` on the Gateway, never in-sandbox), so it is
         mounted **read-only**: sandbox processes only need to read it, and a
         read-only bind stops a compromised agent from tampering with or
-        replacing the app credentials. The ``data`` dir holds refreshable OAuth
-        tokens that ``lark-cli auth`` updates in-sandbox, so it stays writable.
+        replacing the app credentials. Newer ``lark-cli`` versions coordinate
+        API calls through ``config/locks``, so that empty subdirectory is
+        over-mounted writable without exposing the rest of ``config`` to
+        writes. The ``data`` dir holds refreshable OAuth tokens that
+        ``lark-cli auth`` updates in-sandbox, so it stays writable.
         This is defense-in-depth only — both dirs remain readable to arbitrary
         sandbox processes until the auth-proxy follow-up (issue #4338) lands.
         See the sandbox trust-boundary note in ``backend/AGENTS.md``.
@@ -1029,8 +1032,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             paths = get_paths()
             effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
             ensure_lark_cli_credential_tree(effective_user_id, paths=paths)
+            config_dir = paths.host_user_integration_config_dir(effective_user_id, LARK_CLI_INTEGRATION_ID)
             mounts = [
-                (paths.host_user_integration_config_dir(effective_user_id, LARK_CLI_INTEGRATION_ID), LARK_CLI_SANDBOX_CONFIG_DIR, True),
+                (config_dir, LARK_CLI_SANDBOX_CONFIG_DIR, True),
+                (join_host_path(config_dir, "locks"), LARK_CLI_SANDBOX_LOCKS_DIR, False),
                 (paths.host_user_integration_data_dir(effective_user_id, LARK_CLI_INTEGRATION_ID), LARK_CLI_SANDBOX_DATA_DIR, False),
             ]
             runtime_dir = paths.base_dir / "integrations" / LARK_CLI_INTEGRATION_ID / "sandbox-cli"

@@ -24,6 +24,7 @@ from deerflow.config.file_signature import get_config_signature as _get_config_s
 from deerflow.config.guardrails_config import GuardrailsConfig, load_guardrails_config_from_dict
 from deerflow.config.input_polish_config import InputPolishConfig
 from deerflow.config.loop_detection_config import LoopDetectionConfig
+from deerflow.config.mcp_tasks_config import McpTasksConfig
 from deerflow.config.memory_config import MemoryConfig, load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
@@ -48,6 +49,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.extensions.loader import ExtensionSpec
 
 load_dotenv()
 
@@ -203,6 +205,19 @@ class AppConfig(BaseModel):
     )
     token_usage: TokenUsageConfig = Field(default_factory=TokenUsageConfig, description="Token usage tracking configuration")
     token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig, description="Token Budget tracking and limits configuration.")
+    plugins: list[ExtensionSpec] = Field(
+        default_factory=list,
+        description=format_field_description(
+            "plugins",
+            field_doc=(
+                "Extension packages to load at startup, in order. Each entry names an install "
+                "entry point as 'module.path:install' and carries its own private config block. "
+                "Distinct from the `extensions` field above, which configures MCP servers, skills "
+                "and config-declared middlewares and is backed by the HTTP-writable "
+                "extensions_config.json."
+            ),
+        ),
+    )
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,
@@ -274,6 +289,13 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "scheduler",
             field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
+        ),
+    )
+    mcp_tasks: McpTasksConfig = Field(
+        default_factory=McpTasksConfig,
+        description=format_field_description(
+            "mcp_tasks",
+            field_doc="Long-running MCP task persistence and background polling runtime.",
         ),
     )
     checkpointer: CheckpointerConfig | None = Field(

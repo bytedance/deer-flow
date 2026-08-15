@@ -59,7 +59,7 @@ class UserRow(Base):
         # Cross-process backstop for the initialize_admin TOCTOU: the
         # in-process asyncio.Lock only serializes within a single worker, so
         # this partial unique index enforces at most one admin row at the DB
-        # level (mirrored in migration 0011 for legacy databases).
+        # level (mirrored in migration 0013 for legacy databases).
         Index(
             "uq_users_admin_role",
             "system_role",
