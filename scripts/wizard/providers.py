@@ -435,6 +435,28 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="trustedrouter",
+        display_name="TrustedRouter",
+        description="OpenAI-compatible router with per-request failover and privacy-constrained routes",
+        use="langchain_openai:ChatOpenAI",
+        models=[
+            "trustedrouter/auto",
+            "trustedrouter/zdr",
+            "anthropic/claude-opus-4-7",
+            "openai/gpt-5.4-mini",
+        ],
+        default_model="trustedrouter/auto",
+        env_var="TRUSTEDROUTER_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.trustedrouter.com/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
         name="orcarouter",
         display_name="OrcaRouter",
         description="OpenAI-compatible adaptive routing gateway",
