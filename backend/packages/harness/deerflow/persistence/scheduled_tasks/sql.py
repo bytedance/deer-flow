@@ -27,6 +27,24 @@ def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_s
     return lease_expires_at >= now - timedelta(seconds=grace_seconds)
 
 
+def _coerce_datetime(value: datetime | str | None) -> datetime | None:
+    """Convert serialized task timestamps back before binding DateTime fields."""
+    if value is None or isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            text = value
+            if text.endswith("Z"):
+                text = f"{text[:-1]}+00:00"
+            dt = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError(f"invalid scheduled task timestamp: {value!r}") from exc
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
+    raise TypeError(f"scheduled task timestamp must be datetime, str, or None: {type(value).__name__}")
+
+
 class ScheduledTaskRepository:
     def __init__(
         self,
@@ -206,7 +224,7 @@ class ScheduledTaskRepository:
         *,
         status: str,
         next_run_at: datetime | None,
-        last_run_at: datetime | None,
+        last_run_at: datetime | str | None,
         last_run_id: str | None,
         last_thread_id: str | None,
         last_error: str | None,
@@ -237,7 +255,7 @@ class ScheduledTaskRepository:
                 row.status = status
                 row.last_error = last_error
             row.next_run_at = next_run_at
-            row.last_run_at = last_run_at
+            row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id
             if increment_run_count:
