@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
@@ -50,8 +51,10 @@ class TaskSnapshot:
     def __post_init__(self) -> None:
         if not isinstance(self.status, TaskStatus):
             object.__setattr__(self, "status", TaskStatus(self.status))
-        if self.poll_after_seconds is not None and self.poll_after_seconds <= 0:
-            raise ValueError("poll_after_seconds must be positive")
+        if self.poll_after_seconds is not None and (not math.isfinite(self.poll_after_seconds) or self.poll_after_seconds <= 0):
+            # NaN and infinity survive a bare `<= 0` check but break the consumer,
+            # which turns this interval into a `timedelta` for the next poll.
+            raise ValueError("poll_after_seconds must be a finite positive number")
         if self.status == TaskStatus.INPUT_REQUIRED and self.input_required is None:
             raise ValueError("input_required status requires an input_required payload")
 

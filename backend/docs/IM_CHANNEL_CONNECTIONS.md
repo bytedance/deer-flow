@@ -97,14 +97,14 @@ sequenceDiagram
     autonumber
     participant Platform as Provider<br/>(Slack/Telegram/...)
     participant Worker as Provider worker
-    participant Bus as MessageBus<br/>InboundMessage queue
-    participant Mgr as ChannelManager
+    participant Bus as MessageBus<br/>bounded admission + queue
+    participant Mgr as ChannelManager<br/>fixed worker pool
     participant Client as langgraph_sdk<br/>async client
     participant Gateway as Gateway<br/>/api/* routers
 
     Platform->>Worker: inbound chat message<br/>(resolved to connection_id + owner_user_id)
-    Worker->>Bus: publish_inbound(InboundMessage)
-    Bus->>Mgr: msg = get_inbound()
+    Worker->>Bus: reserve by Gateway handoff, then commit InboundMessage
+    Bus->>Mgr: fixed worker gets msg and awaits handler inline
     Mgr->>Mgr: _channel_storage_user_id(msg)<br/>→ owner-bound user_id
     Mgr->>Mgr: _get_bound_identity_rejection()<br/>(re-check identity by provider+ext+ws)
     Mgr->>Client: _get_or_create_thread(thread_id or new)
@@ -128,6 +128,18 @@ sequenceDiagram
     Bus->>Worker: outbound callback
     Worker->>Platform: post reply (Telegram editMessageText,<br/>Feishu patch card, etc.)
 ```
+
+### Inbound capacity and overload behavior
+
+Three top-level `channels` settings control the MessageBus/manager lifecycle: `inbound_queue_maxsize` (default `1000`) covers queued messages plus provider-side reservations that may still be doing final identity/ack preparation, `max_concurrency` (default `5`) is the exact number of long-lived `ChannelManager` workers, and `shutdown_grace_period_seconds` (default `3`) bounds graceful draining before active handlers are cancelled. Active handlers run inline in those workers, so a burst cannot create a task per message. The maximum manager-owned live intake is therefore the pending capacity plus the fixed worker count.
+
+Admission never waits for queue space, because waiting producer coroutines would simply move the unbounded backlog outside the queue. At capacity:
+
+- Slack, Discord, Feishu/Lark, DingTalk, Telegram, WeChat, and WeCom drop the new message before DeerFlow sends its working acknowledgment. `MessageBus` emits a rate-limited warning with a cumulative rejection count.
+- Buzz leaves the per-channel replay watermark unchanged and reconnects, allowing relay history to replay the event.
+- GitHub webhook fan-out returns `503`. GitHub records the delivery as failed; an operator or recovery job can retry it through the Recent Deliveries UI or REST redelivery API (GitHub does not retry failed deliveries automatically).
+
+Shutdown first closes admission and cancels follow-up watchers, but keeps provider transports alive while workers drain accepted messages for up to `shutdown_grace_period_seconds`. Once that grace expires, it cancels active handlers, discards queue entries that never began, and awaits every manager-owned worker and watcher. Provider coroutines submitted from SDK threads are likewise retained, cancelled, and awaited before their channel tears down SDK resources. A successful stop therefore leaves no owned handler able to use a closed transport. The Gateway's outer shutdown timeout remains the process-level bound; if it cancels cleanup, the service retains its transports and singleton instead of reporting a successful stop or hiding unfinished ownership.
 
 ## Sync vs Streaming Channels
 
@@ -262,6 +274,10 @@ Configure the actual IM bots under the existing `channels` block:
 
 ```yaml
 channels:
+  inbound_queue_maxsize: 1000
+  max_concurrency: 5
+  shutdown_grace_period_seconds: 3
+
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN

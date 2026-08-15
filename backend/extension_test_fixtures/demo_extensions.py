@@ -41,9 +41,13 @@ def install_newer_minor_api(registry: ExtensionRegistry, config: Mapping[str, An
 
 
 def install_partial_then_raise(registry: ExtensionRegistry, config: Mapping[str, Any]) -> None:
-    """Registers two contributors, then fails — exercises rollback."""
-    registry.middlewares(_Contributor("partial"))
-    registry.task_lifecycle(_Contributor("partial"))
+    """Register every contribution kind, then fail to exercise five-bucket rollback."""
+    partial = _Contributor("partial")
+    registry.middlewares(partial)
+    registry.task_lifecycle(partial)
+    registry.system_model_observer(partial)
+    registry.service(partial)
+    registry.routers((partial,))
     raise ValueError("boom")
 
 
