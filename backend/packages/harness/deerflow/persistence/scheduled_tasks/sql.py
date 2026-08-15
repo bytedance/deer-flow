@@ -18,9 +18,15 @@ def _coerce_datetime(value: datetime | str | None) -> datetime | None:
         return value
     if isinstance(value, str):
         try:
-            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            text = value
+            if text.endswith("Z"):
+                text = f"{text[:-1]}+00:00"
+            dt = datetime.fromisoformat(text)
         except ValueError as exc:
             raise ValueError(f"invalid scheduled task timestamp: {value!r}") from exc
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=UTC)
+        return dt.astimezone(UTC)
     raise TypeError(f"scheduled task timestamp must be datetime, str, or None: {type(value).__name__}")
 
 
