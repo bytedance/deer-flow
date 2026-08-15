@@ -229,6 +229,20 @@ describe("formatThreadAsJSON", () => {
     expect(raw).toContain("real prompt");
   });
 
+  it("strips legacy <uploaded_files> markers from content", () => {
+    // Display-only backward compatibility (#4212): pre-#4174 history still
+    // carries <uploaded_files> blocks; exports must keep stripping the
+    // legacy spelling so server-side upload paths never leak.
+    const message = human(
+      "real prompt\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
+      { id: "h-legacy-clean" } as Partial<Message>,
+    );
+    const raw = formatThreadAsJSON(makeThread(), [message]);
+    expect(raw).not.toContain("<uploaded_files>");
+    expect(raw).not.toContain("secret.pdf");
+    expect(raw).toContain("real prompt");
+  });
+
   it("drops AI messages that sanitise to empty content", () => {
     // Pure-reasoning AI fragments (no visible text, no tool calls) should
     // not survive as `{content: ""}` rows in the export.
@@ -281,7 +295,7 @@ describe("formatThreadAsJSON", () => {
       id: "t-leak",
       type: "tool",
       content:
-        "Task Succeeded. Result: payload\n<current_uploads>\n/mnt/user-data/uploads/secret.pdf\n</current_uploads>",
+        "Task Succeeded. Result: payload\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
       name: "task",
       tool_call_id: "call-leak",
     } as unknown as Message;
@@ -290,7 +304,7 @@ describe("formatThreadAsJSON", () => {
       includeToolMessages: true,
     });
     expect(raw).toContain("Task Succeeded");
-    expect(raw).not.toContain("<current_uploads>");
+    expect(raw).not.toContain("<uploaded_files>");
     expect(raw).not.toContain("secret.pdf");
   });
 

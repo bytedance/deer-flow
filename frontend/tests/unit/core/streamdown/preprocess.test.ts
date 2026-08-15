@@ -327,12 +327,13 @@ test("stripLeakedSystemTags strips <current_uploads> tag", () => {
   ).toBe("file.pdf");
 });
 
-test("stripLeakedSystemTags leaves legacy <uploaded_files> tag untouched", () => {
-  // Scope decision for #4212: the pre-#4174 tag is no longer treated as an
-  // internal marker, so it passes through like ordinary user text.
+test("stripLeakedSystemTags strips legacy <uploaded_files> tag", () => {
+  // Display-only backward compatibility (#4212): pre-#4174 history still
+  // carries <uploaded_files> blocks; the leaked-tag stripper keeps handling
+  // the legacy spelling so old threads do not render raw XML.
   expect(
     stripLeakedSystemTags("<uploaded_files>file.pdf</uploaded_files>"),
-  ).toBe("<uploaded_files>file.pdf</uploaded_files>");
+  ).toBe("file.pdf");
 });
 
 test("stripLeakedSystemTags strips <slash_skill_activation> tag", () => {

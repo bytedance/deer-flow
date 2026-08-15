@@ -754,10 +754,20 @@ export interface FileInMessage {
  * Strip backend-injected human context tags from message content.
  * Kept under its historical name because callers use it for uploaded-file
  * display cleanup.
+ *
+ * Display-only backward compatibility for #4212: ``<uploaded_files>`` is no
+ * longer emitted by the backend and is treated as plain content by the
+ * memory/sanitization pipelines, but threads persisted before #4174 still
+ * carry legacy blocks in their history. This display/export layer keeps
+ * stripping it so old threads render cleanly instead of showing raw XML
+ * with server-side upload paths.
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
-    .replace(/<(current_uploads|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
+    .replace(
+      /<(current_uploads|uploaded_files|slash_skill_activation)>[\s\S]*?<\/\1>/g,
+      "",
+    )
     .trim();
 }
 
@@ -767,9 +777,9 @@ export function stripUploadedFilesTag(content: string): string {
  *
  * These markers are *not* user copy — they come from:
  *
- * - ``UploadsMiddleware`` → ``<current_uploads>`` (the pre-#4174
- *   ``<uploaded_files>`` tag is no longer emitted and no longer stripped —
- *   see #4212)
+ * - ``UploadsMiddleware`` → ``<current_uploads>`` (``<uploaded_files>`` is
+ *   the pre-#4174 spelling, still stripped here for display/export only so
+ *   legacy history does not leak raw blocks or server paths — see #4212)
  * - ``SkillActivationMiddleware`` → ``<slash_skill_activation>``
  * - ``DynamicContextMiddleware`` → ``<system-reminder>`` (carrying
  *   ``<memory>`` / ``<current_date>`` inside)
@@ -784,6 +794,7 @@ export function stripUploadedFilesTag(content: string): string {
  */
 export const INTERNAL_MARKER_TAGS = [
   "current_uploads",
+  "uploaded_files",
   "slash_skill_activation",
   "system-reminder",
   "memory",
@@ -831,8 +842,11 @@ function parseHumanReadableSize(raw: string): number {
 }
 
 export function parseUploadedFiles(content: string): FileInMessage[] {
-  // Match the upload context block UploadsMiddleware emits (#4174).
-  const uploadedFilesRegex = /<current_uploads>([\s\S]*?)<\/current_uploads>/;
+  // Match the upload context block. <current_uploads> is what
+  // UploadsMiddleware emits (#4174); <uploaded_files> is kept for
+  // display-only backward compatibility with pre-#4174 history (#4212).
+  const uploadedFilesRegex =
+    /<(current_uploads|uploaded_files)>([\s\S]*?)<\/\1>/;
   // eslint-disable-next-line @typescript-eslint/prefer-regexp-exec
   const match = content.match(uploadedFilesRegex);
 
@@ -840,7 +854,7 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
     return [];
   }
 
-  const uploadedFilesContent = match[1];
+  const uploadedFilesContent = match[2];
 
   // Check if it's "No files have been uploaded yet."
   if (uploadedFilesContent?.includes("No files have been uploaded yet.")) {
