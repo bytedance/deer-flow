@@ -52,3 +52,20 @@ test("loadModels rejects unsuccessful gateway responses", async () => {
 
   await expect(loadModels()).rejects.toThrow("Model registry unavailable");
 });
+
+test("loadModels includes the status code when statusText is empty", async () => {
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(
+      async () =>
+        new Response("upstream unavailable", {
+          status: 503,
+          statusText: "",
+        }),
+    ),
+  );
+
+  const { loadModels } = await import("@/core/models/api");
+
+  await expect(loadModels()).rejects.toThrow("Failed to load models: 503");
+});

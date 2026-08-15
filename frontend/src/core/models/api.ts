@@ -18,7 +18,10 @@ export async function loadModels(): Promise<ModelsResponse> {
 
   const res = await fetch(`${getBackendBaseURL()}/api/models`);
   if (!res.ok) {
-    await throwGatewayApiError(res, `Failed to load models: ${res.statusText}`);
+    await throwGatewayApiError(
+      res,
+      `Failed to load models: ${res.status} ${res.statusText}`.trim(),
+    );
   }
   const data = (await res.json()) as Partial<ModelsResponse>;
   return {
