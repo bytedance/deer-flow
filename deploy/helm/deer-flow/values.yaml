@@ -27,7 +27,9 @@ image:
 gateway:
   replicas: 1               # Safe default. Postgres + the Redis stream bridge are
                             # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+                            # work (cancel/dedup/reconcile). Scheduler multi_instance
+                             # recovery is safe only when its config prerequisites are met;
+                             # max_concurrent_runs is shared across Pods in that mode.
   # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
   # shutdown work: channel stop (~5s) + memory queue drain
   # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
@@ -240,7 +242,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 33
+  config_version: 34
   log_level: info
 
   models: []

@@ -20,6 +20,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 想了解更多，或者直接看**真实演示**，可以访问[**官网**](https://deerflow.tech)。
 
+## 姐妹项目
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - 认识 DeerFlow 背后的秘密武器——一款桌面工具，用于原型化 agent 想法、检查 harness 的每个步骤、回放失败用例并基准测试性能。
+
 ## 字节跳动火山引擎方舟 Coding Plan
 
 - 我们推荐使用 Doubao-Seed-2.0-Code、DeepSeek v3.2 和 Kimi 2.5 运行 DeerFlow

@@ -420,7 +420,7 @@ See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to 
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
-For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`.
+For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
 Settings > Tools updates one MCP server at a time: an invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
@@ -435,7 +435,8 @@ explicit, model-selected MCP tool path can run alongside the separate automatic
 OpenViking memory backend; it does not replace automatic turn capture or recall. See the
 [OpenViking MCP tools configuration](backend/docs/MCP_SERVER.md#openviking-mcp-tools).
 
-The Gateway also includes a disabled-by-default, protocol-neutral foundation for durable long-running MCP tasks. It stores remote task handles outside model context, polls them under cross-worker leases, rejects results returned after their lease expires, schedules the next attempt from the time a remote status call finishes, isolates unexpected failures between claimed tasks, cancels in-flight polling during Gateway shutdown, and makes expired claims recoverable after restart. If remote submission succeeds but the handle cannot be persisted, the runtime makes a best-effort cancellation so an untracked task is not silently left running. The exact scoped duplicate-handle conflict is surfaced without cancellation because an existing durable row already owns that remote task. Durable recovery requires a SQL database backend (`sqlite` or `postgres`); the in-memory backend does not initialize this task repository. This foundation does not make existing MCP tools asynchronous by itself: `mcp_tasks.enabled` should remain `false` until a compatible task driver is configured. Ordinary `submit/status/cancel` tools and the future MCP Tasks extension can share the same runtime without making the model remember remote task IDs.
+The Gateway can adapt an MCP server's ordinary `submit` / `status` / `cancel` tools into durable background tasks. The Agent sees only the configured submit tool and a DeerFlow-local task ID; remote IDs are persisted before the submit call returns, while status and cancel stay internal to the runtime. Polling uses cross-worker leases, exponential retry backoff, scoped MCP sessions, bounded result storage, and restart recovery. A status-tool `isError` is retained as a bounded diagnostic and retried; servers report a permanent remote-task outcome through a normal structured result with `status: "failed"`. Remote poll hints are finite positive numbers capped at 24 hours, artifact-reference JSON is limited to 64 KiB, and task/server identifiers are validated against their durable SQL column limits before persistence. Current-thread tasks are available through `GET /api/threads/{thread_id}/mcp-tasks` and its detail endpoint. Enable `mcp_tasks` in `config.yaml`, configure `task_toolsets` with exact raw tool names in `extensions_config.json`, and use a SQL database backend (`sqlite` or `postgres`). Task-enabled server connection, authentication, interceptor, timeout, or binding changes require a Gateway restart so Agent tool discovery and background calls cannot use different configuration versions. This phase does not yet wake the Agent when a task completes or add a frontend task panel.
+
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
 Security: pass per-request MCP credentials only through `config.context.secrets`;
@@ -468,6 +469,13 @@ channels:
   langgraph_url: http://localhost:8001/api
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
+
+  # Maximum queued or provider-reserved inbound messages (default: 1000)
+  inbound_queue_maxsize: 1000
+  # Fixed number of long-lived inbound handler workers (default: 5)
+  max_concurrency: 5
+  # Seconds to drain accepted work before cancelling active handlers (default: 3)
+  shutdown_grace_period_seconds: 3
 
   # Optional: global session defaults for all mobile channels
   session:
@@ -546,6 +554,7 @@ Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
+- Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 
 Set the corresponding API keys in your `.env` file:
@@ -1179,6 +1188,14 @@ servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
 requires an explicit local-development opt-in. See the
 [mem0 backend guide](backend/packages/harness/deerflow/agents/memory/backends/mem0/README.md).
 
+An opt-in `honcho` backend is available for self-hosted or hosted Honcho (v3
+API). It builds user-model memory — long-term preferences and a cross-session
+working representation — on Honcho's server side, so the backend makes no LLM
+calls locally. Each user gets an isolated workspace derived from `user_id`; a
+missing user id fails closed instead of falling back to a shared workspace.
+Fact CRUD and Settings-page fact editing are not available for this backend. See
+the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
+
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 
 In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. Only durable, descriptive user-level facts are stored; current-thread or project constraints and one-time action permissions stay in conversation state. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
@@ -1280,6 +1297,14 @@ Current MVP limits:
 - No `interval` schedule type in this first cut
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically take over only expired leases, and fence stale post-launch writes. `max_concurrent_runs` is a shared global cap across Pods, including short-lived dispatch reservations. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
+
+### Upgrade Notes
+
+- Before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either keep the scheduler on exactly one Gateway worker or configure `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The upgraded Gateway rejects the unsafe combination at startup instead of starting silently.
+- In multi-instance mode, `scheduler.max_concurrent_runs` is a cluster-wide cap, not a per-Pod cap. It includes active scheduled runs and short-lived dispatch reservations, so capacity does not multiply with the number of replicas.
+- `scheduler.multi_instance` and the related scheduler, ownership, and run-event settings are startup-only. Apply changes with a coordinated restart of all Gateway Pods; changing the ConfigMap alone does not activate multi-instance recovery.
 
 ## Terminal Workbench (TUI)
 

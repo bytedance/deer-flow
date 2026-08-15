@@ -21,6 +21,12 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 
 Больше информации и живые демо на [**официальном сайте**](https://deerflow.tech).
 
+## Родственные проекты
+
+<img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />
+
+- [**LLM Space**](https://github.com/deer-flow/llm-space) - Познакомьтесь с нашим секретным оружием за DeerFlow — настольный инструмент для прототипирования идей агентов, проверки каждого шага харнесса, воспроизведения сбоев и тестирования производительности.
+
 ## Coding Plan от ByteDance Volcengine
 
 - Рекомендуем Doubao-Seed-2.0-Code, DeepSeek v3.2 и Kimi 2.5 для запуска DeerFlow
