@@ -32,6 +32,7 @@ from app.gateway.internal_auth import (
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -1330,7 +1331,7 @@ async def launch_scheduled_thread_run(
 
 def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
     """Build the internal user turn for one immutable MCP task event snapshot."""
-    payload = json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    payload = neutralize_untrusted_tags(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
     return (
         "A durable background MCP task has an update that requires the user's attention. "
         "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "
@@ -1361,7 +1362,15 @@ async def launch_mcp_task_notification_run(
     )
     body = RunCreateRequest(
         assistant_id=assistant_id,
-        input={"messages": [{"role": "user", "content": _mcp_task_notification_prompt(event)}]},
+        input={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": _mcp_task_notification_prompt(event),
+                    "additional_kwargs": {"hide_from_ui": True},
+                }
+            ]
+        },
         command=None,
         metadata={
             "mcp_task_notification": {
