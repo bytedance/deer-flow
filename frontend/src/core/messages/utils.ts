@@ -761,6 +761,11 @@ export interface FileInMessage {
  * carry legacy blocks in their history. This display/export layer keeps
  * stripping it so old threads render cleanly instead of showing raw XML
  * with server-side upload paths.
+ *
+ * Accepted tradeoff (review): a live user typing the legacy spelling can
+ * hide their own message text / fabricate file chips — display-only and
+ * self-inflicted, with no backend semantics. Age-gating the legacy
+ * spelling is a possible follow-up if this ever matters.
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
