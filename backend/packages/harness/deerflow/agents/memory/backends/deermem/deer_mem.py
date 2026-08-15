@@ -32,6 +32,7 @@ from pydantic import PrivateAttr
 from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
 
 from .deermem.config import DeerMemConfig
+from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
 from .deermem.core.llm import build_llm
 from .deermem.core.message_processing import (
     SIGNAL_NAMES,
@@ -347,7 +348,7 @@ class DeerMem(MemoryManager):
             agent_name=resolved_agent_name,
             category=category,
         )
-        if results and (self._config.fact_eviction_policy == "hybrid-v1" or self._config.fact_eviction_shadow_enabled):
+        if results and (self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled):
             try:
                 self._storage.record_fact_accesses(
                     [str(fact["id"]) for fact in results if fact.get("id")],

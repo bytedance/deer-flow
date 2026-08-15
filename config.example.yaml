@@ -1764,8 +1764,11 @@ memory:
     # freshness (25%, 90-day half-life), and query-driven access heat (10%,
     # 30-day half-life). Actual memory_search hits count; default injection does
     # not. A bounded 10% correction reserve aligns storage with guaranteed
-    # correction injection. Shadow mode audits hybrid disagreements without
-    # changing which facts confidence-only keeps.
+    # correction injection. Confirmation detection is batch-level: it checks
+    # human messages among the last six filtered messages, while the LLM binds
+    # that signal to a factsToReinforce ID without a second correspondence
+    # check. Shadow mode audits hybrid disagreements without changing which
+    # facts confidence-only keeps.
     fact_eviction_policy: confidence # confidence | hybrid-v1
     fact_eviction_shadow_enabled: false
     eviction_confidence_weight: 0.65

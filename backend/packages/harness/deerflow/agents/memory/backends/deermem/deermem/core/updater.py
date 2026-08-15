@@ -837,12 +837,13 @@ class MemoryUpdater:
         """Apply the configured policy and optionally compute hybrid shadow."""
         if len(facts) <= self._config.max_facts:
             return facts, None, None
+        uses_hybrid_scoring = self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled
         usage = (
             self._storage.get_fact_usage(
                 agent_name=agent_name,
                 user_id=user_id,
             )
-            if agent_name is not None
+            if uses_hybrid_scoring and agent_name is not None
             else {}
         )
         common = {
@@ -1881,10 +1882,10 @@ class MemoryUpdater:
             scope_gate_rejections[kind][reason] += 1
 
         # Explicit confirmation is distinct from extraction duplication. The
-        # LLM may identify an existing id in the same update call, but the
-        # write is allowed only when deterministic message processing found a
-        # reinforcement signal and the model classified the confirmation as
-        # user-scoped with a non-empty reason.
+        # deterministic gate is batch-level: it proves only that a human
+        # message among the last six filtered messages matched a reinforcement
+        # pattern. The LLM remains responsible for binding that signal to an
+        # existing id, which must be user-scoped and carry a non-empty reason.
         tracks_hybrid_signals = config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or config.fact_eviction_shadow_enabled
         if tracks_hybrid_signals and "reinforcement" in signals:
             reinforced_ids = {

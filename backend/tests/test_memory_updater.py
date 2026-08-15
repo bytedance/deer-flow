@@ -316,6 +316,54 @@ def test_automatic_update_uses_hybrid_capacity_policy() -> None:
     assert "stale_high" not in kept_ids
 
 
+def test_confidence_capacity_does_not_read_usage_sidecar() -> None:
+    storage = _MemoryStorage()
+    storage.get_fact_usage = MagicMock(return_value={})
+    updater = _make_updater(
+        config=_memory_config(max_facts=1),
+        storage=storage,
+    )
+
+    updater._select_for_capacity(
+        [
+            {"id": "high", "confidence": 0.9},
+            {"id": "low", "confidence": 0.8},
+        ],
+        agent_name="default",
+        user_id="user-a",
+    )
+
+    storage.get_fact_usage.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        _memory_config(max_facts=1, fact_eviction_policy="hybrid-v1"),
+        _memory_config(max_facts=1, fact_eviction_shadow_enabled=True),
+    ],
+    ids=["hybrid", "shadow"],
+)
+def test_hybrid_capacity_reads_usage_sidecar(config: DeerMemConfig) -> None:
+    storage = _MemoryStorage()
+    storage.get_fact_usage = MagicMock(return_value={})
+    updater = _make_updater(config=config, storage=storage)
+
+    updater._select_for_capacity(
+        [
+            {"id": "high", "confidence": 0.9},
+            {"id": "low", "confidence": 0.8},
+        ],
+        agent_name="default",
+        user_id="user-a",
+    )
+
+    storage.get_fact_usage.assert_called_once_with(
+        agent_name="default",
+        user_id="user-a",
+    )
+
+
 def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
     current_memory = _make_memory(
         facts=[
