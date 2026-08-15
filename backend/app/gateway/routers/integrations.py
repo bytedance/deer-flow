@@ -329,7 +329,7 @@ async def switch_lark_app_credentials(request: Request, body: LarkConfigCredenti
             app_secret=body.app_secret,
             brand=body.brand,
         )
-        return _config_complete_to_response(result, include_host_paths=await _is_admin_user(request))
+        return _config_complete_to_response(result, include_host_paths=await is_admin_user(request))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
