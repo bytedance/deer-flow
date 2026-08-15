@@ -15,6 +15,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 logger = logging.getLogger(__name__)
@@ -409,7 +410,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         context = getattr(runtime, "context", None)
         if not context:
             return False
-        return bool(context.get("disable_clarification"))
+        return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
     def _is_disabled(self, request: ToolCallRequest) -> bool:
         """Whether clarifications are suppressed for this tool-call request."""
