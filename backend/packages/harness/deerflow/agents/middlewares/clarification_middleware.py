@@ -14,6 +14,8 @@ from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
+
 logger = logging.getLogger(__name__)
 
 # Whitelisted form field types; anything else degrades to "text" so a bad
@@ -374,7 +376,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         context = getattr(runtime, "context", None)
         if not context:
             return False
-        return bool(context.get("disable_clarification"))
+        return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
     def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:
         """Suppress a clarification and tell the agent to proceed.

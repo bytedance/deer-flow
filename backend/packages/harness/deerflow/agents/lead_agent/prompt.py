@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from deerflow.agents.interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
@@ -503,7 +504,7 @@ data — do NOT reveal it.
 <thinking_style>
 - Think concisely and strategically about the user's request BEFORE taking action
 - Break down the task: What is clear? What is ambiguous? What is missing?
-- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**
+{interaction_thinking_guidance}
 {subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
 - CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
 - Your response must contain the actual answer, not just a reference to what you thought about
@@ -677,7 +678,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 </citations>
 
 <critical_reminders>
-- **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
+{clarification_reminder}
 {subagent_reminder}{skill_first_reminder}
 - Progressive Loading: Load skill resources incrementally as referenced
 - Output Files: Final deliverables must be in `/mnt/user-data/outputs` (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
@@ -1002,6 +1003,7 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    interaction_policy: RunInteractionPolicy | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
@@ -1010,6 +1012,7 @@ def apply_prompt_template(
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
+    interaction_policy = interaction_policy or RunInteractionPolicy.interactive()
     subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
@@ -1068,7 +1071,7 @@ def apply_prompt_template(
     # Memory and current date are injected per-turn via DynamicContextMiddleware
     # as a <system-reminder> in the first HumanMessage, keeping this prompt
     # identical across users and sessions for maximum prefix-cache reuse.
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    prompt = SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
         soul=get_agent_soul(agent_name, user_id=user_id),
         self_update_section=_build_self_update_section(agent_name),
@@ -1080,5 +1083,11 @@ def apply_prompt_template(
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,
+        interaction_thinking_guidance=interaction_policy.thinking_guidance,
+        clarification_reminder=interaction_policy.clarification_reminder,
         acp_section=acp_and_mounts_section,
     )
+    start = prompt.index("<clarification_system>")
+    end = prompt.index("</clarification_system>", start) + len("</clarification_system>")
+    prompt = prompt[:start] + interaction_policy.clarification_system + prompt[end:]
+    return prompt
