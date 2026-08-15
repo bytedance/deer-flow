@@ -321,13 +321,14 @@ class McpTaskRepository:
             row = (await session.execute(stmt)).scalar_one_or_none()
             if row is None:
                 return None
-            if row.status not in _TERMINAL_STATUS_VALUES:
-                if row.cancel_requested_at is None:
-                    row.cancel_requested_at = requested_at
+            if row.status not in _TERMINAL_STATUS_VALUES and row.cancel_requested_at is None:
+                row.cancel_requested_at = requested_at
                 if row.next_cancel_at is None:
                     row.next_cancel_at = requested_at
                 # A cancel request fences any in-flight poll result, so its
-                # lease can be released immediately for the cancellation worker.
+                # poll lease can be released immediately for the cancellation
+                # worker. A repeated request must preserve an existing cancel
+                # lease so it cannot trigger a concurrent remote cancellation.
                 row.lease_owner = None
                 row.lease_expires_at = None
                 row.updated_at = requested_at
@@ -586,6 +587,34 @@ class McpTaskRepository:
             row.updated_at = now
             await session.commit()
             return True
+
+    async def release_notification_lease(
+        self,
+        task_id: str,
+        *,
+        lease_owner: str,
+        next_notification_at: datetime,
+        error: str,
+    ) -> bool:
+        """Release unexpected notification work without changing its phase."""
+        stmt = (
+            update(McpTaskRow)
+            .where(
+                McpTaskRow.id == task_id,
+                McpTaskRow.notification_lease_owner == lease_owner,
+            )
+            .values(
+                notification_error=error,
+                next_notification_at=next_notification_at,
+                notification_lease_owner=None,
+                notification_lease_expires_at=None,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return bool(result.rowcount)
 
     async def defer_dispatched_notification(
         self,

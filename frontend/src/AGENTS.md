@@ -24,8 +24,11 @@
    otherwise), fetches bounded task details only while a user expands a card,
    and cancels through the thread-scoped local-ID endpoint. The expanded view
    shows result/preview, artifact metadata, input requests, and the latest poll
-   error without exposing the persisted remote handle. A persisted cancel
-   request remains "Cancelling…" only while the task status is still active.
+   or cancellation error without exposing the persisted remote handle. A
+   persisted cancel request remains "Cancelling…" only while the task status is
+   still active; if remote cancellation keeps failing, the active card remains
+   expandable and shows the attempt count plus the latest bounded error while
+   the backend continues retrying.
    Settings > Integrations uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains

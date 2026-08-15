@@ -36,6 +36,8 @@ def _record(**overrides):
         "error": None,
         "last_poll_error": "temporary network failure",
         "consecutive_poll_error_count": 3,
+        "last_cancel_error": None,
+        "cancel_attempt_count": 0,
         "result": None,
         "result_preview": None,
         "result_truncated": False,
@@ -99,6 +101,8 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
                 status="completed",
                 result={"report": "ready"},
                 result_artifact={"uri": "s3://reports/1.json", "mime_type": "application/json"},
+                last_cancel_error="c" * 600,
+                cancel_attempt_count=4,
             )
         ]
     )
@@ -112,6 +116,8 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
 
     assert response["result"] == {"report": "ready"}
     assert response["result_artifact"]["uri"] == "s3://reports/1.json"
+    assert response["last_cancel_error"] == "c" * 500
+    assert response["cancel_attempt_count"] == 4
     assert "remote_task_id" not in response
     assert "driver_data" not in response
     assert "server_name" not in response

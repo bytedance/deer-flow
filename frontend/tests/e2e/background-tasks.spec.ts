@@ -84,6 +84,34 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
       }),
   );
 
+  await page.route(
+    `**/api/threads/${MOCK_THREAD_ID}/mcp-tasks/task-stuck`,
+    (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          task_id: "task-stuck",
+          task_name: "Cancel remote export",
+          status: "submitted",
+          created_at: "2026-08-08T00:00:00+00:00",
+          updated_at: "2026-08-08T00:03:00+00:00",
+          error: null,
+          tracking_degraded: false,
+          cancel_requested: true,
+          result: null,
+          result_preview: null,
+          result_truncated: false,
+          result_artifact: null,
+          input_required: null,
+          last_poll_error: null,
+          last_polled_at: "2026-08-08T00:01:00+00:00",
+          last_cancel_error: "Remote cancellation timed out",
+          cancel_attempt_count: 4,
+        }),
+      }),
+  );
+
   await page.route(`**/api/threads/${MOCK_THREAD_ID}/mcp-tasks*`, (route) => {
     getCalls += 1;
     return route.fulfill({
@@ -121,6 +149,16 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
           tracking_degraded: false,
           cancel_requested: false,
         },
+        {
+          task_id: "task-stuck",
+          task_name: "Cancel remote export",
+          status: "submitted",
+          created_at: "2026-08-08T00:00:00+00:00",
+          updated_at: "2026-08-08T00:03:00+00:00",
+          error: null,
+          tracking_degraded: false,
+          cancel_requested: true,
+        },
       ]),
     });
   });
@@ -156,6 +194,17 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
   await expect(
     page.getByText(
       "This integration cannot send your response back to the remote task yet.",
+    ),
+  ).toBeVisible();
+
+  await page
+    .getByTestId("background-task-task-stuck")
+    .getByRole("button", { name: "View details" })
+    .click();
+  await expect(page.getByText("Remote cancellation timed out")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Cancellation attempt 4 failed; DeerFlow will keep retrying.",
     ),
   ).toBeVisible();
 

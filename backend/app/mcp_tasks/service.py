@@ -298,7 +298,31 @@ class McpTaskService:
             tracking_degraded_after_errors=self._tracking_degraded_after_errors,
         )
         if records:
-            await asyncio.gather(*(self._notify_one(record, now=now) for record in records))
+            results = await asyncio.gather(
+                *(self._notify_one(record, now=now) for record in records),
+                return_exceptions=True,
+            )
+            for record, result in zip(records, results, strict=True):
+                if not isinstance(result, BaseException):
+                    continue
+                error = _bound_error(str(result) or type(result).__name__) or type(result).__name__
+                logger.error(
+                    "Unexpected MCP task notification failure (task_id=%s)",
+                    record.get("id"),
+                    exc_info=(type(result), result, result.__traceback__),
+                )
+                try:
+                    await self._repository.release_notification_lease(
+                        record["id"],
+                        lease_owner=self._lease_owner,
+                        next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                        error=error,
+                    )
+                except Exception:  # noqa: BLE001 - retain the original task-scoped failure
+                    logger.exception(
+                        "Failed to release MCP task notification lease (task_id=%s)",
+                        record.get("id"),
+                    )
 
     async def _notify_one(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
@@ -306,7 +330,18 @@ class McpTaskService:
         if record.get("notification_status") == "dispatched":
             run = await self._get_run(record.get("notification_run_id"), user_id=record["user_id"])
             status = getattr(run, "status", None)
-            if status == RunStatus.success:
+            if run is None:
+                run_id = record.get("notification_run_id")
+                await self._repository.finish_notification_run(
+                    task_id,
+                    lease_owner=self._lease_owner,
+                    dispatch_version=dispatch_version,
+                    delivered=False,
+                    next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                    error=_bound_error(f"Notification run {run_id!r} was not found"),
+                    now=now,
+                )
+            elif status == RunStatus.success:
                 await self._repository.finish_notification_run(
                     task_id,
                     lease_owner=self._lease_owner,

@@ -243,6 +243,7 @@ export interface Translations {
     cancel: string;
     cancelling: string;
     cancelFailed: string;
+    cancellationRetrying: (attempt: number) => string;
     trackingDegraded: string;
     viewDetails: string;
     hideDetails: string;

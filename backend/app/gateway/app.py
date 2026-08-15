@@ -378,7 +378,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 max_result_bytes=mcp_tasks_config.max_result_bytes,
                 result_preview_max_chars=mcp_tasks_config.result_preview_max_chars,
                 launch_notification=lambda **kwargs: launch_mcp_task_notification_run(app=app, **kwargs),
-                get_run=lambda run_id, **kwargs: app.state.run_manager.get(run_id, **kwargs),
+                get_run=lambda run_id, **kwargs: app.state.run_manager.get(
+                    run_id,
+                    raise_on_store_error=True,
+                    **kwargs,
+                ),
             )
             app.state.mcp_task_drivers = mcp_task_drivers
             app.state.mcp_task_service = mcp_task_service

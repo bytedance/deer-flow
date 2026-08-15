@@ -317,6 +317,8 @@ export const enUS: Translations = {
     cancel: "Cancel task",
     cancelling: "Cancelling…",
     cancelFailed: "Failed to cancel task",
+    cancellationRetrying: (attempt) =>
+      `Cancellation attempt ${attempt} failed; DeerFlow will keep retrying.`,
     trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
     viewDetails: "View details",
     hideDetails: "Hide details",

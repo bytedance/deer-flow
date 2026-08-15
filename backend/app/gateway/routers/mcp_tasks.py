@@ -43,6 +43,8 @@ def _detail(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
         **_list_item(record, threshold=threshold),
         "last_polled_at": record.get("last_polled_at"),
         "last_poll_error": _short_error(record.get("last_poll_error")),
+        "last_cancel_error": _short_error(record.get("last_cancel_error")),
+        "cancel_attempt_count": int(record.get("cancel_attempt_count") or 0),
         "result": record.get("result"),
         "result_preview": record.get("result_preview"),
         "result_truncated": bool(record.get("result_truncated")),

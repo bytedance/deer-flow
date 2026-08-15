@@ -301,6 +301,8 @@ export const zhCN: Translations = {
     cancel: "取消任务",
     cancelling: "正在取消…",
     cancelFailed: "取消任务失败",
+    cancellationRetrying: (attempt) =>
+      `第 ${attempt} 次取消失败；DeerFlow 将继续重试。`,
     trackingDegraded: "状态检查有所延迟，DeerFlow 仍在重试。",
     viewDetails: "查看详情",
     hideDetails: "收起详情",

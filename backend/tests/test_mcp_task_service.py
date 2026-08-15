@@ -403,6 +403,95 @@ async def test_notification_delivery_waits_for_successful_agent_run():
 
 
 @pytest.mark.asyncio
+async def test_missing_dispatched_notification_run_retries_delivery():
+    repo = SimpleNamespace(
+        finish_notification_run=AsyncMock(return_value=True),
+        defer_dispatched_notification=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=AsyncMock(return_value=None),
+    )
+    now = datetime.now(UTC)
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "dispatched",
+            "notification_run_id": "missing-run",
+            "dispatch_version": 2,
+        },
+        now=now,
+    )
+
+    repo.defer_dispatched_notification.assert_not_awaited()
+    repo.finish_notification_run.assert_awaited_once()
+    finished = repo.finish_notification_run.await_args.kwargs
+    assert finished["delivered"] is False
+    assert finished["next_notification_at"] == now + timedelta(seconds=5)
+    assert "missing-run" in finished["error"]
+
+
+@pytest.mark.asyncio
+async def test_notification_failures_are_isolated_and_release_their_lease(caplog):
+    records = [
+        {
+            **_claimed_row(),
+            "id": "task-broken",
+            "notification_status": "dispatched",
+            "notification_run_id": "run-broken",
+            "dispatch_version": 2,
+        },
+        {
+            **_claimed_row(),
+            "id": "task-success",
+            "notification_status": "dispatched",
+            "notification_run_id": "run-success",
+            "dispatch_version": 3,
+        },
+    ]
+    repo = SimpleNamespace(
+        claim_notification_work=AsyncMock(return_value=records),
+        finish_notification_run=AsyncMock(return_value=True),
+        defer_dispatched_notification=AsyncMock(return_value=True),
+        release_notification_lease=AsyncMock(return_value=True),
+    )
+    get_run = AsyncMock(
+        side_effect=[
+            RuntimeError("run store unavailable"),
+            SimpleNamespace(status=RunStatus.success),
+        ]
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=get_run,
+    )
+    now = datetime.now(UTC)
+
+    with caplog.at_level(logging.ERROR):
+        await service._run_notifications(now=now)
+
+    repo.finish_notification_run.assert_awaited_once()
+    assert repo.finish_notification_run.await_args.args[0] == "task-success"
+    repo.release_notification_lease.assert_awaited_once()
+    released = repo.release_notification_lease.await_args
+    assert released.args[0] == "task-broken"
+    assert released.kwargs["next_notification_at"] == now + timedelta(seconds=5)
+    assert "run store unavailable" in released.kwargs["error"]
+    assert "task-broken" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_notification_busy_thread_replaces_claim_with_latest_event():
     repo = SimpleNamespace(
         release_notification_claim=AsyncMock(return_value=True),

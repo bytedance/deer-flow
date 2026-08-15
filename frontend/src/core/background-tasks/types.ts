@@ -20,6 +20,8 @@ export type BackgroundTask = {
 export type BackgroundTaskDetail = BackgroundTask & {
   last_polled_at: string | null;
   last_poll_error: string | null;
+  last_cancel_error: string | null;
+  cancel_attempt_count: number;
   result: unknown | null;
   result_preview: string | null;
   result_truncated: boolean;

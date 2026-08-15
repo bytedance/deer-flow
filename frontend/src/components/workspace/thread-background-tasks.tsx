@@ -189,8 +189,9 @@ function BackgroundTaskCard({
   const cancelling = active && (task.cancel_requested || isCancelling);
   const status = taskStatusPresentation(task.status, t.backgroundTasks.status);
   const canShowDetails =
-    task.status !== "submitted" &&
-    (task.status !== "working" || task.tracking_degraded);
+    task.cancel_requested ||
+    (task.status !== "submitted" &&
+      (task.status !== "working" || task.tracking_degraded));
 
   return (
     <article
@@ -332,6 +333,19 @@ function BackgroundTaskDetails({
 
   return (
     <div className="border-border mt-3 space-y-3 border-t pt-3">
+      {task.last_cancel_error && (
+        <div className="flex gap-2 rounded-md bg-amber-500/10 px-2 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-medium">
+              {t.backgroundTasks.cancellationRetrying(
+                task.cancel_attempt_count,
+              )}
+            </p>
+            <p className="mt-1 break-words">{task.last_cancel_error}</p>
+          </div>
+        </div>
+      )}
       <TaskDetailField
         label={t.backgroundTasks.result}
         value={task.result_preview ?? task.result}

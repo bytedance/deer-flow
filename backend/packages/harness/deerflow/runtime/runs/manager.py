@@ -605,12 +605,20 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering when hydrating from store.
+            raise_on_store_error: Propagate store hydration/mapping failures so
+                lifecycle callers can distinguish them from a missing run.
         """
         async with self._lock:
             record = self._runs.get(run_id)
@@ -621,6 +629,8 @@ class RunManager:
         try:
             row = await self._store.get(run_id, user_id=user_id)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
         # Re-check after store await: a concurrent create() may have inserted the
@@ -634,15 +644,27 @@ class RunManager:
         try:
             return self._record_from_store(row)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
-    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def aget(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
 
         Alias for :meth:`get` for backward compatibility.
         """
-        return await self.get(run_id, user_id=user_id)
+        return await self.get(
+            run_id,
+            user_id=user_id,
+            raise_on_store_error=raise_on_store_error,
+        )
 
     async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
