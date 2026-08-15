@@ -63,6 +63,7 @@
       "keys": [
         "artifacts",
         "delegations",
+        "delegations_truncated_count",
         "messages",
         "skill_context",
         "thread_data",
