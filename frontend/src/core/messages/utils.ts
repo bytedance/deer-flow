@@ -757,10 +757,7 @@ export interface FileInMessage {
  */
 export function stripUploadedFilesTag(content: string): string {
   return content
-    .replace(
-      /<(current_uploads|slash_skill_activation)>[\s\S]*?<\/\1>/g,
-      "",
-    )
+    .replace(/<(current_uploads|slash_skill_activation)>[\s\S]*?<\/\1>/g, "")
     .trim();
 }
 
