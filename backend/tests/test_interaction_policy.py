@@ -1,3 +1,5 @@
+import pytest
+
 from deerflow.agents.interaction_policy import (
     ASK_CLARIFICATION_TOOL_NAME,
     RunInteractionMode,
@@ -30,7 +32,7 @@ def test_github_policy_resolves_as_webhook_without_legacy_flag():
 
     assert policy.mode is RunInteractionMode.WEBHOOK
     assert not policy.allows_clarification
-    assert "issue, pull request, repository, and event context" in policy.clarification_system
+    assert "issue, pull request, repository, event context" in policy.clarification_system
 
 
 def test_explicit_mode_takes_precedence_over_legacy_flags():
@@ -42,3 +44,8 @@ def test_explicit_mode_takes_precedence_over_legacy_flags():
     )
 
     assert policy == RunInteractionPolicy(RunInteractionMode.AUTONOMOUS)
+
+
+def test_invalid_explicit_mode_fails_closed():
+    with pytest.raises(ValueError, match="Invalid interaction_mode 'Scheduled'"):
+        resolve_run_interaction_policy({"context": {"interaction_mode": "Scheduled"}})
