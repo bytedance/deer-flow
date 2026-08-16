@@ -5,7 +5,7 @@ import { loadModels } from "./api";
 export const MODELS_QUERY_KEY = ["models"] as const;
 
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
-  const { data, isLoading, isFetching, error, refetch } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: MODELS_QUERY_KEY,
     queryFn: () => loadModels(),
     enabled,
@@ -21,7 +21,6 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     models: data?.models ?? [],
     tokenUsageEnabled: data?.token_usage.enabled ?? false,
     isLoading,
-    isFetching,
     error,
     refetch,
   };
