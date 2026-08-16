@@ -5,26 +5,33 @@ import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 import {
   buildThreadMessagesPageUrl,
   buildVisibleHistoryMessages,
+  areOptimisticMessagesConfirmed,
   computeSummarizationTransientMessages,
+  countHumanMessagesExcludingSuperseded,
   flattenThreadHistoryPages,
   getSummarizationMiddlewareMessages,
   getThreadHistoryNextPageParam,
   getVisibleOptimisticMessages,
+  mergeRenderedMessageLedger,
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  parseThreadMessagesPageResponse,
   pruneConfirmedTransientMessages,
+  reconcileThreadHistoryRows,
   removeSetItems,
   resolveThreadTransientHistoryBridge,
   resolveTransientHistoryBridge,
+  restoreLocalTurnMessageOrder,
+  restoreReconnectedTurnMessageOrder,
   type ThreadMessagesPageResponse,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
-function runMessage(seq?: number): RunMessage {
+function runMessage(seq: number): RunMessage {
   return {
     run_id: "run-1",
-    ...(seq === undefined ? {} : { seq }),
+    seq,
     content: {} as Message,
     metadata: { caller: "" },
     created_at: "2026-05-22T00:00:00Z",
@@ -93,6 +100,40 @@ test("mergeMessages lets live thread messages replace overlapping history", () =
   expect(mergeMessages([oldHuman, oldAi], [liveHuman, liveAi], [])).toEqual([
     liveHuman,
     liveAi,
+  ]);
+});
+
+test("mergeMessages preserves historical run metadata on a live checkpoint replacement", () => {
+  const persistedAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "persisted",
+    additional_kwargs: { turn_duration: 114 },
+  } as Message;
+  const history = buildVisibleHistoryMessages(
+    [
+      {
+        run_id: "run-1",
+        seq: 1,
+        content: persistedAi,
+        metadata: { caller: "lead_agent" },
+        created_at: "2026-07-21T00:00:00Z",
+      },
+    ],
+    new Set(),
+  );
+  const checkpointAi = {
+    id: "ai-1",
+    type: "ai",
+    content: "live checkpoint",
+  } as Message;
+
+  expect(mergeMessages(history, [checkpointAi], [])).toEqual([
+    {
+      ...checkpointAi,
+      run_id: "run-1",
+      additional_kwargs: { turn_duration: 114 },
+    },
   ]);
 });
 
@@ -349,6 +390,58 @@ test("mergeMessages shows server human instead of optimistic duplicate after fir
   ]);
 });
 
+test("edit replay of the only turn hides the optimistic copy once the server human arrives", () => {
+  // The runtime re-keys the first user message of a thread, so the persisted
+  // replacement never matches the optimistic id and only the count can confirm
+  // it. Masking the superseded turn drops the live count to zero first.
+  const supersededHuman = {
+    id: "human-1__user",
+    type: "human",
+    content: "introduce Li Bai",
+  } as Message;
+  const optimisticHuman = {
+    id: "replacement-1",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+  const serverHuman = {
+    id: "replacement-1__user",
+    type: "human",
+    content: "introduce Du Fu",
+  } as Message;
+
+  const baseline = countHumanMessagesExcludingSuperseded(
+    [supersededHuman],
+    ["human-1__user", "ai-1"],
+  );
+  expect(baseline).toBe(0);
+
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 0)).toEqual([
+    optimisticHuman,
+  ]);
+  expect(getVisibleOptimisticMessages([optimisticHuman], baseline, 1)).toEqual(
+    [],
+  );
+  expect(mergeMessages([], [serverHuman], [])).toEqual([serverHuman]);
+});
+
+test("countHumanMessagesExcludingSuperseded keeps turns the replay does not supersede", () => {
+  const keptHuman = { id: "human-1", type: "human", content: "one" } as Message;
+  const supersededHuman = {
+    id: "human-2",
+    type: "human",
+    content: "two",
+  } as Message;
+  const ai = { id: "ai-1", type: "ai", content: "answer" } as Message;
+
+  expect(
+    countHumanMessagesExcludingSuperseded(
+      [keptHuman, ai, supersededHuman],
+      ["human-2", "ai-2"],
+    ),
+  ).toBe(1);
+});
+
 test("getVisibleOptimisticMessages keeps optimistic user input until server human arrives", () => {
   const optimisticHuman = {
     id: "opt-human-1",
@@ -407,6 +500,37 @@ test("getVisibleOptimisticMessages hides optimistic user input after later serve
   ]);
 });
 
+test("areOptimisticMessagesConfirmed returns true when server messages contain every optimistic id", () => {
+  const optimisticHuman = {
+    id: "replacement-human-1",
+    type: "human",
+    content: "edited question",
+  } as Message;
+  const serverHuman = {
+    id: "replacement-human-1",
+    type: "human",
+    content: "edited question",
+  } as Message;
+  const serverAi = {
+    id: "replacement-ai-1",
+    type: "ai",
+    content: "new answer",
+  } as Message;
+
+  expect(
+    areOptimisticMessagesConfirmed([optimisticHuman], [serverHuman, serverAi]),
+  ).toBe(true);
+});
+
+test("areOptimisticMessagesConfirmed ignores optimistic messages without stable ids", () => {
+  const optimisticHuman = {
+    type: "human",
+    content: "edited question",
+  } as Message;
+
+  expect(areOptimisticMessagesConfirmed([optimisticHuman], [])).toBe(false);
+});
+
 test("buildThreadMessagesPageUrl encodes the thread and backward cursor", () => {
   expect(
     buildThreadMessagesPageUrl(
@@ -429,6 +553,54 @@ test("buildThreadMessagesPageUrl returns a relative URL behind nginx", () => {
   expect(buildThreadMessagesPageUrl("", "thread-1", 42)).toBe(
     "/api/threads/thread-1/messages/page?before_seq=42",
   );
+});
+
+test("parseThreadMessagesPageResponse accepts a valid history page", () => {
+  const response = {
+    data: [runMessage(1), runMessage(2)],
+    has_more: true,
+    next_before_seq: 1,
+  };
+
+  expect(parseThreadMessagesPageResponse(response)).toBe(response);
+});
+
+test.each([
+  ["missing", undefined],
+  ["non-numeric", "2"],
+  ["fractional", 2.5],
+  ["unsafe", Number.MAX_SAFE_INTEGER + 1],
+])(
+  "parseThreadMessagesPageResponse rejects a %s row seq",
+  (_description, seq) => {
+    expect(() =>
+      parseThreadMessagesPageResponse({
+        data: [{ ...runMessage(1), seq }],
+        has_more: false,
+        next_before_seq: null,
+      }),
+    ).toThrow("invalid seq");
+  },
+);
+
+test("parseThreadMessagesPageResponse rejects duplicate row seq values", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1), runMessage(1)],
+      has_more: false,
+      next_before_seq: null,
+    }),
+  ).toThrow("duplicate seq");
+});
+
+test("parseThreadMessagesPageResponse rejects an invalid pagination cursor", () => {
+  expect(() =>
+    parseThreadMessagesPageResponse({
+      data: [runMessage(1)],
+      has_more: true,
+      next_before_seq: null,
+    }),
+  ).toThrow("invalid next_before_seq");
 });
 
 test("flattenThreadHistoryPages prepends backward pages in global seq order", () => {
@@ -470,6 +642,96 @@ test("flattenThreadHistoryPages retains backward pages when the latest page refr
       olderPage,
     ]).map((message) => message.seq),
   ).toEqual([1, 2, 3, 4, 5]);
+});
+
+test("reconcileThreadHistoryRows retains rows displaced from a moving latest page", () => {
+  const previousRows = Array.from({ length: 50 }, (_, index) =>
+    runMessage(index + 1),
+  );
+  const currentRows = Array.from({ length: 50 }, (_, index) =>
+    runMessage(index + 51),
+  );
+
+  expect(
+    reconcileThreadHistoryRows(previousRows, currentRows, false).map(
+      (message) => message.seq,
+    ),
+  ).toEqual(Array.from({ length: 100 }, (_, index) => index + 1));
+});
+
+test("reconcileThreadHistoryRows refreshes overlapping rows without moving them", () => {
+  const stale = runMessage(50);
+  const refreshed = {
+    ...runMessage(50),
+    content: {
+      id: "message-50",
+      type: "ai",
+      content: "final response",
+      additional_kwargs: { turn_duration: 704 },
+    } as Message,
+  };
+
+  const reconciled = reconcileThreadHistoryRows(
+    [runMessage(49), stale],
+    [refreshed, runMessage(51)],
+    false,
+  );
+
+  expect(reconciled.map((message) => message.seq)).toEqual([49, 50, 51]);
+  expect(reconciled[1]).toBe(refreshed);
+});
+
+test("reconcileThreadHistoryRows trusts a complete snapshot and prunes missing rows", () => {
+  const currentRows = [runMessage(2), runMessage(3)];
+
+  expect(
+    reconcileThreadHistoryRows(
+      [runMessage(1), ...currentRows],
+      currentRows,
+      true,
+    ),
+  ).toEqual(currentRows);
+});
+
+test("reconcileThreadHistoryRows preserves existing history when a row seq is invalid", () => {
+  const previousRows = [runMessage(1), runMessage(2)];
+  const invalidRow = {
+    ...runMessage(3),
+    seq: undefined,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  expect(reconcileThreadHistoryRows(previousRows, [invalidRow], false)).toBe(
+    previousRows,
+  );
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
+});
+
+test("reconcileThreadHistoryRows keeps insertion order on an invalid initial snapshot", () => {
+  const first = {
+    ...runMessage(1),
+    seq: undefined,
+    content: { id: "first", type: "human", content: "first" } as Message,
+  } as unknown as RunMessage;
+  const second = {
+    ...runMessage(2),
+    seq: undefined,
+    content: { id: "second", type: "ai", content: "second" } as Message,
+  } as unknown as RunMessage;
+  const consoleError = rs
+    .spyOn(console, "error")
+    .mockImplementation(() => undefined);
+
+  const currentRows = [first, second];
+
+  expect(reconcileThreadHistoryRows([], currentRows, false)).toBe(currentRows);
+  expect(consoleError).toHaveBeenCalledOnce();
+
+  consoleError.mockRestore();
 });
 
 test("infinite history refetch recalculates older-page cursors from the refreshed newest page", async () => {
@@ -586,24 +848,28 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   const rows: RunMessage[] = [
     {
       run_id: "run-old",
+      seq: 1,
       content: oldHuman,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:00Z",
     },
     {
       run_id: "run-old",
+      seq: 2,
       content: oldAi,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:01Z",
     },
     {
       run_id: "run-new",
+      seq: 3,
       content: newHuman,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:02Z",
     },
     {
       run_id: "run-new",
+      seq: 4,
       content: newAi,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-18T00:00:03Z",
@@ -622,6 +888,7 @@ test("buildVisibleHistoryMessages attaches run_id to each content message (#3779
   const rows: RunMessage[] = [
     {
       run_id: "run-1",
+      seq: 1,
       content: { id: "ai-1", type: "ai", content: "answer" } as Message,
       metadata: { caller: "lead_agent" },
       created_at: "2026-06-26T00:00:00Z",
@@ -756,6 +1023,53 @@ test("resolveTransientHistoryBridge does not collapse an unloaded gap before its
   ).toEqual(["event-seq-35", "event-seq-88"]);
 });
 
+test("resolveTransientHistoryBridge restores a prefix that was already rendered", () => {
+  const protectedPrompt = {
+    id: "protected-prompt",
+    type: "human",
+    content: "/ppt-master 帮我做个ppt",
+  } as Message;
+  const intermediateReply = {
+    id: "intermediate-reply",
+    type: "ai",
+    content: "正在生成页面",
+  } as Message;
+  const pageAnchor = {
+    id: "page-anchor",
+    type: "ai",
+    content: "继续导出 SVG",
+  } as Message;
+  const latestAnswer = {
+    id: "latest-answer",
+    type: "ai",
+    content: "任务仍在执行",
+  } as Message;
+  const captured = [protectedPrompt, intermediateReply, pageAnchor];
+  const bridgeOrder = mergeTransientHistoryBridgeOrder([], captured);
+  const previouslyRenderedOrder = [
+    protectedPrompt,
+    intermediateReply,
+    pageAnchor,
+    latestAnswer,
+  ]
+    .map((message) => `message:${message.id}`)
+    .filter((identity): identity is string => Boolean(identity));
+
+  expect(
+    resolveTransientHistoryBridge(
+      [pageAnchor, latestAnswer],
+      captured,
+      bridgeOrder,
+      previouslyRenderedOrder,
+    ).map((message) => message.id),
+  ).toEqual([
+    "protected-prompt",
+    "intermediate-reply",
+    "page-anchor",
+    "latest-answer",
+  ]);
+});
+
 test("resolveTransientHistoryBridge does not duplicate once canonical history catches up", () => {
   expect(
     resolveTransientHistoryBridge(
@@ -876,6 +1190,29 @@ test("mergeTransientHistoryBridgeOrder retains confirmed overlap as a non-render
     "message:human-2",
     "message:ai-2",
   ]);
+});
+
+test("mergeTransientHistoryBridgeOrder returns the same array when nothing is new", () => {
+  const order = mergeTransientHistoryBridgeOrder(
+    [],
+    [summarizationHuman1, summarizationAi1],
+  );
+
+  // Identity, not just equality: this runs per render while the bridge is
+  // active and feeds the coalesced render memo (#4409 Phase 1).
+  expect(mergeTransientHistoryBridgeOrder(order, [summarizationAi1])).toBe(
+    order,
+  );
+  expect(
+    mergeTransientHistoryBridgeOrder(order, [
+      summarizationHuman1,
+      summarizationAi1,
+    ]),
+  ).toBe(order);
+  expect(mergeTransientHistoryBridgeOrder(order, [])).toBe(order);
+  expect(
+    mergeTransientHistoryBridgeOrder(order, [summarizationHuman2]),
+  ).not.toBe(order);
 });
 
 test("mergeTransientHistoryBridgeOrder keeps a recaptured protected prefix in place", () => {
@@ -1003,6 +1340,663 @@ test("computeSummarizationTransientMessages captures live turns dropped before t
       new Set([hiddenSummary.id!]),
     ),
   ).toEqual([summarizationHuman1, summarizationAi1, summarizationHuman2]);
+});
+
+test("computeSummarizationTransientMessages rescues rendered processing steps missing from a stale live snapshot", () => {
+  const processingMessages = Array.from({ length: 10 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `processing-${step}`,
+      type: step % 2 === 0 ? "tool" : "ai",
+      ...(step % 2 === 0 ? { tool_call_id: `call-${step - 1}` } : {}),
+      content: `step ${step}`,
+    } as Message;
+  });
+  // The SDK has already advanced to the 10-message post-compaction window,
+  // while the UI's previous committed frame still contains steps 1..10.
+  const staleLiveSnapshot = processingMessages.slice(4);
+  const summarizationMessages = [
+    {
+      id: "__remove_all__",
+      type: "remove",
+      content: "",
+    } as Message,
+    ...staleLiveSnapshot,
+  ];
+
+  expect(
+    computeSummarizationTransientMessages(
+      staleLiveSnapshot,
+      summarizationMessages,
+      new Set(),
+      processingMessages,
+    ),
+  ).toEqual(processingMessages.slice(0, 4));
+});
+
+test("computeSummarizationTransientMessages rescues steps between a protected input and retained tail", () => {
+  const protectedInput = {
+    id: "protected-input",
+    type: "human",
+    content: "Run a long sequential research task",
+  } as Message;
+  const removedSteps = Array.from({ length: 4 }, (_, index) => ({
+    id: `protected-window-step-${index + 1}`,
+    type: "ai",
+    content: `completed ${index + 1}`,
+  })) as Message[];
+  const retainedTail = {
+    id: "retained-tail",
+    type: "tool",
+    tool_call_id: "retained-call",
+    content: "latest search result",
+  } as Message;
+  const renderedMessages = [protectedInput, ...removedSteps, retainedTail];
+  const retainedWindow = [protectedInput, retainedTail];
+
+  expect(
+    computeSummarizationTransientMessages(
+      retainedWindow,
+      [
+        {
+          id: "__remove_all__",
+          type: "remove",
+          content: "",
+        } as Message,
+        ...retainedWindow,
+      ],
+      new Set(),
+      renderedMessages,
+    ),
+  ).toEqual(removedSteps);
+});
+
+test("repeated compaction keeps every previously rendered processing step in order", () => {
+  const processingMessages = Array.from({ length: 12 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `repeat-processing-${step}`,
+      type: step % 2 === 0 ? "tool" : "ai",
+      ...(step % 2 === 0 ? { tool_call_id: `repeat-call-${step - 1}` } : {}),
+      content: `step ${step}`,
+    } as Message;
+  });
+  const removeAll = {
+    id: "__remove_all__",
+    type: "remove",
+    content: "",
+  } as Message;
+
+  const firstTail = processingMessages.slice(4, 10);
+  const firstMoved = computeSummarizationTransientMessages(
+    firstTail,
+    [removeAll, ...firstTail],
+    new Set(),
+    processingMessages.slice(0, 10),
+  );
+  const firstBridge = mergeTransientHistoryBridge([], firstMoved);
+  const firstMerged = mergeMessages(firstBridge, firstTail, []);
+
+  const secondTail = processingMessages.slice(6);
+  const secondMoved = computeSummarizationTransientMessages(
+    secondTail,
+    [removeAll, ...secondTail],
+    new Set(),
+    processingMessages,
+  );
+  const secondBridge = mergeTransientHistoryBridge(firstBridge, secondMoved);
+  const secondMerged = mergeMessages(secondBridge, secondTail, []);
+
+  expect(firstMerged.map((message) => message.id)).toEqual(
+    processingMessages.slice(0, 10).map((message) => message.id),
+  );
+  expect(secondMerged.map((message) => message.id)).toEqual(
+    processingMessages.map((message) => message.id),
+  );
+});
+
+test("rendered message ledger survives rolling live windows before repeated compaction", () => {
+  const processingMessages = Array.from({ length: 23 }, (_, index) => {
+    const step = index + 1;
+    return {
+      id: `rolling-processing-${step}`,
+      type: "ai",
+      content: `completed ${step}/26`,
+    } as Message;
+  });
+  const firstVisibleWindow = processingMessages.slice(0, 13);
+  const secondVisibleWindow = processingMessages.slice(8, 18);
+  const thirdVisibleWindow = processingMessages.slice(13);
+
+  const firstLedger = mergeRenderedMessageLedger([], firstVisibleWindow);
+  const secondLedger = mergeRenderedMessageLedger(
+    firstLedger,
+    secondVisibleWindow,
+  );
+  const thirdLedger = mergeRenderedMessageLedger(
+    secondLedger,
+    thirdVisibleWindow,
+  );
+
+  expect(thirdLedger.map((message) => message.id)).toEqual(
+    processingMessages.map((message) => message.id),
+  );
+
+  // A later compaction retains only 19..23. The accumulated display ledger
+  // must still supply 14..18 (and every older displayed step) to the bridge.
+  const retainedTail = processingMessages.slice(18);
+  const moved = computeSummarizationTransientMessages(
+    retainedTail,
+    [
+      {
+        id: "__remove_all__",
+        type: "remove",
+        content: "",
+      } as Message,
+      ...retainedTail,
+    ],
+    new Set(),
+    thirdLedger,
+  );
+
+  expect(moved.map((message) => message.id)).toEqual(
+    processingMessages.slice(0, 18).map((message) => message.id),
+  );
+});
+
+test("rendered message ledger replaces a submitted user message with its injected server copy", () => {
+  const submittedHuman = {
+    id: "request-1",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedSystemReminder = {
+    id: "request-1",
+    type: "system",
+    content: "<system-reminder>today</system-reminder>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const injectedMemory = {
+    id: "request-1__memory",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const injectedHuman = {
+    id: "request-1__user",
+    type: "human",
+    content: "Build a presentation",
+    name: "user-input",
+  } as Message;
+  const assistantStep = {
+    id: "assistant-step-1",
+    type: "ai",
+    content: "Reading the presentation skill",
+  } as Message;
+
+  const firstLedger = mergeRenderedMessageLedger([], [submittedHuman]);
+  const nextFrame = mergeMessages(
+    [submittedHuman],
+    [injectedSystemReminder, injectedMemory, injectedHuman, assistantStep],
+    [],
+  ).filter((message) => message.additional_kwargs?.hide_from_ui !== true);
+  const nextLedger = mergeRenderedMessageLedger(firstLedger, nextFrame);
+
+  expect(nextLedger).toEqual([injectedHuman, assistantStep]);
+  expect(nextLedger.filter((message) => message.type === "human")).toHaveLength(
+    1,
+  );
+});
+
+test("local turn order keeps early streamed steps behind the user message", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Previous request",
+  } as Message;
+  const previousAssistant = {
+    id: "previous-assistant",
+    type: "ai",
+    content: "Previous answer",
+  } as Message;
+  const earlyAssistantStep = {
+    id: "early-assistant-step",
+    type: "ai",
+    content: "Reading the presentation skill",
+  } as Message;
+  const optimisticHuman = {
+    id: "opt-human-current",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedHuman = {
+    id: "current-request__user",
+    type: "human",
+    content: "Build a presentation",
+  } as Message;
+  const injectedMemory = {
+    id: "current-request__memory",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const laterAssistantStep = {
+    id: "later-assistant-step",
+    type: "ai",
+    content: "Writing the presentation plan",
+  } as Message;
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-assistant",
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, previousAssistant, earlyAssistantStep, optimisticHuman],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAssistant,
+    optimisticHuman,
+    earlyAssistantStep,
+  ]);
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAssistant,
+        earlyAssistantStep,
+        injectedMemory,
+        injectedHuman,
+        laterAssistantStep,
+      ],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAssistant,
+    injectedMemory,
+    injectedHuman,
+    earlyAssistantStep,
+    laterAssistantStep,
+  ]);
+});
+
+test("reconnected turn order moves same-run steps back behind the user message", () => {
+  // Reload mid-run: replayed `messages-tuple` steps reach the merged list
+  // before the turn's human message (the retained replay buffer may have
+  // dropped it). The live-only human is woven before the next shared anchor,
+  // leaving same-run steps above the user message they belong to.
+  const stepA1 = {
+    id: "step-a1",
+    type: "ai",
+    content: "Searching the web",
+    tool_calls: [{ id: "tc-a1", name: "web_search", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const stepA2 = {
+    id: "step-a2",
+    type: "tool",
+    content: "search results",
+    tool_call_id: "tc-a2",
+    run_id: "run-r",
+  } as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Analyze deerflow",
+  } as Message;
+  const stepB1 = {
+    id: "step-b1",
+    type: "ai",
+    content: "Reading the source",
+    run_id: "run-r",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([stepA1, stepA2, human, stepB1]),
+  ).toEqual([human, stepA1, stepA2, stepB1]);
+});
+
+test("reconnected turn order leaves a resent turn after an interrupted run untouched", () => {
+  // Legit layout: an interrupted earlier run left steps without a final
+  // answer, then the user sent a new message. The earlier run's steps must
+  // NOT be pulled below the new human message.
+  const interruptedStep = {
+    id: "step-old",
+    type: "ai",
+    content: "Interrupted run step",
+    run_id: "run-1",
+  } as Message;
+  const human = {
+    id: "human-2",
+    type: "human",
+    content: "Same question again",
+    run_id: "run-2",
+  } as Message;
+  const newStep = {
+    id: "step-new",
+    type: "ai",
+    content: "New run step",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([interruptedStep, human, newStep]),
+  ).toEqual([interruptedStep, human, newStep]);
+});
+
+test("reconnected turn order only moves steps of the sandwiched run in multi-turn history", () => {
+  const human1 = { id: "human-1", type: "human", content: "First" } as Message;
+  const step1 = {
+    id: "step-1",
+    type: "ai",
+    content: "First run step",
+    run_id: "run-1",
+  } as Message;
+  const answer1 = {
+    id: "answer-1",
+    type: "ai",
+    content: "First answer",
+    run_id: "run-1",
+  } as Message;
+  const misplacedStep = {
+    id: "step-misplaced",
+    type: "ai",
+    content: "Second run step above the human",
+    tool_calls: [{ id: "tc-misplaced", name: "read_file", args: {} }],
+    run_id: "run-2",
+  } as unknown as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Second run step below the human",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      step1,
+      answer1,
+      misplacedStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, step1, answer1, human2, misplacedStep, step2]);
+});
+
+test("reconnected turn order moves live-only steps before any history loads", () => {
+  // Right after reconnect no history page has landed yet: every live message
+  // lacks run_id. A run_id-less step below the human proves the live stream
+  // is past turn start, so run_id-less steps above the human belong to the
+  // same reconnected run.
+  const earlyStep = {
+    id: "live-early",
+    type: "ai",
+    content: "Replayed step",
+    tool_calls: [{ id: "tc-early", name: "web_search", args: {} }],
+  } as unknown as Message;
+  const human = {
+    id: "live-human",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "live-later",
+    type: "ai",
+    content: "Fresh step",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([earlyStep, human, laterStep]),
+  ).toEqual([human, earlyStep, laterStep]);
+});
+
+test("reconnected turn order keeps run_id-less steps when no run_id-less step follows the human", () => {
+  // A run_id-less step above the human is only attributable to the current
+  // run when the run_id-less live stream continues below the human. With
+  // every message below the human carrying a (different) run_id, the stray
+  // step may belong to an older turn and must stay put.
+  const human1 = { id: "human-1", type: "human", content: "First" } as Message;
+  const step1 = {
+    id: "step-1",
+    type: "ai",
+    content: "First run step",
+    run_id: "run-1",
+  } as Message;
+  const strayStep = {
+    id: "stray",
+    type: "ai",
+    content: "Ambiguous step",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second",
+    run_id: "run-2",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Second run step",
+    run_id: "run-2",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      step1,
+      strayStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, step1, strayStep, human2, step2]);
+});
+
+test("reconnected turn order keeps hidden control messages and older-run orphans in place", () => {
+  const orphanStep = {
+    id: "orphan",
+    type: "ai",
+    content: "Pagination orphan from an older run",
+    tool_calls: [{ id: "tc-orphan", name: "web_search", args: {} }],
+    run_id: "run-0",
+  } as unknown as Message;
+  const hiddenControl = {
+    id: "control",
+    type: "human",
+    content: "<memory>context</memory>",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const misplacedStep = {
+    id: "misplaced",
+    type: "ai",
+    content: "Same-run step",
+    tool_calls: [{ id: "tc-misplaced", name: "read_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "Later same-run step",
+    run_id: "run-r",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      orphanStep,
+      hiddenControl,
+      misplacedStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([orphanStep, hiddenControl, human, misplacedStep, laterStep]);
+});
+
+test("reconnected turn order is a no-op when the human message already leads its turn", () => {
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const step = {
+    id: "step",
+    type: "ai",
+    content: "Step",
+    run_id: "run-r",
+  } as Message;
+
+  expect(restoreReconnectedTurnMessageOrder([human, step])).toEqual([
+    human,
+    step,
+  ]);
+  expect(restoreReconnectedTurnMessageOrder([step])).toEqual([step]);
+  expect(restoreReconnectedTurnMessageOrder([])).toEqual([]);
+});
+
+test("reconnected turn order keeps a completed turn's answer above the next human message", () => {
+  // Regression for the branch-thread e2e shape: history feeds where every
+  // message shares one run_id (branch-seeded threads, mocked feeds). A
+  // terminal answer completes its turn and must never be pulled below the
+  // next human message even though the naive same-run check would match.
+  const human1 = {
+    id: "human-1",
+    type: "human",
+    content: "First question",
+    run_id: "run-x",
+  } as Message;
+  const answer1 = {
+    id: "ai-1",
+    type: "ai",
+    content: "First answer",
+    run_id: "run-x",
+  } as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second question",
+    run_id: "run-x",
+  } as Message;
+  const intermediate = {
+    id: "ai-2",
+    type: "ai",
+    content: "Intermediate answer",
+    run_id: "run-x",
+  } as Message;
+  const toolCalling = {
+    id: "ai-3",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "write_todos", args: {} }],
+    run_id: "run-x",
+  } as unknown as Message;
+  const toolResult = {
+    id: "tool-1",
+    type: "tool",
+    tool_call_id: "tc-1",
+    content: "Todos updated",
+    run_id: "run-x",
+  } as Message;
+  const final = {
+    id: "ai-4",
+    type: "ai",
+    content: "Final answer",
+    run_id: "run-x",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      answer1,
+      human2,
+      intermediate,
+      toolCalling,
+      toolResult,
+      final,
+    ]),
+  ).toEqual([
+    human1,
+    answer1,
+    human2,
+    intermediate,
+    toolCalling,
+    toolResult,
+    final,
+  ]);
+});
+
+test("reconnected turn order treats a content-only streaming text as a boundary", () => {
+  // Accepted transient (#4304): a still-streaming text step looks like a
+  // terminal answer until its tool call arrives, so it stays above the human
+  // until canonical history heals the order. Tool-calling steps after the
+  // last such boundary are still restored.
+  const streamingText = {
+    id: "streaming-text",
+    type: "ai",
+    content: "Let me analyze this",
+    run_id: "run-r",
+  } as Message;
+  const toolStep = {
+    id: "tool-step",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-1", name: "read_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+  const human = {
+    id: "human-r",
+    type: "human",
+    content: "Question",
+  } as Message;
+  const laterStep = {
+    id: "later",
+    type: "ai",
+    content: "",
+    tool_calls: [{ id: "tc-2", name: "write_file", args: {} }],
+    run_id: "run-r",
+  } as unknown as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      streamingText,
+      toolStep,
+      human,
+      laterStep,
+    ]),
+  ).toEqual([streamingText, human, toolStep, laterStep]);
+});
+
+test("rendered message ledger does not retain explicitly superseded messages", () => {
+  const retained = {
+    id: "retained-answer",
+    type: "ai",
+    content: "keep me",
+  } as Message;
+  const superseded = {
+    id: "superseded-answer",
+    type: "ai",
+    content: "replace me",
+  } as Message;
+
+  expect(
+    mergeRenderedMessageLedger(
+      [retained, superseded],
+      [retained],
+      new Set([superseded.id!]),
+    ),
+  ).toEqual([retained]);
 });
 
 test("computeSummarizationTransientMessages excludes already-summarized control messages", () => {

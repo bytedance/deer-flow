@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { resolveAuthNextPath } from "@/core/auth/next-path";
 import {
   loadRememberLoginPreference,
   saveRememberLoginPreference,
@@ -21,39 +22,6 @@ import {
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
-
-/**
- * Validate next parameter
- * Prevent open redirect attacks
- * Per RFC-001: Only allow relative paths starting with /
- */
-function validateNextParam(next: string | null): string | null {
-  if (!next) {
-    return null;
-  }
-
-  // Need start with / (relative path)
-  if (!next.startsWith("/")) {
-    return null;
-  }
-
-  // Disallow protocol-relative URLs
-  if (
-    next.startsWith("//") ||
-    next.startsWith("http://") ||
-    next.startsWith("https://")
-  ) {
-    return null;
-  }
-
-  // Disallow URLs with different protocols (e.g., javascript:, data:, etc)
-  if (next.includes(":") && !next.startsWith("/")) {
-    return null;
-  }
-
-  // Valid relative path
-  return next;
-}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -72,7 +40,10 @@ export default function LoginPage() {
   const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(
     null,
   );
-  const [setupStatusChecked, setSetupStatusChecked] = useState(false);
+  const [setupStatusPhase, setSetupStatusPhase] = useState<
+    "checking" | "ready" | "unavailable"
+  >("checking");
+  const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
 
   // Extract error from query params (e.g., ?error=sso_failed)
   const errorParam = searchParams.get("error");
@@ -91,12 +62,17 @@ export default function LoginPage() {
 
   // Get next parameter for validated redirect
   const nextParam = searchParams.get("next");
-  const redirectPath = validateNextParam(nextParam) ?? "/workspace";
+  const redirectPath = resolveAuthNextPath(nextParam);
   const regularSignupAllowed = canCreateRegularAccount({
-    checked: setupStatusChecked,
+    // A failed probe must not expose registration while the system's setup
+    // state is unknown. Existing users can still sign in normally.
+    checked: setupStatusPhase === "ready",
     status: setupStatus,
   });
   const systemNeedsAdminSetup = setupStatus?.needs_setup === true;
+  const showSetupStatusUnavailable =
+    setupStatusPhase === "unavailable" ||
+    (setupStatusAttempt > 0 && setupStatusPhase === "checking");
 
   // Redirect if already authenticated (client-side, post-login)
   useEffect(() => {
@@ -113,14 +89,17 @@ export default function LoginPage() {
     }
   }, []);
 
-  // Fetch setup state and SSO providers
+  // Fetch setup state independently so retrying a slow Gateway does not also
+  // refetch unrelated auth-provider configuration.
   useEffect(() => {
     let cancelled = false;
+    setSetupStatusPhase("checking");
 
     void fetchSetupStatus()
       .then((data) => {
         if (cancelled) return;
         setSetupStatus(data);
+        setSetupStatusPhase("ready");
         if (data.needs_setup) {
           setIsLogin(true);
         }
@@ -128,13 +107,19 @@ export default function LoginPage() {
       .catch(() => {
         if (!cancelled) {
           setSetupStatus(null);
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setSetupStatusChecked(true);
+          setSetupStatusPhase("unavailable");
         }
       });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [setupStatusAttempt]);
+
+  // SSO providers are static for the page lifetime and should not be coupled to
+  // setup-status retries.
+  useEffect(() => {
+    let cancelled = false;
 
     void fetch("/api/v1/auth/providers")
       .then((r) => r.json())
@@ -233,6 +218,34 @@ export default function LoginPage() {
             {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
           </p>
         </div>
+
+        {showSetupStatusUnavailable && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="border-l-2 border-amber-500 ps-3 text-sm"
+          >
+            <p className="font-medium">{t.login.serviceUnavailableTitle}</p>
+            <p className="text-muted-foreground mt-1">
+              {t.login.serviceUnavailableDescription}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              disabled={setupStatusPhase === "checking"}
+              onClick={() => {
+                setSetupStatusPhase("checking");
+                setSetupStatusAttempt((attempt) => attempt + 1);
+              }}
+            >
+              {setupStatusPhase === "checking"
+                ? t.login.pleaseWait
+                : t.login.retry}
+            </Button>
+          </div>
+        )}
 
         {systemNeedsAdminSetup && (
           <div className="border-l-2 border-blue-500 ps-3 text-sm">

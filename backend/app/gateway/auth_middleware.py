@@ -24,8 +24,9 @@ from app.gateway.auth_disabled import (
     get_auth_disabled_user,
     is_auth_disabled,
 )
-from app.gateway.authz import _ALL_PERMISSIONS, AuthContext
+from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
+from app.gateway.request_path import get_request_route_path
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -86,7 +87,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(request.url.path):
+        if _is_public(get_request_route_path(request)):
             return await call_next(request)
 
         internal_user = None
@@ -151,7 +152,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
         request.state.auth_source = auth_source
-        request.state.auth = AuthContext(user=user, permissions=_ALL_PERMISSIONS)
+        permissions = await resolve_route_permissions(
+            user,
+            is_internal=auth_source == AUTH_SOURCE_INTERNAL,
+        )
+        request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:
             return await call_next(request)

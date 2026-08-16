@@ -3,14 +3,31 @@
 import json
 import logging
 import os
+import stat
+import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
+from deerflow.constants import (
+    DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_mcp_transport_alias(data: Any) -> Any:
+    """Promote MCP-spec ``transport`` to ``type`` when ``type`` is absent."""
+    if isinstance(data, dict):
+        transport = data.get("transport")
+        if transport and not data.get("type"):
+            return {**data, "type": transport}
+    return data
 
 
 class McpRoutingConfig(BaseModel):
@@ -47,6 +64,32 @@ class McpToolOverride(BaseModel):
 
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig)
     model_config = ConfigDict(extra="allow")
+
+
+class McpTaskToolsetConfig(BaseModel):
+    """One ordinary submit/status/cancel contract exposed by an MCP server.
+
+    Tool names are the exact raw names advertised by that server. The
+    presentation prefix added by ``langchain-mcp-adapters`` is deliberately not
+    part of this durable binding.
+    """
+
+    name: str = Field(
+        min_length=1,
+        max_length=MCP_TASK_NAME_MAX_LENGTH,
+        description="Stable local name shown for tasks from this toolset",
+    )
+    submit_tool: str = Field(min_length=1, description="Raw MCP tool name used to submit work")
+    status_tool: str = Field(min_length=1, description="Raw MCP tool name used to poll work")
+    cancel_tool: str = Field(min_length=1, description="Raw MCP tool name used to cancel work")
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("MCP task toolset name must not be empty")
+        return value
 
 
 class McpOAuthConfig(BaseModel):
@@ -86,9 +129,26 @@ class McpServerConfig(BaseModel):
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
+    tool_name_prefix: bool = Field(
+        default=True,
+        description="Whether to prefix discovered tool names with the MCP server name to avoid cross-server collisions",
+    )
     tool_call_timeout: float | None = Field(
         default=None,
-        description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
+        description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
+    )
+    session_init_timeout: float | None = Field(
+        default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        description=(
+            "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
+            "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
+            "initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung server cannot block agent "
+            "construction or the task poller indefinitely. None means no timeout."
+        ),
+    )
+    task_toolsets: list[McpTaskToolsetConfig] = Field(
+        default_factory=list,
+        description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
     )
     model_config = ConfigDict(extra="allow")
 
@@ -104,11 +164,19 @@ class McpServerConfig(BaseModel):
         ``stdio`` (the default). This validator normalizes the two so either
         spelling works, with ``type`` taking precedence when both are provided.
         """
-        if isinstance(data, dict):
-            transport = data.get("transport")
-            if transport and not data.get("type"):
-                data = {**data, "type": transport}
-        return data
+        return normalize_mcp_transport_alias(data)
+
+    @model_validator(mode="after")
+    def _validate_task_tool_bindings(self) -> "McpServerConfig":
+        claimed: dict[str, str] = {}
+        for toolset in self.task_toolsets:
+            for role in ("submit_tool", "status_tool", "cancel_tool"):
+                raw_name = getattr(toolset, role)
+                previous = claimed.get(raw_name)
+                if previous is not None:
+                    raise ValueError(f"MCP task tool {raw_name!r} must be unique across task_toolsets and roles; it is configured as both {previous} and {toolset.name}.{role}")
+                claimed[raw_name] = f"{toolset.name}.{role}"
+        return self
 
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
@@ -146,6 +214,15 @@ class ExtensionsConfig(BaseModel):
         description="Map of skill name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
+        for server_name, server in self.mcp_servers.items():
+            if not server.task_toolsets:
+                continue
+            if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
+                raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
+        return self
 
     def to_file_dict(self) -> dict[str, Any]:
         """Serialize in the public extensions_config.json shape."""
@@ -315,11 +392,75 @@ class ExtensionsConfig(BaseModel):
         skill_config = self.skills.get(skill_name)
         if skill_config is None:
             # Default to enabled for all skill categories
-            return skill_category in ("public", "custom", "legacy")
+            return skill_category in ("public", "custom", "legacy", "integrations")
         return skill_config.enabled
 
 
 _extensions_config: ExtensionsConfig | None = None
+
+
+def _fsync_directory_best_effort(directory: Path) -> None:
+    """Persist a directory entry update where the platform supports it."""
+    if os.name == "nt":
+        return
+
+    try:
+        directory_fd = os.open(directory, os.O_RDONLY)
+    except OSError:
+        return
+
+    try:
+        os.fsync(directory_fd)
+    except OSError:
+        logger.debug("Could not fsync extensions config directory: %s", directory, exc_info=True)
+    finally:
+        try:
+            os.close(directory_fd)
+        except OSError:
+            logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
+
+
+def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
+    """Write extensions config without exposing a truncated or partial file."""
+    path = Path(path)
+    target_path = path.resolve(strict=False) if path.is_symlink() else path
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+
+    existing_mode: int | None = None
+    try:
+        existing_mode = stat.S_IMODE(target_path.stat().st_mode)
+    except FileNotFoundError:
+        pass
+
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target_path.parent,
+            prefix=f".{target_path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary_file:
+            temporary_path = Path(temporary_file.name)
+            json.dump(data, temporary_file, indent=2)
+            if existing_mode is not None:
+                temporary_path.chmod(existing_mode)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+
+        os.replace(temporary_path, target_path)
+        _fsync_directory_best_effort(target_path.parent)
+    finally:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError:
+                logger.warning(
+                    "Could not remove temporary extensions config file: %s",
+                    temporary_path,
+                    exc_info=True,
+                )
 
 
 def get_extensions_config() -> ExtensionsConfig:
@@ -335,6 +476,25 @@ def get_extensions_config() -> ExtensionsConfig:
     if _extensions_config is None:
         _extensions_config = ExtensionsConfig.from_file()
     return _extensions_config
+
+
+#: Serializes read-modify-write cycles on ``extensions_config.json`` across every
+#: writer. Both the skills router (skill enable/disable) and the MCP router
+#: (server config updates) read this file, merge a change and write it back.
+#: While each RMW ran inline on the event loop they were implicitly serialized;
+#: once a writer offloads its RMW to a worker thread the loop is free to
+#: interleave the other writer inside the read->write window, and the second
+#: write silently drops the first one's change.
+#:
+#: This is a ``threading.Lock`` rather than an ``asyncio.Lock``, and it must be
+#: acquired *inside* the worker that performs the RMW. An asyncio lock held
+#: around ``await asyncio.to_thread(...)`` protects only the awaiting task: if
+#: that task is cancelled the context manager releases immediately while the
+#: worker thread keeps writing, letting a second writer in. Owning the lock from
+#: the worker keeps it held until the write and reload actually finish. It also
+#: has no event-loop affinity, so writers running on different loops still
+#: exclude each other.
+extensions_config_write_lock = threading.Lock()
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:

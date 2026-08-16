@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.dialects import postgresql
 
 from deerflow.persistence.run import RunRepository
-from deerflow.runtime import CancelOutcome, RunManager, RunStatus
+from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import RunStore
 
@@ -29,6 +29,9 @@ async def _cleanup():
 
 
 class _CustomRunStoreWithoutProgress(RunStore):
+    def __init__(self):
+        self.legacy_atomic_calls = 0
+
     async def put(self, *args, **kwargs):
         return None
 
@@ -40,6 +43,9 @@ class _CustomRunStoreWithoutProgress(RunStore):
 
     async def update_status(self, *args, **kwargs):
         return None
+
+    async def start_run(self, *args, **kwargs):
+        return False
 
     async def delete(self, *args, **kwargs):
         return None
@@ -66,6 +72,7 @@ class _CustomRunStoreWithoutProgress(RunStore):
         return []
 
     async def create_run_atomic(self, *args, **kwargs):
+        self.legacy_atomic_calls += 1
         return {}, []
 
     async def claim_for_takeover(self, *args, **kwargs):
@@ -77,6 +84,28 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
     store = _CustomRunStoreWithoutProgress()
 
     await store.update_run_progress("r1", total_tokens=1)
+
+
+@pytest.mark.anyio
+async def test_legacy_create_run_atomic_store_remains_compatible():
+    store = _CustomRunStoreWithoutProgress()
+
+    await store.create_thread_operation_atomic(
+        "r1",
+        thread_id="t1",
+        owner_worker_id="worker-1",
+        lease_expires_at=None,
+    )
+
+    assert store.legacy_atomic_calls == 1
+    with pytest.raises(NotImplementedError, match="cannot create non-run"):
+        await store.create_thread_operation_atomic(
+            "checkpoint-write-1",
+            thread_id="t1",
+            owner_worker_id="worker-1",
+            lease_expires_at=None,
+            operation_kind=ThreadOperationKind.checkpoint_write,
+        )
 
 
 class TestRunRepository:
@@ -128,6 +157,22 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_start_run_only_updates_pending_rows(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("pending-run", thread_id="t1", status="pending")
+        await repo.put("cancelled-run", thread_id="t2", status="pending")
+        await repo.update_status("cancelled-run", "interrupted")
+
+        assert await repo.start_run("pending-run") is True
+        assert await repo.start_run("cancelled-run") is False
+
+        pending_row = await repo.get("pending-run")
+        cancelled_row = await repo.get("cancelled-run")
+        assert pending_row["status"] == "running"
+        assert cancelled_row["status"] == "interrupted"
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_update_status_with_error(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("r1", thread_id="t1")
@@ -146,6 +191,22 @@ class TestRunRepository:
         rows = await repo.list_by_thread("t1")
         assert len(rows) == 2
         assert all(r["thread_id"] == "t1" for r in rows)
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_run_history_excludes_internal_thread_operations(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="success")
+        await repo.put(
+            "checkpoint-write-1",
+            thread_id="t1",
+            status="error",
+            operation_kind=ThreadOperationKind.checkpoint_write,
+        )
+
+        rows = await repo.list_by_thread("t1")
+
+        assert [row["run_id"] for row in rows] == ["r1"]
         await _cleanup()
 
     @pytest.mark.anyio
@@ -233,6 +294,21 @@ class TestRunRepository:
         repo = await _make_repo(tmp_path)
         updated = await repo.update_run_completion("missing", status="error", total_tokens=1)
         assert updated is False
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_update_run_completion_does_not_replace_terminal_status(self, tmp_path):
+        """Late completion data cannot rewrite a peer's terminal outcome."""
+        repo = await _make_repo(tmp_path)
+        await repo.put("r1", thread_id="t1", status="running")
+        await repo.update_status("r1", "error", error="peer takeover")
+
+        updated = await repo.update_run_completion("r1", status="success", total_tokens=1)
+
+        row = await repo.get("r1")
+        assert updated is False
+        assert row["status"] == "error"
+        assert row["error"] == "peer takeover"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -648,7 +724,7 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
-    async def test_create_run_atomic_reject_propagates_conflict_on_unique_violation(self, tmp_path):
+    async def test_create_thread_operation_atomic_rejects_unique_violation(self, tmp_path):
         """reject path against a real SQLite-backed store must surface as ConflictError, not raw IntegrityError.
 
         The partial unique index ``uq_runs_thread_active`` is created by
@@ -678,7 +754,7 @@ class TestRunRepository:
         # Pre-insert an active run on thread T directly through the store so
         # the partial unique index has something to enforce on the second insert.
         lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
-        await repo.create_run_atomic(
+        await repo.create_thread_operation_atomic(
             "run-A",
             thread_id="thread-T",
             owner_worker_id="worker-A",
@@ -695,6 +771,65 @@ class TestRunRepository:
                 multitask_strategy="reject",
             )
 
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_checkpoint_write_reservation_blocks_interrupt_run_on_sql_store(self, tmp_path):
+        """An interrupt-strategy run cannot displace a durable checkpoint writer."""
+        repo = await _make_repo(tmp_path)
+        compaction_worker = RunManager(store=repo, worker_id="worker-a")
+        run_worker = RunManager(store=repo, worker_id="worker-b")
+
+        async with compaction_worker.reserve_thread_operation("thread-T", kind=ThreadOperationKind.checkpoint_write):
+            with pytest.raises(ConflictError, match="checkpoint write"):
+                await run_worker.create_or_reject("thread-T", multitask_strategy="interrupt")
+
+        assert await repo.list_by_thread("thread-T") == []
+        admitted = await run_worker.create_or_reject("thread-T")
+        assert admitted.status == RunStatus.pending
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_reservation_release_uses_record_user_without_ambient_context(self, tmp_path):
+        """Release must not depend on the request ContextVar still being set."""
+        repo = await _make_repo(tmp_path)
+        manager = RunManager(store=repo)
+
+        async with manager.reserve_thread_operation(
+            "thread-T",
+            kind=ThreadOperationKind.checkpoint_write,
+            user_id="reservation-owner",
+        ):
+            inflight = await repo.list_inflight()
+            assert len(inflight) == 1
+            assert inflight[0]["user_id"] == "reservation-owner"
+
+        assert await repo.list_inflight() == []
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_interrupt_reclaims_expired_checkpoint_write_reservation_on_sql_store(self, tmp_path):
+        """An expired durable checkpoint writer is immediately reclaimable."""
+        repo = await _make_repo(tmp_path)
+        expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "checkpoint-write-1",
+            thread_id="thread-T",
+            status="pending",
+            operation_kind=ThreadOperationKind.checkpoint_write,
+            owner_worker_id="dead-worker",
+            lease_expires_at=expired,
+            created_at=expired,
+        )
+        manager = RunManager(store=repo, worker_id="worker-b")
+
+        admitted = await manager.create_or_reject("thread-T", multitask_strategy="interrupt")
+
+        assert admitted.status == RunStatus.pending
+        stale = await repo.get("checkpoint-write-1")
+        assert stale is not None
+        assert stale["status"] == "interrupted"
+        assert stale["owner_worker_id"] == "worker-b"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -777,12 +912,12 @@ class TestRunRepository:
         assert _is_unique_violation(sa_err) is True
 
     @pytest.mark.anyio
-    async def test_create_run_atomic_interrupt_tolerates_tz_naive_lease_on_sqlite(self, tmp_path):
+    async def test_create_thread_operation_atomic_tolerates_tz_naive_lease_on_sqlite(self, tmp_path):
         """Interrupt path must not raise TypeError comparing naive vs aware datetimes.
 
         SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` (see
         the comment in ``RunRepository._row_to_dict``). The interrupt branch
-        of ``create_run_atomic`` compares ``row.lease_expires_at`` against
+        of ``create_thread_operation_atomic`` compares ``row.lease_expires_at`` against
         the aware ``cutoff = datetime.now(UTC) - ...`` in Python. Under
         default config (heartbeat disabled) leases are always NULL so the
         ``is not None`` check short-circuits, but there is no guard against
@@ -801,7 +936,7 @@ class TestRunRepository:
         # The lease value is stored as ISO; SQLite reads it back as a tz-naive
         # datetime — exactly the shape that triggered the bug.
         valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
-        await repo.create_run_atomic(
+        await repo.create_thread_operation_atomic(
             "valid-lease-run",
             thread_id="thread-T",
             owner_worker_id="other-worker",
@@ -813,7 +948,7 @@ class TestRunRepository:
         # The interrupt path must surface a clean ConflictError, not a
         # TypeError from the naive-vs-aware comparison.
         with pytest.raises(ConflictError, match="another worker"):
-            await repo.create_run_atomic(
+            await repo.create_thread_operation_atomic(
                 "run-new",
                 thread_id="thread-T",
                 owner_worker_id="w1",
@@ -856,6 +991,125 @@ class TestRunRepository:
         row = await repo.get("run-1")
         assert row["status"] == "running"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_request_cancel_is_returned_by_owner_lease_renewal(self, tmp_path):
+        """The SQL store must atomically carry the first cancel action to the owner."""
+        repo = await _make_repo(tmp_path)
+        lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=lease,
+        )
+
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        assert await repo.request_cancel("run-1", action="interrupt") == "rollback"
+
+        renewal = await repo.renew_lease(
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+        )
+
+        assert renewal.renewed is True
+        assert renewal.cancel_action == "rollback"
+        row = await repo.get("run-1")
+        assert row["cancel_action"] == "rollback"
+        assert row["cancel_requested_at"] is not None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_request_cancel_rejects_terminal_run(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put("run-1", thread_id="t1", status="success")
+
+        assert await repo.request_cancel("run-1", action="interrupt") is None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_cancel_request_wins_before_owner_completion(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+        )
+
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        result = await repo.finalize_if_not_cancelled(
+            "run-1",
+            status="success",
+        )
+
+        assert result.finalized is False
+        assert result.cancel_action == "rollback"
+        assert (await repo.get("run-1"))["status"] == "running"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_owner_completion_wins_before_cancel_request(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+        )
+
+        result = await repo.finalize_if_not_cancelled(
+            "run-1",
+            status="success",
+        )
+
+        assert result.finalized is True
+        assert await repo.request_cancel("run-1", action="rollback") is None
+        assert (await repo.get("run-1"))["status"] == "success"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_reconciliation_skips_run_renewed_after_scan(self, tmp_path):
+        """The SQL takeover CAS must reject a candidate renewed after its scan."""
+        repo = await _make_repo(tmp_path)
+        grace = 10
+        run_id = "renewed-after-scan"
+        owner_worker_id = "worker-alive"
+        try:
+            await repo.put(
+                run_id,
+                thread_id="t1",
+                status="running",
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=(datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat(),
+                created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+            )
+            original_scan = repo.list_inflight_with_expired_lease
+
+            async def scan_then_renew(*, before=None, grace_seconds=10):
+                rows = await original_scan(before=before, grace_seconds=grace_seconds)
+                renewed = await repo.update_lease(
+                    run_id,
+                    owner_worker_id=owner_worker_id,
+                    lease_expires_at=(datetime.now(UTC) + timedelta(seconds=60)).isoformat(),
+                )
+                assert renewed is True
+                return rows
+
+            repo.list_inflight_with_expired_lease = scan_then_renew
+            manager = RunManager(store=repo)
+
+            recovered = await manager.reconcile_orphaned_inflight_runs(error="orphaned")
+
+            row = await repo.get(run_id)
+            assert recovered == []
+            assert row is not None
+            assert row["status"] == "running"
+            assert datetime.fromisoformat(row["lease_expires_at"]) > datetime.now(UTC)
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_claim_for_takeover_succeeds_with_null_lease(self, tmp_path):

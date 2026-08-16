@@ -12,6 +12,7 @@ from deerflow.config import get_paths
 from .diff import compare_snapshots, get_changed_paths
 from .scanner import scan_workspace_roots
 from .types import (
+    WORKSPACE_CHANGES_EVENT_CATEGORY,
     WORKSPACE_CHANGES_EVENT_TYPE,
     WORKSPACE_CHANGES_METADATA_KEY,
     WorkspaceChangeLimits,
@@ -80,6 +81,7 @@ async def capture_workspace_snapshot(
     user_id: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
     include_text: bool = True,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> WorkspaceSnapshot:
     # `_prepare_capture` creates the text cache dir inside the worker, so the
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
@@ -109,6 +111,7 @@ async def capture_workspace_snapshot(
             limits=limits,
             include_text=include_text,
             text_cache_dir=text_cache_dir,
+            extra_excluded_dir_names=extra_excluded_dir_names,
         )
     except Exception:
         if text_cache_dir is not None:
@@ -124,6 +127,7 @@ async def record_workspace_changes(
     *,
     user_id: str | None = None,
     limits: WorkspaceChangeLimits | None = None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> dict | None:
     try:
         roots = await asyncio.to_thread(build_thread_workspace_roots, thread_id, user_id=user_id)
@@ -132,6 +136,7 @@ async def record_workspace_changes(
             roots,
             limits=limits,
             include_text=False,
+            extra_excluded_dir_names=extra_excluded_dir_names,
         )
         changed_paths = get_changed_paths(before, after_metadata)
         after = await asyncio.to_thread(
@@ -140,6 +145,7 @@ async def record_workspace_changes(
             limits=limits,
             include_text=True,
             text_paths=changed_paths,
+            extra_excluded_dir_names=extra_excluded_dir_names,
         )
         result = compare_snapshots(before, after, limits=limits)
         if not result.has_changes():
@@ -153,7 +159,7 @@ async def record_workspace_changes(
             thread_id=thread_id,
             run_id=run_id,
             event_type=WORKSPACE_CHANGES_EVENT_TYPE,
-            category="workspace",
+            category=WORKSPACE_CHANGES_EVENT_CATEGORY,
             content=content,
             metadata={WORKSPACE_CHANGES_METADATA_KEY: payload},
         )

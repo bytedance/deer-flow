@@ -72,6 +72,16 @@
 
 @custom-variant dark (&:is(.dark *));
 
+@keyframes streaming-list-marker-fade-in {
+  from {
+    color: transparent;
+  }
+}
+
+[data-streaming-list-item]::marker {
+  animation: streaming-list-marker-fade-in 200ms ease both;
+}
+
 @theme {
   --font-sans:
     ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
@@ -267,6 +277,10 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0.0098 87.47);
   --sidebar-ring: oklch(0.708 0 0);
+}
+
+html.dark .shiki span {
+  color: var(--shiki-dark) !important;
 }
 
 .dark {

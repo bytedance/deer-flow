@@ -678,11 +678,29 @@ class LocalSandbox(Sandbox):
 
         return sorted(result)
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved_path = self._resolve_path(path)
+        should_slice = start_line is not None or end_line is not None
         try:
             with open(resolved_path, encoding="utf-8") as f:
-                content = f.read()
+                if not should_slice:
+                    content = f.read()
+
+                start = max(start_line or 1, 1)
+                if should_slice:
+                    selected: list[str] = []
+                    for line_number, line in enumerate(f, start=1):
+                        if line_number < start:
+                            continue
+                        if end_line is not None and line_number > end_line:
+                            break
+                        selected.append(line.rstrip("\r\n"))
+                    content = "\n".join(selected)
             # Only reverse-resolve paths in files that were previously written
             # by write_file (agent-authored content). User-uploaded files,
             # external tool output, and other non-agent content should not be

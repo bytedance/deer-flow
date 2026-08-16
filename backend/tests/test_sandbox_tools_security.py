@@ -10,6 +10,7 @@ from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
     _compiled_mask_patterns,
+    _extract_skill_name_from_skills_path,
     _get_custom_mount_for_path,
     _get_custom_mounts,
     _is_acp_workspace_path,
@@ -258,6 +259,26 @@ def test_mask_local_paths_no_thread_data_still_masks_skills() -> None:
         assert "/mnt/skills/a/b.md" in masked
 
 
+def test_mask_local_paths_hides_global_integration_skill_paths(tmp_path: Path) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    integration_dir = tmp_path / "integrations" / "skills" / "lark-cli" / "lark-doc"
+    integration_dir.mkdir(parents=True)
+    output = f"Reading: {integration_dir / 'SKILL.md'}"
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+        patch("deerflow.config.paths.get_paths", return_value=paths),
+        patch("deerflow.runtime.user_context.get_effective_user_id", return_value="alice"),
+    ):
+        masked = mask_local_paths_in_output(output, _THREAD_DATA)
+
+    assert str(integration_dir) not in masked
+    assert "/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md" in masked
+
+
 # ---------- _reject_path_traversal ----------
 
 
@@ -370,6 +391,42 @@ def test_resolve_skills_path_resolves_root() -> None:
     ):
         resolved = _resolve_skills_path("/mnt/skills")
         assert resolved == "/home/user/deer-flow/skills"
+
+
+def test_extract_skill_name_from_integration_skill_path() -> None:
+    with patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"):
+        assert _extract_skill_name_from_skills_path("/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md") == "lark-doc"
+        assert _extract_skill_name_from_skills_path("/mnt/skills/integrations/lark-cli") is None
+
+
+def test_resolve_skills_path_resolves_global_integration_skills(tmp_path: Path) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    expected = tmp_path / "integrations" / "skills" / "lark-cli" / "lark-doc" / "SKILL.md"
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+        patch("deerflow.config.paths.get_paths", return_value=paths),
+        patch("deerflow.runtime.user_context.get_effective_user_id", return_value="alice"),
+    ):
+        resolved = _resolve_skills_path("/mnt/skills/integrations/lark-cli/lark-doc/SKILL.md")
+
+    assert resolved == str(expected)
+
+
+def test_resolve_skills_path_blocks_integration_traversal(tmp_path: Path) -> None:
+    from deerflow.config.paths import Paths
+
+    paths = Paths(base_dir=tmp_path)
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/home/user/deer-flow/skills"),
+        patch("deerflow.config.paths.get_paths", return_value=paths),
+        patch("deerflow.runtime.user_context.get_effective_user_id", return_value="alice"),
+    ):
+        with pytest.raises(PermissionError, match="path traversal detected"):
+            _resolve_skills_path("/mnt/skills/integrations/../../etc/passwd")
 
 
 def test_resolve_skills_path_raises_when_not_configured() -> None:
@@ -1188,7 +1245,12 @@ def test_str_replace_parallel_updates_should_preserve_both_edits(monkeypatch) ->
             self._state_lock = threading.Lock()
             self._overlap_detected = threading.Event()
 
-        def read_file(self, path: str) -> str:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
             with self._state_lock:
                 self._active_reads += 1
                 snapshot = self.content
@@ -1251,7 +1313,12 @@ def test_str_replace_parallel_updates_in_isolated_sandboxes_should_not_share_pat
             self.content = "alpha\nbeta\n"
             self._shared_state = shared_state
 
-        def read_file(self, path: str) -> str:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
             state_lock = self._shared_state["state_lock"]
             with state_lock:
                 active_reads = self._shared_state["active_reads"]
@@ -1333,7 +1400,12 @@ def test_str_replace_and_append_on_same_path_should_preserve_both_updates(monkey
             self.str_replace_has_snapshot = threading.Event()
             self.append_finished = threading.Event()
 
-        def read_file(self, path: str) -> str:
+        def read_file(
+            self,
+            path: str,
+            start_line: int | None = None,
+            end_line: int | None = None,
+        ) -> str:
             with self.state_lock:
                 snapshot = self.content
             self.str_replace_has_snapshot.set()

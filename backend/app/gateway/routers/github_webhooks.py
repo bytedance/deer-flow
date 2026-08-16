@@ -187,19 +187,27 @@ async def receive_github_webhook(
     automatically retry a failed delivery of any kind — 5xx, timeout, or
     connection error are all simply recorded as failed; see
     https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries.
-    A 200 response marks the delivery permanently successful, so
-    swallowing a transient registry filesystem error or bus publish
-    failure into a 200 would silently drop a real webhook forever with no
-    way to recover it. Returning 503 instead keeps the delivery correctly
-    recorded as failed in GitHub's Recent Deliveries / Deliveries API, so
-    an operator's manual "Redeliver" click, a REST API call, or a
-    self-hosted recovery script (the pattern GitHub's own docs recommend)
-    can still recover it — by the time that redelivery lands the
-    underlying outage is usually gone. The `is_route_enabled()` startup
-    check still handles *configuration* errors fail-closed (route absent
-    → 404); 503 is reserved for runtime failures worth making recoverable
-    this way. Permanent / non-retryable conditions (unknown event, missing
-    channel service) keep returning 200.
+    Swallowing a transient registry filesystem error or bus publish
+    failure into a 200 would mark the delivery successful, so it never
+    surfaces as failed in GitHub's Recent Deliveries / Deliveries API and
+    a scheduled recovery script filtering on non-OK status (the pattern
+    GitHub's own docs recommend) will never flag it for redelivery. That
+    is a discoverability problem, not literal unrecoverability — GitHub's
+    manual "Redeliver" button and its REST/App redelivery endpoints place
+    no failed-status precondition on the delivery id (see
+    https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks),
+    so an operator who independently identifies this exact delivery can
+    still redeliver it by hand within GitHub's ~3-day redelivery window —
+    they just get no automated signal telling them to. Returning 503
+    keeps the delivery correctly recorded as failed instead, so that same
+    manual click, REST call, or recovery script actually finds it rather
+    than merely being capable of redelivering it if asked, well inside
+    the window the underlying outage usually clears in. The
+    `is_route_enabled()` startup check still handles *configuration*
+    errors fail-closed (route absent → 404); 503 is reserved for runtime
+    failures worth making discoverable and recoverable this way.
+    Permanent / non-retryable conditions (unknown event, missing channel
+    service) keep returning 200.
 
     The route is fail-closed: :func:`is_route_enabled` should have already
     prevented this handler from being mounted when no secret is configured.
@@ -326,14 +334,20 @@ async def receive_github_webhook(
             # ``fanout_event`` calls the registry (filesystem) and the
             # message bus; both can fail transiently (disk hiccup, bus
             # queue full, asyncio cancellation). Swallowing those into a
-            # 200 would permanently drop a real webhook, since GitHub
-            # treats 200 as final success and does not automatically
-            # retry any failure — including 5xx (see
+            # 200 would hide a real failure: GitHub treats 200 as final
+            # success and never automatically retries any failure,
+            # including 5xx (see
             # https://docs.github.com/en/webhooks/using-webhooks/handling-failed-webhook-deliveries).
-            # 503 keeps the delivery recorded as failed so a manual
-            # "Redeliver", the REST API, or a recovery script can recover
-            # it. The startup-time ``is_route_enabled`` check still
-            # covers fail-closed *configuration* errors.
+            # A 200 delivery can still be redelivered by hand — GitHub's
+            # manual "Redeliver" button and REST redelivery endpoint have
+            # no failed-status precondition (see
+            # https://docs.github.com/en/webhooks/testing-and-troubleshooting-webhooks/redelivering-webhooks)
+            # — but nothing flags it for an operator or recovery script
+            # to do so. 503 keeps the delivery correctly recorded as
+            # failed so that same manual click, REST call, or recovery
+            # script actually finds and recovers it. The startup-time
+            # ``is_route_enabled`` check still covers fail-closed
+            # *configuration* errors.
             try:
                 dispatch_result = await fanout_event(
                     service.bus,

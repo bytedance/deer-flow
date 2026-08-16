@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from unittest import mock
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from langchain.agents import create_agent
@@ -13,7 +13,7 @@ from langgraph.constants import TAG_NOSTREAM
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
-from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, create_summarization_middleware
+from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, SummaryGenerationError, create_summarization_middleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.summarization_config import SummarizationConfig
@@ -78,6 +78,7 @@ def _middleware(
 ) -> DeerFlowSummarizationMiddleware:
     model = MagicMock()
     model.invoke.return_value = SimpleNamespace(text="compressed summary")
+    model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="compressed summary"))
     model.with_config.return_value = model
     return DeerFlowSummarizationMiddleware(
         model=model,
@@ -727,3 +728,481 @@ def test_benign_summary_input_text_preserved() -> None:
     assert out is not None
     assert "User: what is the plan" in out
     assert "prior recap text" in out
+
+
+def _app_config(model_names=("default-model",)):
+    """Minimal AppConfig-shaped stub: ordered ``models`` + ``get_model_config``."""
+    models = [SimpleNamespace(name=name) for name in model_names]
+
+    def get_model_config(name):
+        return next((model for model in models if model.name == name), None)
+
+    return SimpleNamespace(models=models, get_model_config=get_model_config)
+
+
+def _tracking_create_chat_model(built: list, *, fail: bool = False):
+    """Patch target for ``create_chat_model``: records built names, returns a mock
+    whose summary text is ``from-<name>`` (or fails on invoke when ``fail``)."""
+
+    def _factory(*, name=None, thinking_enabled=False, app_config=None, attach_tracing=True, **kwargs):
+        model = MagicMock()
+        model.with_config.return_value = model
+        if fail:
+            model.invoke.side_effect = RuntimeError("provider down")
+            model.ainvoke = AsyncMock(side_effect=RuntimeError("provider down"))
+        else:
+            model.invoke.return_value = SimpleNamespace(text=f"from-{name}")
+            model.ainvoke = AsyncMock(return_value=SimpleNamespace(text=f"from-{name}"))
+        built.append(name)
+        return model
+
+    return _factory
+
+
+def _blank_model(*, text: str = "   \n\t ") -> MagicMock:
+    """A model whose response body is whitespace-only (a generation failure)."""
+    model = MagicMock()
+    model.with_config.return_value = model
+    model.invoke.return_value = SimpleNamespace(text=text)
+    model.ainvoke = AsyncMock(return_value=SimpleNamespace(text=text))
+    return model
+
+
+def test_null_model_summarizes_with_the_run_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """model_name: null must summarize with the model the run actually uses, not
+    config.models[0]. This is the model-ownership fix: a run on a non-default model
+    while models[0]'s provider is broken must still compact.
+
+    Production-shaped: the run model is supplied at build time (``run_model_name``),
+    and the runtime carries NO ``model_name`` in its context — the previous fixture
+    injected ``runtime.context['model_name']``, which the production custom-agent /
+    subagent contexts never populate."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    default_model = MagicMock()
+    default_model.with_config.return_value = default_model
+    default_model.invoke.return_value = SimpleNamespace(text="from-default")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=default_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name=None,
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    # The run model was built + used; the default (models[0]) never generated a summary.
+    assert built == ["run-model"]
+    default_model.invoke.assert_not_called()
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+
+
+def test_explicit_summary_model_failure_falls_back_to_run_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicitly configured summary model generates; if its provider is broken,
+    compaction falls back to the run's own (working) model instead of no-op'ing.
+    The fallback is built lazily only after the primary fails."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    explicit = MagicMock()
+    explicit.with_config.return_value = explicit
+    explicit.invoke.side_effect = RuntimeError("summary provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    explicit.invoke.assert_called_once()  # primary tried
+    assert built == ["run-model"]  # fallback built (lazily, after primary failed) + used
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+
+
+@pytest.mark.anyio
+async def test_async_explicit_failure_falls_back_to_run_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The async path applies the same run-model fallback as the sync path."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    explicit = MagicMock()
+    explicit.with_config.return_value = explicit
+    explicit.ainvoke = AsyncMock(side_effect=RuntimeError("summary provider down"))
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    explicit.ainvoke.assert_awaited_once()
+    assert built == ["run-model"]
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+
+
+def test_both_summary_models_failing_returns_none_on_automatic_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the explicit model and the run-model fallback both fail, the automatic
+    path leaves compaction state unchanged (returns None) rather than raising."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built, fail=True))
+
+    explicit = MagicMock()
+    explicit.with_config.return_value = explicit
+    explicit.invoke.side_effect = RuntimeError("provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    explicit.invoke.assert_called_once()  # primary tried
+    assert built == ["run-model"]  # fallback tried too
+
+
+def test_explicit_summary_model_equal_to_run_model_is_not_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the configured summary model IS the run model, there is no distinct
+    fallback: the failed model must not be re-invoked (that would just burn another
+    call against a provider we already know is down) and no second model is built."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built, fail=True))
+
+    explicit = MagicMock()
+    explicit.with_config.return_value = explicit
+    explicit.invoke.side_effect = RuntimeError("provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("summary-model",)),
+        configured_model_name="summary-model",
+        run_model_name="summary-model",  # run model == configured summary model
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    explicit.invoke.assert_called_once()  # tried exactly once, not twice
+    assert built == []  # no distinct fallback model was built
+
+
+def test_fallback_construction_error_does_not_escape_automatic_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A broken run-model config must not skip the healthy primary or escape the
+    automatic failure boundary: the primary is tried first, and a fallback that
+    fails to *construct* is swallowed (returns None), not raised."""
+
+    def _failing_build(*, name=None, **kwargs):
+        raise RuntimeError("cannot build run model")
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _failing_build)
+
+    explicit = MagicMock()
+    explicit.with_config.return_value = explicit
+    explicit.invoke.side_effect = RuntimeError("summary provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    explicit.invoke.assert_called_once()  # healthy-or-not, the primary was still tried first
+
+
+def test_blank_summary_response_is_not_committed_null_case(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A whitespace-only model response is a generation failure, not a valid empty
+    summary: the automatic path returns None (history preserved, no RemoveMessage)
+    instead of removing all history for an empty replacement."""
+    run_model = _blank_model()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kwargs: run_model)
+
+    default_model = MagicMock()
+    default_model.with_config.return_value = default_model
+    middleware = DeerFlowSummarizationMiddleware(
+        model=default_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name=None,
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    run_model.invoke.assert_called_once()
+
+
+@pytest.mark.anyio
+async def test_blank_summary_response_is_not_committed_async(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Async counterpart: a whitespace-only response leaves compaction state unchanged."""
+    run_model = _blank_model()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kwargs: run_model)
+
+    default_model = MagicMock()
+    default_model.with_config.return_value = default_model
+    middleware = DeerFlowSummarizationMiddleware(
+        model=default_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name=None,
+        run_model_name="run-model",
+    )
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    assert result is None
+    run_model.ainvoke.assert_awaited_once()
+
+
+def test_blank_primary_summary_falls_back_to_run_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A blank primary response is treated as failure and triggers the run-model
+    fallback, exactly as a raised exception would."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    explicit = _blank_model()  # primary returns whitespace
+    middleware = DeerFlowSummarizationMiddleware(
+        model=explicit,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    explicit.invoke.assert_called_once()  # blank primary counted as a failure
+    assert built == ["run-model"]  # fallback built + used
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+
+
+def test_manual_compaction_failure_raises_summary_generation_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A manual /compact opts into ``raise_on_failure`` so a generation failure raises,
+    letting the caller report it distinctly from "nothing to compact". This is now
+    decoupled from ``force`` (which only bypasses the trigger threshold)."""
+    default_model = MagicMock()
+    default_model.with_config.return_value = default_model
+    default_model.invoke.side_effect = RuntimeError("provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=default_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model",)),
+        configured_model_name=None,
+        run_model_name="default-model",
+    )
+
+    with pytest.raises(SummaryGenerationError):
+        middleware.compact_state({"messages": _messages()}, _runtime(), force=True, raise_on_failure=True)
+
+
+def test_force_alone_does_not_raise_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``force`` bypasses the threshold but must NOT, on its own, raise on a generation
+    failure — only ``raise_on_failure`` does. The automatic path (force + no
+    raise_on_failure) leaves state unchanged."""
+    default_model = MagicMock()
+    default_model.with_config.return_value = default_model
+    default_model.invoke.side_effect = RuntimeError("provider down")
+    middleware = DeerFlowSummarizationMiddleware(
+        model=default_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model",)),
+        configured_model_name=None,
+        run_model_name="default-model",
+    )
+
+    assert middleware.compact_state({"messages": _messages()}, _runtime(), force=True) is None
+
+
+def test_before_summarization_hook_not_fired_when_summary_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hooks must not enqueue durable-memory work for a summary that never
+    materializes; on failure the automatic path returns None without firing hooks."""
+    default_model = MagicMock()
+    default_model.with_config.return_value = default_model
+    default_model.invoke.side_effect = RuntimeError("provider down")
+    captured: list[SummarizationEvent] = []
+    middleware = DeerFlowSummarizationMiddleware(
+        model=default_model,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model",)),
+        configured_model_name=None,
+        run_model_name="default-model",
+        before_summarization=[captured.append],
+    )
+
+    # The run uses the default model, which fails; no distinct fallback in the null case.
+    assert middleware.before_model({"messages": _messages()}, _runtime()) is None
+    assert captured == []
+
+
+def _factory_app_config(model_names, *, summary_model_name=None):
+    """AppConfig-shaped stub for the factory: summarization enabled + ordered models."""
+    models = [SimpleNamespace(name=name) for name in model_names]
+    return SimpleNamespace(
+        summarization=SummarizationConfig(enabled=True, model_name=summary_model_name),
+        memory=MemoryConfig(enabled=False),
+        models=models,
+        get_model_config=lambda name: next((model for model in models if model.name == name), None),
+    )
+
+
+def test_factory_null_case_anchor_is_run_model_not_models0(monkeypatch):
+    """model_name: null builds the summary model from ``run_model_name``, never
+    config.models[0]. A run on a non-default model whose models[0] provider is broken
+    still gets a working summarization middleware — the factory has no eager models[0]
+    dependency."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    middleware = create_summarization_middleware(
+        app_config=_factory_app_config(("models0", "run-model")),
+        keep=("messages", 2),
+        run_model_name="run-model",
+    )
+
+    assert middleware is not None
+    assert built == ["run-model"]  # anchor built from the run model, not models0 / None
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "from-run-model"
+
+
+def test_factory_configured_constructor_failure_falls_back_to_run_model(monkeypatch):
+    """A configured summary model whose *constructor* raises must not break middleware
+    creation or skip the healthy run model. The anchor falls through the broken
+    constructor to the run model, and generation summarizes with it (the reviewer's
+    ``configured='broken-summary'`` reproduction)."""
+    built: list = []
+
+    def _factory(*, name=None, thinking_enabled=False, app_config=None, attach_tracing=True, **kwargs):
+        if name == "broken-summary":
+            raise RuntimeError("cannot construct summary provider")
+        model = MagicMock()
+        model.with_config.return_value = model
+        model.invoke.return_value = SimpleNamespace(text=f"from-{name}")
+        model.ainvoke = AsyncMock(return_value=SimpleNamespace(text=f"from-{name}"))
+        built.append(name)
+        return model
+
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _factory)
+
+    middleware = create_summarization_middleware(
+        app_config=_factory_app_config(("models0", "run-model"), summary_model_name="broken-summary"),
+        keep=("messages", 2),
+        run_model_name="run-model",
+    )
+
+    assert middleware is not None  # a broken configured constructor did not break creation
+    assert "run-model" in built  # the healthy run model was constructed as the anchor
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "from-run-model"
+
+
+class _RaisingTextResponse:
+    """A provider response whose ``.text`` accessor fails — a realistic malformed result."""
+
+    @property
+    def text(self):
+        raise ValueError("malformed content blocks")
+
+
+def _text_raises_model() -> MagicMock:
+    model = MagicMock()
+    model.with_config.return_value = model
+    model.invoke.return_value = _RaisingTextResponse()
+    model.ainvoke = AsyncMock(return_value=_RaisingTextResponse())
+    return model
+
+
+def test_text_extraction_failure_falls_back_to_run_model(monkeypatch):
+    """A response whose ``.text`` accessor raises is part of consuming the provider
+    result, so it must be a candidate failure that falls back to the run model — not an
+    exception that escapes automatic compaction."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    primary = _text_raises_model()
+    middleware = DeerFlowSummarizationMiddleware(
+        model=primary,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = middleware.before_model({"messages": _messages()}, _runtime())
+
+    primary.invoke.assert_called_once()  # primary invoked; its .text raised
+    assert built == ["run-model"]  # fell back to the run model
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"
+
+
+@pytest.mark.anyio
+async def test_text_extraction_failure_falls_back_to_run_model_async(monkeypatch):
+    """Async counterpart: a ``.text`` accessor failure falls back to the run model."""
+    built: list = []
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", _tracking_create_chat_model(built))
+
+    primary = _text_raises_model()
+    middleware = DeerFlowSummarizationMiddleware(
+        model=primary,
+        trigger=("messages", 4),
+        keep=("messages", 2),
+        token_counter=len,
+        app_config=_app_config(("default-model", "run-model")),
+        configured_model_name="summary-model",
+        run_model_name="run-model",
+    )
+
+    result = await middleware.abefore_model({"messages": _messages()}, _runtime())
+
+    primary.ainvoke.assert_awaited_once()
+    assert built == ["run-model"]
+    assert result is not None
+    assert result["summary_text"] == "from-run-model"

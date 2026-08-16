@@ -157,10 +157,47 @@ def test_detect_from_config_browser_via_browser_navigate_tool(tmp_path):
     assert detect.detect_from_config(cfg) == ["browser"]
 
 
+def test_detect_from_config_browser_via_indentless_tools_list(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "tools:\n- name: web_fetch\n  group: web\n- name: browser_navigate\n  group: browser\n",
+    )
+    assert detect.detect_from_config(cfg) == ["browser"]
+
+
 def test_detect_from_config_ignores_commented_browser_tool(tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "tools:\n  # - name: browser_navigate\n  #   group: browser\n  - name: web_fetch\n    group: web\n",
+    )
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_buzz_via_channels_enabled(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "channels:\n  buzz:\n    enabled: true\n    relay_url: wss://buzz.example.com\n",
+    )
+    assert detect.detect_from_config(cfg) == ["buzz"]
+
+
+def test_detect_from_config_buzz_disabled_returns_no_extras(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("channels:\n  buzz:\n    enabled: false\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_no_channels_section_returns_no_buzz_extra(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: sqlite\n")
+    assert detect.detect_from_config(cfg) == []
+
+
+def test_detect_from_config_ignores_commented_buzz_block(tmp_path):
+    """Mirrors the fully-commented example block shipped in config.example.yaml."""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "# channels:\n#   buzz:\n#     enabled: true\n#     relay_url: wss://buzz.example.com\ndatabase:\n  backend: sqlite\n",
     )
     assert detect.detect_from_config(cfg) == []
 
@@ -183,6 +220,13 @@ def test_detect_from_config_dedupes_when_both_present(tmp_path):
     cfg.write_text("checkpointer:\n  type: postgres\ndatabase:\n  backend: postgres\n")
     # Sorted unique extras, no double-counting.
     assert detect.detect_from_config(cfg) == ["postgres"]
+
+
+def test_detect_from_config_combines_buzz_with_postgres(tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("database:\n  backend: postgres\nchannels:\n  buzz:\n    enabled: true\n")
+    # Existing postgres/redis/browser detection is unaffected by the new rule.
+    assert detect.detect_from_config(cfg) == ["buzz", "postgres"]
 
 
 def test_detect_from_config_missing_file_returns_empty(tmp_path):

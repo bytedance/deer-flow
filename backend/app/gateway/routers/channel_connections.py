@@ -92,6 +92,7 @@ _PROVIDER_META: dict[str, dict[str, str]] = {
     "dingtalk": {"display_name": "DingTalk", "auth_mode": "binding_code"},
     "wechat": {"display_name": "WeChat", "auth_mode": "binding_code"},
     "wecom": {"display_name": "WeCom", "auth_mode": "binding_code"},
+    "buzz": {"display_name": "Buzz", "auth_mode": "binding_code"},
 }
 
 _CREDENTIAL_FIELDS: dict[str, tuple[dict[str, str], ...]] = {
@@ -117,6 +118,10 @@ _CREDENTIAL_FIELDS: dict[str, tuple[dict[str, str], ...]] = {
         {"name": "bot_id", "label": "Bot ID", "type": "text"},
         {"name": "bot_secret", "label": "Bot secret", "type": "password"},
     ),
+    "buzz": (
+        {"name": "relay_url", "label": "Relay URL", "type": "text"},
+        {"name": "private_key", "label": "Private key (hex or nsec)", "type": "password"},
+    ),
 }
 
 _RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
@@ -127,6 +132,7 @@ _RUNTIME_REQUIREMENTS: dict[str, tuple[str, ...]] = {
     "dingtalk": ("client_id", "client_secret"),
     "wechat": ("bot_token",),
     "wecom": ("bot_id", "bot_secret"),
+    "buzz": ("relay_url", "private_key"),
 }
 
 

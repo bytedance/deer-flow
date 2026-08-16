@@ -3,8 +3,9 @@
 Coverage:
 - create_or_reject with reject strategy blocks duplicate active runs
 - create_or_reject with interrupt strategy claims and cancels old runs
-- create_run_atomic refuses to interrupt a run owned by another live worker
+- create_thread_operation_atomic refuses to interrupt a run owned by another live worker
 - reconcile_orphaned_inflight_runs uses lease-based detection
+- periodic reconciliation notifies Gateway recovery orchestration
 - Worker reconciliation skips runs with unexpired leases
 - Lease heartbeat renews active run leases
 - GATEWAY_WORKERS=1 + heartbeat_enabled=false behaviour unchanged
@@ -19,7 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
-from deerflow.runtime import RunManager, RunStatus
+from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -71,6 +72,76 @@ async def test_reject_succeeds_when_no_active_run():
     assert record.status == RunStatus.pending
     assert record.owner_worker_id is not None
     assert record.lease_expires_at is not None
+
+
+@pytest.mark.anyio
+async def test_checkpoint_write_reservation_rejects_nonowning_worker_while_run_is_active():
+    """A durable run owned by worker A must block worker B's checkpoint writer."""
+    store = MemoryRunStore()
+    owner = _make_manager(store=store, worker_id="worker-a")
+    non_owner = _make_manager(store=store, worker_id="worker-b")
+    active = await owner.create_or_reject("thread-1")
+    await owner.set_status(active.run_id, RunStatus.running)
+
+    with pytest.raises(ConflictError, match="already has an active run"):
+        async with non_owner.reserve_thread_operation("thread-1", kind=ThreadOperationKind.checkpoint_write):
+            pytest.fail("the checkpoint mutation guard must not be acquired")
+
+    stored = await store.get(active.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_checkpoint_write_reservation_blocks_new_runs_until_mutation_finishes():
+    """The durable guard closes the check-then-write window in both directions."""
+    store = MemoryRunStore()
+    compaction_worker = _make_manager(store=store, worker_id="worker-a")
+    run_worker = _make_manager(store=store, worker_id="worker-b")
+
+    async with compaction_worker.reserve_thread_operation("thread-1", kind=ThreadOperationKind.checkpoint_write):
+        inflight = await store.list_inflight()
+        assert len(inflight) == 1
+        assert inflight[0]["operation_kind"] == ThreadOperationKind.checkpoint_write
+        assert inflight[0]["metadata"] == {}
+
+        with pytest.raises(ConflictError, match="checkpoint write"):
+            await run_worker.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    assert await store.list_inflight() == []
+    assert await store.list_by_thread("thread-1") == []
+
+    admitted = await run_worker.create_or_reject("thread-1")
+    assert admitted.status == RunStatus.pending
+
+
+@pytest.mark.anyio
+async def test_interrupt_reclaims_expired_checkpoint_write_reservation():
+    """A dead checkpoint writer must not wait for periodic reconciliation."""
+    store = MemoryRunStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "checkpoint-write-1",
+        thread_id="thread-1",
+        status="pending",
+        operation_kind=ThreadOperationKind.checkpoint_write,
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=_lease_config(grace_seconds=10),
+    )
+
+    admitted = await manager.create_or_reject("thread-1", multitask_strategy="interrupt")
+
+    assert admitted.status == RunStatus.pending
+    stale = await store.get("checkpoint-write-1")
+    assert stale is not None
+    assert stale["status"] == "interrupted"
+    assert stale["owner_worker_id"] == "worker-b"
 
 
 @pytest.mark.anyio
@@ -138,7 +209,7 @@ async def test_interrupt_exhausted_retries_surface_as_conflict_error():
     import sqlite3
 
     class _AlwaysUniqueViolationStore(MemoryRunStore):
-        """MemoryRunStore whose ``create_run_atomic`` always raises a
+        """MemoryRunStore whose ``create_thread_operation_atomic`` always raises a
         real-flavoured unique-violation IntegrityError, simulating a worker
         that keeps losing the cross-worker race for the same thread."""
 
@@ -146,7 +217,7 @@ async def test_interrupt_exhausted_retries_surface_as_conflict_error():
             super().__init__()
             self.atomic_call_count = 0
 
-        async def create_run_atomic(self, *args, **kwargs):
+        async def create_thread_operation_atomic(self, *args, **kwargs):
             self.atomic_call_count += 1
             err = sqlite3.IntegrityError("UNIQUE constraint failed: runs.uq_runs_thread_active")
             err.sqlite_errorcode = sqlite3.SQLITE_CONSTRAINT_UNIQUE
@@ -183,6 +254,7 @@ async def test_run_record_stores_owner_and_lease():
     assert stored is not None
     assert stored["owner_worker_id"] == manager.worker_id
     assert stored["lease_expires_at"] is not None
+    assert stored["operation_kind"] == ThreadOperationKind.run
 
 
 @pytest.mark.anyio
@@ -196,6 +268,34 @@ async def test_store_row_roundtrips_ownership_fields():
     assert hydrated is not None
     assert hydrated.owner_worker_id == manager.worker_id
     assert hydrated.lease_expires_at is not None
+    assert hydrated.operation_kind == ThreadOperationKind.run
+
+
+@pytest.mark.anyio
+async def test_reconciliation_releases_expired_internal_operation_without_reporting_run():
+    """Expired internal reservations release admission without becoming failed runs."""
+    store = MemoryRunStore()
+    expired = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
+    await store.put(
+        "checkpoint-write-1",
+        thread_id="thread-1",
+        status="pending",
+        operation_kind=ThreadOperationKind.checkpoint_write,
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired,
+        created_at=expired,
+    )
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=10),
+    )
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(error="owner expired")
+
+    assert recovered == []
+    stored = await store.get("checkpoint-write-1")
+    assert stored is not None
+    assert stored["status"] == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +358,94 @@ async def test_reconciliation_skips_active_lease_runs():
 
     stored = await store.get("live-run")
     assert stored["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_reconciliation_skips_candidate_when_owner_renews_lease_after_scan():
+    """A renewed lease between scan and claim must keep the run active."""
+    store = MemoryRunStore()
+    grace = 10
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
+    await store.put(
+        "race-run",
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="worker-alive",
+        lease_expires_at=expired_lease,
+        created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    )
+    original_list = store.list_inflight_with_expired_lease
+
+    async def list_then_owner_renews(*, before=None, grace_seconds=10):
+        rows = [dict(row) for row in await original_list(before=before, grace_seconds=grace_seconds)]
+        renewed_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+        updated = await store.update_lease(
+            "race-run",
+            owner_worker_id="worker-alive",
+            lease_expires_at=renewed_lease,
+        )
+        assert updated is True
+        return rows
+
+    store.list_inflight_with_expired_lease = list_then_owner_renews
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace),
+    )
+
+    recovered = await manager.reconcile_orphaned_inflight_runs(
+        error="Gateway restarted before this run reached a durable final state.",
+    )
+
+    assert recovered == []
+    stored = await store.get("race-run")
+    assert stored["status"] == "running"
+    assert datetime.fromisoformat(stored["lease_expires_at"]) > datetime.now(UTC)
+
+
+@pytest.mark.anyio
+async def test_concurrent_reconcilers_report_one_successful_claim():
+    """Two reapers scanning the same candidate must report one recovery."""
+    store = MemoryRunStore()
+    grace = 10
+    run_id = "contended-orphan"
+    await store.put(
+        run_id,
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="worker-dead",
+        lease_expires_at=(datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat(),
+        created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    )
+
+    original_scan = store.list_inflight_with_expired_lease
+    both_scanned = asyncio.Event()
+    scan_lock = asyncio.Lock()
+    scan_count = 0
+
+    async def synchronized_scan(*, before=None, grace_seconds=10):
+        nonlocal scan_count
+        rows = [dict(row) for row in await original_scan(before=before, grace_seconds=grace_seconds)]
+        async with scan_lock:
+            scan_count += 1
+            if scan_count == 2:
+                both_scanned.set()
+        await asyncio.wait_for(both_scanned.wait(), timeout=1)
+        return rows
+
+    store.list_inflight_with_expired_lease = synchronized_scan
+    managers = [
+        _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace)),
+        _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace)),
+    ]
+
+    results = await asyncio.gather(*(manager.reconcile_orphaned_inflight_runs(error="orphaned") for manager in managers))
+
+    assert sorted(len(recovered) for recovered in results) == [0, 1]
+    assert [record.run_id for recovered in results for record in recovered] == [run_id]
+    row = await store.get(run_id)
+    assert row is not None
+    assert row["status"] == "error"
 
 
 @pytest.mark.anyio
@@ -346,6 +534,262 @@ async def test_reconciliation_returns_empty_when_no_orphaned_runs():
     assert recovered == []
 
 
+@pytest.mark.anyio
+async def test_periodic_reconciliation_notifies_recovery_callback():
+    """Periodic recovery must hand terminalized rows to Gateway orchestration."""
+    store = MemoryRunStore()
+    on_orphans_recovered = AsyncMock()
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=(datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    )
+
+    await manager._reconcile_orphans_periodic()
+    await asyncio.sleep(0)
+
+    on_orphans_recovered.assert_awaited_once()
+    recovered = on_orphans_recovered.await_args.args[0]
+    assert [record.run_id for record in recovered] == ["periodic-orphan"]
+    assert recovered[0].status == RunStatus.error
+    assert recovered[0].stop_reason == ORPHAN_RECOVERY_STOP_REASON
+    stored = await store.get("periodic-orphan")
+    assert stored is not None
+    assert stored["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_periodic_reconciliation_logs_recovered_run_ids_when_callback_fails(caplog):
+    """Callback failures must identify every recovered run in the warning."""
+    store = MemoryRunStore()
+    on_orphans_recovered = AsyncMock(side_effect=RuntimeError("callback failed"))
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    created_at = (datetime.now(UTC) - timedelta(seconds=120)).isoformat()
+    for run_id in ("periodic-orphan-1", "periodic-orphan-2"):
+        await store.put(
+            run_id,
+            thread_id=f"thread-{run_id}",
+            status="running",
+            owner_worker_id="dead-worker",
+            lease_expires_at=expired_lease,
+            created_at=created_at,
+        )
+
+    with caplog.at_level("WARNING", logger="deerflow.runtime.runs.manager"):
+        await manager._reconcile_orphans_periodic()
+        await asyncio.sleep(0)
+
+    assert "Periodic orphan recovery callback failed for 2 run(s)" in caplog.text
+    assert "periodic-orphan-1" in caplog.text
+    assert "periodic-orphan-2" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_periodic_terminalization_does_not_block_lease_renewal_or_shutdown():
+    """The real heartbeat loop must keep renewing during a slow callback."""
+    store = MemoryRunStore()
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    callback_finished = asyncio.Event()
+
+    async def on_orphans_recovered(_recovered):
+        callback_started.set()
+        await callback_release.wait()
+        callback_finished.set()
+
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    active = await manager.create_or_reject("active-thread")
+    await manager.set_status(active.run_id, RunStatus.running)
+    original_expiry = active.lease_expires_at
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="orphan-thread",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=expired_lease,
+    )
+
+    await manager.start_heartbeat()
+    await asyncio.wait_for(callback_started.wait(), timeout=4.5)
+    expiry_during_callback = active.lease_expires_at
+    await asyncio.sleep(1.2)
+
+    assert expiry_during_callback != original_expiry
+    assert active.lease_expires_at != expiry_during_callback
+    assert callback_finished.is_set() is False
+
+    shutdown_task = asyncio.create_task(manager.shutdown(timeout=1.0))
+    await asyncio.sleep(0)
+    assert shutdown_task.done() is False
+    callback_release.set()
+    await asyncio.wait_for(shutdown_task, timeout=1.0)
+    assert callback_finished.is_set() is True
+
+
+@pytest.mark.anyio
+async def test_periodic_store_scan_does_not_block_real_heartbeat_loop():
+    """A slow orphan scan must not stall later lease-renewal cycles."""
+
+    class SlowScanStore(MemoryRunStore):
+        def __init__(self):
+            super().__init__()
+            self.scan_started = asyncio.Event()
+            self.scan_release = asyncio.Event()
+
+        async def list_inflight_with_expired_lease(
+            self,
+            *,
+            before=None,
+            grace_seconds=10,
+        ):
+            self.scan_started.set()
+            await self.scan_release.wait()
+            return await super().list_inflight_with_expired_lease(
+                before=before,
+                grace_seconds=grace_seconds,
+            )
+
+    store = SlowScanStore()
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=5),
+    )
+    active = await manager.create_or_reject("active-thread")
+    await manager.set_status(active.run_id, RunStatus.running)
+
+    await manager.start_heartbeat()
+    await asyncio.wait_for(store.scan_started.wait(), timeout=4.5)
+    expiry_during_scan = active.lease_expires_at
+    await asyncio.sleep(1.2)
+
+    assert active.lease_expires_at != expiry_during_scan
+
+    store.scan_release.set()
+    await manager.stop_heartbeat()
+    await manager._drain_orphan_recovery_task(timeout=0.5)
+
+
+@pytest.mark.anyio
+async def test_periodic_recovery_is_single_flight():
+    """A second trigger must not create another recovery pipeline."""
+    store = MemoryRunStore()
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    callback_calls = 0
+
+    async def on_orphans_recovered(_recovered):
+        nonlocal callback_calls
+        callback_calls += 1
+        callback_started.set()
+        await callback_release.wait()
+
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="orphan-thread",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=expired_lease,
+    )
+
+    manager._schedule_orphan_reconciliation()
+    await asyncio.wait_for(callback_started.wait(), timeout=0.5)
+    first_task = manager._orphan_recovery_task
+    manager._schedule_orphan_reconciliation()
+
+    assert manager._orphan_recovery_task is first_task
+    assert callback_calls == 1
+
+    callback_release.set()
+    await asyncio.wait_for(first_task, timeout=0.5)
+
+
+@pytest.mark.anyio
+async def test_shutdown_cancels_recovery_that_exceeds_drain_budget():
+    """The pending -> cancel -> gather branch must observe callback cancellation."""
+    store = MemoryRunStore()
+    callback_started = asyncio.Event()
+    callback_cancelled = asyncio.Event()
+
+    async def on_orphans_recovered(_recovered):
+        callback_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            callback_cancelled.set()
+            raise
+
+    manager = _make_manager(
+        store=store,
+        on_orphans_recovered=on_orphans_recovered,
+    )
+    expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+    await store.put(
+        "periodic-orphan",
+        thread_id="orphan-thread",
+        status="running",
+        owner_worker_id="dead-worker",
+        lease_expires_at=expired_lease,
+        created_at=expired_lease,
+    )
+    manager._schedule_orphan_reconciliation()
+    await asyncio.wait_for(callback_started.wait(), timeout=0.5)
+
+    await manager.shutdown(timeout=0.01)
+
+    assert callback_cancelled.is_set()
+    assert manager._orphan_recovery_task is None
+
+
+@pytest.mark.anyio
+async def test_shutdown_applies_shared_deadline_to_heartbeat_stop():
+    """A stuck heartbeat must not receive a separate five-second budget."""
+    manager = _make_manager(
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    heartbeat_cancelled = asyncio.Event()
+
+    async def stuck_heartbeat():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            heartbeat_cancelled.set()
+            raise
+
+    manager._heartbeat_stop = asyncio.Event()
+    manager._heartbeat_task = asyncio.create_task(stuck_heartbeat())
+    started = asyncio.get_running_loop().time()
+
+    await manager.shutdown(timeout=0.01)
+
+    elapsed = asyncio.get_running_loop().time() - started
+    assert heartbeat_cancelled.is_set()
+    assert elapsed < 0.5
+
+
 # ---------------------------------------------------------------------------
 # Lease heartbeat
 # ---------------------------------------------------------------------------
@@ -378,12 +822,12 @@ async def test_heartbeat_renews_active_run_leases():
 
 @pytest.mark.anyio
 async def test_heartbeat_renews_pending_run_before_task_is_spawned():
-    """A run sitting in ``pending`` between ``create_run_atomic`` and task
+    """A run sitting in ``pending`` between ``create_thread_operation_atomic`` and task
     spawn must still have its lease renewed.
 
     Pre-fix the renewal filter required ``record.task is not None``, so a
     pending run with no task yet (the brief window after
-    ``create_run_atomic`` inserts the row before the worker layer spawns
+    ``create_thread_operation_atomic`` inserts the row before the worker layer spawns
     the agent task) was silently skipped. If that window stretched past
     ``lease_seconds`` — e.g. event-loop saturation, slow checkpoint
     hydrate — peer reconciliation reclaimed the run as an orphan and
@@ -413,6 +857,147 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     store.update_lease.assert_awaited_once()
     assert record.lease_expires_at is not None
     assert record.lease_expires_at > original_lease
+
+
+@pytest.mark.anyio
+async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
+    """A renewal error is retryable while the last confirmed lease is valid."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    original_update_lease = store.update_lease
+    attempts = 0
+
+    async def fail_once_then_renew(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary database outage")
+        return await original_update_lease(*args, **kwargs)
+
+    store.update_lease = fail_once_then_renew
+    original_expiry = record.lease_expires_at
+
+    try:
+        await manager._renew_leases()
+
+        assert record.abort_event.is_set() is False
+        assert record.task.done() is False
+        assert record.lease_expires_at == original_expiry
+
+        await manager._renew_leases()
+
+        assert attempts == 2
+        assert record.abort_event.is_set() is False
+        assert record.task.done() is False
+        assert record.lease_expires_at is not None
+        assert original_expiry is not None
+        assert record.lease_expires_at > original_expiry
+    finally:
+        record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_renewal_exception_through_confirmed_expiry_fail_stops_run():
+    """The owner must stop once errors outlive its last confirmed lease."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    attempts = 0
+
+    async def fail_renewal(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise OSError("database unreachable")
+
+    store.update_lease = fail_renewal
+
+    await manager._renew_leases()
+    assert record.abort_event.is_set() is False
+    assert record.task.done() is False
+
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+
+    await manager._renew_leases()
+    await asyncio.sleep(0)
+
+    assert attempts == 1
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set() is True
+    assert record.task.cancelled()
+
+
+@pytest.mark.anyio
+async def test_hung_renewal_is_bounded_by_confirmed_lease_deadline():
+    """A blocked store call cannot keep execution alive beyond the lease."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    near_expiry = (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()
+    record.lease_expires_at = near_expiry
+    store._runs[record.run_id]["lease_expires_at"] = near_expiry
+
+    async def hang_renewal(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    store.update_lease = hang_renewal
+
+    await asyncio.wait_for(manager._renew_leases(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set() is True
+    assert record.task.cancelled()
+
+
+@pytest.mark.anyio
+async def test_late_successful_renewal_still_fences_local_run():
+    """A renewal confirmed after the old deadline cannot revive local work."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+    near_expiry = (datetime.now(UTC) + timedelta(milliseconds=50)).isoformat()
+    record.lease_expires_at = near_expiry
+    store._runs[record.run_id]["lease_expires_at"] = near_expiry
+    original_update_lease = store.update_lease
+
+    async def renew_after_timeout_cancellation(*args, **kwargs):
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            # Simulate a store operation that commits successfully despite the
+            # caller's deadline cancellation.
+            pass
+        return await original_update_lease(*args, **kwargs)
+
+    store.update_lease = renew_after_timeout_cancellation
+
+    await asyncio.wait_for(manager._renew_leases(), timeout=1)
+    await asyncio.sleep(0)
+
+    row = await store.get(record.run_id)
+    assert row is not None
+    assert row["lease_expires_at"] > near_expiry
+    assert record.lease_expires_at == near_expiry
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set() is True
+    assert record.task.cancelled()
 
 
 @pytest.mark.anyio
@@ -559,14 +1144,14 @@ def test_two_managers_have_different_default_ids():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_reject_prevents_duplicate():
-    """store.create_run_atomic with reject must raise ConflictError on duplicate."""
+async def test_create_thread_operation_atomic_reject_prevents_duplicate():
+    """Atomic thread-operation creation must reject a duplicate."""
     store = MemoryRunStore()
     config = _lease_config()
 
-    store.create_run_atomic = AsyncMock(wraps=store.create_run_atomic)
+    store.create_thread_operation_atomic = AsyncMock(wraps=store.create_thread_operation_atomic)
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="run-1",
         thread_id="thread-1",
         owner_worker_id="w1",
@@ -576,7 +1161,7 @@ async def test_create_run_atomic_reject_prevents_duplicate():
     )
 
     with pytest.raises(ConflictError, match="already has an active run"):
-        await store.create_run_atomic(
+        await store.create_thread_operation_atomic(
             run_id="run-2",
             thread_id="thread-1",
             owner_worker_id="w2",
@@ -587,14 +1172,14 @@ async def test_create_run_atomic_reject_prevents_duplicate():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_claims_and_creates():
-    """store.create_run_atomic with interrupt must claim old and create new."""
+async def test_create_thread_operation_atomic_interrupt_claims_and_creates():
+    """Atomic thread-operation creation with interrupt must claim and replace."""
     store = MemoryRunStore()
     config = _lease_config()
     # Create an active run with an expired lease (simulating a crashed worker)
     expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="run-old",
         thread_id="thread-1",
         owner_worker_id="w1",
@@ -603,7 +1188,7 @@ async def test_create_run_atomic_interrupt_claims_and_creates():
         grace_seconds=config.grace_seconds,
     )
 
-    new_row, claimed = await store.create_run_atomic(
+    new_row, claimed = await store.create_thread_operation_atomic(
         run_id="run-new",
         thread_id="thread-1",
         owner_worker_id="w2",
@@ -623,7 +1208,7 @@ async def test_create_run_atomic_interrupt_claims_and_creates():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
+async def test_create_thread_operation_atomic_interrupt_rejects_other_worker_valid_lease():
     """Interrupt must raise ConflictError when a valid-lease run is owned by another worker.
 
     The partial unique index ``uq_runs_thread_active`` would reject the INSERT
@@ -634,7 +1219,7 @@ async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
     config = _lease_config(grace_seconds=10)
     valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="valid-lease-run",
         thread_id="thread-1",
         owner_worker_id="other-worker",
@@ -644,7 +1229,7 @@ async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
     )
 
     with pytest.raises(ConflictError, match="another worker"):
-        await store.create_run_atomic(
+        await store.create_thread_operation_atomic(
             run_id="run-new",
             thread_id="thread-1",
             owner_worker_id="w2",
@@ -660,13 +1245,13 @@ async def test_create_run_atomic_interrupt_rejects_other_worker_valid_lease():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_allows_self_owned_valid_lease():
+async def test_create_thread_operation_atomic_interrupt_allows_self_owned_valid_lease():
     """Interrupt must succeed when the existing valid-lease run is owned by this worker."""
     store = MemoryRunStore()
     config = _lease_config(grace_seconds=10)
     valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
 
-    await store.create_run_atomic(
+    await store.create_thread_operation_atomic(
         run_id="self-run",
         thread_id="thread-1",
         owner_worker_id="w1",
@@ -675,7 +1260,7 @@ async def test_create_run_atomic_interrupt_allows_self_owned_valid_lease():
         grace_seconds=config.grace_seconds,
     )
 
-    new_row, claimed = await store.create_run_atomic(
+    new_row, claimed = await store.create_thread_operation_atomic(
         run_id="run-new",
         thread_id="thread-1",
         owner_worker_id="w1",  # same worker
@@ -691,7 +1276,7 @@ async def test_create_run_atomic_interrupt_allows_self_owned_valid_lease():
 
 
 @pytest.mark.anyio
-async def test_create_run_atomic_interrupt_rolls_back_earlier_mutations_on_conflict():
+async def test_create_thread_operation_atomic_interrupt_rolls_back_earlier_mutations_on_conflict():
     """Interrupt must not leave earlier candidates interrupted when a later
     candidate raises ConflictError.
 
@@ -712,7 +1297,7 @@ async def test_create_run_atomic_interrupt_rolls_back_earlier_mutations_on_confl
     expired_lease = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
     valid_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
 
-    # Seed both active rows directly via ``put`` (bypassing create_run_atomic's
+    # Seed both active rows directly via ``put`` (bypassing atomic operation creation's
     # reject check, which would refuse the second row). Insert the
     # interruptible run first so dict iteration visits it first — that's the
     # ordering that exposes the half-interrupted divergence in a naive
@@ -733,7 +1318,7 @@ async def test_create_run_atomic_interrupt_rolls_back_earlier_mutations_on_confl
     )
 
     with pytest.raises(ConflictError, match="another worker"):
-        await store.create_run_atomic(
+        await store.create_thread_operation_atomic(
             run_id="run-new",
             thread_id="thread-1",
             owner_worker_id="w1",
@@ -980,13 +1565,19 @@ async def test_claim_for_takeover_succeeds_with_expired_lease():
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
     await store.put("run-1", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat(), owner_worker_id="w-a", lease_expires_at=expired_lease)
 
-    ok = await store.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
+    ok = await store.claim_for_takeover(
+        "run-1",
+        grace_seconds=grace,
+        error="claimed",
+        stop_reason=ORPHAN_RECOVERY_STOP_REASON,
+    )
     assert ok is True
 
     row = await store.get("run-1")
     assert row is not None
     assert row["status"] == "error"
     assert row["error"] == "claimed"
+    assert row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
 
 
 @pytest.mark.anyio
@@ -1059,8 +1650,8 @@ async def test_cancel_takeover_from_crashed_worker():
 
 
 @pytest.mark.anyio
-async def test_cancel_refuses_active_lease_from_other_worker():
-    """cancel must return lease_valid_elsewhere when the run is owned by another worker with a valid lease."""
+async def test_cancel_requests_active_lease_from_other_worker():
+    """A cancel routed to a peer must durably notify the live owner."""
     store = MemoryRunStore()
     grace = 10
     valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
@@ -1068,11 +1659,168 @@ async def test_cancel_refuses_active_lease_from_other_worker():
 
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
     outcome = await manager.cancel("run-alive")
-    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert outcome == CancelOutcome.requested
 
     row = await store.get("run-alive")
     assert row is not None
-    assert row["status"] == "running"  # untouched
+    assert row["status"] == "running"
+    assert row["cancel_action"] == "interrupt"
+    assert row["cancel_requested_at"] is not None
+
+
+@pytest.mark.anyio
+async def test_non_owner_cancel_is_observed_by_owner_heartbeat():
+    """Heartbeat signals the owner task without performing terminal writes."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+        # Match local idempotency: once accepted, a later action cannot change
+        # whether the owner rolls back or merely interrupts.
+        assert await peer.cancel(record.run_id, action="interrupt") == CancelOutcome.requested
+
+        await owner._renew_leases()
+        await asyncio.sleep(0)
+
+        assert record.abort_event.is_set()
+        assert record.abort_action == "rollback"
+        assert record.status == RunStatus.running
+        assert record.task.cancelled()
+
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == "running"
+        assert stored["cancel_action"] == "rollback"
+
+        # The worker's existing cancellation path, not heartbeat, owns the
+        # terminal status write and any rollback cleanup.
+        await owner.set_status(
+            record.run_id,
+            RunStatus.error,
+            error="Rolled back by user",
+        )
+        next_run = await peer.create_or_reject("thread-1")
+        assert next_run.status == RunStatus.pending
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_first_cancel_action_wins_when_retry_lands_on_owner():
+    """Routing a retry to the owner must not replace the durable first action."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await peer.cancel(record.run_id, action="rollback") == CancelOutcome.requested
+        assert await owner.cancel(record.run_id, action="interrupt") == CancelOutcome.cancelled
+        await asyncio.sleep(0)
+
+        assert record.abort_action == "rollback"
+        assert record.task.cancelled()
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["cancel_action"] == "rollback"
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+
+@pytest.mark.anyio
+async def test_local_owner_cancel_falls_back_when_durable_request_fails():
+    """A local owner can still abort its own task when durable cancel persistence fails."""
+
+    class FailingCancelStore(MemoryRunStore):
+        async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+            raise RuntimeError("store unavailable")
+
+    store = FailingCancelStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True, lease_seconds=30),
+    )
+
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
+
+    try:
+        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+        assert record.abort_event.is_set()
+        assert record.abort_action == "rollback"
+
+        with pytest.raises(asyncio.CancelledError):
+            await record.task
+
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == "interrupted"
+        assert stored["cancel_action"] is None
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await record.task
+
+
+@pytest.mark.anyio
+async def test_owner_cancel_retry_on_peer_is_accepted():
+    """A peer must treat the owner's interrupted status as an accepted cancel."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+
+    record = await owner.create_or_reject("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+
+    assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    assert await peer.cancel(record.run_id, action="interrupt") == CancelOutcome.requested
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "interrupted"
+    assert stored["cancel_action"] == "rollback"
+
+
+@pytest.mark.anyio
+async def test_owner_cancel_uses_store_while_terminal_status_is_staged_locally():
+    """A staged local terminal status must not bypass the durable cancel CAS."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create_or_reject("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    # Event-store finalization stages success in memory before persisting it.
+    record.status = RunStatus.success
+
+    assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == "running"
+    assert stored["cancel_action"] == "rollback"
 
 
 @pytest.mark.anyio
@@ -1096,7 +1844,7 @@ async def test_cancel_returns_not_active_locally_when_heartbeat_disabled():
 
 @pytest.mark.anyio
 async def test_cancel_takeover_race_owner_renewed_lease():
-    """When the owner heartbeats between our read and the conditional UPDATE, cancel must return lease_valid_elsewhere."""
+    """When takeover loses to a renewal, cancellation must notify the live owner."""
     store = MemoryRunStore()
     grace = 10
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
@@ -1118,12 +1866,13 @@ async def test_cancel_takeover_race_owner_renewed_lease():
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
 
     outcome = await manager.cancel("run-race")
-    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert outcome == CancelOutcome.requested
+    assert (await store.get("run-race"))["cancel_action"] == "interrupt"
 
 
 @pytest.mark.anyio
 async def test_cancel_takeover_respects_grace_seconds():
-    """Cancel must not take over when the lease is within the grace window."""
+    """Within the grace window, cancellation must notify rather than take over."""
     store = MemoryRunStore()
     grace = 10
     # Lease expired, but only by 3s — still within the 10s grace window
@@ -1132,7 +1881,8 @@ async def test_cancel_takeover_respects_grace_seconds():
 
     manager = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
     outcome = await manager.cancel("run-grace")
-    assert outcome == CancelOutcome.lease_valid_elsewhere
+    assert outcome == CancelOutcome.requested
+    assert (await store.get("run-grace"))["cancel_action"] == "interrupt"
 
 
 @pytest.mark.anyio
@@ -1151,7 +1901,28 @@ async def test_cancel_not_cancellable_for_store_terminal_run():
 # ---------------------------------------------------------------------------
 
 
-def _make_cancel_test_app(mgr: RunManager):
+class _EndingCrossProcessBridge:
+    supports_cross_process = True
+
+    async def publish(self, run_id, event, data):
+        return None
+
+    async def publish_end(self, run_id):
+        return None
+
+    def subscribe(self, run_id, *, last_event_id=None, heartbeat_interval=15.0):
+        from deerflow.runtime import END_SENTINEL
+
+        async def events():
+            yield END_SENTINEL
+
+        return events()
+
+    async def cleanup(self, run_id, *, delay=0):
+        return None
+
+
+def _make_cancel_test_app(mgr: RunManager, *, bridge=None):
     """Build a TestClient wired with the thread_runs router + memory bridge."""
     from _router_auth_helpers import make_authed_test_app
     from fastapi.testclient import TestClient
@@ -1162,12 +1933,12 @@ def _make_cancel_test_app(mgr: RunManager):
     app = make_authed_test_app()
     app.include_router(thread_runs.router)
     app.state.run_manager = mgr
-    app.state.stream_bridge = MemoryStreamBridge()
+    app.state.stream_bridge = bridge or MemoryStreamBridge()
     return TestClient(app, raise_server_exceptions=False)
 
 
-def test_http_cancel_non_owner_valid_lease_returns_409_with_retry_after():
-    """POST /cancel on a non-owning worker with a valid lease must return 409 + Retry-After."""
+def test_http_cancel_non_owner_valid_lease_returns_202():
+    """POST /cancel must not fail solely because routing chose a non-owner."""
     store = MemoryRunStore()
     grace = 10
     valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
@@ -1185,15 +1956,105 @@ def test_http_cancel_non_owner_valid_lease_returns_409_with_retry_after():
     client = _make_cancel_test_app(mgr)
 
     resp = client.post("/api/threads/t1/runs/run-alive/cancel")
-    assert resp.status_code == 409
-    assert "Retry-After" in resp.headers
-    # Retry-After = remaining lease (≈60s) + grace (10s) = ≈70s
-    retry_after = int(resp.headers["Retry-After"])
-    assert 50 <= retry_after <= 75
+    assert resp.status_code == 202
+    assert "Retry-After" not in resp.headers
 
-    # Store row must be untouched
+    # The owner remains fenced, while the cancellation request is durable.
     row = asyncio.run(store.get("run-alive"))
     assert row["status"] == "running"
+    assert row["cancel_action"] == "interrupt"
+
+
+def test_http_stream_action_non_owner_without_shared_bridge_returns_202():
+    """A peer cancel is accepted without subscribing to an unreachable local stream."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    asyncio.run(
+        store.put(
+            "run-alive-stream",
+            thread_id="t1",
+            status="running",
+            created_at=datetime.now(UTC).isoformat(),
+            owner_worker_id="alive-worker",
+            lease_expires_at=valid_lease,
+        )
+    )
+    mgr = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    client = _make_cancel_test_app(mgr)
+
+    resp = client.post(
+        "/api/threads/t1/runs/run-alive-stream/stream",
+        params={"action": "interrupt"},
+    )
+
+    assert resp.status_code == 202
+    row = asyncio.run(store.get("run-alive-stream"))
+    assert row["status"] == "running"
+    assert row["cancel_action"] == "interrupt"
+
+
+def test_http_cancel_non_owner_wait_uses_shared_bridge():
+    """wait=true observes remote owner finalization through the shared bridge."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    asyncio.run(
+        store.put(
+            "run-alive-wait",
+            thread_id="t1",
+            status="running",
+            created_at=datetime.now(UTC).isoformat(),
+            owner_worker_id="alive-worker",
+            lease_expires_at=valid_lease,
+        )
+    )
+    mgr = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    client = _make_cancel_test_app(mgr, bridge=_EndingCrossProcessBridge())
+
+    resp = client.post(
+        "/api/threads/t1/runs/run-alive-wait/cancel",
+        params={"action": "rollback", "wait": "true"},
+    )
+
+    assert resp.status_code == 204
+    row = asyncio.run(store.get("run-alive-wait"))
+    assert row["cancel_action"] == "rollback"
+
+
+def test_http_stream_action_non_owner_uses_shared_bridge():
+    """The SDK stop path drains the remote owner's shared stream after accept."""
+    store = MemoryRunStore()
+    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    asyncio.run(
+        store.put(
+            "run-alive-shared-stream",
+            thread_id="t1",
+            status="running",
+            created_at=datetime.now(UTC).isoformat(),
+            owner_worker_id="alive-worker",
+            lease_expires_at=valid_lease,
+        )
+    )
+    mgr = _make_manager(
+        store=store,
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    client = _make_cancel_test_app(mgr, bridge=_EndingCrossProcessBridge())
+
+    resp = client.post(
+        "/api/threads/t1/runs/run-alive-shared-stream/stream",
+        params={"action": "interrupt"},
+    )
+
+    assert resp.status_code == 200
+    assert "event: end" in resp.text
+    row = asyncio.run(store.get("run-alive-shared-stream"))
+    assert row["cancel_action"] == "interrupt"
 
 
 def test_http_cancel_non_owner_expired_lease_returns_202_takeover():
@@ -1329,6 +2190,8 @@ async def test_heartbeat_cancels_task_on_lease_loss():
     # Let the event loop process the cancellation (task.cancel() schedules,
     # doesn't await).
     await asyncio.sleep(0)
+    assert record.ownership_lost is True
+    assert record.abort_event.is_set() is True
     assert record.task.cancelled()
 
 
@@ -1398,6 +2261,88 @@ async def test_cancel_action_rollback_finalizes_to_error_in_store():
     row = await store.get(record.run_id)
     assert row["status"] == "error"
     assert row["error"] == "Rolled back by user"
+
+
+@pytest.mark.anyio
+async def test_peer_reconciliation_fences_late_success_and_completion():
+    """A stale owner cannot overwrite a peer's terminal takeover."""
+    store = MemoryRunStore()
+    config = _lease_config(heartbeat_enabled=True, grace_seconds=0)
+    owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
+    peer = _make_manager(store=store, worker_id="worker-b", run_ownership_config=config)
+    record = await owner.create("thread-1")
+    await owner.set_status(record.run_id, RunStatus.running)
+
+    expired = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+    record.lease_expires_at = expired
+    store._runs[record.run_id]["lease_expires_at"] = expired
+    recovered = await peer.reconcile_orphaned_inflight_runs(error="peer takeover")
+
+    assert [recovered_record.run_id for recovered_record in recovered] == [record.run_id]
+    assert (await store.get(record.run_id))["status"] == "error"
+
+    await owner.set_status(record.run_id, RunStatus.success)
+    await owner.update_run_completion(record.run_id, status=record.status.value, total_tokens=1)
+
+    row = await store.get(record.run_id)
+    assert record.ownership_lost is True
+    assert record.status == RunStatus.error
+    assert row["status"] == "error"
+    assert row["error"] == "peer takeover"
+
+
+@pytest.mark.anyio
+async def test_unconfirmed_success_is_fenced_when_heartbeat_is_enabled():
+    """A store outage cannot turn an unconfirmed terminal write into local success."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+
+    async def fail_status_write(*_args, **_kwargs):
+        raise OSError("database unreachable")
+
+    store.update_status = fail_status_write
+
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    row = await store.get(record.run_id)
+    assert record.ownership_lost is True
+    assert record.status == RunStatus.error
+    assert record.abort_event.is_set() is True
+    assert row["status"] == "running"
+
+
+@pytest.mark.anyio
+async def test_unconfirmed_staged_success_is_fenced_on_deferred_persistence():
+    """Receipt-ordered status persistence retains the success fail-close fence."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=_lease_config(heartbeat_enabled=True),
+    )
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    async def fail_status_write(*_args, **_kwargs):
+        raise OSError("database unreachable")
+
+    store.update_status = fail_status_write
+
+    persisted = await manager.persist_current_status(record.run_id)
+
+    row = await store.get(record.run_id)
+    assert persisted is False
+    assert record.ownership_lost is True
+    assert record.status == RunStatus.error
+    assert record.abort_event.is_set() is True
+    assert row["status"] == "running"
 
 
 # ---------------------------------------------------------------------------
@@ -1496,34 +2441,3 @@ def test_compute_retry_after_normal():
     assert val is not None
     # lease_expires_at is ~45s from now + grace_seconds 10 = ~55, within reason
     assert 40 <= val <= 65
-
-
-# ---------------------------------------------------------------------------
-# HTTP — stream endpoint cross-worker 409
-# ---------------------------------------------------------------------------
-
-
-def test_http_stream_action_interrupt_non_owner_returns_409_with_retry_after():
-    """POST /stream?action=interrupt on a non-owner with valid lease must
-    return 409 + Retry-After, not hang on SSE."""
-    store = MemoryRunStore()
-    grace = 10
-    valid_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
-    asyncio.run(
-        store.put(
-            "run-alive-stream",
-            thread_id="t1",
-            status="running",
-            owner_worker_id="alive-worker",
-            lease_expires_at=valid_lease,
-            created_at=datetime.now(UTC).isoformat(),
-        )
-    )
-    mgr = _make_manager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True, grace_seconds=grace))
-    client = _make_cancel_test_app(mgr)
-
-    resp = client.post("/api/threads/t1/runs/run-alive-stream/stream", params={"action": "interrupt"})
-    assert resp.status_code == 409
-    assert "Retry-After" in resp.headers
-    retry_after = int(resp.headers["Retry-After"])
-    assert 50 <= retry_after <= 75

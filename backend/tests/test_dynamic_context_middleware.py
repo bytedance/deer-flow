@@ -23,10 +23,12 @@ def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
 
-def _fake_runtime(journal=None, *, pre_existing_message_ids=()):
+def _fake_runtime(journal=None, *, pre_existing_message_ids=(), user_id: str | None = None):
     context = {"__run_journal": journal} if journal is not None else {}
     if pre_existing_message_ids:
         context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+    if user_id is not None:
+        context["user_id"] = user_id
     return SimpleNamespace(context=context)
 
 
@@ -114,6 +116,27 @@ def test_memory_included_when_present():
     assert "User prefers Python." in msgs[1].content
 
     assert msgs[2].content == "Hi"
+
+
+def test_memory_lookup_uses_runtime_user_id():
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="",
+        ) as get_memory_context,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        mw.before_agent(state, _fake_runtime(user_id="runtime-user"))
+
+    get_memory_context.assert_called_once_with(
+        None,
+        app_config=None,
+        user_id="runtime-user",
+    )
 
 
 def test_first_run_records_exact_effective_memory():

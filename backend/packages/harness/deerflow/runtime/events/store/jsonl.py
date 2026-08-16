@@ -32,6 +32,7 @@ from typing import Any
 
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
+from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class JsonlRunEventStore(RunEventStore):
         return value
 
     def _thread_dir(self, thread_id: str) -> Path:
-        self._validate_id(thread_id, "thread_id")
+        validate_thread_id(thread_id)
         return self._base_dir / "threads" / thread_id / "runs"
 
     def _run_file(self, thread_id: str, run_id: str) -> Path:
@@ -177,6 +178,36 @@ class JsonlRunEventStore(RunEventStore):
             records = await self._write_batch_async(thread_id, batch)
             results.extend(records)
         return results
+
+    async def put_if_absent(
+        self,
+        *,
+        thread_id,
+        run_id,
+        event_type,
+        category,
+        content="",
+        metadata=None,
+        created_at=None,
+    ):
+        async with self._get_write_lock(thread_id):
+            existing = await asyncio.to_thread(self._read_run_events, thread_id, run_id)
+            for event in existing:
+                if event.get("event_type") == event_type:
+                    return event, False
+            await self._ensure_seq_loaded(thread_id)
+            record = {
+                "thread_id": thread_id,
+                "run_id": run_id,
+                "event_type": event_type,
+                "category": category,
+                "content": content,
+                "metadata": metadata or {},
+                "seq": self._next_seq(thread_id),
+                "created_at": created_at or datetime.now(UTC).isoformat(),
+            }
+            await asyncio.to_thread(self._write_record, record)
+            return record, True
 
     async def _write_batch_async(self, thread_id: str, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         async with self._get_write_lock(thread_id):

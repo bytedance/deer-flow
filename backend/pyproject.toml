@@ -10,6 +10,16 @@ dependencies = [
     "httpx>=0.28.0",
     "python-multipart>=0.0.31",
     "sse-starlette>=2.1.0",
+    # Direct dependency on purpose, even though FastAPI already pulls it in:
+    # app/gateway/request_path.py imports the private
+    # `starlette._utils.get_route_path` so the auth and CSRF predicates
+    # classify the exact string Starlette's router matches on. A private
+    # import is the safest option here because it fails loudly (ImportError at
+    # startup) instead of silently drifting from the dispatcher at a security
+    # boundary -- but it does mean a Starlette bump is a security-relevant
+    # change. Declaring and bounding it here makes that bump visible in the
+    # diff; tests/test_gateway_request_path.py pins the agreement itself.
+    "starlette>=1.3.1,<2",
     "uvicorn[standard]>=0.34.0",
     "lark-oapi>=1.4.0",
     "slack-sdk>=3.33.0",
@@ -28,10 +38,16 @@ dependencies = [
 postgres = ["deerflow-harness[postgres]"]
 redis = ["deerflow-harness[redis]"]
 discord = ["discord.py>=2.7.0"]
+buzz = ["coincurve>=20.0.0"]
 monocle = ["deerflow-harness[monocle]"]
 browser = ["deerflow-harness[browser]"]
+memory-zh = ["deerflow-harness[memory-zh]"]
 
 [dependency-groups]
+# Managed extension packages are added here by `deerflow extensions install`.
+# Keeping them separate from development tooling lets every startup mode sync
+# the same locked runtime set without promoting those packages to core deps.
+extensions = []
 dev = [
     "blockbuster>=1.5.26,<1.6",
     "hypothesis>=6.100,<7",
@@ -57,25 +73,32 @@ markers = [
     "no_auto_user: disable the conftest autouse contextvar fixture for this test",
     "allow_blocking_io: opt out of the strict Blockbuster gate in tests/blocking_io/",
     "integration: tests that require an external service (e.g. Redis); skipped when unavailable",
+    "live: tests that call real external APIs and require explicit opt-in",
 ]
 
 [tool.uv]
 index-url = "https://pypi.org/simple"
+default-groups = ["dev", "extensions"]
 # langgraph-sdk 0.4.2 (pulled in by langgraph 1.2.9 for DeltaChannel) pins
 # `websockets<16,>=14`, silently downgrading websockets 16.0 -> 15.0.1. The
 # pin is not grounded in any API incompatibility: websockets 16's only
 # breaking change is requiring Python >=3.10 (we require >=3.12), the sdk
 # only imports `websockets.asyncio.client`/`websockets.exceptions` (both
 # 16-compatible), and DeerFlow never uses the sdk's WebSocket transport
-# (httpx/SSE only). Pin the exact pre-upgrade 16.0 for the IM channel
-# integrations (dingtalk-stream, python-telegram-bot, etc.) that ran on it
-# before. Remove once langgraph-sdk relaxes the pin upstream. Note: enabling
+# (httpx/SSE only). DeerFlow does have one direct consumer of its own: the Buzz
+# channel (`app/channels/buzz.py`) imports the top-level `websockets` package and
+# calls `websockets.connect()`, which in 16.0 is the same asyncio client the sdk
+# uses, re-exported at the package root -- so it is covered by the same
+# compatibility argument. Pin the exact pre-upgrade 16.0 for that plus the IM
+# channel integrations (dingtalk-stream, python-telegram-bot, etc.) that ran on
+# it before. Remove once langgraph-sdk relaxes the pin upstream. Note: enabling
 # the `openai[realtime]` or `slack-sdk[optional]` extras would conflict (they
 # also cap websockets<16).
 override-dependencies = ["websockets==16.0"]
 
 [tool.uv.workspace]
-members = ["packages/harness"]
+members = ["packages/harness", "packages/extension-api"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+deerflow-extension-api = { workspace = true }

@@ -40,13 +40,11 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
-  hasOpenHumanInputRequest,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { safeLocalStorage } from "@/core/settings/local";
-import { useThreadStream } from "@/core/threads/hooks";
+import { hasToolResult, useThreadStream } from "@/core/threads/hooks";
 import { uuid } from "@/core/utils/uuid";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
@@ -100,13 +98,14 @@ export default function NewAgentPage() {
       mode: "flash",
       is_bootstrap: true,
     },
-    onFinish() {
-      if (!agent && setupAgentStatus === "requested") {
-        setSetupAgentStatus("idle");
+    onFinish(state) {
+      if (agent || setupAgentStatus !== "requested") {
+        return;
       }
-    },
-    onToolEnd({ name }) {
-      if (name !== "setup_agent" || !agentName) return;
+      if (!agentName || !hasToolResult(state.messages, "setup_agent")) {
+        setSetupAgentStatus("idle");
+        return;
+      }
       setSetupAgentStatus("completed");
       void getAgentWithRetry(agentName).then((fetched) => {
         if (fetched) {
@@ -118,15 +117,6 @@ export default function NewAgentPage() {
       });
     },
   });
-  const hasOpenHumanInputCard = useMemo(
-    () =>
-      hasOpenHumanInputRequest(
-        thread.messages,
-        (message) => !isHiddenFromUIMessage(message),
-      ),
-    [thread.messages],
-  );
-
   useEffect(() => {
     if (typeof window === "undefined" || step !== "chat") {
       return;
@@ -224,14 +214,14 @@ export default function NewAgentPage() {
   const handleChatSubmit = useCallback(
     async (text: string) => {
       const trimmed = text.trim();
-      if (!trimmed || thread.isLoading || hasOpenHumanInputCard) return;
+      if (!trimmed || thread.isLoading) return;
       await sendMessage(
         threadId,
         { text: trimmed, files: [] },
         { agent_name: agentName },
       );
     },
-    [agentName, hasOpenHumanInputCard, sendMessage, thread.isLoading, threadId],
+    [agentName, sendMessage, thread.isLoading, threadId],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -442,18 +432,16 @@ export default function NewAgentPage() {
                   </div>
                 ) : (
                   <PromptInput
-                    disabled={thread.isLoading || hasOpenHumanInputCard}
+                    disabled={thread.isLoading}
                     onSubmit={({ text }) => void handleChatSubmit(text)}
                   >
                     <PromptInputTextarea
                       autoFocus
                       placeholder={t.agents.createPageSubtitle}
-                      disabled={thread.isLoading || hasOpenHumanInputCard}
+                      disabled={thread.isLoading}
                     />
                     <PromptInputFooter className="justify-end">
-                      <PromptInputSubmit
-                        disabled={thread.isLoading || hasOpenHumanInputCard}
-                      />
+                      <PromptInputSubmit disabled={thread.isLoading} />
                     </PromptInputFooter>
                   </PromptInput>
                 )}

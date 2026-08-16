@@ -3,10 +3,10 @@
 Exposes memory_search, memory_add, memory_update, memory_delete as
 LangChain @tool functions the model can call directly.
 
-When memory.mode == "tool", these tools are registered on the agent
-instead of appending MemoryMiddleware.  The model gains agency over
-its own persistent memory: it decides what to remember, when to
-search, and when to update or remove stale facts.
+When memory.mode == "tool", these tools are registered on the agent. Most
+backends omit MemoryMiddleware so the model drives persistence; a backend that
+sets ``requires_passive_writes_in_tool_mode`` retains conversation writes while
+the tools provide query-aware recall.
 
 Backend-agnostic: every tool goes through the ``MemoryManager`` ABC
 (:func:`get_memory_manager`) -- ``search``/``get_memory`` are tier-2 methods;
@@ -118,9 +118,11 @@ def memory_add_tool(
         content_key = _memory_content_key(normalized_content)
         manager = get_memory_manager()
         existing_facts = manager.get_memory(agent_name=agent_name, user_id=user_id).get("facts", [])
-        # Tool calls normally run one-at-a-time per user turn. If tool-mode
-        # writing broadens to multiple concurrent calls for the same user,
-        # move duplicate rejection into the storage/update critical section.
+        # Fast-path duplicate rejection to spare a write attempt in the common
+        # case. The authoritative check lives in the backend's create critical
+        # section (DeerMem re-checks against a fresh snapshot on every
+        # revision-conflict retry in create_memory_fact), so concurrent tool
+        # calls for the same user cannot both store the same content.
         if any(_memory_content_key(str(fact.get("content", ""))) == content_key for fact in existing_facts):
             return json.dumps({"error": "Duplicate fact"})
 

@@ -6,11 +6,12 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 
 from deerflow.persistence.json_compat import json_match
-from deerflow.persistence.thread_meta.base import InvalidMetadataFilterError, ThreadMetaStore
+from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaStore
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -123,7 +124,15 @@ class ThreadMetaRepository(ThreadMetaStore):
         context. Pass ``user_id=None`` to bypass (migration/CLI).
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.search")
-        stmt = select(ThreadMetaRow).order_by(ThreadMetaRow.updated_at.desc(), ThreadMetaRow.thread_id.desc())
+        pinned_order = case(
+            (json_match(ThreadMetaRow.metadata_json, THREAD_PINNED_METADATA_KEY, True), 1),
+            else_=0,
+        )
+        stmt = select(ThreadMetaRow).order_by(
+            pinned_order.desc(),
+            ThreadMetaRow.updated_at.desc(),
+            ThreadMetaRow.thread_id.desc(),
+        )
         if resolved_user_id is not None:
             stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
         if status:
@@ -190,17 +199,32 @@ class ThreadMetaRepository(ThreadMetaStore):
         thread_id: str,
         metadata: dict,
         *,
+        touch: bool = True,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         """Merge ``metadata`` into ``metadata_json``.
 
-        Read-modify-write inside a single session/transaction so concurrent
-        callers see consistent state. No-op if the row does not exist or
-        the user_id check fails.
+        The row is locked before the read-modify-write merge so concurrent
+        callers cannot replace each other's keys. SQLite acquires its write
+        transaction before reading; databases with row-level locking use
+        ``SELECT ... FOR UPDATE``. No-op if the row does not exist or the
+        user_id check fails.
+
+        ``touch`` refreshes ``updated_at`` (default); pass ``touch=False`` to
+        preserve recency ordering for metadata-only changes such as pin/unpin.
         """
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_metadata")
         async with self._sf() as session:
-            row = await session.get(ThreadMetaRow, thread_id)
+            if session.get_bind().dialect.name == "sqlite":
+                # A deferred SQLite transaction does not reserve the writer
+                # until the UPDATE, which is too late for a read-modify-write
+                # merge. BEGIN IMMEDIATE serializes writers before the read,
+                # including writers in other processes using the same file.
+                await session.execute(text("BEGIN IMMEDIATE"))
+                row = await session.get(ThreadMetaRow, thread_id)
+            else:
+                result = await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())
+                row = result.scalar_one_or_none()
             if row is None:
                 return
             if resolved_user_id is not None and row.user_id != resolved_user_id:
@@ -208,7 +232,14 @@ class ThreadMetaRepository(ThreadMetaStore):
             merged = dict(row.metadata_json or {})
             merged.update(metadata)
             row.metadata_json = merged
-            row.updated_at = datetime.now(UTC)
+            if touch:
+                row.updated_at = datetime.now(UTC)
+            else:
+                # ``updated_at`` has an ``onupdate`` hook that fires on any row
+                # UPDATE unless the column has an explicit SET value. Mark the
+                # current value dirty so SQLAlchemy emits it in SET, skips the
+                # hook, and preserves recency ordering.
+                flag_modified(row, "updated_at")
             await session.commit()
 
     async def update_owner(

@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import tempfile
 from pathlib import Path
@@ -12,7 +11,14 @@ from app.gateway.deps import get_config, require_admin_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, refresh_skills_system_prompt_cache_async, refresh_user_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
-from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    SkillStateConfig,
+    atomic_write_extensions_config,
+    extensions_config_write_lock,
+    get_extensions_config,
+    reload_extensions_config,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills import Skill
 from deerflow.skills.installer import SkillAlreadyExistsError, SkillSecurityScanError
@@ -25,6 +31,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +66,7 @@ class SkillUpdateRequest(BaseModel):
 class SkillInstallRequest(BaseModel):
     """Request model for installing a skill from a .skill file."""
 
-    thread_id: str = Field(..., description="The thread ID where the .skill file is located")
+    thread_id: ThreadId = Field(..., description="The thread ID where the .skill file is located")
     path: str = Field(..., description="Virtual path to the .skill file (e.g., mnt/user-data/outputs/my-skill.skill)")
 
 
@@ -267,8 +274,9 @@ async def update_custom_skill(skill_name: str, body: CustomSkillUpdateRequest, r
         if scan.decision == "block":
             raise HTTPException(status_code=400, detail=f"Security scan blocked the edit: {scan.reason}")
         prev_content = storage.read_custom_skill(skill_name)
-        storage.write_custom_skill(skill_name, SKILL_MD_FILE, body.content)
-        storage.append_history(
+        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, body.content)
+        await asyncio.to_thread(
+            storage.append_history,
             skill_name,
             {
                 "action": "human_edit",
@@ -299,7 +307,8 @@ async def delete_custom_skill(skill_name: str, request: Request, config: AppConf
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
         storage = _get_user_skill_storage(config)
-        storage.delete_custom_skill(
+        await asyncio.to_thread(
+            storage.delete_custom_skill,
             skill_name,
             history_meta={
                 "action": "human_delete",
@@ -327,10 +336,20 @@ async def get_custom_skill_history(skill_name: str, request: Request, config: Ap
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+
+        def _read_history() -> list[dict] | None:
+            # Worker thread: storage construction, the existence probes, and the
+            # history-file read are blocking filesystem IO that must stay off the
+            # event loop. None signals 404 to the caller.
+            storage = _get_user_skill_storage(config)
+            if not storage.custom_skill_exists(skill_name) and not storage.get_skill_history_file(skill_name).exists():
+                return None
+            return storage.read_history(skill_name)
+
+        history = await asyncio.to_thread(_read_history)
+        if history is None:
             raise HTTPException(status_code=404, detail=f"Custom skill '{skill_name}' not found")
-        return CustomSkillHistoryResponse(history=storage.read_history(skill_name))
+        return CustomSkillHistoryResponse(history=history)
     except HTTPException:
         raise
     except Exception as e:
@@ -368,10 +387,10 @@ async def rollback_custom_skill(skill_name: str, body: SkillRollbackRequest, req
             "scanner": {"decision": scan.decision, "reason": scan.reason, "static_findings": static_findings},
         }
         if scan.decision == "block":
-            storage.append_history(skill_name, history_entry)
+            await asyncio.to_thread(storage.append_history, skill_name, history_entry)
             raise HTTPException(status_code=400, detail=f"Rollback blocked by security scanner: {scan.reason}")
-        storage.write_custom_skill(skill_name, SKILL_MD_FILE, target_content)
-        storage.append_history(skill_name, history_entry)
+        await asyncio.to_thread(storage.write_custom_skill, skill_name, SKILL_MD_FILE, target_content)
+        await asyncio.to_thread(storage.append_history, skill_name, history_entry)
         await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
         return await _read_custom_skill_response(skill_name, config)
     except HTTPException:
@@ -410,6 +429,49 @@ async def get_skill(skill_name: str, config: AppConfig = Depends(get_config)) ->
         raise HTTPException(status_code=500, detail=f"Failed to get skill: {str(e)}")
 
 
+def _write_extensions_skill_state(
+    storage: SkillStorage,
+    skill_name: str,
+    enabled: bool,
+    *,
+    rebuild_public_projection: bool,
+) -> None:
+    """Read-modify-write a skill's enabled state in the shared extensions_config.json.
+
+    Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
+    the public projection lock before ``extensions_config_write_lock``. The first
+    keeps the enabled-only view synchronized across workers; the second prevents
+    this router and the MCP router from interleaving writes to the shared file.
+    Both locks are held by the worker, so request cancellation cannot release
+    either lock while the write or projection rebuild is still running.
+    """
+    from contextlib import nullcontext
+
+    from deerflow.skills.projection import skill_projection_mutation
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    removal_names = (skill_name,) if not enabled else ()
+    projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
+    with projection_update:
+        with extensions_config_write_lock:
+            config_path = ExtensionsConfig.resolve_config_path()
+            if config_path is None:
+                config_path = Path.cwd().parent / "extensions_config.json"
+                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+
+            # The projection lock is cross-process, but the singleton cache is
+            # not. Existing files are therefore re-read under the lock; a new
+            # file starts from a deep snapshot of the cached defaults.
+            extensions_config = ExtensionsConfig.from_file(config_path) if config_path.exists() else get_extensions_config().model_copy(deep=True)
+            extensions_config.skills[skill_name] = SkillStateConfig(enabled=enabled)
+
+            config_data = extensions_config.to_file_dict()
+            atomic_write_extensions_config(config_path, config_data)
+
+            logger.info(f"Skills configuration updated and saved to: {config_path}")
+            reload_extensions_config()
+
+
 @router.put(
     "/skills/{skill_name}",
     response_model=SkillResponse,
@@ -424,8 +486,14 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_name = skill_name.replace("\r\n", "").replace("\n", "")
-        storage = _get_user_skill_storage(config)
-        skills = storage.load_skills(enabled_only=False)
+
+        def _load_storage_and_skills() -> tuple[SkillStorage, list[Skill]]:
+            # Worker thread: storage construction and skill enumeration both walk
+            # the filesystem.
+            storage = _get_user_skill_storage(config)
+            return storage, storage.load_skills(enabled_only=False)
+
+        storage, skills = await asyncio.to_thread(_load_storage_and_skills)
         skill = next((s for s in skills if s.name == skill_name), None)
 
         if skill is None:
@@ -435,38 +503,30 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state)
         # so that two users with same-named custom skills can toggle independently.
         if skill.category == SkillCategory.PUBLIC:
-            config_path = ExtensionsConfig.resolve_config_path()
-            if config_path is None:
-                config_path = Path.cwd().parent / "extensions_config.json"
-                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-            extensions_config = get_extensions_config()
-            extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-
-            config_data = extensions_config.to_file_dict()
-
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(config_data, f, indent=2)
-
-            logger.info(f"Skills configuration updated and saved to: {config_path}")
-            reload_extensions_config()
+            await asyncio.to_thread(
+                _write_extensions_skill_state,
+                storage,
+                skill_name,
+                body.enabled,
+                rebuild_public_projection=True,
+            )
         else:
             # CUSTOM / LEGACY: write per-user state
             from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             if isinstance(storage, UserScopedSkillStorage):
-                storage.set_skill_enabled_state(skill_name, body.enabled)
+                await asyncio.to_thread(storage.set_skill_enabled_state, skill_name, body.enabled)
             else:
-                # Fallback for non-user-scoped storage (unlikely in practice)
-                config_path = ExtensionsConfig.resolve_config_path()
-                if config_path is None:
-                    config_path = Path.cwd().parent / "extensions_config.json"
-                extensions_config = get_extensions_config()
-                extensions_config.skills[skill_name] = SkillStateConfig(enabled=body.enabled)
-                config_data = extensions_config.to_file_dict()
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config_data, f, indent=2)
-                reload_extensions_config()
+                # Fallback for non-user-scoped storage (unlikely in practice):
+                # same shared-file RMW as the PUBLIC branch, without a public
+                # projection rebuild for this non-public skill.
+                await asyncio.to_thread(
+                    _write_extensions_skill_state,
+                    storage,
+                    skill_name,
+                    body.enabled,
+                    rebuild_public_projection=False,
+                )
 
         # PUBLIC skill enabled state lives in the global extensions_config.json
         # and affects every user, so the prompt cache for ALL users must be
@@ -481,7 +541,10 @@ async def update_skill(skill_name: str, body: SkillUpdateRequest, request: Reque
         else:
             await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
 
-        skills = _get_user_skill_storage(config).load_skills(enabled_only=False)
+        def _reload_skills() -> list[Skill]:
+            return _get_user_skill_storage(config).load_skills(enabled_only=False)
+
+        skills = await asyncio.to_thread(_reload_skills)
         updated_skill = next((s for s in skills if s.name == skill_name), None)
 
         if updated_skill is None:

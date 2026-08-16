@@ -9,7 +9,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
-from langgraph.types import Command
+from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
@@ -46,7 +46,12 @@ class _SandboxStub(Sandbox):
         del env, timeout
         return "OK"
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         return "content"
 
     def download_file(self, path: str) -> bytes:
@@ -250,6 +255,62 @@ async def test_aafter_agent_delegates_to_super_when_no_sandbox(monkeypatch: pyte
 
     assert result == {"delegated": True}
     assert calls == [(state, runtime)]
+
+
+def test_after_agent_unwraps_overwrite_sandbox_state() -> None:
+    """Fork-restored state may carry the sandbox channel Overwrite-wrapped."""
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": Overwrite({"sandbox_id": "fork-restored"})}
+        result = SandboxMiddleware().after_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    # The wrapped value replays the parent's sandbox; this run must not release it.
+    assert provider.released_ids == []
+
+
+def test_after_agent_releases_own_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": {"sandbox_id": "own-sandbox"}}
+        result = SandboxMiddleware().after_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == ["own-sandbox"]
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_unwraps_overwrite_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": Overwrite({"sandbox_id": "fork-restored"})}
+        result = await SandboxMiddleware().aafter_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == []
+
+
+@pytest.mark.anyio
+async def test_aafter_agent_releases_own_sandbox_state() -> None:
+    provider = _AsyncOnlyProvider()
+    set_sandbox_provider(provider)
+    try:
+        state = {"sandbox": {"sandbox_id": "own-sandbox"}}
+        result = await SandboxMiddleware().aafter_agent(state, Runtime(context={}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.released_ids == ["own-sandbox"]
 
 
 # ---------------------------------------------------------------------------

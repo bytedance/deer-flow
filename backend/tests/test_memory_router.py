@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -44,6 +45,27 @@ def test_export_memory_route_returns_current_memory() -> None:
             response = client.get("/api/memory/export")
     assert response.status_code == 200
     assert response.json()["facts"] == exported_memory["facts"]
+
+
+def test_get_memory_route_offloads_manager_call_from_event_loop() -> None:
+    event_loop_thread = threading.get_ident()
+    called_from: list[int] = []
+    manager = MagicMock()
+
+    def get_memory(*, user_id: str) -> dict:
+        called_from.append(threading.get_ident())
+        return _sample_memory()
+
+    manager.get_memory.side_effect = get_memory
+    request = SimpleNamespace()
+    with (
+        patch("app.gateway.routers.memory.get_memory_manager", return_value=manager),
+        patch("app.gateway.routers.memory._resolve_memory_user_id", return_value="user-1"),
+    ):
+        response = asyncio.run(memory.get_memory(request))
+
+    assert response.facts == []
+    assert called_from and called_from[0] != event_loop_thread
 
 
 def test_export_memory_route_preserves_source_error() -> None:
@@ -189,6 +211,20 @@ def test_create_memory_fact_route_maps_conflict_to_409() -> None:
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Memory changed concurrently; reload and retry."
+
+
+def test_create_memory_fact_route_maps_duplicate_to_409() -> None:
+    app = FastAPI()
+    app.include_router(memory.router)
+    mock_mgr = MagicMock()
+    mock_mgr.create_fact.side_effect = ValueError("Duplicate fact")
+
+    with patch("app.gateway.routers.memory.get_memory_manager", return_value=mock_mgr):
+        with TestClient(app) as client:
+            response = client.post("/api/memory/facts", json={"content": "fact"})
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "A fact with the same content already exists."
 
 
 def test_get_memory_route_maps_corruption_to_stable_500() -> None:

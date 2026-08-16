@@ -9,11 +9,14 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import DeerMemConfig
+from .message_processing import detect_signals, extract_message_text
 from .prompt import (
     format_conversation_for_update,
     load_prompt,
@@ -124,6 +127,52 @@ def _extract_text(content: Any) -> str:
 
 
 _REQUIRED_MEMORY_UPDATE_TOP_LEVEL_KEYS = frozenset({"user", "history", "newFacts"})
+_FACT_CLASSIFICATION_FIELDS = ("scope", "durability", "authority")
+
+
+def _normalize_gate_label(value: Any) -> str | None:
+    """Normalize a model-produced scope-gate label without validating policy."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    return normalized or None
+
+
+def _fact_scope_gate_reason(fact: dict[str, Any]) -> str | None:
+    """Return the deterministic rejection reason for a model-extracted fact."""
+    if any(_normalize_gate_label(fact.get(field)) is None for field in _FACT_CLASSIFICATION_FIELDS):
+        return "missing"
+    if _normalize_gate_label(fact.get("scope")) != "user":
+        return "scope"
+    if _normalize_gate_label(fact.get("durability")) != "durable":
+        return "durability"
+    if _normalize_gate_label(fact.get("authority")) != "descriptive":
+        return "authority"
+    return None
+
+
+def _summary_scope_gate_reason(section_data: dict[str, Any]) -> str | None:
+    """Return the deterministic rejection reason for a summary update."""
+    scope = _normalize_gate_label(section_data.get("scope"))
+    authority = _normalize_gate_label(section_data.get("authority"))
+    if scope is None or authority is None:
+        return "missing"
+    if scope != "user":
+        return "scope"
+    if authority != "descriptive":
+        return "authority"
+    return None
+
+
+def _removal_scope_gate_reason(removal: dict[str, Any]) -> str | None:
+    """Return the deterministic rejection reason for a contradiction removal."""
+    scope = _normalize_gate_label(removal.get("scope"))
+    reason = removal.get("reason")
+    if scope is None or not isinstance(reason, str) or not reason.strip():
+        return "missing"
+    if scope != "user":
+        return "scope"
+    return None
 
 
 def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
@@ -178,6 +227,14 @@ def _normalize_memory_update_fact(fact: Any) -> dict[str, Any] | None:
     if evd is not None:
         normalized_fact["expected_valid_days"] = evd
 
+    # Scope classification is extraction-only metadata. Preserve it through
+    # structural normalization so _apply_updates can fail closed per item, but
+    # never copy it into the persisted fact_entry.
+    for field in _FACT_CLASSIFICATION_FIELDS:
+        normalized_value = _normalize_gate_label(fact.get(field))
+        if normalized_value is not None:
+            normalized_fact[field] = normalized_value
+
     return normalized_fact
 
 
@@ -187,7 +244,35 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
     history = update_data.get("history")
     new_facts = update_data.get("newFacts")
     facts_to_remove = update_data.get("factsToRemove")
-    normalized_facts_to_remove = [fact_id for fact_id in facts_to_remove if isinstance(fact_id, str)] if isinstance(facts_to_remove, list) else []
+    normalized_facts_to_remove: list[dict[str, Any]] = []
+    if isinstance(facts_to_remove, list):
+        for entry in facts_to_remove:
+            # Preserve the legacy string form as an unclassified removal. The
+            # apply-layer gate will reject it as missing instead of continuing
+            # to allow an unscoped destructive mutation.
+            if isinstance(entry, str):
+                fact_id = entry.strip()
+                if fact_id:
+                    normalized_facts_to_remove.append({"id": fact_id})
+                continue
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            normalized_removal: dict[str, Any] = {"id": raw_id.strip()}
+            scope = _normalize_gate_label(entry.get("scope"))
+            if scope is not None:
+                normalized_removal["scope"] = scope
+            reason = entry.get("reason")
+            if isinstance(reason, str) and reason.strip():
+                normalized_removal["reason"] = reason.strip()
+            if "replacementFactIndex" in entry:
+                # Preserve invalid values too: the apply layer must reject an
+                # invalid dependency rather than silently treating it as a pure
+                # removal and deleting the old fact.
+                normalized_removal["replacementFactIndex"] = entry.get("replacementFactIndex")
+            normalized_facts_to_remove.append(normalized_removal)
     normalized_new_facts = []
     dropped_new_fact = not isinstance(new_facts, list)
     if isinstance(new_facts, list):
@@ -288,6 +373,7 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
                         "content": content.strip(),
                         "category": _norm_cat,
                         "confidence": _norm_conf,
+                        **{field: normalized for field in _FACT_CLASSIFICATION_FIELDS if (normalized := _normalize_gate_label(consolidated.get(field))) is not None},
                     },
                 }
             )
@@ -368,6 +454,20 @@ def _fact_content_key(content: Any) -> str | None:
     if not stripped:
         return None
     return stripped.casefold()
+
+
+def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: str | None) -> None:
+    """Reject a candidate fact whose normalized content already exists.
+
+    Callers must invoke this against the freshest snapshot available inside
+    their read-check-write critical section (i.e. on every revision-conflict
+    retry), so two concurrent creators of the same content cannot both pass
+    the check and store duplicate facts."""
+    if content_key is None:
+        return
+    for fact in memory_data.get("facts", []):
+        if isinstance(fact, dict) and _fact_content_key(fact.get("content")) == content_key:
+            raise ValueError("Duplicate fact")
 
 
 # ── Staleness review helpers ──────────────────────────────────────────────
@@ -610,6 +710,52 @@ def _escape_memory_for_prompt(memory: Any) -> Any:
     return memory
 
 
+def _memory_with_manual_markers(memory: Any) -> Any:
+    """Return a deep copy of ``memory`` with ``[MANUAL]`` prefixed onto the
+    content of manually-authored facts (``source.type == "manual"``).
+
+    The marker is a prompt-only signal that tells the extraction LLM a fact is a
+    high-trust user edit; the persisted memory is untouched (this copy is only
+    fed to the prompt). Idempotent: a fact already carrying the prefix is not
+    double-marked.
+    """
+    display = copy.deepcopy(memory)
+    if not isinstance(display, dict):
+        return display
+    for fact in display.get("facts", []):
+        if not isinstance(fact, dict):
+            continue
+        src = fact.get("source")
+        src_type = src.get("type") if isinstance(src, dict) else None
+        if src_type == "manual":
+            content = fact.get("content")
+            if isinstance(content, str) and not content.startswith("[MANUAL]"):
+                fact["content"] = "[MANUAL] " + content
+    return display
+
+
+def _message_identity(msg: Any) -> tuple[str, ...] | None:
+    """Return a hashable identity for ``msg`` for watermark tracking.
+
+    The watermark is content/identity based rather than index based so it stays
+    valid when summarization removes the conversation front (an index watermark
+    would point at the wrong message after a front removal, silently skipping
+    un-extracted turns). Prefers the langgraph message ``id`` (unique, robust to
+    duplicate content); falls back to ``(type, content)`` when no id is set
+    (e.g. plain ``HumanMessage(content=...)`` in tests). Returns ``None`` for a
+    message with neither id nor extractable text -- the caller then feeds the
+    full list, which is safe over-extraction and never loss.
+    """
+    mid = getattr(msg, "id", None)
+    if isinstance(mid, str) and mid:
+        return ("id", mid)
+    text = extract_message_text(msg)
+    if not text:
+        return None
+    msg_type = getattr(msg, "type", "") or ""
+    return ("content", msg_type, text)
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
@@ -632,6 +778,12 @@ class MemoryUpdater:
         self._llm = llm
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
+        # Watermark: last-extracted message identity per (thread_id, user_id,
+        # agent_name), held in memory so a restart re-extracts one batch. The
+        # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
+        # gateway handling many threads cannot grow it without limit; a dropped
+        # key re-extracts one batch on that thread's next turn.
+        self._watermarks: OrderedDict[tuple[str | None, str | None, str | None], tuple[str, ...] | None] = OrderedDict()
 
     # ── Data access + fact CRUD (formerly module-level functions; use self._storage) ──
 
@@ -761,6 +913,13 @@ class MemoryUpdater:
         "added" status. This restores both the max_facts cap and the post-trim
         existence check (upstream's ``create_memory_fact_with_created_fact``),
         which the vendored copy had dropped together to avoid the dangling id.
+
+        Duplicate rejection is enforced here (not only by callers): the
+        candidate's normalized content key is checked against the fresh
+        memory snapshot inside the revision-conflict retry loop of both
+        storage paths (apply_changes and legacy single-file save), so
+        concurrent creators cannot both store the same content. Raises
+        ``ValueError("Duplicate fact")`` on a normalized-content match.
         """
         if agent_name is None:
             raise ValueError("agent_name")
@@ -769,6 +928,7 @@ class MemoryUpdater:
             raise ValueError("content")
         normalized_category = category.strip() or "context"
         validated_confidence = _validate_confidence(confidence)
+        candidate_key = _fact_content_key(normalized_content)
         now = utc_now_iso_z()
         fact_id = f"fact_{uuid.uuid4().hex[:8]}"
         candidate = {
@@ -782,6 +942,12 @@ class MemoryUpdater:
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                # Duplicate rejection lives inside the conflict-retry loop so
+                # it is re-evaluated against the fresh snapshot after every
+                # revision conflict: two concurrent creators of the same
+                # content cannot both store it (the loser reloads, sees the
+                # winner's fact, and is rejected here).
+                _raise_if_duplicate_fact_content(memory_data, candidate_key)
                 updated_memory = dict(memory_data)
                 updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
                 kept_ids = {str(fact.get("id")) for fact in updated_memory["facts"]}
@@ -806,15 +972,24 @@ class MemoryUpdater:
                         raise
                     logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
             raise AssertionError("bounded create retry did not return or raise")
-        memory_data = self.get_memory_data(agent_name, user_id=user_id)
-        updated_memory = dict(memory_data)
-        updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), candidate], self._config.max_facts)
-        if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
-            raise OSError("Failed to save memory data after creating fact")
-        # If the cap evicted the just-added (lower-confidence) fact, signal via
-        # None so callers don't report a dangling id as "added".
-        stored = any(f.get("id") == fact_id for f in updated_memory["facts"])
-        return updated_memory, (fact_id if stored else None)
+        # Legacy single-file path: same duplicate-rejection contract as the
+        # apply_changes path above. A revision-conflicted save (False) reloads
+        # the fresh snapshot and re-runs the duplicate check, so a concurrent
+        # creator's commit is rejected with ValueError("Duplicate fact")
+        # instead of surfacing as a generic save failure.
+        for attempt in range(3):
+            memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+            _raise_if_duplicate_fact_content(memory_data, candidate_key)
+            updated_memory = dict(memory_data)
+            updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+            if self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
+                # If the cap evicted the just-added (lower-confidence) fact,
+                # signal via None so callers don't report a dangling id as
+                # "added".
+                stored = any(f.get("id") == fact_id for f in updated_memory["facts"])
+                return updated_memory, (fact_id if stored else None)
+            logger.info("Retrying capped fact creation from a fresh snapshot after a revision conflict")
+        raise OSError("Failed to save memory data after creating fact")
 
     def delete_memory_fact(self, fact_id: str, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Delete a fact by its id and persist the updated memory data."""
@@ -917,37 +1092,44 @@ class MemoryUpdater:
             raise OSError(f"Failed to save memory data after updating fact '{fact_id}'")
         return updated_memory
 
-    def _build_correction_hint(
-        self,
-        correction_detected: bool,
-        reinforcement_detected: bool,
-    ) -> str:
-        """Build optional prompt hints for correction and reinforcement signals."""
-        correction_hint = ""
-        if correction_detected:
-            correction_hint = (
-                "IMPORTANT: Explicit correction signals were detected in this conversation. "
-                "Pay special attention to what the agent got wrong, what the user corrected, "
-                "and record the correct approach as a fact with category "
-                '"correction" and confidence >= 0.95 when appropriate.'
-            )
-        if reinforcement_detected:
-            reinforcement_hint = (
-                "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
-                "The user explicitly confirmed the agent's approach was correct or helpful. "
-                "Record the confirmed approach, style, or preference as a fact with category "
-                '"preference" or "behavior" and confidence >= 0.9 when appropriate.'
-            )
-            correction_hint = (correction_hint + "\n" + reinforcement_hint).strip() if correction_hint else reinforcement_hint
+    def _build_signal_hints(self, signals: frozenset[str]) -> str:
+        """Build optional prompt hints for the detected signal classes.
 
-        return correction_hint
+        Each present signal contributes one instruction nudging the extraction
+        LLM toward the right category and confidence. The variable is still
+        rendered into the template's ``{correction_hint}`` slot (the name is
+        historical -- it now carries the full signal-hint set, plus the manual
+        fact note appended by :meth:`_prepare_update_prompt`).
+        """
+        hints: list[str] = []
+        if "correction" in signals:
+            hints.append(
+                "IMPORTANT: Explicit correction signals were detected in this conversation. "
+                "Record a correction with confidence >= 0.95 only when it describes a durable, user-level "
+                "working preference that is safe to reuse across unrelated tasks. A correction to facts, files, "
+                "directions, or constraints in the current task is thread- or project-scoped and must not be stored."
+            )
+        if "reinforcement" in signals:
+            hints.append(
+                "IMPORTANT: Positive reinforcement signals were detected in this conversation. "
+                "Record the confirmed approach, style, or preference with high confidence only if it is a durable, "
+                "user-level pattern. Approval of the current result or current task is thread-scoped and must not be stored."
+            )
+        if "preference" in signals:
+            hints.append("IMPORTANT: A preference signal was detected. Record it with high confidence only when it is a durable, user-level preference; a one-off choice for the current task is thread-scoped and must not be stored.")
+        if "identity" in signals:
+            hints.append("IMPORTANT: An identity signal was detected. Record the user's stated role, profession, or background only when it is user-level and durable across tasks.")
+        if "goal" in signals:
+            hints.append("IMPORTANT: A goal signal was detected. Record only a durable, user-level goal that remains useful across unrelated tasks; the objective of the current task, sprint, PR, or thread must not be stored.")
+        if "decision" in signals:
+            hints.append("IMPORTANT: A decision signal was detected. Record only a durable, user-level decision or working pattern; a choice made for the current task, file, PR, or thread must not be stored.")
+        return "\n".join(hints)
 
     def _prepare_update_prompt(
         self,
         messages: list[Any],
         agent_name: str | None,
-        correction_detected: bool,
-        reinforcement_detected: bool,
+        signals: frozenset[str],
         user_id: str | None = None,
     ) -> tuple[dict[str, Any], list[Any]] | None:
         """Load memory and build the update prompt for a conversation."""
@@ -960,10 +1142,16 @@ class MemoryUpdater:
         if not conversation_text.strip():
             return None
 
-        correction_hint = self._build_correction_hint(
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
-        )
+        correction_hint = self._build_signal_hints(signals)
+
+        # Manual-fact signal: tag high-trust user-authored facts with a [MANUAL]
+        # prefix in the prompt's current_memory and instruct the model to preserve
+        # them unless the new conversation is an explicit, unambiguous correction.
+        display_memory = current_memory
+        if self._has_manual_facts(current_memory):
+            display_memory = _memory_with_manual_markers(current_memory)
+            manual_hint = "NOTE: Facts marked [MANUAL] are high-trust user-authored edits. Update them only when the new conversation is an explicit, unambiguous correction; otherwise preserve them as-is."
+            correction_hint = (correction_hint + "\n" + manual_hint).strip() if correction_hint else manual_hint
 
         # ── Build staleness review section ──
         staleness_section = ""
@@ -986,7 +1174,7 @@ class MemoryUpdater:
                 )
 
         variables = {
-            "current_memory": json.dumps(_escape_memory_for_prompt(current_memory), indent=2, ensure_ascii=False),
+            "current_memory": json.dumps(_escape_memory_for_prompt(display_memory), indent=2, ensure_ascii=False),
             "conversation": conversation_text,
             "correction_hint": correction_hint,
             "staleness_review_section": staleness_section,
@@ -995,6 +1183,45 @@ class MemoryUpdater:
         prompt = load_prompt_messages("memory_update", variables, agent_name=agent_name, prompts_dir=self._prompts_dir)
         return current_memory, prompt
 
+    def _has_manual_facts(self, memory: dict[str, Any]) -> bool:
+        """Return whether ``memory`` contains any user-authored (manual) fact."""
+        return any(isinstance(f, dict) and isinstance(f.get("source"), dict) and f.get("source", {}).get("type") == "manual" for f in memory.get("facts", []))
+
+    def _emit_extraction_metrics(
+        self,
+        metrics: dict[str, Any],
+        *,
+        thread_id: str | None,
+        user_id: str | None,
+        trace_id: str | None,
+        model_name: str | None,
+        response: Any,
+        success: bool,
+    ) -> None:
+        """Invoke the post-extraction observability callback (Langfuse span etc.).
+
+        No-op when ``extraction_callback`` is unset (default). Exceptions from
+        the callback are logged and swallowed so observability never breaks the
+        update path.
+        """
+        callback = self._config.extraction_callback
+        if callback is None:
+            return
+        usage = getattr(response, "usage_metadata", None)
+        payload: dict[str, Any] = {
+            "thread_id": thread_id,
+            "user_id": user_id,
+            "trace_id": trace_id,
+            "model_name": model_name,
+            "success": success,
+            "token_usage": usage if isinstance(usage, dict) else None,
+        }
+        payload.update(metrics)
+        try:
+            callback(payload)
+        except Exception:
+            logger.warning("extraction_callback raised; ignoring", exc_info=True)
+
     def _finalize_update(
         self,
         current_memory: dict[str, Any],
@@ -1002,9 +1229,18 @@ class MemoryUpdater:
         thread_id: str | None,
         agent_name: str | None,
         user_id: str | None = None,
+        *,
+        metrics: dict[str, Any] | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
+        if metrics is not None:
+            extracted = update_data.get("newFacts", [])
+            extracted_list = extracted if isinstance(extracted, list) else []
+            metrics["facts_extracted"] = len(extracted_list)
+            # facts_passed_confidence / rejected_low_confidence are populated
+            # inside _apply_updates at the real confidence-filter site, so the
+            # metric tracks the actual filter rather than a re-derived copy here.
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 # Deep-copy before in-place mutation so a failed commit cannot
@@ -1012,7 +1248,7 @@ class MemoryUpdater:
                 # complete extraction result is reapplied to a fresh document;
                 # its trim/consolidation/delete decisions are snapshot-wide and
                 # must never be replayed as disjoint point writes.
-                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
+                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
                 updated_memory = _strip_upload_mentions_from_memory(updated_memory)
                 current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
                 updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
@@ -1044,7 +1280,7 @@ class MemoryUpdater:
             raise AssertionError("bounded extracted-update retry did not return or raise")
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
-        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id)
+        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
         return self._storage.save(
             updated_memory,
@@ -1058,10 +1294,11 @@ class MemoryUpdater:
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1076,10 +1313,10 @@ class MemoryUpdater:
             messages=messages,
             thread_id=thread_id,
             agent_name=agent_name,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
+            signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            bypass_watermark=bypass_watermark,
         )
 
     def _do_update_memory_sync(
@@ -1087,10 +1324,11 @@ class MemoryUpdater:
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1110,45 +1348,128 @@ class MemoryUpdater:
                     messages=messages,
                     thread_id=thread_id,
                     agent_name=agent_name,
-                    correction_detected=correction_detected,
-                    reinforcement_detected=reinforcement_detected,
+                    signals=signals,
                     user_id=user_id,
                     trace_id=trace_id,
+                    bypass_watermark=bypass_watermark,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
             thread_id=thread_id,
             agent_name=agent_name,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
+            signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            bypass_watermark=bypass_watermark,
         )
+
+    def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
+        """Return the watermark for ``key``, marking it most-recently-used.
+
+        Uses key presence (not value truthiness) so a stored ``None`` identity
+        still counts as a live entry for LRU ordering.
+        """
+        if key not in self._watermarks:
+            return None
+        self._watermarks.move_to_end(key)
+        return self._watermarks[key]
+
+    def _watermark_set(
+        self,
+        key: tuple[str | None, str | None, str | None],
+        value: tuple[str, ...] | None,
+    ) -> None:
+        """Store ``value`` for ``key``, evicting the least-recently-used entry
+        when the bounded LRU cache exceeds ``config.watermark_max_keys``.
+
+        A dropped key is safe: the next turn for that thread finds no watermark
+        and re-extracts one batch (the documented restart behavior). ``0`` =
+        unbounded (no eviction).
+        """
+        self._watermarks[key] = value
+        self._watermarks.move_to_end(key)
+        cap = self._config.watermark_max_keys
+        if cap > 0 and len(self._watermarks) > cap:
+            self._watermarks.popitem(last=False)
+
+    def _feed_after_watermark(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+    ) -> list[Any]:
+        """Return the slice of ``messages`` not yet extracted.
+
+        The watermark stores the identity of the last-extracted message (see
+        :func:`_message_identity`). If that message is still present, everything
+        *after* it is fed; if it is absent (front removed by summarization, or
+        the first-ever extraction for this key) the full list is fed. Re-feeding
+        is safe over-extraction -- it never skips a turn, which is the only
+        failure direction that would lose facts.
+        """
+        last_id = self._watermark_get(watermark_key)
+        if last_id is None:
+            return messages
+        for i, msg in enumerate(messages):
+            if _message_identity(msg) == last_id:
+                return messages[i + 1 :]
+        return messages
 
     def _do_update_memory_sync_impl(
         self,
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
         Uses the *sync* LLM call path so no event loop is created.  This
         guarantees that the langchain provider's globally cached async
         httpx ``AsyncClient`` / connection pool (the one shared with the
-        lead agent) is never touched — no cross-loop connection reuse is
+        lead agent) is never touched - no cross-loop connection reuse is
         possible.
+
+        Watermark: the middleware passes the full conversation each turn, so
+        without skipping already-extracted turns every update re-feeds old
+        messages. The watermark stores the identity of the last-extracted
+        message (content/id based, in-memory only) so it stays correct when
+        summarization removes the conversation front; a restart loses it and
+        re-extracts one batch. ``bypass_watermark`` is set by the emergency
+        (summarization) flush path: the subset it carries is a one-shot
+        "extract before removal" snapshot, so it is fed in full and does not
+        read or advance the conversation watermark (advancing it from the
+        subset's own length would regress the watermark and skip un-extracted
+        tail turns on the next normal feed).
         """
+        metrics: dict[str, Any] = {}
+        response: Any = None
+        model_name: str | None = None
+        success = False
+        attempted = False
         try:
+            watermark_key = (thread_id, user_id, agent_name)
+            if bypass_watermark:
+                # Emergency flush: extract the carried subset in full.
+                feed_messages = messages
+            else:
+                feed_messages = self._feed_after_watermark(watermark_key, messages)
+            if not feed_messages:
+                logger.debug("Memory update skipped: no new messages since watermark (thread=%s)", thread_id)
+                return True
+            # Re-detect signals on the post-watermark feed so extraction hints
+            # reference only turns the LLM will actually see. The admission-time
+            # ``signals`` (detected on the full conversation in DeerMem) already
+            # served their purpose (backpressure admission at enqueue); the hint
+            # is a soft nudge and must not point at turns the watermark excluded.
+            feed_signals = detect_signals(feed_messages, patterns_dir=self._config.patterns_dir)
             prepared = self._prepare_update_prompt(
-                messages=messages,
+                messages=feed_messages,
                 agent_name=agent_name,
-                correction_detected=correction_detected,
-                reinforcement_detected=reinforcement_detected,
+                signals=feed_signals,
                 user_id=user_id,
             )
             if prepared is None:
@@ -1173,30 +1494,114 @@ class MemoryUpdater:
                     model_name=model_name,
                 )
             logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
-            response = model.invoke(prompt, config=invoke_config)
-            return self._finalize_update(
+            attempted = True
+            started = time.monotonic()
+            try:
+                response = model.invoke(prompt, config=invoke_config)
+            # Deliberately broader than `Exception` so no terminal path of the
+            # provider call goes unobserved. This is NOT about asyncio
+            # cancellation: this whole method runs on a worker thread (the
+            # debounce timer, or the executor `update_memory` offloads to), and
+            # cancelling the awaiting side never interrupts a running thread, so
+            # `CancelledError` cannot arrive here. Reporting costs nothing on
+            # this path either way — the hook below is a non-blocking submit.
+            except BaseException as exc:
+                self._notify_llm_result(
+                    invoke_config,
+                    prompt=prompt,
+                    response=None,
+                    error=exc,
+                    started=started,
+                    model_name=model_name,
+                )
+                raise
+            self._notify_llm_result(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=None,
+                started=started,
+                model_name=model_name,
+            )
+            success = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,
                 agent_name=agent_name,
                 user_id=user_id,
+                metrics=metrics,
             )
+            if success and not bypass_watermark:
+                # Advance the watermark to the last message fed (the feed is a
+                # suffix, so this is messages[-1]). Skipped on the emergency
+                # path -- the subset's last message is older than the
+                # conversation's latest, so advancing from it would regress.
+                self._watermark_set(watermark_key, _message_identity(messages[-1]))
+            return success
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
         except Exception as e:
             logger.exception("Memory update failed: %s", e)
             return False
+        finally:
+            # Emit metrics even when _finalize_update (or invoke) raises, so the
+            # observability callback sees exception failures (parse errors,
+            # storage errors after retry) rather than only the happy path. The
+            # pre-attempt early returns (no new messages, empty conversation, no
+            # model) do not emit, matching the prior behavior.
+            if attempted:
+                self._emit_extraction_metrics(
+                    metrics,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    model_name=model_name,
+                    response=response,
+                    success=success,
+                )
+
+    def _notify_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        started: float,
+        model_name: str | None,
+    ) -> None:
+        """Fire the optional host result hook without affecting the update."""
+        if self._callbacks is None:
+            return
+        hook = getattr(self._callbacks, "on_memory_llm_result", None)
+        if hook is None:
+            return
+        try:
+            hook(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                model_name=model_name,
+            )
+        except Exception:
+            # Only the hook's own failures are non-fatal. `SystemExit` /
+            # `KeyboardInterrupt` mean the process is going down and must not be
+            # swallowed by an observability path.
+            logger.warning("Memory LLM result hook failed (non-fatal)", exc_info=True)
 
     def update_memory(
         self,
         messages: list[Any],
         thread_id: str | None = None,
         agent_name: str | None = None,
-        correction_detected: bool = False,
-        reinforcement_detected: bool = False,
+        signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        *,
+        bypass_watermark: bool = False,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1213,12 +1618,15 @@ class MemoryUpdater:
             messages: List of conversation messages.
             thread_id: Optional thread ID for tracking source.
             agent_name: If provided, updates per-agent memory. If None, updates global memory.
-            correction_detected: Whether recent turns include an explicit correction signal.
-            reinforcement_detected: Whether recent turns include a positive reinforcement signal.
+            signals: Signal classes detected in the conversation (correction /
+                reinforcement / preference / ...), used as extraction hints.
             user_id: If provided, scopes memory to a specific user.
 
         Returns:
-            True if update was successful, False otherwise.
+            True if the update persisted. False on any failure (no content,
+            unparseable response, LLM error); failures are swallowed (best-effort)
+            -- a failed update is re-fed on the next conversation turn because the
+            watermark does not advance on failure.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -1232,10 +1640,10 @@ class MemoryUpdater:
                     messages=messages,
                     thread_id=thread_id,
                     agent_name=agent_name,
-                    correction_detected=correction_detected,
-                    reinforcement_detected=reinforcement_detected,
+                    signals=signals,
                     user_id=user_id,
                     trace_id=trace_id,
+                    bypass_watermark=bypass_watermark,
                 )
                 return future.result()
             except Exception:
@@ -1246,10 +1654,10 @@ class MemoryUpdater:
             messages=messages,
             thread_id=thread_id,
             agent_name=agent_name,
-            correction_detected=correction_detected,
-            reinforcement_detected=reinforcement_detected,
+            signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            bypass_watermark=bypass_watermark,
         )
 
     def _apply_updates(
@@ -1257,6 +1665,8 @@ class MemoryUpdater:
         current_memory: dict[str, Any],
         update_data: dict[str, Any],
         thread_id: str | None = None,
+        *,
+        metrics: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Apply LLM-generated updates to memory.
 
@@ -1264,18 +1674,35 @@ class MemoryUpdater:
             current_memory: Current memory data.
             update_data: Updates from LLM.
             thread_id: Optional thread ID for tracking.
+            metrics: Optional observability dict. When provided, populated with
+                confidence and scope-gate counters counted at their real filter
+                sites, so observability cannot drift from actual acceptance.
 
         Returns:
             Updated memory data.
         """
         config = self._config
         now = utc_now_iso_z()
+        scope_gate_rejections: dict[str, dict[str, int]] = {
+            "facts": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
+            "summaries": {"missing": 0, "scope": 0, "authority": 0},
+            "removals": {"missing": 0, "scope": 0, "replacement": 0},
+            "consolidations": {"missing": 0, "scope": 0, "durability": 0, "authority": 0},
+        }
+
+        def reject_by_scope_gate(kind: str, reason: str) -> None:
+            scope_gate_rejections[kind][reason] += 1
 
         # Update user sections
         user_updates = update_data.get("user", {})
         for section in ["workContext", "personalContext", "topOfMind"]:
             section_data = user_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+                continue
+            rejection_reason = _summary_scope_gate_reason(section_data)
+            if rejection_reason is not None:
+                reject_by_scope_gate("summaries", rejection_reason)
+            else:
                 current_memory["user"][section] = {
                     "summary": section_data["summary"],
                     "updatedAt": now,
@@ -1285,16 +1712,16 @@ class MemoryUpdater:
         history_updates = update_data.get("history", {})
         for section in ["recentMonths", "earlierContext", "longTermBackground"]:
             section_data = history_updates.get(section, {})
-            if section_data.get("shouldUpdate") and section_data.get("summary"):
+            if not isinstance(section_data, dict) or not section_data.get("shouldUpdate") or not section_data.get("summary"):
+                continue
+            rejection_reason = _summary_scope_gate_reason(section_data)
+            if rejection_reason is not None:
+                reject_by_scope_gate("summaries", rejection_reason)
+            else:
                 current_memory["history"][section] = {
                     "summary": section_data["summary"],
                     "updatedAt": now,
                 }
-
-        # Remove facts (contradiction-based)
-        facts_to_remove = set(update_data.get("factsToRemove", []))
-        if facts_to_remove:
-            current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in facts_to_remove]
 
         # ── Staleness review: removals + lifetime extensions ──
         # Both operations share one staleness-candidate guardrail pass and one
@@ -1398,49 +1825,102 @@ class MemoryUpdater:
         # Creation-time lifetime cap shared with the consolidation path below, so
         # both fact-creation sites apply the identical bound in one place.
         creation_cap = int(config.staleness_age_days * config.staleness_max_lifetime_multiplier)
-        for fact in new_facts:
+        # Two independent accept filters govern new facts: the deterministic
+        # scope gate and this confidence threshold. Each is counted at its own
+        # filter site so neither metric can drift from the filter it reports:
+        # ``facts_passed_confidence`` counts threshold-passers even when the
+        # scope gate rejects them, and the scope-gate counters increment
+        # whether or not the confidence check passes. Duplicate / empty /
+        # over-cap facts that pass the threshold are still counted here -- the
+        # metric is a confidence-gate signal (the host's rejection-rate
+        # warning monitors confidence filtering, not dedup / over-cap), not a
+        # persisted-fact count.
+        passed_threshold = 0
+        replacement_fact_keys: dict[int, str] = {}
+        for fact_index, fact in enumerate(new_facts):
             confidence = fact.get("confidence", 0.5)
             if confidence >= config.fact_confidence_threshold:
-                raw_content = fact.get("content", "")
-                if not isinstance(raw_content, str):
-                    continue
-                normalized_content = raw_content.strip()
-                fact_key = _fact_content_key(normalized_content)
-                if fact_key is None:
-                    # Empty / whitespace-only content: skip it the same way the
-                    # non-string guard above does, instead of appending a blank
-                    # fact that violates the non-empty-content invariant.
-                    continue
-                if fact_key in existing_fact_keys:
-                    continue
+                passed_threshold += 1
+            rejection_reason = _fact_scope_gate_reason(fact)
+            if rejection_reason is not None:
+                reject_by_scope_gate("facts", rejection_reason)
+                continue
+            if confidence < config.fact_confidence_threshold:
+                continue
+            raw_content = fact.get("content", "")
+            if not isinstance(raw_content, str):
+                continue
+            normalized_content = raw_content.strip()
+            fact_key = _fact_content_key(normalized_content)
+            if fact_key is None:
+                # Empty / whitespace-only content: skip it the same way the
+                # non-string guard above does, instead of appending a blank
+                # fact that violates the non-empty-content invariant.
+                continue
+            # Remember every eligible replacement's content key even when it is
+            # already present. A paired removal is safe only if the post-trim
+            # memory contains this content under an ID other than its target.
+            replacement_fact_keys[fact_index] = fact_key
+            if fact_key in existing_fact_keys:
+                continue
 
-                fact_entry = {
-                    "id": f"fact_{uuid.uuid4().hex[:8]}",
-                    "content": normalized_content,
-                    "category": fact.get("category", "context"),
-                    "confidence": confidence,
-                    "createdAt": now,
-                    "source": thread_id or "unknown",
-                }
-                source_error = fact.get("sourceError")
-                if isinstance(source_error, str):
-                    normalized_source_error = source_error.strip()
-                    if normalized_source_error:
-                        fact_entry["sourceError"] = normalized_source_error
-                evd = _read_expected_valid_days(fact)
-                if evd is not None:
-                    # Apply the creation-time cap so the LLM cannot assign an
-                    # unbounded lifetime that defers staleness review indefinitely.
-                    # Extensions (staleFactsToExtend) bypass this cap via their own
-                    # staleness_max_extension_days ceiling because they represent a
-                    # deliberate review decision, not an unchecked initial assignment.
-                    fact_entry["expected_valid_days"] = min(evd, creation_cap)
-                current_memory["facts"].append(fact_entry)
-                if fact_key is not None:
-                    existing_fact_keys.add(fact_key)
+            fact_entry = {
+                "id": f"fact_{uuid.uuid4().hex[:8]}",
+                "content": normalized_content,
+                "category": fact.get("category", "context"),
+                "confidence": confidence,
+                "createdAt": now,
+                "source": thread_id or "unknown",
+            }
+            source_error = fact.get("sourceError")
+            if isinstance(source_error, str):
+                normalized_source_error = source_error.strip()
+                if normalized_source_error:
+                    fact_entry["sourceError"] = normalized_source_error
+            evd = _read_expected_valid_days(fact)
+            if evd is not None:
+                # Apply the creation-time cap so the LLM cannot assign an
+                # unbounded lifetime that defers staleness review indefinitely.
+                # Extensions (staleFactsToExtend) bypass this cap via their own
+                # staleness_max_extension_days ceiling because they represent a
+                # deliberate review decision, not an unchecked initial assignment.
+                fact_entry["expected_valid_days"] = min(evd, creation_cap)
+            current_memory["facts"].append(fact_entry)
+            existing_fact_keys.add(fact_key)
 
         # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).
         current_memory["facts"] = _trim_facts_to_max(current_memory["facts"], config.max_facts)
+
+        # Remove contradicted facts only after replacements have passed both
+        # gates and survived deduplication/trimming. Task-local contradictions
+        # cannot delete user memory, and a failed paired replacement cannot
+        # degrade into a delete-only update.
+        fact_ids_to_remove: set[str] = set()
+        for removal in update_data.get("factsToRemove", []):
+            if not isinstance(removal, dict):
+                reject_by_scope_gate("removals", "missing")
+                continue
+            rejection_reason = _removal_scope_gate_reason(removal)
+            if rejection_reason is not None:
+                reject_by_scope_gate("removals", rejection_reason)
+                continue
+            fact_id = removal.get("id")
+            if not isinstance(fact_id, str) or not fact_id:
+                reject_by_scope_gate("removals", "missing")
+                continue
+            if "replacementFactIndex" in removal:
+                replacement_index = removal.get("replacementFactIndex")
+                if not isinstance(replacement_index, int) or isinstance(replacement_index, bool) or replacement_index < 0:
+                    reject_by_scope_gate("removals", "replacement")
+                    continue
+                replacement_key = replacement_fact_keys.get(replacement_index)
+                if replacement_key is None or not any(fact.get("id") != fact_id and _fact_content_key(fact.get("content")) == replacement_key for fact in current_memory.get("facts", [])):
+                    reject_by_scope_gate("removals", "replacement")
+                    continue
+            fact_ids_to_remove.add(fact_id)
+
+        if fact_ids_to_remove:
+            current_memory["facts"] = [fact for fact in current_memory.get("facts", []) if fact.get("id") not in fact_ids_to_remove]
 
         # ── Memory consolidation ──
         # Runs after the max_facts trim so source facts that were just evicted
@@ -1501,6 +1981,10 @@ class MemoryUpdater:
 
                     content = consolidated.get("content", "")
                     if not isinstance(content, str) or not content.strip():
+                        continue
+                    rejection_reason = _fact_scope_gate_reason(consolidated)
+                    if rejection_reason is not None:
+                        reject_by_scope_gate("consolidations", rejection_reason)
                         continue
 
                     source_confidences = [_coerce_source_confidence(fact_index[sid]) for sid in source_ids]
@@ -1611,5 +2095,12 @@ class MemoryUpdater:
                 if ids_consumed:
                     current_memory["facts"] = [f for f in current_memory.get("facts", []) if f.get("id") not in ids_consumed]
                     current_memory["facts"].extend(new_consolidated)
+
+        if metrics is not None:
+            metrics["facts_passed_confidence"] = passed_threshold
+            metrics["rejected_low_confidence"] = len(new_facts) - passed_threshold
+            metrics["facts_passed_scope_gate"] = len(new_facts) - sum(scope_gate_rejections["facts"].values())
+            metrics["rejected_by_scope_gate"] = sum(count for reasons in scope_gate_rejections.values() for count in reasons.values())
+            metrics["scope_gate_rejections"] = scope_gate_rejections
 
         return current_memory
