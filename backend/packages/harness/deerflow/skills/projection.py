@@ -158,11 +158,18 @@ def _validate_projection_relative_path(relative_path: Path) -> None:
 def _remove_projection_relative(root: Path, relative_path: Path) -> None:
     """Remove a projected package without following a drifted namespace symlink."""
     current = root
-    for part in relative_path.parts:
+    parts = relative_path.parts
+    for index, part in enumerate(parts):
         current /= part
         if current.is_symlink():
             current.unlink()
             return
+        # A namespace component that exists as a regular file means the
+        # projection was externally replaced (drifted). Fail closed on every
+        # platform: os.unlink() reports this as ENOTDIR on POSIX but ENOENT
+        # on Windows, where unlink(missing_ok=True) swallows the ENOENT.
+        if index < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise NotADirectoryError(errno.ENOTDIR, f"Projection namespace drifted to a file: {current}")
     _remove_projection_entry(current)
 
 
