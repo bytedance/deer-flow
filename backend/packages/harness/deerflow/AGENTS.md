@@ -76,3 +76,19 @@ files. It is marked `live`, excluded from `make test`, and skipped in default
 CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
+
+### E2B Mount Uploads
+
+The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.
+
+Each mount has these fixed limits:
+
+- 100 MiB for one file.
+- 512 MiB for all files.
+- 2,000 files.
+
+The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
+
+An invalid mount does not block later mounts.
+
+Each successful upload logs its source, destination, file count, byte count, and elapsed time.

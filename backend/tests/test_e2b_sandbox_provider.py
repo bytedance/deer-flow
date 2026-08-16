@@ -105,6 +105,7 @@ class FakeFilesAPI:
         self.store = dict(store or {})
         self.read_calls: list[tuple[str, str | None]] = []
         self.write_calls: list[tuple[str, bytes]] = []
+        self.write_streamed: list[bool] = []
         self.streams: list[_FakeFileStream] = []
         self._stream_chunk_size = stream_chunk_size
 
@@ -124,9 +125,12 @@ class FakeFilesAPI:
         except UnicodeDecodeError:
             return data
 
-    def write(self, path: str, content: bytes) -> None:
-        self.write_calls.append((path, content))
-        self.store[path] = content
+    def write(self, path: str, content: Any) -> None:
+        is_stream = hasattr(content, "read")
+        data = content.read() if is_stream else content
+        self.write_streamed.append(is_stream)
+        self.write_calls.append((path, data))
+        self.store[path] = data
 
 
 class FakeClient:
@@ -359,6 +363,130 @@ def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_pat
     assert "/mnt/skills/public/disabled-skill/SKILL.md" not in uploaded_paths
     assert "/mnt/skills/integrations/lark-cli/enabled-integration/SKILL.md" in uploaded_paths
     assert "/mnt/skills/integrations/lark-cli/disabled-integration/SKILL.md" not in uploaded_paths
+
+
+def test_upload_tree_streams_file_contents(tmp_path):
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"mount content")
+    client = FakeClient()
+
+    provider = _make_provider()
+    provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == [("/mnt/data/large.bin", b"mount content")]
+    assert client.files.write_streamed == [True]
+
+
+@pytest.mark.parametrize("replacement_content", [b"123", b"12345"], ids=["smaller", "larger"])
+def test_upload_tree_rejects_file_size_changed_after_preflight(monkeypatch, tmp_path, replacement_content):
+    source = tmp_path / "small.bin"
+    source.write_bytes(b"1234")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(replacement_content)
+    original_open = Path.open
+
+    def replace_before_open(path: Path, *args, **kwargs):
+        if path == source and replacement.exists():
+            os.replace(replacement, source)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", replace_before_open)
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="changed during upload preflight"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_upload_tree_rejects_oversized_file_before_upload(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 4)
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"12345")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="exceeds the 4-byte file limit"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_upload_tree_rejects_oversized_tree_before_upload(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 10)
+    monkeypatch.setattr(mod, "_MAX_MOUNT_TOTAL_SIZE", 8)
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.bin").write_bytes(b"12345")
+    (source / "second.bin").write_bytes(b"67890")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="exceeds the 8-byte total limit"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_upload_tree_rejects_excess_file_count_before_upload(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILES", 1)
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="exceeds the 1-file limit"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_apply_mounts_continues_after_mount_exceeds_limit(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 4)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    oversized = tmp_path / "oversized"
+    oversized.mkdir()
+    (oversized / "large.bin").write_bytes(b"12345")
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    (valid / "small.bin").write_bytes(b"1234")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(oversized), container_path="/mnt/oversized", read_only=False),
+        SimpleNamespace(host_path=str(valid), container_path="/mnt/valid", read_only=False),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/valid/small.bin", b"1234")]
+
+
+def test_upload_tree_logs_upload_summary(caplog, tmp_path):
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_bytes(b"123")
+    (source / "second.txt").write_bytes(b"4567")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with caplog.at_level("INFO"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert "source=" in caplog.text
+    assert "destination=/mnt/data" in caplog.text
+    assert "files=2" in caplog.text
+    assert "bytes=7" in caplog.text
+    assert "elapsed_ms=" in caplog.text
 
 
 def test_skill_projection_mounts_swallows_projection_failure(monkeypatch):
