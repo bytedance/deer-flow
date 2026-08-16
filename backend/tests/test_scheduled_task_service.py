@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -298,7 +298,7 @@ async def test_manual_overlap_conflict_returns_conflict():
 async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     """Rows persisted before the thread-id contract was centralized may store
     IDs that fail the canonical pattern (dots, >64 chars). Dispatch must record
-    the failure through normal bookkeeping instead of raising 鈥?an uncaught
+    the failure through normal bookkeeping instead of raising — an uncaught
     ValueError surfaces as HTTP 500 on manual trigger and, in the poller,
     aborts the rest of the claimed batch every cycle."""
 
@@ -474,7 +474,7 @@ def _once_task_row(task_id="task-once", status="running"):
     }
 
 
-def _completion_record(status, *, task_id="task-once", error=None):
+def _completion_record(status, *, task_id="task-once", error=None, trigger="scheduled"):
     return RunRecord(
         run_id="run-x",
         thread_id="thread-x",
@@ -484,6 +484,7 @@ def _completion_record(status, *, task_id="task-once", error=None):
         metadata={
             "scheduled_task_id": task_id,
             "scheduled_task_run_id": "task-run-x",
+            "scheduled_trigger": trigger,
         },
         user_id="user-1",
         error=error,
@@ -1015,7 +1016,7 @@ async def test_manual_trigger_rejected_when_global_budget_exhausted():
     row = _once_task_row(task_id="task-budget", status="enabled")
     row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "overlap_policy": "skip"})
     task_repo = DummyTaskRepo([row])
-    # active_count equals max_concurrent_runs 鈫?budget is exhausted
+    # active_count equals max_concurrent_runs → budget is exhausted
     run_repo = DummyRunRepo(active_count=3)
     service = ScheduledTaskService(
         task_repo=task_repo,
@@ -1046,7 +1047,7 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
     row = _once_task_row(task_id="task-ok", status="enabled")
     row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "overlap_policy": "skip"})
     task_repo = DummyTaskRepo([row])
-    # active_count is 2, max_concurrent_runs is 3 鈫?one slot left
+    # active_count is 2, max_concurrent_runs is 3 → one slot left
     run_repo = DummyRunRepo(active_count=2)
     service = ScheduledTaskService(
         task_repo=task_repo,
@@ -1061,6 +1062,8 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
 
     assert result["outcome"] == "launched"
     assert len(launched) == 1
+
+
 # ---------------------------------------------------------------------------
 # Notification enqueue on completion (issue #4254): the hook writes durable
 # outbox rows; a separate delivery worker does the actual IM send.
@@ -1179,6 +1182,58 @@ async def test_completion_does_not_notify_for_interrupted_runs():
 
     # An interrupt is a user-initiated cancel; the user is already aware.
     assert notification_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_completion_does_not_notify_for_manual_triggers():
+    """A manual "run now" happens with the user watching the UI; pushing the
+    same outcome to IM is noise, so only scheduled firings notify."""
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    await service.handle_run_completion(_completion_record(RunStatus.success, trigger="manual"))
+
+    # Execution status is still recorded; only the IM push is suppressed.
+    assert run_repo.updated[-1][1]["status"] == "success"
+    assert notification_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_completion_still_notifies_when_trigger_metadata_is_missing():
+    """Fail safe: an untagged completion (older rows, unexpected paths) keeps
+    notifying -- dropping a push silently is worse than a rare extra one."""
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    record = _completion_record(RunStatus.success)
+    record.metadata.pop("scheduled_trigger")
+    await service.handle_run_completion(record)
+
+    assert len(notification_repo.enqueued) == 1
 
 
 @pytest.mark.asyncio

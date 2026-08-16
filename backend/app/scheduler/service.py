@@ -556,6 +556,12 @@ class ScheduledTaskService:
                 updates["status"] = "failed"
         await self._task_repo.update(task_id, user_id=user_id, updates=updates)
 
+        if metadata.get("scheduled_trigger") == "manual":
+            # A manual "run now" happens with the user watching the UI; the
+            # IM push would only echo what they already see. Missing
+            # metadata fails safe towards notifying.
+            return
+
         await self._enqueue_run_notifications(
             task_id=task_id,
             task_run_id=task_run_id,

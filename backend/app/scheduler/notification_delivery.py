@@ -14,7 +14,7 @@ import asyncio
 import inspect
 import logging
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -31,6 +31,12 @@ SummaryResolver = Callable[[str, str | None], Any]
 
 _ERROR_TEXT_LIMIT = 500
 _SUMMARY_TEXT_LIMIT = 1000
+
+# A claimed row stuck in "sending" longer than this is considered orphaned
+# (process died between claim and the final status write) and flipped back
+# to pending. Generous on purpose: a healthy send plus status write finishes
+# in seconds, and resetting too eagerly would double-send live deliveries.
+_STALE_SENDING_TIMEOUT_SECONDS = 600
 
 
 def _truncate(text: str, *, limit: int = _ERROR_TEXT_LIMIT) -> str:
@@ -71,12 +77,14 @@ class NotificationDeliveryWorker:
         poll_interval_seconds: int = 5,
         batch_size: int = 10,
         resolve_run_summary: SummaryResolver | None = None,
+        stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
     ) -> None:
         self._delivery_repo = delivery_repo
         self._resolve_channel = resolve_channel
         self._resolve_run_summary = resolve_run_summary
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
+        self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -94,9 +102,35 @@ class NotificationDeliveryWorker:
         self._task = None
 
     async def run_once(self, *, now: datetime) -> None:
+        await self._recover_stale_sending(now)
         rows = await self._delivery_repo.claim_due_deliveries(now=now, limit=self._batch_size)
         for row in rows:
-            await self._deliver(row)
+            try:
+                await self._deliver(row)
+            except Exception:
+                # One poisoned row must not abort the loop and strand the
+                # rest of the claimed batch in "sending". Best-effort
+                # mark_failed; if even that raises, the stale reset above
+                # reclaims the row on a later poll.
+                logger.exception("Notification delivery %s crashed; isolating from the rest of the batch", row.get("id"))
+                try:
+                    await self._delivery_repo.mark_failed(row["id"], error="delivery crashed before completion")
+                except Exception:
+                    logger.warning("Could not mark crashed delivery %s as failed; stale reset will recover it", row.get("id"), exc_info=True)
+
+    async def _recover_stale_sending(self, now: datetime) -> None:
+        """Lease-style reconciliation, run before every claim (the first poll
+        after startup is covered too). Mirrors how the scheduler recovers
+        stale active runs."""
+        try:
+            reset = await self._delivery_repo.reset_stale_sending_rows(
+                now=now,
+                timeout=timedelta(seconds=self._stale_sending_timeout_seconds),
+            )
+            if reset:
+                logger.info("Recovered %s notification deliveries stuck in 'sending'", reset)
+        except Exception:
+            logger.warning("Failed to reset stale sending rows; retrying next poll", exc_info=True)
 
     async def _resolve_summary(self, delivery: dict[str, Any]) -> str | None:
         """Best-effort lookup of the run's final answer at delivery time.
@@ -131,7 +165,10 @@ class NotificationDeliveryWorker:
         if inspect.isawaitable(channel):
             channel = await channel
         if channel is None:
-            await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running")
+            # Channel outage is not the delivery's fault: park the row
+            # without consuming its retry budget so it survives an
+            # hours-long outage and delivers once the channel returns.
+            await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running", count_attempt=False)
             return
         enriched = delivery
         if delivery.get("event") == "run_completed":

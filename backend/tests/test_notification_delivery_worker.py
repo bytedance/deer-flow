@@ -22,17 +22,25 @@ class FakeDeliveryRepo:
         self.claims = []
         self.sent = []
         self.failed = []
+        self.resets = []
+        self.events = []
+
+    async def reset_stale_sending_rows(self, *, now, timeout):
+        self.resets.append((now, timeout))
+        self.events.append("reset")
+        return 0
 
     async def claim_due_deliveries(self, *, now, limit):
         claimed, self.rows = self.rows[:limit], self.rows[limit:]
         self.claims.append((now, limit))
+        self.events.append("claim")
         return claimed
 
     async def mark_sent(self, delivery_id):
         self.sent.append(delivery_id)
 
-    async def mark_failed(self, delivery_id, *, error=None):
-        self.failed.append((delivery_id, error))
+    async def mark_failed(self, delivery_id, *, error=None, count_attempt=True):
+        self.failed.append((delivery_id, error, count_attempt))
 
 
 class FakeChannel:
@@ -137,9 +145,12 @@ async def test_run_once_marks_failed_when_channel_is_not_running():
 
     assert repo.sent == []
     assert len(repo.failed) == 1
-    delivery_id, error = repo.failed[0]
+    delivery_id, error, count_attempt = repo.failed[0]
     assert delivery_id == "delivery-1"
     assert "wecom" in error
+    # A channel that is simply not running must not burn the retry budget:
+    # the row comes back on a flat long backoff until the channel returns.
+    assert count_attempt is False
 
 
 @pytest.mark.asyncio
@@ -150,9 +161,11 @@ async def test_run_once_marks_failed_when_send_raises():
     await worker.run_once(now=datetime.now(UTC))
 
     assert repo.sent == []
-    delivery_id, error = repo.failed[0]
+    delivery_id, error, count_attempt = repo.failed[0]
     assert delivery_id == "delivery-1"
     assert "platform rejected" in error
+    # A real send error does count against the retry budget.
+    assert count_attempt is True
 
 
 @pytest.mark.asyncio
@@ -163,6 +176,60 @@ async def test_run_once_without_due_rows_is_noop():
     await worker.run_once(now=datetime.now(UTC))
 
     assert repo.sent == []
+    assert repo.failed == []
+
+
+# ---------------------------------------------------------------------------
+# Crash recovery (review follow-up): a row exploding mid-delivery must not
+# strand the rest of the batch in "sending", and rows orphaned between claim
+# and the final status write come back through the stale reset.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_once_recovers_stale_sending_rows_before_claiming():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel())
+    now = datetime.now(UTC)
+
+    await worker.run_once(now=now)
+
+    assert repo.events == ["reset", "claim"]
+    assert repo.resets[0][0] == now
+
+
+@pytest.mark.asyncio
+async def test_run_once_isolates_crashes_so_rest_of_batch_still_delivers():
+    """Replay the reviewer's worst case: row one crashes even its own
+    mark_failed (e.g. the DB blip that killed the status write), which used
+    to abort the loop and strand every following claimed row in
+    ``sending``."""
+
+    class ExplodingRepo(FakeDeliveryRepo):
+        async def mark_failed(self, delivery_id, *, error=None):
+            if delivery_id == "delivery-1":
+                raise RuntimeError("db gone")
+            await super().mark_failed(delivery_id, error=error)
+
+    class TargetFailChannel(FakeChannel):
+        async def send_notification(self, *, target, text_markdown):
+            if target == "GaoZhiChao":
+                raise RuntimeError("platform rejected")
+            await super().send_notification(target=target, text_markdown=text_markdown)
+
+    repo = ExplodingRepo(
+        [
+            _delivery_row(delivery_id="delivery-1"),
+            _delivery_row(delivery_id="delivery-2", target="bob"),
+        ]
+    )
+    worker = _make_worker(repo, TargetFailChannel())
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    # Row one is left for the stale reset to recover; row two must not be
+    # sacrificed with it.
+    assert repo.sent == ["delivery-2"]
     assert repo.failed == []
 
 
