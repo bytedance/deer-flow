@@ -130,6 +130,30 @@ def test_apply_prompt_template_uses_non_interactive_clarification_guidance(monke
     assert "Do not wait for a human response" in prompt
 
 
+def test_apply_prompt_template_preserves_interactive_clarification_guidance(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
+    )
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config)
+
+    assert "**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**" in prompt
+    assert "❌ DO NOT make assumptions when information is missing - ALWAYS ask" in prompt
+    assert '**Example:**\nUser: "Deploy the application"' in prompt
+    assert 'User: "staging"\nYou: "Deploying to staging..." [proceed]' in prompt
+
+
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
     tool_config = SimpleNamespace(
         sandbox=SimpleNamespace(mounts=[]),

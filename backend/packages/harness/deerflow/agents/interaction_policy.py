@@ -20,7 +20,7 @@ class RunInteractionMode(StrEnum):
 
 
 _INTERACTIVE_CLARIFICATION_SYSTEM = """<clarification_system>
-**WORKFLOW PRIORITY: CLARIFY -> PLAN -> ACT**
+**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**
 1. **FIRST**: Analyze the request in your thinking - identify what's unclear, missing, or ambiguous
 2. **SECOND**: If clarification is needed, call `ask_clarification` tool IMMEDIATELY - do NOT start working
 3. **THIRD**: Only after all clarifications are resolved, proceed with planning and execution
@@ -54,14 +54,14 @@ _INTERACTIVE_CLARIFICATION_SYSTEM = """<clarification_system>
    - **REQUIRED ACTION**: Call ask_clarification to get approval
 
 **STRICT ENFORCEMENT:**
-- DO NOT start working and then ask for clarification mid-execution - clarify FIRST
-- DO NOT skip clarification for "efficiency" - accuracy matters more than speed
-- DO NOT make assumptions when information is missing - ALWAYS ask
-- DO NOT proceed with guesses - STOP and call ask_clarification first
-- Analyze the request in thinking -> Identify unclear aspects -> Ask BEFORE any action
-- If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
-- After calling ask_clarification, execution will be interrupted automatically
-- Wait for user response - do NOT continue with assumptions
+- ❌ DO NOT start working and then ask for clarification mid-execution - clarify FIRST
+- ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
+- ❌ DO NOT make assumptions when information is missing - ALWAYS ask
+- ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
+- ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
+- ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
+- ✅ After calling ask_clarification, execution will be interrupted automatically
+- ✅ Wait for user response - do NOT continue with assumptions
 
 **How to Use:**
 ```python
@@ -72,6 +72,20 @@ ask_clarification(
     options=["option1", "option2"]  # optional, for choices
 )
 ```
+
+**Example:**
+User: "Deploy the application"
+You (thinking): Missing environment info - I MUST ask for clarification
+You (action): ask_clarification(
+    question="Which environment should I deploy to?",
+    clarification_type="approach_choice",
+    context="I need to know the target environment for proper configuration",
+    options=["development", "staging", "production"]
+)
+[Execution stops - wait for user response]
+
+User: "staging"
+You: "Deploying to staging..." [proceed]
 </clarification_system>"""
 
 _AUTONOMOUS_CLARIFICATION_SYSTEM = """<clarification_system>
@@ -79,7 +93,7 @@ _AUTONOMOUS_CLARIFICATION_SYSTEM = """<clarification_system>
 
 There is no human available to answer a synchronous question during this run.
 Do not wait for clarification or approval. Resolve ambiguity from the request,
-the available repository/event context, and existing configuration.
+{context_sources}.
 
 - For low-risk and reversible work, make the smallest reasonable assumption and continue.
 - State every material assumption in the final result.
@@ -87,6 +101,9 @@ the available repository/event context, and existing configuration.
   stop with a concise structured `BLOCKED` result that names the missing decision.
 - Prefer inspection and read-only checks before changing state.
 </clarification_system>"""
+
+_AUTONOMOUS_CONTEXT_SOURCES = "the available run context and existing configuration"
+_WEBHOOK_CONTEXT_SOURCES = "the issue, pull request, repository, event context, and existing configuration"
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,12 +132,8 @@ class RunInteractionPolicy:
     def clarification_system(self) -> str:
         if self.allows_clarification:
             return _INTERACTIVE_CLARIFICATION_SYSTEM
-        if self.mode is RunInteractionMode.WEBHOOK:
-            return _AUTONOMOUS_CLARIFICATION_SYSTEM.replace(
-                "the available repository/event context, and existing configuration",
-                "the issue, pull request, repository, and event context, then existing configuration",
-            )
-        return _AUTONOMOUS_CLARIFICATION_SYSTEM
+        context_sources = _WEBHOOK_CONTEXT_SOURCES if self.mode is RunInteractionMode.WEBHOOK else _AUTONOMOUS_CONTEXT_SOURCES
+        return _AUTONOMOUS_CLARIFICATION_SYSTEM.format(context_sources=context_sources)
 
     @property
     def clarification_reminder(self) -> str:
@@ -152,11 +165,12 @@ def resolve_run_interaction_policy(config: Mapping[str, Any] | None) -> RunInter
             merged.update(context)
 
     raw_mode = merged.get("interaction_mode")
-    try:
-        if raw_mode is not None:
+    if raw_mode is not None:
+        try:
             return RunInteractionPolicy(RunInteractionMode(str(raw_mode)))
-    except ValueError:
-        pass
+        except ValueError as exc:
+            valid_modes = ", ".join(mode.value for mode in RunInteractionMode)
+            raise ValueError(f"Invalid interaction_mode {raw_mode!r}; expected one of: {valid_modes}") from exc
 
     if merged.get("non_interactive"):
         return RunInteractionPolicy(RunInteractionMode.SCHEDULED)
