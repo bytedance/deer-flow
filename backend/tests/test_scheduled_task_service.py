@@ -1,4 +1,4 @@
-import asyncio
+﻿import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -298,7 +298,7 @@ async def test_manual_overlap_conflict_returns_conflict():
 async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     """Rows persisted before the thread-id contract was centralized may store
     IDs that fail the canonical pattern (dots, >64 chars). Dispatch must record
-    the failure through normal bookkeeping instead of raising — an uncaught
+    the failure through normal bookkeeping instead of raising 鈥?an uncaught
     ValueError surfaces as HTTP 500 on manual trigger and, in the poller,
     aborts the rest of the claimed batch every cycle."""
 
@@ -1015,7 +1015,7 @@ async def test_manual_trigger_rejected_when_global_budget_exhausted():
     row = _once_task_row(task_id="task-budget", status="enabled")
     row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "overlap_policy": "skip"})
     task_repo = DummyTaskRepo([row])
-    # active_count equals max_concurrent_runs → budget is exhausted
+    # active_count equals max_concurrent_runs 鈫?budget is exhausted
     run_repo = DummyRunRepo(active_count=3)
     service = ScheduledTaskService(
         task_repo=task_repo,
@@ -1046,7 +1046,7 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
     row = _once_task_row(task_id="task-ok", status="enabled")
     row.update({"schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "overlap_policy": "skip"})
     task_repo = DummyTaskRepo([row])
-    # active_count is 2, max_concurrent_runs is 3 → one slot left
+    # active_count is 2, max_concurrent_runs is 3 鈫?one slot left
     run_repo = DummyRunRepo(active_count=2)
     service = ScheduledTaskService(
         task_repo=task_repo,
@@ -1061,3 +1061,170 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
 
     assert result["outcome"] == "launched"
     assert len(launched) == 1
+# ---------------------------------------------------------------------------
+# Notification enqueue on completion (issue #4254): the hook writes durable
+# outbox rows; a separate delivery worker does the actual IM send.
+# ---------------------------------------------------------------------------
+
+
+class DummyConnectionRepo:
+    def __init__(self, connections):
+        self.connections = connections
+
+    async def list_connections(self, owner_user_id):
+        return [dict(connection, owner_user_id=owner_user_id) for connection in self.connections]
+
+
+class DummyNotificationRepo:
+    def __init__(self, *, fail=False):
+        self.enqueued = []
+        self.fail = fail
+
+    async def enqueue(self, **kwargs):
+        if self.fail:
+            raise RuntimeError("delivery backend unavailable")
+        self.enqueued.append(kwargs)
+        return {"id": f"delivery-{len(self.enqueued)}", **kwargs}
+
+
+def _make_notifying_service(task_repo, run_repo, *, connection_repo, notification_repo):
+    return ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_completion_enqueues_run_completed_for_connected_channels():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    assert len(notification_repo.enqueued) == 1
+    enqueued = notification_repo.enqueued[0]
+    assert enqueued["event"] == "run_completed"
+    assert enqueued["provider"] == "wecom"
+    assert enqueued["target"] == "GaoZhiChao"
+    assert enqueued["task_id"] == "task-once"
+    assert enqueued["task_run_id"] == "task-run-x"
+    assert enqueued["run_id"] == "run-x"
+    assert enqueued["owner_user_id"] == "user-1"
+    assert enqueued["payload"]["run_status"] == "success"
+    assert enqueued["payload"]["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_completion_enqueues_run_failed_event_on_error():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    await service.handle_run_completion(_completion_record(RunStatus.error, error="boom"))
+
+    assert len(notification_repo.enqueued) == 1
+    enqueued = notification_repo.enqueued[0]
+    assert enqueued["event"] == "run_failed"
+    assert enqueued["payload"]["run_status"] == "failed"
+    assert enqueued["payload"]["error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_completion_does_not_notify_for_interrupted_runs():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    await service.handle_run_completion(_completion_record(RunStatus.interrupted))
+
+    # An interrupt is a user-initiated cancel; the user is already aware.
+    assert notification_repo.enqueued == []
+
+
+@pytest.mark.asyncio
+async def test_completion_skips_unusable_connections():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "revoked-user", "status": "revoked"},
+            {"provider": "wecom", "external_account_id": None, "status": "connected"},
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo()
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    assert [item["target"] for item in notification_repo.enqueued] == ["GaoZhiChao"]
+
+
+@pytest.mark.asyncio
+async def test_completion_notification_failure_does_not_break_status_writes():
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    connection_repo = DummyConnectionRepo(
+        [
+            {"provider": "wecom", "external_account_id": "GaoZhiChao", "status": "connected"},
+        ]
+    )
+    notification_repo = DummyNotificationRepo(fail=True)
+    service = _make_notifying_service(
+        task_repo,
+        run_repo,
+        connection_repo=connection_repo,
+        notification_repo=notification_repo,
+    )
+
+    await service.handle_run_completion(_completion_record(RunStatus.success))
+
+    # Execution status is written regardless: delivery is best-effort and must
+    # never shadow the run outcome (execution/delivery status separation).
+    assert run_repo.updated[-1][1]["status"] == "success"
+    assert task_repo.rows[0]["status"] == "completed"

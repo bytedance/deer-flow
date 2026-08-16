@@ -194,6 +194,31 @@ class WeComChannel(Channel):
             return
         logger.warning("[WeCom] send called but WebSocket client is not available")
 
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Proactively push markdown to a bound WeCom identity (issue #4254).
+
+        Goes through ``WSClient.send_message`` (no inbound frame required);
+        the platform ACK's ``errcode`` is checked so the delivery outbox can
+        retry on rejection instead of treating an ACK-less call as success.
+        """
+        if not self._ws_client:
+            raise RuntimeError("WeCom channel is not connected")
+        body = {"msgtype": "markdown", "markdown": {"content": text_markdown}}
+        ack = await self._send_with_retry(
+            lambda: self._ws_client.send_message(target, body),
+            max_retries=3,
+            log_prefix="[WeCom]",
+            operation_name="notification send",
+        )
+        errcode = None
+        if isinstance(ack, dict):
+            errcode = ack.get("errcode")
+            ack_body = ack.get("body")
+            if errcode is None and isinstance(ack_body, dict):
+                errcode = ack_body.get("errcode")
+        if errcode not in (None, 0):
+            raise RuntimeError(f"WeCom send_message rejected with errcode={errcode}")
+
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         if msg.channel_name != self.name:
             return

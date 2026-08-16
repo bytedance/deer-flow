@@ -36,6 +36,8 @@ class ScheduledTaskService:
         max_concurrent_runs: int,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
+        connection_repo=None,
+        notification_repo=None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -45,6 +47,11 @@ class ScheduledTaskService:
         self._max_concurrent_runs = max_concurrent_runs
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
+        # Notification outbox wiring (issue #4254): both repos must be present
+        # for the feature to be active; the completion hook only enqueues, the
+        # delivery worker sends. Either being None keeps legacy behavior.
+        self._connection_repo = connection_repo
+        self._notification_repo = notification_repo
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
@@ -548,6 +555,69 @@ class ScheduledTaskService:
             else:
                 updates["status"] = "failed"
         await self._task_repo.update(task_id, user_id=user_id, updates=updates)
+
+        await self._enqueue_run_notifications(
+            task_id=task_id,
+            task_run_id=task_run_id,
+            run_id=record.run_id,
+            user_id=user_id,
+            terminal_status=terminal_status,
+            error=error,
+        )
+
+    async def _enqueue_run_notifications(
+        self,
+        *,
+        task_id: str,
+        task_run_id: str,
+        run_id: str | None,
+        user_id: str,
+        terminal_status: str,
+        error: str | None,
+    ) -> None:
+        """Write durable outbox rows for the run outcome (issue #4254).
+
+        Best-effort by design: a notification failure is logged and swallowed
+        so delivery problems can never shadow the execution status written
+        above. Interrupted runs are user-initiated cancels and intentionally
+        produce no notification.
+        """
+        if self._notification_repo is None or self._connection_repo is None:
+            return
+        event = {"success": "run_completed", "failed": "run_failed"}.get(terminal_status)
+        if event is None:
+            return
+        try:
+            connections = await self._connection_repo.list_connections(user_id)
+        except Exception:
+            logger.exception("[Scheduler] failed to list channel connections for notifications")
+            return
+        payload = {"run_status": terminal_status, "error": error, "task_id": task_id}
+        for connection in connections:
+            if connection.get("status") != "connected":
+                continue
+            provider = connection.get("provider")
+            target = connection.get("external_account_id")
+            if not provider or not target:
+                continue
+            try:
+                await self._notification_repo.enqueue(
+                    task_id=task_id,
+                    task_run_id=task_run_id,
+                    run_id=run_id,
+                    event=event,
+                    provider=provider,
+                    target=target,
+                    owner_user_id=user_id,
+                    payload=payload,
+                )
+            except Exception:
+                logger.exception(
+                    "[Scheduler] failed to enqueue notification task_run=%s provider=%s target=%s",
+                    task_run_id,
+                    provider,
+                    target,
+                )
 
     async def start(self) -> None:
         if self._task is not None:

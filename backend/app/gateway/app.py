@@ -316,6 +316,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from app.scheduler import ScheduledTaskService
 
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
+                # Notification outbox wiring (issue #4254): only active when
+                # channel connections are enabled, so the completion hook can
+                # resolve the task owner's bound IM identities. The scheduler
+                # only enqueues; a delivery worker sends.
+                notification_connection_repo = None
+                notification_repo = None
+                connection_config = getattr(startup_config, "channel_connections", None)
+                if connection_config is not None and getattr(connection_config, "enabled", False):
+                    from deerflow.persistence.channel_connections import ChannelConnectionRepository
+                    from deerflow.persistence.engine import get_session_factory
+                    from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository
+
+                    notification_session_factory = get_session_factory()
+                    if notification_session_factory is not None:
+                        notification_connection_repo = ChannelConnectionRepository(notification_session_factory)
+                        notification_repo = NotificationDeliveryRepository(notification_session_factory)
                 scheduled_task_service = ScheduledTaskService(
                     task_repo=app.state.scheduled_task_repo,
                     task_run_repo=app.state.scheduled_task_run_repo,
@@ -325,10 +341,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
+                    connection_repo=notification_connection_repo,
+                    notification_repo=notification_repo,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
                     await scheduled_task_service.start()
+                if notification_repo is not None:
+                    # Delivery side of the outbox (issue #4254): polls due
+                    # rows and pushes them through the owning channel's
+                    # proactive send path. Only started when the enqueue side
+                    # is wired and a channel service exists to resolve
+                    # providers against.
+                    from app.channels.service import get_channel_service
+                    from app.scheduler.notification_delivery import NotificationDeliveryWorker
+
+                    delivery_channel_service = get_channel_service()
+                    if delivery_channel_service is not None:
+                        notification_delivery_worker = NotificationDeliveryWorker(
+                            delivery_repo=notification_repo,
+                            resolve_channel=delivery_channel_service.get_channel,
+                        )
+                        await notification_delivery_worker.start()
+                        app.state.notification_delivery_worker = notification_delivery_worker
         except Exception:
             logger.exception("Failed to initialize scheduled task service")
 
@@ -389,6 +424,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await auth.close_oidc_service()
         except Exception:
             logger.exception("Failed to close OIDC service")
+
+        # Stop the notification delivery worker BEFORE the channel service: it
+        # sends through running channels, so letting channels die first would
+        # turn every in-flight delivery into a spurious failure/retry.
+        if getattr(app.state, "notification_delivery_worker", None) is not None:
+            try:
+                await app.state.notification_delivery_worker.stop()
+            except Exception:
+                logger.exception("Failed to stop notification delivery worker")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:

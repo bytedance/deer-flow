@@ -101,6 +101,18 @@ class Channel(ABC):
         """
         return False
 
+    async def send_notification(self, *, target: str, text_markdown: str) -> None:
+        """Push a proactive notification to an external identity (issue #4254).
+
+        Unlike ``send``, there is no inbound frame to reply to: *target* is a
+        platform identity (e.g. the ``external_account_id`` recorded by the
+        bind flow). Used by the notification delivery worker to deliver
+        scheduled-task outcomes. Channels without proactive push support keep
+        the default, which raises so the delivery outbox records a failure
+        instead of silently dropping the notification.
+        """
+        raise NotImplementedError(f"channel '{self.name}' does not support proactive notifications")
+
     # -- helpers -----------------------------------------------------------
 
     async def _send_with_retry(
