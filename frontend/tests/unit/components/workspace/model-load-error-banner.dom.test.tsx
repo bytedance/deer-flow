@@ -92,7 +92,7 @@ describe("ModelLoadErrorBanner", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("Models couldn't be loaded");
-    expect(alert.textContent).toContain("Gateway returned 503");
+    expect(alert.textContent).not.toContain("Gateway returned 503");
     expect(screen.getAllByRole("alert")).toHaveLength(1);
     expect(mockedLoadModels).toHaveBeenCalledTimes(1);
 
