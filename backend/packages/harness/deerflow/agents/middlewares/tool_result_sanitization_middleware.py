@@ -16,9 +16,11 @@ network tools, so a fetched ``<system-reminder>`` is escaped to
 deliberately targets only the remote-content tools: local tool output (bash,
 file reads) is left untouched so legitimate code/log content is never mangled.
 
-Scope note: matching is a name-based allowlist, so MCP-provided remote-content
-tools registered under other names are not yet covered — see
-``_REMOTE_CONTENT_TOOL_NAMES``.
+Scope: the built-in network tools are matched by name
+(``_REMOTE_CONTENT_TOOL_NAMES``), and MCP-sourced tools are matched by their
+``deerflow_mcp`` metadata tag (third-party remote code, untrusted by default).
+Local tool output (bash, file reads) is left untouched so legitimate code/log
+content is never mangled.
 """
 
 from __future__ import annotations
@@ -33,6 +35,8 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
+
+from deerflow.tools.mcp_metadata import is_mcp_tool
 
 logger = logging.getLogger(__name__)
 
@@ -123,15 +127,17 @@ class ToolResultSanitizationMiddleware(AgentMiddleware[AgentState]):
     is returned unchanged. Mirrors the user-input guardrail so untrusted remote
     content and untrusted user input receive the same structural neutralization.
 
-    Scope is a name-based allowlist (``_REMOTE_CONTENT_TOOL_NAMES``): it reliably
-    covers the built-in web tools without false positives on local tools. It does
-    NOT cover MCP-provided remote-content tools registered under other names —
-    see the note on ``_REMOTE_CONTENT_TOOL_NAMES`` for why a name heuristic is
-    avoided and the metadata-tagging follow-up.
+    Scope: the built-in web tools are covered by name (``_REMOTE_CONTENT_TOOL_NAMES``),
+    and every MCP-sourced tool is covered via its ``deerflow_mcp`` metadata tag —
+    an MCP server is third-party remote code, so its results are untrusted by
+    default. Neutralization only touches structural control tokens, so benign MCP
+    content passes through unchanged.
     """
 
     def _should_sanitize(self, request: ToolCallRequest) -> bool:
-        return request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES
+        if request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES:
+            return True
+        return is_mcp_tool(getattr(request, "tool", None))
 
     @override
     def wrap_tool_call(
