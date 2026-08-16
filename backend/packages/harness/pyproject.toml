@@ -11,7 +11,7 @@ dependencies = [
     # the contract version it implements, extensions declare ranges. A range
     # here would let pip resolve a newer contract package than this harness
     # implements, making newer extensions look supported at runtime.
-    "deerflow-extension-api==0.1.1",
+    "deerflow-extension-api==0.1.2",
     "dotenv>=0.9.9",
     "exa-py>=1.0.0",
     "httpx>=0.28.0",
@@ -28,9 +28,12 @@ dependencies = [
     "langgraph>=1.2.9,<1.3",
     "langgraph-api>=0.8.1",
     "langgraph-cli>=0.4.24",
-    "langgraph-runtime-inmem>=0.28.0",
+    # Standalone Studio's pre-runtime persistence repair is validated against
+    # the 0.30.0 store lifecycle and must not resolve an older implementation.
+    "langgraph-runtime-inmem>=0.30.0",
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
+    "packaging>=24.2",
     "pydantic>=2.12.5",
     "pyyaml>=6.0.3",
     "readabilipy>=0.3.0",

@@ -13,6 +13,7 @@ from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
+    McpTaskToolsetConfig,
     McpToolOverride,
     atomic_write_extensions_config,
     extensions_config_write_lock,
@@ -379,11 +380,21 @@ class McpServerConfigResponse(BaseModel):
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
     tool_name_prefix: bool = Field(default=True, description="Whether to prefix discovered tool names with the MCP server name")
-    tool_call_timeout: float | None = Field(default=None, description="Timeout in seconds for individual stdio MCP tool calls")
+    tool_call_timeout: float | None = Field(
+        default=None,
+        description="Timeout in seconds for individual stdio MCP calls and durable-task calls on every transport",
+    )
     # Default matches McpServerConfig: this model's defaults feed model_dump()
     # into the persisted extensions config on PUT, so an API-created server that
     # omits the field must get the same bring-up timeout as a file-created one.
-    session_init_timeout: float | None = Field(default=DEFAULT_MCP_SESSION_INIT_TIMEOUT, description="Timeout in seconds for MCP server bring-up (tool discovery and persistent stdio session initialization); null means no timeout")
+    session_init_timeout: float | None = Field(
+        default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        description="Timeout in seconds for MCP server bring-up and durable HTTP/SSE task-session initialization; null means no timeout",
+    )
+    task_toolsets: list[McpTaskToolsetConfig] = Field(
+        default_factory=list,
+        description="Raw submit/status/cancel tool groups managed as durable background tasks",
+    )
     model_config = ConfigDict(extra="allow")
 
     @model_validator(mode="before")

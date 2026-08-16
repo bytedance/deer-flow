@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 33
+config_version: 34
 
 # ============================================================================
 # Logging
@@ -41,7 +41,8 @@ logging:
 # lead-only vs subagent-only configuration is not expressible yet. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
-# lets extensions_config.json remain the source of truth for extension packages.
+# lets extensions_config.json remain the source of truth for this legacy
+# config-declared middleware list. Packaged plugins use the `plugins:` block below.
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
@@ -2053,19 +2054,19 @@ agent_storage:
 # Background scheduler for one-time and recurring (cron) agent runs.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
-# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
-# ignores row-level locks, so multiple workers can double-fire the same task.
-# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
-# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+# The scheduler is single-instance by default. Set multi_instance: true only
+# when every Gateway instance shares Postgres, run ownership heartbeats, and
+# database-backed run events; startup recovery then preserves live peer runs.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
+#   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
 scheduler:
   enabled: false
+  multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
@@ -2074,8 +2075,9 @@ scheduler:
 # ============================================================================
 # Long-running MCP Tasks Configuration
 # ============================================================================
-# Protocol-neutral durable task runtime. This foundation is disabled by
-# default; an MCP task driver must be configured before tasks can be submitted.
+# Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is
+# disabled by default; task_toolsets are configured per server in
+# extensions_config.json.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
 # mcp_tasks:
@@ -2083,11 +2085,21 @@ scheduler:
 #   poll_interval_seconds: 5     # Scan interval and default task retry interval
 #   lease_seconds: 120           # Expired claims become recoverable after this delay
 #   max_concurrent_polls: 8      # Maximum status calls started by one worker per scan
+#   max_poll_backoff_seconds: 300             # Cap for exponential retries after transient errors
+#   input_required_poll_interval_seconds: 60  # Minimum poll interval while waiting for user input
+#   tracking_degraded_after_errors: 3         # Consecutive errors before query API reports degraded tracking
+#   max_result_bytes: 65536                    # Full JSON result storage limit
+#   result_preview_max_chars: 2000             # Text preview retained when a result exceeds the limit
 mcp_tasks:
   enabled: false
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_polls: 8
+  max_poll_backoff_seconds: 300
+  input_required_poll_interval_seconds: 60
+  tracking_degraded_after_errors: 3
+  max_result_bytes: 65536
+  result_preview_max_chars: 2000
 
 # ============================================================================
 # Run Ownership Configuration
@@ -2215,6 +2227,14 @@ run_ownership:
 #   langgraph_url: http://localhost:8001/api
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
+#   # Maximum queued or provider-reserved inbound messages. Must be a positive integer.
+#   inbound_queue_maxsize: 1000
+#   # Fixed number of long-lived inbound handler workers. Must be a positive integer.
+#   max_concurrency: 5
+#   # Seconds to drain accepted inbound work before cancelling active handlers.
+#   # Must be a non-negative finite number. Cancelled handlers are awaited; the Gateway's
+#   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
+#   shutdown_grace_period_seconds: 3
 #   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
@@ -2531,8 +2551,27 @@ authorization:
 # entry names an install entry point as "module.path:install"; the `config`
 # block is handed to that package verbatim and validated by the package itself.
 #
-# Loading is explicit on purpose: an installed package does nothing until it is
-# listed here, and the list order is what fixes middleware ordering.
+# Prefer the extension manager over editing this list by hand:
+#   make extension-install SOURCE="deerflow-extension-acme==1.2.3"
+#   make extension-install SOURCE="git+https://github.com/acme/deerflow-extension-acme.git@<commit>"
+#   make extension-install SOURCE="/absolute/path/to/local-extension"
+#   make extension-list
+#   make extension-enable NAME=acme
+#   make extension-disable NAME=acme
+#   make extension-remove NAME=acme
+# The installer updates backend/pyproject.toml, backend/uv.lock, and this block
+# together. It also asks the operator to confirm that the source is trusted;
+# extensions and their build systems execute with Gateway privileges.
+#
+# Every install, enable, disable, remove, or manual edit requires a Gateway
+# restart. Development launchers may fetch missing locked artifacts before
+# handoff; a built production Gateway never installs plugins during startup.
+# Local directories are copied to backend/extensions/sources as deployable
+# snapshots; use a pinned version or public HTTPS Git commit for reproducible
+# remote sources. SSH Git URLs are rejected because the stock Docker builder
+# does not forward host SSH credentials.
+# Loading remains explicit: a package installed outside the manager does nothing
+# until it is listed here, and list order fixes contribution ordering.
 #
 # This is deliberately separate from the `extensions:` block above (MCP servers,
 # skills, config-declared middlewares). That one is backed by
@@ -2540,20 +2579,16 @@ authorization:
 # endpoint; a list that causes code to be imported must stay in this
 # operator-controlled file only.
 #
-# This initial extension-system slice accepts middleware contributors. Their
-# install functions register semantically placed middlewares for the lead and/or
-# subagent stack; the examples below intentionally cover only that surface.
+# Plugins can contribute semantically placed middleware, task-lifecycle hooks,
+# system-model observers, Gateway-lifetime services, and eager FastAPI HTTP routers.
+# See examples/deerflow-extension-example for a package that exercises all five.
 #
 # plugins:
-#   - use: acme_request_observer:install
+#   - name: example                       # PEP 621 entry-point name
+#     package: deerflow-extension-example # Python distribution managed by uv
+#     use: deerflow_extension_example:install
+#     enabled: true                       # false skips import and registration
+#     required: false                     # true makes load failure abort Gateway startup
+#                                         # (install --required opts in)
 #     config:
-#       enabled: true
-#       placement: model_logical
-#   - use: acme_tool_observer:install
-#     config:
-#       enabled: true
-#       placement: tool_raw
-#   # `required: true` turns a load failure into a startup failure. Use it for
-#   # packages whose absence changes behaviour rather than just observability.
-#   - use: acme_required_middleware:install
-#     required: true
+#       label: example                    # extension-private values, if any
