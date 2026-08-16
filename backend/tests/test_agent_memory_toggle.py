@@ -211,7 +211,7 @@ def test_build_middlewares_folds_memory_opt_out_into_the_chain(monkeypatch) -> N
     # Stub the heavy shared/summarization/todo parts so this exercises only the
     # lead-only assembly that decides on MemoryMiddleware.
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None, **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
     runnable = {"configurable": {"is_plan_mode": False, "subagent_enabled": False}}
@@ -242,7 +242,7 @@ def _stub_heavy_middleware_parts(monkeypatch) -> None:
     from deerflow.agents.lead_agent import agent as lead_agent_module
 
     monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init=True: [])
-    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None: None)
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda *, app_config=None, **_kwargs: None)
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
 
 
