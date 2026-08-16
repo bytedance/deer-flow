@@ -529,6 +529,13 @@ export interface Translations {
     browserBack: string;
     browserScreenshot: string;
     browserClose: string;
+    details: string;
+    toolName: string;
+    toolCallId: string;
+    input: string;
+    result: string;
+    error: string;
+    payloadTruncated: (limit: number) => string;
   };
 
   humanInput: {

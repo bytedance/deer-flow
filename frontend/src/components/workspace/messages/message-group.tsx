@@ -47,6 +47,7 @@ import { useMaybeBrowserView } from "../browser-view";
 import { FlipDisplay } from "../flip-display";
 import { Tooltip } from "../tooltip";
 
+import { GenericToolCallDetails } from "./generic-tool-call-details";
 import { MarkdownContent } from "./markdown-content";
 
 interface MessageGroupProps {
@@ -264,6 +265,7 @@ function MessageGroupComponent({
         isLast={options?.isLast}
         isLoading={isLoading}
         deferBrowserPreview={deferBrowserPreviews}
+        showDebugDetails={showTokenDebugSummaries}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -577,9 +579,11 @@ function ToolCall({
   name,
   args,
   result,
+  resultIsError = false,
   isLast = false,
   isLoading = false,
   deferBrowserPreview = false,
+  showDebugDetails = false,
   tokenDebugStep,
   browserView,
   threadId,
@@ -588,10 +592,12 @@ function ToolCall({
   messageId?: string;
   name: string;
   args: Record<string, unknown>;
-  result?: string | Record<string, unknown>;
+  result?: unknown;
+  resultIsError?: boolean;
   isLast?: boolean;
   isLoading?: boolean;
   deferBrowserPreview?: boolean;
+  showDebugDetails?: boolean;
   tokenDebugStep?: TokenDebugStep;
   browserView?: BrowserViewMeta;
   threadId?: string;
@@ -913,7 +919,17 @@ function ToolCall({
         key={id}
         label={resolveLabel(description ?? t.toolCalls.useTool(name))}
         icon={WrenchIcon}
-      ></ChainOfThoughtStep>
+      >
+        {showDebugDetails && (
+          <GenericToolCallDetails
+            toolName={name}
+            toolCallId={id}
+            args={args}
+            result={result}
+            isError={resultIsError}
+          />
+        )}
+      </ChainOfThoughtStep>
     );
   }
 }
@@ -931,7 +947,8 @@ interface CoTReasoningStep extends GenericCoTStep<"reasoning"> {
 interface CoTToolCallStep extends GenericCoTStep<"toolCall"> {
   name: string;
   args: Record<string, unknown>;
-  result?: string;
+  result?: unknown;
+  resultIsError?: boolean;
   browserView?: BrowserViewMeta;
 }
 
@@ -948,7 +965,10 @@ interface BrowserViewMeta {
 }
 
 function indexToolCallData(messages: Message[]) {
-  const toolCallResults = new Map<string, string>();
+  const toolCallResults = new Map<
+    string,
+    { content: string; isError: boolean }
+  >();
   const browserViews = new Map<string, BrowserViewMeta>();
 
   for (const message of messages) {
@@ -960,7 +980,10 @@ function indexToolCallData(messages: Message[]) {
     if (!toolCallResults.has(toolCallId)) {
       const result = extractTextFromMessage(message);
       if (result) {
-        toolCallResults.set(toolCallId, result);
+        toolCallResults.set(toolCallId, {
+          content: result,
+          isError: isToolResultError(message),
+        });
       }
     }
 
@@ -977,6 +1000,22 @@ function indexToolCallData(messages: Message[]) {
   }
 
   return { browserViews, toolCallResults };
+}
+
+function isToolResultError(message: Message): boolean {
+  if (Reflect.get(message, "status") === "error") {
+    return true;
+  }
+
+  const metadata = Reflect.get(
+    message.additional_kwargs ?? {},
+    "deerflow_tool_meta",
+  );
+  return (
+    typeof metadata === "object" &&
+    metadata !== null &&
+    Reflect.get(metadata, "status") === "error"
+  );
 }
 
 function convertToSteps(messages: Message[]): CoTStep[] {
@@ -1022,11 +1061,12 @@ function convertToSteps(messages: Message[]): CoTStep[] {
           const toolCallResult = toolCallResults.get(toolCallId);
           if (toolCallResult) {
             try {
-              const json = JSON.parse(toolCallResult);
+              const json = JSON.parse(toolCallResult.content);
               step.result = json;
             } catch {
-              step.result = toolCallResult;
+              step.result = toolCallResult.content;
             }
+            step.resultIsError = toolCallResult.isError;
           }
           step.browserView = browserViews.get(toolCallId);
         }
