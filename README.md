@@ -286,6 +286,12 @@ make down   # Stop and remove containers
 
 Access: http://localhost:2026
 
+`make up` waits for the Gateway `/health` endpoint before reporting success.
+If the Gateway does not become healthy within the startup window, deployment
+exits non-zero and prints the container status plus recent Gateway logs. The
+production image starts from its already-built environment and never resolves
+or installs Python dependencies at container startup.
+
 For persistent deployments, configure `database.backend` as `sqlite` or
 `postgres`. The selected backend is shared by the LangGraph checkpointer,
 LangGraph Store, and DeerFlow application data. The deprecated `checkpointer`
@@ -346,6 +352,10 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    ```
 
 6. **Access**: http://localhost:2026
+
+Local services always use their internal ports (`8001`, `3000`, and `2026`).
+The root `.env` variable `PORT` configures only the published Docker ingress;
+it does not change the Next.js port used by `make dev`.
 
 #### Startup Modes
 
@@ -459,6 +469,13 @@ channels:
   # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
+  # Maximum queued or provider-reserved inbound messages (default: 1000)
+  inbound_queue_maxsize: 1000
+  # Fixed number of long-lived inbound handler workers (default: 5)
+  max_concurrency: 5
+  # Seconds to drain accepted work before cancelling active handlers (default: 3)
+  shutdown_grace_period_seconds: 3
+
   # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent  # or a custom agent name; custom agents are routed via lead_agent + agent_name
@@ -536,6 +553,7 @@ Notes:
 - `assistant_id: lead_agent` calls the default LangGraph assistant directly.
 - If `assistant_id` is set to a custom agent name, DeerFlow still routes through `lead_agent` and injects that value as `agent_name`, so the custom agent's SOUL/config takes effect for IM channels.
 - IM channel workers call Gateway's LangGraph-compatible API internally and automatically attach process-local internal auth plus the CSRF cookie/header pair required for thread and run creation.
+- Inbound work is bounded to `inbound_queue_maxsize` pending messages plus `max_concurrency` active workers. When capacity is exhausted, socket/polling providers drop new messages before sending DeerFlow's working acknowledgment and emit a rate-limited warning. Buzz leaves its replay cursor unchanged and reconnects for relay replay; GitHub webhooks return `503`, marking the delivery failed for manual/API redelivery. Shutdown closes admission immediately, keeps channel transports available while accepted messages drain for up to `shutdown_grace_period_seconds`, then cancels and awaits active handlers before closing provider resources; the Gateway's outer timeout can cancel an incomplete shutdown without detaching those resources.
 - Feishu/Lark now queues rapid follow-up messages per mapped DeerFlow `thread_id` instead of immediately surfacing the generic busy reply, and topic replies keep a per-message card with a compact source-message preview across queued/running/final patches.
 
 Set the corresponding API keys in your `.env` file:
@@ -1169,6 +1187,14 @@ servers. Its token-bearing `base_url` must use HTTPS by default; plaintext HTTP
 requires an explicit local-development opt-in. See the
 [mem0 backend guide](backend/packages/harness/deerflow/agents/memory/backends/mem0/README.md).
 
+An opt-in `honcho` backend is available for self-hosted or hosted Honcho (v3
+API). It builds user-model memory — long-term preferences and a cross-session
+working representation — on Honcho's server side, so the backend makes no LLM
+calls locally. Each user gets an isolated workspace derived from `user_id`; a
+missing user id fails closed instead of falling back to a shared workspace.
+Fact CRUD and Settings-page fact editing are not available for this backend. See
+the [Honcho backend guide](backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md).
+
 Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
 
 In the default DeerMem `middleware` mode, automatic extraction now classifies every proposed fact by scope, durability, and authority before a deterministic write gate accepts it. Only durable, descriptive user-level facts are stored; current-thread or project constraints and one-time action permissions stay in conversation state. User-global summaries require both user scope and descriptive authority, contradiction removals are scope-gated, and a replacement-dependent removal is applied only when its replacement actually survives validation and storage. These classification labels are extraction-only metadata, add no extra LLM call, and are not written into the fact files. The explicit CRUD tools in `memory.mode: tool` remain a separate, model-directed path. Deployments that override the bundled DeerMem prompts via `memory.backend_config.prompts_dir` must add the new classification fields to their custom templates (the `memory_update` fact/summary/removal formats and the `consolidation` consolidated-fact schema): the write gate fails closed, so an un-migrated template stops every extraction-driven fact, summary, and removal write, surfacing only through the `rejected_by_scope_gate` metrics and the high-rejection-rate warning.
@@ -1270,6 +1296,14 @@ Current MVP limits:
 - No `interval` schedule type in this first cut
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
+
+The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically take over only expired leases, and fence stale post-launch writes. `max_concurrent_runs` is a shared global cap across Pods, including short-lived dispatch reservations. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
+
+### Upgrade Notes
+
+- Before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either keep the scheduler on exactly one Gateway worker or configure `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The upgraded Gateway rejects the unsafe combination at startup instead of starting silently.
+- In multi-instance mode, `scheduler.max_concurrent_runs` is a cluster-wide cap, not a per-Pod cap. It includes active scheduled runs and short-lived dispatch reservations, so capacity does not multiply with the number of replicas.
+- `scheduler.multi_instance` and the related scheduler, ownership, and run-event settings are startup-only. Apply changes with a coordinated restart of all Gateway Pods; changing the ConfigMap alone does not activate multi-instance recovery.
 
 ## Terminal Workbench (TUI)
 
