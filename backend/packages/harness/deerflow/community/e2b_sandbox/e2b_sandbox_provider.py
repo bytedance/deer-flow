@@ -99,10 +99,27 @@ MIN_CAPACITY_RESERVATION_SECONDS = 120.0
 # Hard upper bound for ``set_timeout`` (e2b currently caps at 24h on the
 # free plan; passing an excessive value is rejected by the control-plane).
 MAX_E2B_TIMEOUT = 24 * 60 * 60
-# These limits bound Gateway work during each E2B mount upload.
+# These limits bound one E2B mount.
 _MAX_MOUNT_FILE_SIZE = 100 * 1024 * 1024
 _MAX_MOUNT_TOTAL_SIZE = 512 * 1024 * 1024
 _MAX_MOUNT_FILES = 2000
+# These limits bound all uploads during one sandbox creation pass.
+_MAX_MOUNT_PASS_TOTAL_BYTES = 512 * 1024 * 1024
+_MAX_MOUNT_PASS_FILES = 2000
+# The deadline stops new writes. It does not interrupt an active SDK write.
+_MOUNT_PASS_DEADLINE_SECONDS = 120
+
+
+class _MountPassLimitExceeded(Exception):
+    """Stop the current mount upload pass at its aggregate resource limit."""
+
+
+@dataclass
+class _MountUploadBudget:
+    deadline: float
+    total_bytes: int = 0
+    files: int = 0
+
 
 # Metadata keys we attach to every sandbox so we can discover ours via
 # ``Sandbox.list(query={...})`` from any gateway process.
@@ -1769,6 +1786,8 @@ class E2BSandboxProvider(SandboxProvider):
             return []
 
     def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+        started_at = time.monotonic()
+        budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
         effective_user_id = user_id or get_effective_user_id()
         projection_mounts = self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
@@ -1809,7 +1828,17 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("make_dir(%s) failed (continuing): %s", container_path, e)
 
             try:
-                self._upload_tree(client, host_path, container_path, read_only)
+                self._upload_tree(client, host_path, container_path, read_only, budget=budget)
+            except _MountPassLimitExceeded as e:
+                elapsed_ms = int((time.monotonic() - started_at) * 1000)
+                logger.warning(
+                    "e2b mount upload pass stopped: reason=%s files=%d bytes=%d elapsed_ms=%d",
+                    e,
+                    budget.files,
+                    budget.total_bytes,
+                    elapsed_ms,
+                )
+                break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
 
@@ -2097,6 +2126,8 @@ class E2BSandboxProvider(SandboxProvider):
         src: Path,
         dest_dir: str,
         read_only: bool,
+        *,
+        budget: _MountUploadBudget | None = None,
     ) -> None:
         """Recursively upload ``src`` into ``dest_dir`` inside the sandbox."""
         started_at = time.monotonic()
@@ -2125,6 +2156,12 @@ class E2BSandboxProvider(SandboxProvider):
                     add_file(path, f"{dest_dir}/{rel}")
 
         for path, target, expected_size in files:
+            if budget is not None and time.monotonic() >= budget.deadline:
+                raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
+            if budget is not None and budget.files >= _MAX_MOUNT_PASS_FILES:
+                raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
+            if budget is not None and budget.total_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
+                raise _MountPassLimitExceeded(f"total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
             try:
                 make_dir = getattr(client.files, "make_dir", None)
                 if callable(make_dir):
@@ -2138,6 +2175,9 @@ class E2BSandboxProvider(SandboxProvider):
                 if actual_size != expected_size:
                     raise ValueError(f"Mount file {path} changed during upload preflight")
                 client.files.write(target, fh)
+            if budget is not None:
+                budget.files += 1
+                budget.total_bytes += expected_size
         if read_only:
             try:
                 chmod_target = files[0][1] if source_is_file else dest_dir
