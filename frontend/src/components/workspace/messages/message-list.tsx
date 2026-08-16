@@ -52,6 +52,7 @@ import {
   getAssistantTurnCopyData,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
+  getStreamMetadataSnapshot,
   getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
@@ -59,6 +60,7 @@ import {
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
   type MessageGroup as ThreadMessageGroup,
+  type StreamMetadataSnapshot,
 } from "@/core/messages/utils";
 import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
 import {
@@ -506,14 +508,35 @@ export function MessageList({
     },
     [showTokenDebugSummaries, tokenDebugStepsByMessageId],
   );
+  const settledStreamMetadataRef = useRef<StreamMetadataSnapshot | undefined>(
+    undefined,
+  );
+  const settledStreamMetadataThreadIdRef = useRef(threadId);
+  if (settledStreamMetadataThreadIdRef.current !== threadId) {
+    settledStreamMetadataThreadIdRef.current = threadId;
+    settledStreamMetadataRef.current = undefined;
+  }
+  if (!thread.isLoading) {
+    settledStreamMetadataRef.current = getStreamMetadataSnapshot(
+      messages,
+      thread.getMessagesMetadata,
+    );
+  }
+  const settledStreamMetadata = settledStreamMetadataRef.current;
   const streamingMessages = useMemo(
     () =>
       getStreamingMessageLookup(
         messages,
         thread.isLoading,
         thread.getMessagesMetadata,
+        settledStreamMetadata,
       ),
-    [messages, thread.getMessagesMetadata, thread.isLoading],
+    [
+      messages,
+      settledStreamMetadata,
+      thread.getMessagesMetadata,
+      thread.isLoading,
+    ],
   );
 
   const humanInputState = useMemo(
