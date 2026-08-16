@@ -358,9 +358,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
                     delivery_channel_service = get_channel_service()
                     if delivery_channel_service is not None:
+                        from deerflow.persistence.run import RunRepository
+
+                        notification_run_repo = RunRepository(notification_session_factory)
+
+                        async def resolve_run_summary(run_id: str, user_id: str | None) -> str | None:
+                            # Scoped to the outbox row's owner so a stale row
+                            # can never pull another user's run content.
+                            row = await notification_run_repo.get(run_id, user_id=user_id)
+                            return row.get("last_ai_message") if row else None
+
                         notification_delivery_worker = NotificationDeliveryWorker(
                             delivery_repo=notification_repo,
                             resolve_channel=delivery_channel_service.get_channel,
+                            resolve_run_summary=resolve_run_summary,
                         )
                         await notification_delivery_worker.start()
                         app.state.notification_delivery_worker = notification_delivery_worker

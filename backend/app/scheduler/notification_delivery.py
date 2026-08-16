@@ -24,7 +24,13 @@ logger = logging.getLogger(__name__)
 # are both accepted (``ChannelService.get_channel`` is sync).
 ChannelResolver = Callable[[str], Any]
 
+# Resolves the run's final answer for a completed run, keyed
+# ``(run_id, owner_user_id)``, or None when no summary is available. Sync or
+# async callables are both accepted; failures fall back to the skeleton text.
+SummaryResolver = Callable[[str, str | None], Any]
+
 _ERROR_TEXT_LIMIT = 500
+_SUMMARY_TEXT_LIMIT = 1000
 
 
 def _truncate(text: str, *, limit: int = _ERROR_TEXT_LIMIT) -> str:
@@ -43,6 +49,12 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
             lines.append(f"Error: {_truncate(str(error))}")
     else:
         lines = ["**Scheduled task completed**", f"Task: `{task_id}`"]
+        # The result summary belongs to a successful outcome only: on failed
+        # runs a partial answer would be misleading, so the error line above
+        # stays the sole detail.
+        summary = payload.get("result_summary")
+        if isinstance(summary, str) and summary.strip():
+            lines.append(f"Result: {_truncate(summary.strip(), limit=_SUMMARY_TEXT_LIMIT)}")
     if delivery.get("run_id"):
         lines.append(f"Run: `{delivery['run_id']}`")
     return "\n".join(lines)
@@ -58,9 +70,11 @@ class NotificationDeliveryWorker:
         resolve_channel: ChannelResolver,
         poll_interval_seconds: int = 5,
         batch_size: int = 10,
+        resolve_run_summary: SummaryResolver | None = None,
     ) -> None:
         self._delivery_repo = delivery_repo
         self._resolve_channel = resolve_channel
+        self._resolve_run_summary = resolve_run_summary
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
         self._task: asyncio.Task | None = None
@@ -84,6 +98,29 @@ class NotificationDeliveryWorker:
         for row in rows:
             await self._deliver(row)
 
+    async def _resolve_summary(self, delivery: dict[str, Any]) -> str | None:
+        """Best-effort lookup of the run's final answer at delivery time.
+
+        Read at delivery time, not enqueue time, so retried deliveries see
+        the freshest value and the outbox payload stays skeleton-only. Any
+        failure degrades to the skeleton notification instead of blocking it.
+        """
+        if self._resolve_run_summary is None:
+            return None
+        run_id = delivery.get("run_id")
+        if not run_id:
+            return None
+        try:
+            summary = self._resolve_run_summary(run_id, delivery.get("owner_user_id"))
+            if inspect.isawaitable(summary):
+                summary = await summary
+        except Exception:
+            logger.warning("Failed to resolve run summary for run %s; sending skeleton notification", run_id, exc_info=True)
+            return None
+        if isinstance(summary, str) and summary.strip():
+            return summary
+        return None
+
     async def _deliver(self, delivery: dict[str, Any]) -> None:
         delivery_id = delivery["id"]
         provider = delivery.get("provider") or ""
@@ -96,10 +133,18 @@ class NotificationDeliveryWorker:
         if channel is None:
             await self._delivery_repo.mark_failed(delivery_id, error=f"channel '{provider}' is not running")
             return
+        enriched = delivery
+        if delivery.get("event") == "run_completed":
+            summary = await self._resolve_summary(delivery)
+            if summary is not None:
+                # Copy before enriching: the claimed row must not be mutated
+                # in place (its payload is the durable outbox snapshot).
+                enriched = dict(delivery)
+                enriched["payload"] = {**(delivery.get("payload") or {}), "result_summary": summary}
         try:
             await channel.send_notification(
                 target=delivery.get("target") or "",
-                text_markdown=render_notification_text(delivery),
+                text_markdown=render_notification_text(enriched),
             )
         except Exception as exc:
             await self._delivery_repo.mark_failed(delivery_id, error=str(exc))

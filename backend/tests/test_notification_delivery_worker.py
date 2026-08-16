@@ -68,7 +68,7 @@ def _delivery_row(
     }
 
 
-def _make_worker(repo, channel=None):
+def _make_worker(repo, channel=None, resolve_run_summary=None):
     channels = {}
     if channel is not None:
         channels["wecom"] = channel
@@ -76,6 +76,7 @@ def _make_worker(repo, channel=None):
         delivery_repo=repo,
         resolve_channel=lambda provider: channels.get(provider),
         poll_interval_seconds=5,
+        resolve_run_summary=resolve_run_summary,
     )
 
 
@@ -174,6 +175,126 @@ async def test_start_stop_lifecycle():
     await worker.stop()
     # Idempotent stop mirrors the scheduler service contract.
     await worker.stop()
+
+
+# ---------------------------------------------------------------------------
+# Result summary enrichment (issue #4254): completed runs carry the agent's
+# final answer into the IM push; failed runs keep the error-only skeleton.
+# ---------------------------------------------------------------------------
+
+
+def test_render_includes_result_summary_for_completed_runs():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "The answer is 42"}))
+
+    assert "The answer is 42" in text
+
+
+def test_render_truncates_long_result_summary():
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": "x" * 5000}))
+
+    # Bounded on the wire: 999 chars of summary + the ellipsis marker.
+    result_line = next(line for line in text.splitlines() if line.startswith("Result: "))
+    assert len(result_line) == len("Result: ") + 1000
+    assert result_line.endswith("\u2026")
+
+
+def test_render_ignores_result_summary_for_failed_runs():
+    text = render_notification_text(
+        _delivery_row(
+            event="run_failed",
+            payload={"run_status": "failed", "error": "boom", "task_id": "task-1", "result_summary": "partial answer"},
+        )
+    )
+
+    assert "partial answer" not in text
+
+
+@pytest.mark.asyncio
+async def test_delivery_enriches_completed_run_with_summary():
+    row = _delivery_row()
+    repo = FakeDeliveryRepo([row])
+    channel = FakeChannel()
+    seen = []
+
+    def resolver(run_id, user_id):
+        seen.append((run_id, user_id))
+        return "The answer is 42"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert seen == [("run-1", "user-1")]
+    assert repo.sent == ["delivery-1"]
+    assert "The answer is 42" in channel.sent[0][1]
+    # The claimed outbox row itself must not be mutated in place.
+    assert "result_summary" not in row["payload"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_supports_async_summary_resolver():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+
+    async def resolver(run_id, user_id):
+        return "async answer"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    assert "async answer" in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_delivery_skips_resolver_for_failed_runs():
+    repo = FakeDeliveryRepo([_delivery_row(event="run_failed", payload={"run_status": "failed", "error": "boom", "task_id": "task-1"})])
+    channel = FakeChannel()
+    called = []
+
+    def resolver(run_id, user_id):
+        called.append(run_id)
+        return "should not appear"
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert called == []
+    assert repo.sent == ["delivery-1"]
+
+
+@pytest.mark.asyncio
+async def test_delivery_falls_back_to_skeleton_when_resolver_raises():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+
+    def resolver(run_id, user_id):
+        raise RuntimeError("db unavailable")
+
+    worker = _make_worker(repo, channel, resolve_run_summary=resolver)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    # A summary lookup failure must never block the notification itself.
+    assert repo.sent == ["delivery-1"]
+    assert repo.failed == []
+    assert "task-1" in channel.sent[0][1]
+
+
+@pytest.mark.asyncio
+async def test_delivery_sends_skeleton_when_summary_is_missing():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    channel = FakeChannel()
+    worker = _make_worker(repo, channel, resolve_run_summary=lambda run_id, user_id: None)
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == ["delivery-1"]
+    text = channel.sent[0][1]
+    assert "task-1" in text
+    assert "Result:" not in text
 
 
 class FakeWsClient:
