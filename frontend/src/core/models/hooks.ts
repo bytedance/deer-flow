@@ -2,9 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 
 import { loadModels } from "./api";
 
+export const MODELS_QUERY_KEY = ["models"] as const;
+
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["models"],
+  const { data, isLoading, isFetching, error, refetch } = useQuery({
+    queryKey: MODELS_QUERY_KEY,
     queryFn: () => loadModels(),
     enabled,
     refetchOnWindowFocus: false,
@@ -19,6 +21,8 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
     models: data?.models ?? [],
     tokenUsageEnabled: data?.token_usage.enabled ?? false,
     isLoading,
+    isFetching,
     error,
+    refetch,
   };
 }
