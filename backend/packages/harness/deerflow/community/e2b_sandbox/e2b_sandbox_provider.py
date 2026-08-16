@@ -106,7 +106,7 @@ _MAX_MOUNT_FILES = 2000
 # These limits bound all uploads during one sandbox creation pass.
 _MAX_MOUNT_PASS_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_MOUNT_PASS_FILES = 2000
-# The deadline stops new writes. It does not interrupt an active SDK write.
+# Deadline checks stop preflight work and new writes. Active SDK writes finish.
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
 
@@ -121,6 +121,10 @@ class _MountUploadBudget:
     attempted_files: int = 0
     completed_bytes: int = 0
     completed_files: int = 0
+
+    def check_deadline(self) -> None:
+        if time.monotonic() >= self.deadline:
+            raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
 
 
 # Metadata keys we attach to every sandbox so we can discover ours via
@@ -1790,6 +1794,19 @@ class E2BSandboxProvider(SandboxProvider):
     def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
         started_at = time.monotonic()
         budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
+
+        def warn_pass_stopped(reason: _MountPassLimitExceeded) -> None:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.warning(
+                "e2b mount upload pass stopped: reason=%s attempted_files=%d attempted_bytes=%d completed_files=%d completed_bytes=%d elapsed_ms=%d",
+                reason,
+                budget.attempted_files,
+                budget.attempted_bytes,
+                budget.completed_files,
+                budget.completed_bytes,
+                elapsed_ms,
+            )
+
         effective_user_id = user_id or get_effective_user_id()
         projection_mounts = self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
@@ -1812,6 +1829,11 @@ class E2BSandboxProvider(SandboxProvider):
             mounts.append((host_path, container_path, read_only))
 
         for host_path, container_path, read_only in mounts:
+            try:
+                budget.check_deadline()
+            except _MountPassLimitExceeded as e:
+                warn_pass_stopped(e)
+                break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
                 continue
@@ -1832,16 +1854,7 @@ class E2BSandboxProvider(SandboxProvider):
             try:
                 self._upload_tree(client, host_path, container_path, read_only, budget=budget)
             except _MountPassLimitExceeded as e:
-                elapsed_ms = int((time.monotonic() - started_at) * 1000)
-                logger.warning(
-                    "e2b mount upload pass stopped: reason=%s attempted_files=%d attempted_bytes=%d completed_files=%d completed_bytes=%d elapsed_ms=%d",
-                    e,
-                    budget.attempted_files,
-                    budget.attempted_bytes,
-                    budget.completed_files,
-                    budget.completed_bytes,
-                    elapsed_ms,
-                )
+                warn_pass_stopped(e)
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
@@ -2141,6 +2154,8 @@ class E2BSandboxProvider(SandboxProvider):
 
         def add_file(path: Path, target: str) -> None:
             nonlocal total_size
+            if budget is not None:
+                budget.check_deadline()
             file_size = path.stat().st_size
             if file_size > _MAX_MOUNT_FILE_SIZE:
                 raise ValueError(f"Mount file {path} is {file_size} bytes and exceeds the {_MAX_MOUNT_FILE_SIZE}-byte file limit")
@@ -2155,6 +2170,8 @@ class E2BSandboxProvider(SandboxProvider):
             add_file(src, f"{dest_dir}/{src.name}")
         else:
             for path in src.rglob("*"):
+                if budget is not None:
+                    budget.check_deadline()
                 if path.is_file():
                     rel = path.relative_to(src).as_posix()
                     add_file(path, f"{dest_dir}/{rel}")
@@ -2162,8 +2179,8 @@ class E2BSandboxProvider(SandboxProvider):
         upload_attempted = False
         try:
             for path, target, expected_size in files:
-                if budget is not None and time.monotonic() >= budget.deadline:
-                    raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
+                if budget is not None:
+                    budget.check_deadline()
                 if budget is not None and budget.attempted_files >= _MAX_MOUNT_PASS_FILES:
                     raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
                 if budget is not None and budget.attempted_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:

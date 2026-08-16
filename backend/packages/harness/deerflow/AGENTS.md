@@ -90,8 +90,9 @@ Each mount has these fixed limits:
 The full sandbox creation pass also allows 512 MiB and 2,000 files. Skill
 projections and configured mounts share this budget.
 
-The pass has a 120-second deadline. The deadline stops new file uploads. It
-does not interrupt an active E2B SDK write.
+The pass has a cooperative 120-second deadline. The provider checks it before
+each mount, during directory preflight, and before each SDK write. The deadline
+does not interrupt active filesystem or E2B SDK calls.
 
 The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
 

@@ -1119,9 +1119,10 @@ E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.
 
 Each E2B mount upload pass accepts at most 512 MiB and 2,000 files. The pass
-also has a 120-second deadline. Skill projections and configured mounts share
-these limits. The deadline stops new file uploads after it expires. It does
-not interrupt an active E2B SDK write.
+also has a cooperative 120-second deadline. Skill projections and configured
+mounts share these limits. The provider checks the deadline before each mount
+and during directory preflight. The deadline stops new file uploads after it
+expires. It does not interrupt active filesystem or E2B SDK calls.
 
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
