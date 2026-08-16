@@ -36,7 +36,7 @@ export async function WorkspaceContent({
         <WorkspaceSidebar />
         <SidebarInset className="min-w-0">
           <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-          <ModelLoadErrorBanner />
+          <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
           {children}
         </SidebarInset>
       </SidebarProvider>

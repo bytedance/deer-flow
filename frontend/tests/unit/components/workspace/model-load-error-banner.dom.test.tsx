@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
@@ -28,16 +28,49 @@ rs.mock("@/core/i18n/hooks", () => ({
   }),
 }));
 
+rs.mock("@/core/auth/AuthProvider", () => ({
+  useAuth: rs.fn(),
+}));
+
 import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
 import { UnauthorizedError } from "@/core/api/errors";
+import { useAuth } from "@/core/auth/AuthProvider";
+import type { User } from "@/core/auth/types";
 import { loadModels } from "@/core/models/api";
 import { MODELS_QUERY_KEY, useModels } from "@/core/models/hooks";
+import type { ModelsResponse } from "@/core/models/types";
 
 const mockedLoadModels = rs.mocked(loadModels);
+const mockedUseAuth = rs.mocked(useAuth);
+const fakeUser = {} as User;
+
+function createAuthState(user: User | null): ReturnType<typeof useAuth> {
+  return {
+    user,
+    isAuthenticated: user !== null,
+    isLoading: false,
+    logout: rs.fn(),
+    refreshUser: rs.fn(),
+    applyUser: rs.fn(),
+  };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
+
+beforeEach(() => {
+  mockedUseAuth.mockReturnValue(createAuthState(fakeUser));
+});
 
 afterEach(() => {
   cleanup();
   mockedLoadModels.mockReset();
+  mockedUseAuth.mockReset();
 });
 
 function createWrapper() {
@@ -73,12 +106,10 @@ describe("ModelLoadErrorBanner", () => {
   });
 
   it("shows one actionable error for all model consumers and clears after retry", async () => {
+    const retryResult = createDeferred<ModelsResponse>();
     mockedLoadModels
       .mockRejectedValueOnce(new Error("Gateway returned 503"))
-      .mockResolvedValueOnce({
-        models: [],
-        token_usage: { enabled: false },
-      });
+      .mockImplementationOnce(() => retryResult.promise);
     const { QueryWrapper } = createWrapper();
 
     render(
@@ -97,6 +128,16 @@ describe("ModelLoadErrorBanner", () => {
     expect(mockedLoadModels).toHaveBeenCalledTimes(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+
+    const retryingButton = await screen.findByRole("button", {
+      name: "Retrying…",
+    });
+    expect((retryingButton as HTMLButtonElement).disabled).toBe(true);
+
+    retryResult.resolve({
+      models: [],
+      token_usage: { enabled: false },
+    });
 
     await waitFor(() => {
       expect(screen.queryByRole("alert")).toBeNull();
@@ -120,5 +161,61 @@ describe("ModelLoadErrorBanner", () => {
       expect(queryClient.getQueryState(MODELS_QUERY_KEY)?.status).toBe("error");
     });
     expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("suppresses a model symptom only while the gateway banner is visible", async () => {
+    mockedUseAuth.mockReturnValue(createAuthState(null));
+    mockedLoadModels.mockRejectedValueOnce(new Error("Gateway returned 503"));
+    const { queryClient, QueryWrapper } = createWrapper();
+
+    const renderView = () => (
+      <>
+        <ModelLoadErrorBanner gatewayUnavailable />
+        <ModelConsumer />
+      </>
+    );
+    const { rerender } = render(renderView(), { wrapper: QueryWrapper });
+
+    await waitFor(() => {
+      expect(queryClient.getQueryState(MODELS_QUERY_KEY)?.status).toBe("error");
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    mockedUseAuth.mockReturnValue(createAuthState(fakeUser));
+    rerender(renderView());
+
+    expect(await screen.findByRole("alert")).not.toBeNull();
+  });
+
+  it("does not show manual retry progress for a shared background refetch", async () => {
+    const backgroundResult = createDeferred<ModelsResponse>();
+    mockedLoadModels
+      .mockRejectedValueOnce(new Error("Gateway returned 503"))
+      .mockImplementationOnce(() => backgroundResult.promise);
+    const { queryClient, QueryWrapper } = createWrapper();
+
+    render(
+      <>
+        <ModelLoadErrorBanner />
+        <ModelConsumer />
+      </>,
+      { wrapper: QueryWrapper },
+    );
+
+    await screen.findByRole("alert");
+    const backgroundRefetch = queryClient.refetchQueries({
+      queryKey: MODELS_QUERY_KEY,
+    });
+    await waitFor(() => {
+      expect(mockedLoadModels).toHaveBeenCalledTimes(2);
+    });
+
+    expect(screen.queryByRole("button", { name: "Retrying…" })).toBeNull();
+
+    backgroundResult.resolve({
+      models: [],
+      token_usage: { enabled: false },
+    });
+    await backgroundRefetch;
   });
 });
