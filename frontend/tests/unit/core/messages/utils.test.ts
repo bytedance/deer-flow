@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
@@ -788,6 +789,49 @@ test("marks the latest assistant message as streaming", () => {
       })),
     ),
   ).toBe(false);
+});
+
+test("compares stream metadata snapshots by keys and metadata identity", () => {
+  const identifiedMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: "Completed answer",
+  } as Message;
+  const anonymousMessage = {
+    type: "ai",
+    content: "Anonymous answer",
+  } as Message;
+  const identifiedMetadata = { langgraph_node: "agent" };
+  const anonymousMetadata = { langgraph_node: "agent" };
+  const messages = [identifiedMessage, anonymousMessage];
+  const snapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const equivalentSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const changedSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage
+        ? { ...identifiedMetadata }
+        : anonymousMetadata,
+  }));
+  const missingSnapshot = getStreamMetadataSnapshot(
+    [identifiedMessage],
+    () => ({ streamMetadata: identifiedMetadata }),
+  );
+
+  expect(areStreamMetadataSnapshotsEqual(snapshot, equivalentSnapshot)).toBe(
+    true,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, changedSnapshot)).toBe(
+    false,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, missingSnapshot)).toBe(
+    false,
+  );
 });
 
 test("ignores stream metadata retained from a completed turn", () => {

@@ -46,6 +46,7 @@ import {
   type TokenUsageInlineMode,
 } from "@/core/messages/usage-model";
 import {
+  areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
@@ -519,9 +520,18 @@ export function MessageList({
     if (thread.isLoading) {
       return;
     }
-    setSettledStreamMetadataState({
-      threadId,
-      snapshot: getStreamMetadataSnapshot(messages, thread.getMessagesMetadata),
+    const snapshot = getStreamMetadataSnapshot(
+      messages,
+      thread.getMessagesMetadata,
+    );
+    setSettledStreamMetadataState((previous) => {
+      if (
+        previous?.threadId === threadId &&
+        areStreamMetadataSnapshotsEqual(previous.snapshot, snapshot)
+      ) {
+        return previous;
+      }
+      return { threadId, snapshot };
     });
   }, [messages, thread.getMessagesMetadata, thread.isLoading, threadId]);
   const settledStreamMetadata =

@@ -373,6 +373,30 @@ export type StreamingMessageLookup = {
   messages: ReadonlySet<Message>;
 };
 
+export function areStreamMetadataSnapshotsEqual(
+  left: StreamMetadataSnapshot,
+  right: StreamMetadataSnapshot,
+) {
+  if (
+    left.ids.size !== right.ids.size ||
+    left.messages.size !== right.messages.size
+  ) {
+    return false;
+  }
+
+  for (const [id, metadata] of left.ids) {
+    if (right.ids.get(id) !== metadata) {
+      return false;
+    }
+  }
+  for (const [message, metadata] of left.messages) {
+    if (right.messages.get(message) !== metadata) {
+      return false;
+    }
+  }
+  return true;
+}
+
 export function getStreamMetadataSnapshot(
   messages: Message[],
   getMessagesMetadata?: MessageMetadataLookup,
