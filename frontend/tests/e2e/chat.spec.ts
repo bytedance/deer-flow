@@ -85,7 +85,9 @@ test.describe("Streaming message actions", () => {
         .locator('[data-assistant-turn=""]')
         .filter({ hasText: "First completed answer" });
       await completedTurn.hover();
-      await expect(completedTurn.locator("button").first()).toBeVisible();
+      await expect(
+        completedTurn.getByRole("button", { name: "Copy to clipboard" }),
+      ).toBeVisible();
     } finally {
       releaseSecondStream();
     }

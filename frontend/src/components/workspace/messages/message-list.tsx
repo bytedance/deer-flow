@@ -101,6 +101,11 @@ import { VirtualMessageList } from "./virtual-message-list";
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
 
+type SettledStreamMetadataState = {
+  threadId: string;
+  snapshot: StreamMetadataSnapshot;
+};
+
 function sameStrings(previous: readonly string[], next: readonly string[]) {
   return (
     previous.length === next.length &&
@@ -508,21 +513,21 @@ export function MessageList({
     },
     [showTokenDebugSummaries, tokenDebugStepsByMessageId],
   );
-  const settledStreamMetadataRef = useRef<StreamMetadataSnapshot | undefined>(
-    undefined,
-  );
-  const settledStreamMetadataThreadIdRef = useRef(threadId);
-  if (settledStreamMetadataThreadIdRef.current !== threadId) {
-    settledStreamMetadataThreadIdRef.current = threadId;
-    settledStreamMetadataRef.current = undefined;
-  }
-  if (!thread.isLoading) {
-    settledStreamMetadataRef.current = getStreamMetadataSnapshot(
-      messages,
-      thread.getMessagesMetadata,
-    );
-  }
-  const settledStreamMetadata = settledStreamMetadataRef.current;
+  const [settledStreamMetadataState, setSettledStreamMetadataState] =
+    useState<SettledStreamMetadataState>();
+  useEffect(() => {
+    if (thread.isLoading) {
+      return;
+    }
+    setSettledStreamMetadataState({
+      threadId,
+      snapshot: getStreamMetadataSnapshot(messages, thread.getMessagesMetadata),
+    });
+  }, [messages, thread.getMessagesMetadata, thread.isLoading, threadId]);
+  const settledStreamMetadata =
+    settledStreamMetadataState?.threadId === threadId
+      ? settledStreamMetadataState.snapshot
+      : undefined;
   const streamingMessages = useMemo(
     () =>
       getStreamingMessageLookup(
