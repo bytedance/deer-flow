@@ -122,8 +122,12 @@ class _MountUploadBudget:
     completed_bytes: int = 0
     completed_files: int = 0
 
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline
+
     def check_deadline(self) -> None:
-        if time.monotonic() >= self.deadline:
+        if self.expired:
             raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
 
 
@@ -1795,7 +1799,7 @@ class E2BSandboxProvider(SandboxProvider):
         started_at = time.monotonic()
         budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
 
-        def warn_pass_stopped(reason: _MountPassLimitExceeded) -> None:
+        def warn_pass_stopped(reason: str) -> None:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
             logger.warning(
                 "e2b mount upload pass stopped: reason=%s attempted_files=%d attempted_bytes=%d completed_files=%d completed_bytes=%d elapsed_ms=%d",
@@ -1829,10 +1833,8 @@ class E2BSandboxProvider(SandboxProvider):
             mounts.append((host_path, container_path, read_only))
 
         for host_path, container_path, read_only in mounts:
-            try:
-                budget.check_deadline()
-            except _MountPassLimitExceeded as e:
-                warn_pass_stopped(e)
+            if budget.expired:
+                warn_pass_stopped(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
@@ -1854,7 +1856,7 @@ class E2BSandboxProvider(SandboxProvider):
             try:
                 self._upload_tree(client, host_path, container_path, read_only, budget=budget)
             except _MountPassLimitExceeded as e:
-                warn_pass_stopped(e)
+                warn_pass_stopped(str(e))
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)

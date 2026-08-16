@@ -495,8 +495,8 @@ def test_apply_mounts_bounds_total_bytes_across_mounts(monkeypatch, tmp_path, ca
 
     assert client.files.write_calls == [("/mnt/first/first.bin", b"1234")]
     assert "total byte budget 7" in caplog.text
-    assert "files=1" in caplog.text
-    assert "bytes=4" in caplog.text
+    assert "attempted_files=1" in caplog.text
+    assert "attempted_bytes=4" in caplog.text
 
 
 def test_apply_mounts_bounds_total_files_across_mounts(monkeypatch, tmp_path, caplog):
@@ -523,7 +523,7 @@ def test_apply_mounts_bounds_total_files_across_mounts(monkeypatch, tmp_path, ca
 
     assert client.files.write_calls == [("/mnt/first/first.txt", b"first")]
     assert "file count cap 1" in caplog.text
-    assert "files=1" in caplog.text
+    assert "attempted_files=1" in caplog.text
 
 
 def test_read_only_mount_remains_read_only_when_pass_limit_stops_mid_mount(monkeypatch, tmp_path):
@@ -647,7 +647,7 @@ def test_apply_mounts_deadline_stops_before_next_file(monkeypatch, tmp_path, cap
         ("/mnt/data/second.txt", b"second"),
     }
     assert "time budget 1s" in caplog.text
-    assert "files=1" in caplog.text
+    assert "attempted_files=1" in caplog.text
 
 
 def test_apply_mounts_deadline_stops_directory_preflight(monkeypatch, tmp_path, caplog):
