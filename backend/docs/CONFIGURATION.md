@@ -742,7 +742,7 @@ To keep this off the default attack surface:
 > for CLI auto-auth in **all** modes. These hold long-lived CLI credentials;
 > scope or omit them when the gateway runs untrusted workloads.
 
-### CLI Credential Mounts (Claude Code / Codex)
+### CLI Credential Mounts (Claude Code / Codex / MiniMax Code)
 
 DeerFlow can reuse your Claude Code / Codex CLI subscription login as a model
 provider (`ClaudeChatModel`, the Codex provider) or for ACP agents that run the
@@ -770,6 +770,16 @@ its config directory, so it needs no `~/.claude` mount at all. Prefer the
 adapter's documented env auth, and reach for the
 `docker-compose.cli-auth.yaml` overlay only as a fallback for an adapter that
 genuinely reads the full CLI config directory.
+
+MiniMax Code is a native ACP agent, so it does not need an adapter. For local
+Gateway runs, install it with `npm install --global @minimax-ai/code`, run
+`mcode login`, and configure `acp_agents.mcode` with `command: mcode` and
+`args: ["acp"]`. The executable and its authenticated runtime must be available
+inside the Gateway environment; a host-only installation is not visible to a
+Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
+Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
+only when the agent is expected to edit files or run commands for a trusted
+task.
 
 
 ## Best Practices

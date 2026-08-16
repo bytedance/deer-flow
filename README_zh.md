@@ -196,6 +196,23 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
    - Codex CLI 会读取 `~/.codex/auth.json`
    - Claude Code 支持 `CLAUDE_CODE_OAUTH_TOKEN`、`ANTHROPIC_AUTH_TOKEN`、`CLAUDE_CODE_CREDENTIALS_PATH`，或 `~/.claude/.credentials.json`
    - ACP agent 条目与 model provider 是分开配置的——如果你配置了 `acp_agents.codex`，请把它指向一个 Codex ACP 适配器，例如 `npx -y @zed-industries/codex-acp`
+   - MiniMax Code 原生支持 ACP，不需要额外适配器。先安装并登录，再把它配置成 ACP agent：
+
+   ```bash
+   npm install --global @minimax-ai/code
+   mcode login
+   ```
+
+   ```yaml
+   acp_agents:
+     mcode:
+       command: mcode
+       args: ["acp"]
+       description: MiniMax Code for implementation, refactoring, debugging, and repository tasks
+       auto_approve_permissions: false
+   ```
+
+   `mcode` 必须位于 Gateway 进程的 `PATH` 中；只安装在 Docker host 上并不会让 Gateway 容器内可用。DeerFlow 会通过 `invoke_acp_agent` 在每个 thread 独立的 ACP workspace 中调用 MCode，并转发已启用的 MCP server。处理不可信任务时请保持 `auto_approve_permissions: false`；只有在任务可信且确实需要 MCode 修改文件或执行命令时才启用它。
    - 在 macOS 上，如有需要可显式导出 Claude Code 的认证信息：
 
    ```bash
