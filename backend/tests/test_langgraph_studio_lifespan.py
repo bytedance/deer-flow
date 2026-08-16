@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
+import sys
 from pathlib import Path
 from uuid import NAMESPACE_DNS, uuid4, uuid5
 
@@ -198,3 +200,20 @@ def test_langgraph_config_loads_the_pre_runtime_studio_app():
     config = json.loads((Path(__file__).resolve().parents[1] / "langgraph.json").read_text(encoding="utf-8"))
 
     assert config["http"]["app"].endswith("app/gateway/langgraph_studio.py:langgraph_app")
+
+
+def test_studio_app_supports_langgraph_file_loader():
+    """The CLI executes the custom app without first registering its module."""
+    module_path = Path(__file__).resolve().parents[1] / "app" / "gateway" / "langgraph_studio.py"
+    module_name = f"langgraph_studio_file_loader_{uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+
+    assert spec is not None
+    assert spec.loader is not None
+    assert module_name not in sys.modules
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module_name not in sys.modules
+    assert module.langgraph_app is not None
