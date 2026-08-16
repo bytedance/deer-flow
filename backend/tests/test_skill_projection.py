@@ -283,6 +283,30 @@ def test_targeted_removal_failure_clears_drifted_projection_scope(projection_env
     assert not manifest.exists()
 
 
+def test_targeted_removal_drift_check_raises_when_underlying_unlink_swallows_error(projection_env, monkeypatch) -> None:
+    """Explicit drift check raises NotADirectoryError even if underlying unlink would swallow ENOENT (Windows semantics)."""
+    env = projection_env
+    _write_skill(env.skills_root / "public" / "team", "helper")
+    projected = rebuild_skill_projections(env.storage)
+    manifest = projected.public.parent / ".projection-manifest.json"
+    namespace = projected.public / "team"
+    shutil.rmtree(namespace)
+    namespace.write_text("drifted file", encoding="utf-8")
+
+    from deerflow.skills import projection as projection_module
+
+    # Simulate Windows Path.unlink(missing_ok=True) semantics where file-in-path
+    # returns ENOENT and is swallowed, so underlying removal would not raise ENOTDIR.
+    monkeypatch.setattr(projection_module, "_remove_projection_entry", lambda _target: None)
+
+    with pytest.raises(NotADirectoryError, match="Projection namespace drifted to a file"):
+        with skill_projection_mutation(env.storage, "public", remove_names=("helper",)):
+            env.extensions.skills["helper"] = SkillStateConfig(enabled=False)
+
+    assert list(projected.public.iterdir()) == []
+    assert not manifest.exists()
+
+
 def test_user_custom_skill_replaces_legacy_projection(projection_env) -> None:
     env = projection_env
     _write_skill(env.skills_root / "custom", "legacy-skill")
