@@ -526,6 +526,95 @@ def test_apply_mounts_bounds_total_files_across_mounts(monkeypatch, tmp_path, ca
     assert "files=1" in caplog.text
 
 
+def test_read_only_mount_remains_read_only_when_pass_limit_stops_mid_mount(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    source = tmp_path / "read-only"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/read-only", read_only=True),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert "chmod -R a-w /mnt/read-only" in client.commands.calls
+
+
+def test_read_only_mount_is_not_chmodded_when_no_upload_starts(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    source = tmp_path / "read-only"
+    source.mkdir()
+    (source / "file.txt").write_text("content", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/read-only", read_only=True),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == []
+    assert client.commands.calls == []
+
+
+def test_failed_write_consumes_aggregate_upload_budget(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 4)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    class FailFirstWriteAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            if len(self.write_calls) == 1:
+                raise RuntimeError("response lost after upload")
+
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient(files=FailFirstWriteAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.bin", b"1234")]
+    assert "attempted_files=1" in caplog.text
+    assert "attempted_bytes=4" in caplog.text
+    assert "completed_files=0" in caplog.text
+    assert "completed_bytes=0" in caplog.text
+
+
 def test_apply_mounts_deadline_stops_before_next_file(monkeypatch, tmp_path, caplog):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)

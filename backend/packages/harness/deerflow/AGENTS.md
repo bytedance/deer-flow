@@ -99,4 +99,4 @@ An invalid mount does not block later mounts.
 
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
 
-A stopped pass logs its limit reason, completed file count, byte count, and elapsed time.
+A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.

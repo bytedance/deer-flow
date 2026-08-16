@@ -117,8 +117,10 @@ class _MountPassLimitExceeded(Exception):
 @dataclass
 class _MountUploadBudget:
     deadline: float
-    total_bytes: int = 0
-    files: int = 0
+    attempted_bytes: int = 0
+    attempted_files: int = 0
+    completed_bytes: int = 0
+    completed_files: int = 0
 
 
 # Metadata keys we attach to every sandbox so we can discover ours via
@@ -1832,10 +1834,12 @@ class E2BSandboxProvider(SandboxProvider):
             except _MountPassLimitExceeded as e:
                 elapsed_ms = int((time.monotonic() - started_at) * 1000)
                 logger.warning(
-                    "e2b mount upload pass stopped: reason=%s files=%d bytes=%d elapsed_ms=%d",
+                    "e2b mount upload pass stopped: reason=%s attempted_files=%d attempted_bytes=%d completed_files=%d completed_bytes=%d elapsed_ms=%d",
                     e,
-                    budget.files,
-                    budget.total_bytes,
+                    budget.attempted_files,
+                    budget.attempted_bytes,
+                    budget.completed_files,
+                    budget.completed_bytes,
                     elapsed_ms,
                 )
                 break
@@ -2155,36 +2159,43 @@ class E2BSandboxProvider(SandboxProvider):
                     rel = path.relative_to(src).as_posix()
                     add_file(path, f"{dest_dir}/{rel}")
 
-        for path, target, expected_size in files:
-            if budget is not None and time.monotonic() >= budget.deadline:
-                raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
-            if budget is not None and budget.files >= _MAX_MOUNT_PASS_FILES:
-                raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
-            if budget is not None and budget.total_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
-                raise _MountPassLimitExceeded(f"total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
-            try:
-                make_dir = getattr(client.files, "make_dir", None)
-                if callable(make_dir):
-                    parent = target.rsplit("/", 1)[0]
-                    if parent and parent != dest_dir:
-                        make_dir(parent)
-            except Exception:
-                pass
-            with path.open("rb") as fh:
-                actual_size = os.fstat(fh.fileno()).st_size
-                if actual_size != expected_size:
-                    raise ValueError(f"Mount file {path} changed during upload preflight")
-                client.files.write(target, fh)
-            if budget is not None:
-                budget.files += 1
-                budget.total_bytes += expected_size
-        if read_only:
-            try:
-                chmod_target = files[0][1] if source_is_file else dest_dir
-                chmod_flag = "" if source_is_file else "-R "
-                client.commands.run(f"chmod {chmod_flag}a-w {shlex.quote(chmod_target)}")
-            except Exception:
-                pass
+        upload_attempted = False
+        try:
+            for path, target, expected_size in files:
+                if budget is not None and time.monotonic() >= budget.deadline:
+                    raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
+                if budget is not None and budget.attempted_files >= _MAX_MOUNT_PASS_FILES:
+                    raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
+                if budget is not None and budget.attempted_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
+                    raise _MountPassLimitExceeded(f"total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
+                try:
+                    make_dir = getattr(client.files, "make_dir", None)
+                    if callable(make_dir):
+                        parent = target.rsplit("/", 1)[0]
+                        if parent and parent != dest_dir:
+                            make_dir(parent)
+                except Exception:
+                    pass
+                with path.open("rb") as fh:
+                    actual_size = os.fstat(fh.fileno()).st_size
+                    if actual_size != expected_size:
+                        raise ValueError(f"Mount file {path} changed during upload preflight")
+                    upload_attempted = True
+                    if budget is not None:
+                        budget.attempted_files += 1
+                        budget.attempted_bytes += expected_size
+                    client.files.write(target, fh)
+                if budget is not None:
+                    budget.completed_files += 1
+                    budget.completed_bytes += expected_size
+        finally:
+            if read_only and upload_attempted:
+                try:
+                    chmod_target = files[0][1] if source_is_file else dest_dir
+                    chmod_flag = "" if source_is_file else "-R "
+                    client.commands.run(f"chmod {chmod_flag}a-w {shlex.quote(chmod_target)}")
+                except Exception:
+                    pass
         elapsed_ms = int((time.monotonic() - started_at) * 1000)
         logger.info(
             "e2b mount upload: source=%s destination=%s files=%d bytes=%d elapsed_ms=%d",
