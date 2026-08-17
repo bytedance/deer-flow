@@ -85,6 +85,11 @@ def set_mcp_task_submitter(submitter: McpTaskSubmitter | None) -> None:
     _submitter = submitter
 
 
+def is_mcp_task_runtime_available() -> bool:
+    """Return whether the Gateway-owned durable task runtime is installed."""
+    return _submitter is not None
+
+
 def get_mcp_task_submitter() -> McpTaskSubmitter:
     if _submitter is None:
         raise McpTaskConfigurationError("The MCP task runtime is not initialized. Run this tool through the Gateway with mcp_tasks.enabled=true and a SQL database backend.")

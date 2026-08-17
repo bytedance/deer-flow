@@ -4,6 +4,7 @@ from langchain.tools import BaseTool
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.tools.builtins import (
@@ -103,7 +104,7 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
-    if getattr(getattr(config, "mcp_tasks", None), "enabled", False) is True:
+    if is_mcp_task_runtime_available():
         builtin_tools.extend((list_background_tasks, cancel_background_task))
     if include_upload_tool:
         builtin_tools.append(list_uploaded_files)

@@ -32,7 +32,7 @@ from app.gateway.internal_auth import (
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
-from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -1331,15 +1331,15 @@ async def launch_scheduled_thread_run(
 
 def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
     """Build the internal user turn for one immutable MCP task event snapshot."""
-    payload = neutralize_untrusted_tags(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
-    return (
+    payload = frame_untrusted_text(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    instruction = (
         "A durable background MCP task has an update that requires the user's attention. "
         "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "
         "When status is input_required, show the question but explain that this MCP integration "
         "cannot resume the remote task with user input yet. When tracking_degraded is true, explain "
-        "that DeerFlow will continue retrying at a lower frequency.\n\n"
-        f"<background_task_event>{payload}</background_task_event>"
+        "that DeerFlow will continue retrying at a lower frequency."
     )
+    return f"{instruction}\n\n{payload}"
 
 
 async def launch_mcp_task_notification_run(
