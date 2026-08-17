@@ -17,6 +17,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from app.channels.base import ChannelUnavailable
+
 logger = logging.getLogger(__name__)
 
 # Resolves a provider name (e.g. "wecom") to a running Channel instance, or
@@ -38,6 +40,11 @@ _SUMMARY_TEXT_LIMIT = 1000
 # in seconds, and resetting too eagerly would double-send live deliveries.
 _STALE_SENDING_TIMEOUT_SECONDS = 600
 
+# Matches Gateway ``_SHUTDOWN_HOOK_TIMEOUT_SECONDS``: this worker sits in
+# front of external IM I/O, so an unbounded join would stall the whole
+# lifespan shutdown path the channel-service bound was added to protect.
+_STOP_TIMEOUT_SECONDS = 5.0
+
 
 def _truncate(text: str, *, limit: int = _ERROR_TEXT_LIMIT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
@@ -47,14 +54,14 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
     """Render a bounded markdown summary of the run outcome for IM push."""
     payload = delivery.get("payload") or {}
     event = delivery.get("event") or ""
-    task_id = payload.get("task_id") or delivery.get("task_id")
+    task_label = payload.get("task_title") or payload.get("task_id") or delivery.get("task_id")
     if event == "run_failed":
-        lines = ["**Scheduled task failed**", f"Task: `{task_id}`"]
+        lines = ["**Scheduled task failed**", f"Task: `{task_label}`"]
         error = payload.get("error")
         if error:
             lines.append(f"Error: {_truncate(str(error))}")
     else:
-        lines = ["**Scheduled task completed**", f"Task: `{task_id}`"]
+        lines = ["**Scheduled task completed**", f"Task: `{task_label}`"]
         # The result summary belongs to a successful outcome only: on failed
         # runs a partial answer would be misleading, so the error line above
         # stays the sole detail.
@@ -78,6 +85,7 @@ class NotificationDeliveryWorker:
         batch_size: int = 10,
         resolve_run_summary: SummaryResolver | None = None,
         stale_sending_timeout_seconds: int = _STALE_SENDING_TIMEOUT_SECONDS,
+        stop_timeout_seconds: float = _STOP_TIMEOUT_SECONDS,
     ) -> None:
         self._delivery_repo = delivery_repo
         self._resolve_channel = resolve_channel
@@ -85,6 +93,7 @@ class NotificationDeliveryWorker:
         self._poll_interval_seconds = poll_interval_seconds
         self._batch_size = batch_size
         self._stale_sending_timeout_seconds = stale_sending_timeout_seconds
+        self._stop_timeout_seconds = stop_timeout_seconds
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -98,8 +107,20 @@ class NotificationDeliveryWorker:
         if self._task is None:
             return
         self._stop.set()
-        await self._task
+        task = self._task
         self._task = None
+        try:
+            await asyncio.wait_for(task, timeout=self._stop_timeout_seconds)
+        except TimeoutError:
+            logger.warning(
+                "Notification delivery worker stop exceeded %.1fs; cancelling in-flight poll",
+                self._stop_timeout_seconds,
+            )
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     async def run_once(self, *, now: datetime) -> None:
         await self._recover_stale_sending(now)
@@ -164,7 +185,7 @@ class NotificationDeliveryWorker:
         channel = self._resolve_channel(provider)
         if inspect.isawaitable(channel):
             channel = await channel
-        if channel is None:
+        if channel is None or not getattr(channel, "is_running", True):
             # Channel outage is not the delivery's fault: park the row
             # without consuming its retry budget so it survives an
             # hours-long outage and delivers once the channel returns.
@@ -183,6 +204,9 @@ class NotificationDeliveryWorker:
                 target=delivery.get("target") or "",
                 text_markdown=render_notification_text(enriched),
             )
+        except ChannelUnavailable as exc:
+            await self._delivery_repo.mark_failed(delivery_id, error=str(exc), count_attempt=False)
+            return
         except Exception as exc:
             await self._delivery_repo.mark_failed(delivery_id, error=str(exc))
             return

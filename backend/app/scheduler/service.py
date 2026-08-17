@@ -569,6 +569,7 @@ class ScheduledTaskService:
             user_id=user_id,
             terminal_status=terminal_status,
             error=error,
+            task_title=task.get("title"),
         )
 
     async def _enqueue_run_notifications(
@@ -580,6 +581,7 @@ class ScheduledTaskService:
         user_id: str,
         terminal_status: str,
         error: str | None,
+        task_title: str | None = None,
     ) -> None:
         """Write durable outbox rows for the run outcome (issue #4254).
 
@@ -598,7 +600,12 @@ class ScheduledTaskService:
         except Exception:
             logger.exception("[Scheduler] failed to list channel connections for notifications")
             return
-        payload = {"run_status": terminal_status, "error": error, "task_id": task_id}
+        payload = {
+            "run_status": terminal_status,
+            "error": error,
+            "task_id": task_id,
+            "task_title": task_title,
+        }
         for connection in connections:
             if connection.get("status") != "connected":
                 continue

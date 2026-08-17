@@ -7,10 +7,12 @@ proactive send path. It must never touch execution state.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
 
+from app.channels.base import ChannelUnavailable
 from app.channels.message_bus import MessageBus
 from app.channels.wecom import WeComChannel
 from app.scheduler.notification_delivery import NotificationDeliveryWorker, render_notification_text
@@ -44,11 +46,15 @@ class FakeDeliveryRepo:
 
 
 class FakeChannel:
-    def __init__(self, *, fail=False):
+    def __init__(self, *, fail=False, unavailable=False, running=True):
         self.sent = []
         self.fail = fail
+        self.unavailable = unavailable
+        self.is_running = running
 
     async def send_notification(self, *, target, text_markdown):
+        if self.unavailable:
+            raise ChannelUnavailable("channel transport down")
         if self.fail:
             raise RuntimeError("platform rejected the push")
         self.sent.append((target, text_markdown))
@@ -94,6 +100,16 @@ def test_render_run_completed_text_includes_task_and_run():
     assert "completed" in text.lower()
     assert "task-1" in text
     assert "run-1" in text
+
+
+def test_render_prefers_task_title_over_id():
+    text = render_notification_text(
+        _delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"})
+    )
+
+    assert "Daily digest" in text
+    task_line = next(line for line in text.splitlines() if line.startswith("Task:"))
+    assert "task-1" not in task_line
 
 
 def test_render_run_failed_text_includes_error():
@@ -154,6 +170,33 @@ async def test_run_once_marks_failed_when_channel_is_not_running():
 
 
 @pytest.mark.asyncio
+async def test_run_once_parks_when_registered_channel_reports_not_running():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel(running=False))
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    _, error, count_attempt = repo.failed[0]
+    assert "not running" in error
+    assert count_attempt is False
+
+
+@pytest.mark.asyncio
+async def test_run_once_parks_without_counting_channel_unavailable():
+    repo = FakeDeliveryRepo([_delivery_row()])
+    worker = _make_worker(repo, FakeChannel(unavailable=True))
+
+    await worker.run_once(now=datetime.now(UTC))
+
+    assert repo.sent == []
+    delivery_id, error, count_attempt = repo.failed[0]
+    assert delivery_id == "delivery-1"
+    assert "transport down" in error
+    assert count_attempt is False
+
+
+@pytest.mark.asyncio
 async def test_run_once_marks_failed_when_send_raises():
     repo = FakeDeliveryRepo([_delivery_row()])
     worker = _make_worker(repo, FakeChannel(fail=True))
@@ -166,6 +209,27 @@ async def test_run_once_marks_failed_when_send_raises():
     assert "platform rejected" in error
     # A real send error does count against the retry budget.
     assert count_attempt is True
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_when_poller_exceeds_timeout():
+    repo = FakeDeliveryRepo([])
+    worker = NotificationDeliveryWorker(
+        delivery_repo=repo,
+        resolve_channel=lambda _provider: None,
+        poll_interval_seconds=60,
+        stop_timeout_seconds=0.05,
+    )
+
+    async def _hang_forever():
+        await asyncio.Event().wait()
+
+    worker._stop.clear()
+    worker._task = asyncio.create_task(_hang_forever())
+
+    await worker.stop()
+
+    assert worker._task is None
 
 
 @pytest.mark.asyncio
@@ -377,6 +441,8 @@ class FakeWsClient:
 def _wecom_channel(ws_client=None):
     channel = WeComChannel(bus=MessageBus(), config={})
     channel._ws_client = ws_client
+    channel._running = True
+    channel._ws_transport_up = ws_client is not None
     return channel
 
 
@@ -405,6 +471,22 @@ async def test_wecom_send_notification_raises_on_platform_error():
 @pytest.mark.asyncio
 async def test_wecom_send_notification_raises_when_not_connected():
     channel = _wecom_channel(None)
+    channel._running = True
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(ChannelUnavailable, match="not connected"):
         await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_wraps_transport_errors_as_unavailable():
+    class BrokenWsClient:
+        async def send_message(self, chatid, body):
+            raise ConnectionError("websocket closed")
+
+    channel = _wecom_channel(BrokenWsClient())
+    channel._ws_transport_up = False  # single probe; no retry/sleep storm
+
+    with pytest.raises(ChannelUnavailable, match="transport unavailable"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
+
+    assert channel._ws_transport_up is False

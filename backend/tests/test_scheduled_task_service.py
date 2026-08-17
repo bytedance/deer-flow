@@ -466,6 +466,7 @@ def _once_task_row(task_id="task-once", status="running"):
         "thread_id": None,
         "context_mode": "fresh_thread_per_run",
         "assistant_id": "lead_agent",
+        "title": "Once summary",
         "prompt": "Summarize thread",
         "schedule_type": "once",
         "schedule_spec": {"run_at": "2026-07-02T01:00:00+00:00"},
@@ -1133,6 +1134,7 @@ async def test_completion_enqueues_run_completed_for_connected_channels():
     assert enqueued["owner_user_id"] == "user-1"
     assert enqueued["payload"]["run_status"] == "success"
     assert enqueued["payload"]["error"] is None
+    assert enqueued["payload"]["task_title"] == "Once summary"
 
 
 @pytest.mark.asyncio

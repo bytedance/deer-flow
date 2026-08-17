@@ -8,7 +8,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
-from app.channels.base import Channel
+from app.channels.base import Channel, ChannelUnavailable
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import (
@@ -45,6 +45,11 @@ class WeComChannel(Channel):
         self._lifecycle_lock = asyncio.Lock()
         self._ws_frames: dict[str, dict[str, Any]] = {}
         self._ws_stream_ids: dict[str, str] = {}
+        # Optimistic until the SDK reports a disconnect: start() hands us a
+        # live client that is connecting/reconnecting. Cleared on disconnect
+        # and restored after a successful send so proactive push can park
+        # without burning the outbox retry budget during a transport outage.
+        self._ws_transport_up = False
         self._working_message = "Working on it..."
 
     @property
@@ -102,6 +107,7 @@ class WeComChannel(Channel):
                 self._ws_task = asyncio.create_task(self._ws_client.connect())
                 self._ws_task.add_done_callback(self._on_ws_task_done)
 
+                self._ws_transport_up = True
                 self._running = True
                 self.bus.subscribe_outbound(self._on_outbound)
             logger.info("WeCom channel started")
@@ -121,6 +127,7 @@ class WeComChannel(Channel):
         logger.error("WeCom WebSocket error: %s", error)
 
     def _on_ws_disconnected(self, *args: Any) -> None:
+        self._ws_transport_up = False
         detail = f" ({args[0]})" if args else ""
         logger.warning("WeCom WebSocket disconnected%s; SDK will attempt to reconnect", detail)
 
@@ -157,6 +164,7 @@ class WeComChannel(Channel):
     async def stop(self) -> None:
         async with self._lifecycle_lock:
             self._running = False
+            self._ws_transport_up = False
             self.bus.unsubscribe_outbound(self._on_outbound)
             ws_client = self._ws_client
             ws_task = self._ws_task
@@ -200,16 +208,38 @@ class WeComChannel(Channel):
         Goes through ``WSClient.send_message`` (no inbound frame required);
         the platform ACK's ``errcode`` is checked so the delivery outbox can
         retry on rejection instead of treating an ACK-less call as success.
+
+        Transport / not-connected failures raise :class:`ChannelUnavailable`
+        so the outbox parks without consuming retries. Platform ``errcode``
+        rejections stay as ``RuntimeError`` and count against the budget.
         """
-        if not self._ws_client:
-            raise RuntimeError("WeCom channel is not connected")
+        if not self._running or not self._ws_client:
+            raise ChannelUnavailable("WeCom channel is not connected")
         body = {"msgtype": "markdown", "markdown": {"content": text_markdown}}
-        ack = await self._send_with_retry(
-            lambda: self._ws_client.send_message(target, body),
-            max_retries=3,
-            log_prefix="[WeCom]",
-            operation_name="notification send",
-        )
+
+        async def _send_once() -> Any:
+            return await self._ws_client.send_message(target, body)
+
+        try:
+            if self._ws_transport_up:
+                ack = await self._send_with_retry(
+                    _send_once,
+                    max_retries=3,
+                    log_prefix="[WeCom]",
+                    operation_name="notification send",
+                )
+            else:
+                # Known disconnect: one probe so a silent SDK reconnect can
+                # recover, without the 3× retry/sleep storm burning shutdown
+                # and poll time while the socket is still down.
+                ack = await _send_once()
+        except ChannelUnavailable:
+            raise
+        except Exception as exc:
+            # Dead/flapping transport: not the delivery's fault. Park the
+            # outbox row until the SDK reconnects instead of burning retries.
+            self._ws_transport_up = False
+            raise ChannelUnavailable(f"WeCom transport unavailable: {exc}") from exc
         errcode = None
         if isinstance(ack, dict):
             errcode = ack.get("errcode")
@@ -218,6 +248,7 @@ class WeComChannel(Channel):
                 errcode = ack_body.get("errcode")
         if errcode not in (None, 0):
             raise RuntimeError(f"WeCom send_message rejected with errcode={errcode}")
+        self._ws_transport_up = True
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         if msg.channel_name != self.name:
