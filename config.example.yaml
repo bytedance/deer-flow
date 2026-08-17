@@ -1411,6 +1411,26 @@ sandbox:
 #   # environment:                   # injected into every command (and as create-time env)
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 6: OpenSandbox remote Sandbox
+# Runs each sandbox through an OpenSandbox server. Released sandboxes stay in an
+# in-process warm pool and are reclaimed only by the same user/thread. Requires
+# the optional SDK: pip install "deerflow-harness[opensandbox]".
+# sandbox:
+#   use: deerflow.community.opensandbox:OpenSandboxProvider
+#   image: python:3.11
+#   # api_key: $OPEN_SANDBOX_API_KEY  # optional when the SDK env var is set
+#   # domain: localhost:8080          # optional; OPEN_SANDBOX_DOMAIN fallback
+#   # protocol: http                  # localhost only; use https for remote domains
+#   # request_timeout: 30             # management API request timeout seconds
+#   # ready_timeout: 30               # create/readiness timeout seconds
+#   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # sandbox_timeout: 14400          # remote lifetime seconds; 0 = explicit cleanup
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # replicas: 3                     # active + warm cap per gateway process
+#   # idle_timeout: 600               # warm seconds before destroy; 0 disables
+#   # environment:                    # create-time and per-command defaults
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
