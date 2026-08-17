@@ -162,6 +162,8 @@ QA accuracy at capacity 7 with identical settings for both policies:
 
 Scenario breakdown: `confirmation_help` 3/10 vs 10/10, `access_help` 3/10 vs 9/10, `confidence_control` 7/10 vs 8/10, `noisy_signal_control` 10/10 vs 8/10, synthetic corrections 1/5 vs 5/5. The noisy-signal control is the one scenario where `hybrid-v1` scored below the confidence baseline in this run; it is reported separately and not folded into any other metric.
 
+Decomposing that noisy-signal cell from the published rows: both policies retained the support fact in all ten noisy-signal cases, so the two rows `hybrid-v1` lost (`993da5e2`, `9a707b81`) are not eviction failures. In both, the hybrid run produced a more verbose phrasing of the same answer (`About one week.`, `21 days ago.`) that the frozen grader rejected under its numeric-conflict rule against a multi-number reference, while the confidence run's terser phrasing (`1 week`, `21`) matched through the substring rule. The opposite also occurs (`af082822`: the hybrid run's terse `2` and the confidence run's `2 weeks ago.` both pass). The policies retain different distractor sets, which nudges answer phrasing; the grader remains frozen and the cell is reported as-is.
+
 Both totals sit well above the historical `14/45` vs `23/45`, primarily because the historical confidence baseline was limited to 1024 output tokens while this run gives both policies the same 2048-token budget. The run consumed 81,742 input and 14,156 output tokens across the 90 calls.
 
 ## Historical-result caveats
