@@ -11,7 +11,10 @@ from .io import sha256_file
 from .manifest import OfficialManifest, SyntheticManifest, load_official_manifest, load_synthetic_manifest
 from .policy import evaluate_case
 from .protocol import build_protocol_cases, validate_official_selection
+from .provider import build_client, resolve_provider_settings
+from .qa import build_answer_task
 from .results import write_policy_run
+from .runner import ensure_run_config_identity, run_answer_calls
 
 EVAL_ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = EVAL_ROOT.parents[2]
@@ -63,6 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_policy.add_argument("--synthetic-manifest", type=Path, default=DEFAULT_SYNTHETIC_MANIFEST)
     run_policy.add_argument("--dataset", type=Path, required=True)
     run_policy.add_argument("--output-dir", type=Path, required=True)
+
+    run_qa = subparsers.add_parser("run-qa", help="Call the configured answer provider for both policies at the QA capacity (resumable; requires provider environment variables)")
+    run_qa.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    run_qa.add_argument("--official-manifest", type=Path, default=DEFAULT_OFFICIAL_MANIFEST)
+    run_qa.add_argument("--synthetic-manifest", type=Path, default=DEFAULT_SYNTHETIC_MANIFEST)
+    run_qa.add_argument("--dataset", type=Path, required=True)
+    run_qa.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -73,6 +83,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         official_count = sum(len(question_ids) for question_ids in official.scenarios.values())
         print(f"validated {official_count} official and {len(synthetic.cases)} synthetic cases")
         return 0
+
+    provider_settings = resolve_provider_settings(config.qa) if args.command == "run-qa" else None
 
     dataset = _load_validated_dataset(args, config, official)
     cases = build_protocol_cases(dataset, config, official, synthetic)
@@ -94,4 +106,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"wrote {len(results)} policy rows for {len(cases)} cases to {args.output_dir}")
         return 0
+    if args.command == "run-qa":
+        assert provider_settings is not None
+        template = prompt_path.read_text(encoding="utf-8")
+        tasks = [build_answer_task(case, evaluate_case(case, policy_name=policy_name, capacity=config.pool.qa_capacity, hybrid_config=config.policies.hybrid_v1), template) for case in cases for policy_name in ("confidence", "hybrid-v1")]
+        ensure_run_config_identity(args.output_dir, config=config, config_path=args.config, dataset_path=args.dataset, backend_root=BACKEND_ROOT)
+        with build_client(provider_settings, config.qa) as client:
+            report = run_answer_calls(tasks, config=config, client=client, output_dir=args.output_dir)
+        print(f"answer rows: {report.reused} reused, {report.called} called, {len(report.failed)} failed")
+        for failure in report.failed:
+            print(f"  failed {failure}")
+        return 1 if report.failed else 0
     raise AssertionError(f"unhandled command: {args.command}")

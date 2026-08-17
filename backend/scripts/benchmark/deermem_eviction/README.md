@@ -15,7 +15,7 @@ The first stage is entirely offline:
 - compares `confidence` and the production `hybrid-v1` policy at capacities 5, 7, and 9;
 - writes metadata-only row results that are safe to publish.
 
-The deterministic grader (`grading.py`, see below) is implemented and frozen. The live QA runner is intentionally not part of this scaffold yet. It will use the fixed answer prompt and provider environment-variable names already recorded in the config. Both policies must be rerun with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline will not be reproduced.
+The deterministic grader (`grading.py`) and the resumable live QA runner (`qa.py`, `provider.py`, `runner.py`) are implemented; both are documented below. Both policies receive fresh calls with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline is not reproduced.
 
 ## Pinned inputs
 
@@ -66,6 +66,18 @@ PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-policy \
 ```
 
 The command refuses to overwrite an existing run. Use a new output directory for every run.
+
+Call the configured answer provider for both policies at the QA capacity (45 cases x 2 policies = 90 calls on a fresh run):
+
+```bash
+export DEERMEM_EVAL_ANSWER_API_KEY=...   # never committed or logged
+export DEERMEM_EVAL_ANSWER_BASE_URL=...  # OpenAI-compatible endpoint
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-qa \
+  --dataset "$LONGMEMEVAL_ORACLE_PATH" \
+  --output-dir /tmp/deermem-eviction-qa-run
+```
+
+The runner resolves credentials only from the two environment variables named in the config and fails before touching the dataset when either is missing. Model, temperature, `max_tokens`, stream, timeout, retry attempts, and worker count all come from the versioned config; both policies use identical settings. Each row is written to `responses/<case>__<policy>.json` as soon as its call succeeds, so rerunning the same command resumes a partial run without repeating completed calls; `qa_run.json` binds the output directory to one config identity and rejects resumption with a different config. Row files contain the prediction and non-secret metadata only — never questions, reference answers, memory content, credentials, or response headers.
 
 ## Deterministic reconstruction
 
