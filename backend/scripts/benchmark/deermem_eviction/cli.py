@@ -13,6 +13,7 @@ from .policy import evaluate_case
 from .protocol import build_protocol_cases, validate_official_selection
 from .provider import build_client, resolve_provider_settings
 from .qa import build_answer_task
+from .report import collect_answer_rows, compute_qa_statistics, grade_answer_rows, summarize_qa_rows, write_qa_report
 from .results import write_policy_run
 from .runner import ensure_run_config_identity, run_answer_calls
 
@@ -73,6 +74,13 @@ def build_parser() -> argparse.ArgumentParser:
     run_qa.add_argument("--synthetic-manifest", type=Path, default=DEFAULT_SYNTHETIC_MANIFEST)
     run_qa.add_argument("--dataset", type=Path, required=True)
     run_qa.add_argument("--output-dir", type=Path, required=True)
+
+    grade_qa = subparsers.add_parser("grade-qa", help="Grade completed answer rows blindly and write the public QA rows, summary, and paired statistics")
+    grade_qa.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    grade_qa.add_argument("--official-manifest", type=Path, default=DEFAULT_OFFICIAL_MANIFEST)
+    grade_qa.add_argument("--synthetic-manifest", type=Path, default=DEFAULT_SYNTHETIC_MANIFEST)
+    grade_qa.add_argument("--dataset", type=Path, required=True)
+    grade_qa.add_argument("--output-dir", type=Path, required=True)
     return parser
 
 
@@ -117,4 +125,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         for failure in report.failed:
             print(f"  failed {failure}")
         return 1 if report.failed else 0
+    if args.command == "grade-qa":
+        results_by_row = {
+            f"{case.case_id}__{policy_name}": evaluate_case(case, policy_name=policy_name, capacity=config.pool.qa_capacity, hybrid_config=config.policies.hybrid_v1) for case in cases for policy_name in ("confidence", "hybrid-v1")
+        }
+        rows = collect_answer_rows(args.output_dir, cases)
+        graded = grade_answer_rows(cases, results_by_row, rows)
+        summary = summarize_qa_rows(graded)
+        statistics = compute_qa_statistics(graded, config)
+        write_qa_report(args.output_dir, graded=graded, summary=summary, statistics=statistics, config=config)
+        for suite, values in statistics["suites"].items():
+            mcnemar = values["mcnemar"]
+            correct_first = mcnemar["both_correct"] + mcnemar["only_first_correct"]
+            correct_second = mcnemar["both_correct"] + mcnemar["only_second_correct"]
+            print(f"{suite}: confidence {correct_first}/{values['cases']}, hybrid-v1 {correct_second}/{values['cases']}, exact McNemar p={mcnemar['p_value']:.6f}")
+        print(f"graded {len(graded)} rows to {args.output_dir}")
+        return 0
     raise AssertionError(f"unhandled command: {args.command}")

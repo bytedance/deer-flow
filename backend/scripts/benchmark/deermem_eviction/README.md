@@ -15,7 +15,7 @@ The first stage is entirely offline:
 - compares `confidence` and the production `hybrid-v1` policy at capacities 5, 7, and 9;
 - writes metadata-only row results that are safe to publish.
 
-The deterministic grader (`grading.py`) and the resumable live QA runner (`qa.py`, `provider.py`, `runner.py`) are implemented; both are documented below. Both policies receive fresh calls with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline is not reproduced.
+The deterministic grader (`grading.py`), the resumable live QA runner (`qa.py`, `provider.py`, `runner.py`), and the blind grading/statistics report (`report.py`, `stats.py`) are implemented; all are documented below. Both policies receive fresh calls with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline is not reproduced.
 
 ## Pinned inputs
 
@@ -79,6 +79,16 @@ PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-qa \
 
 The runner resolves credentials only from the two environment variables named in the config and fails before touching the dataset when either is missing. Model, temperature, `max_tokens`, stream, timeout, retry attempts, and worker count all come from the versioned config; both policies use identical settings. Each row is written to `responses/<case>__<policy>.json` as soon as its call succeeds, so rerunning the same command resumes a partial run without repeating completed calls; `qa_run.json` binds the output directory to one config identity and rejects resumption with a different config. Row files contain the prediction and non-secret metadata only — never questions, reference answers, memory content, credentials, or response headers.
 
+Grade a completed answer run and write the public QA results (no provider calls):
+
+```bash
+PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction grade-qa \
+  --dataset "$LONGMEMEVAL_ORACLE_PATH" \
+  --output-dir /tmp/deermem-eviction-qa-run
+```
+
+Grading happens through `grade_answer(prediction, reference)` — two strings, no policy identity — and is joined back to policies only afterwards through stable row IDs. Before grading, the command recomputes the deterministic selector output and rejects any answer row whose kept facts, capacity, or policy disagree with it, and refuses to proceed while any of the 90 rows is missing.
+
 ## Deterministic reconstruction
 
 Official samples are independently recomputed from the pinned dataset rather than merely checked for existence. For each of the two eligible question types, the loader applies the published exclusions, sorts by `question_id`, and selects the first 20. Consecutive groups of five are assigned according to the manifest's explicit `scenario_order` field.
@@ -125,6 +135,12 @@ Before freezing, the grader was cross-checked locally against all 90 historical 
 - `run.json` records the git state, immutable dataset identity, evaluation clock, capacities, and SHA-256 values for config, manifests, and prompt.
 - `policy.raw.jsonl` contains one row per case, capacity, and policy. Rows include fact IDs, kept/evicted IDs, score components, support retention, and correction reservation. They never include fact content, questions, or reference answers.
 - `summary.json` aggregates support retention by source, scenario, capacity, and policy. Synthetic corrections are not folded into an official-only metric.
+
+`grade-qa` adds three publishable files to a completed answer run and refuses to overwrite them:
+
+- `qa.rows.jsonl` contains one graded row per case and policy: IDs, scenario/source, kept-fact metadata, the model's prediction, the grade with its deciding rule, the grader version, and non-secret response metadata.
+- `qa.summary.json` reports accuracy by source, scenario, and policy; official scenarios and synthetic corrections are never folded into one metric.
+- `qa.stats.json` reports the exact paired McNemar test and the seeded paired bootstrap difference (`hybrid-v1` minus `confidence`) for the official, synthetic, and overall suites, using the statistics parameters pinned in the config.
 
 Full provider requests, dataset text, and prepared pools must remain in ignored local directories. Provider response headers must never be persisted because they can contain sensitive or account-specific data.
 
