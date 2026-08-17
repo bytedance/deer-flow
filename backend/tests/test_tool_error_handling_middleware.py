@@ -1,5 +1,7 @@
 import posixpath
+import re
 import sys
+from datetime import datetime
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -161,8 +163,10 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 TokenBudgetMiddleware (subagents.token_budget enabled by default, #3875 Phase 2)
     # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
+    # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
+    from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
@@ -170,7 +174,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 17
+    assert len(middlewares) == 18
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -187,8 +191,9 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # middleware), so it is the last element regardless of summarization.enabled —
     # unlike DurableContextMiddleware, which is only last when summarization is off.
     durable_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, DurableContextMiddleware))
+    date_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SubagentDateContextMiddleware))
     assert isinstance(middlewares[-1], SystemMessageCoalescingMiddleware)
-    assert policy_idx < durable_idx < len(middlewares) - 1
+    assert policy_idx < durable_idx < date_idx == len(middlewares) - 2
 
 
 def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
@@ -895,6 +900,89 @@ def test_subagent_chain_coalesces_durable_authority_system_message(monkeypatch):
     agent.invoke({"messages": seed, "summary_text": "COMPRESSED_SUBAGENT_HISTORY"})
 
     assert seen["system_indices"] == [0], f"request must have a single leading SystemMessage, got {seen['system_indices']}"
+
+
+def test_subagent_chain_injects_date_without_memory_and_coalesces_for_strict_provider(monkeypatch):
+    """A built-in subagent's first model request gets hidden date-only context.
+
+    The date must be framework-owned and independent of the lead agent's
+    memory path, even when memory injection is enabled globally. Subagents
+    carry their static prompt in ``messages``, so the outgoing strict-provider
+    payload must also retain exactly one leading ``SystemMessage`` after the
+    date reminder is added.
+    """
+    from langchain.agents import create_agent
+    from langchain_core.language_models import BaseChatModel
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+    from langchain_core.outputs import ChatGeneration, ChatResult
+
+    from deerflow.agents.middlewares import dynamic_context_middleware as dynamic_context
+    from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
+    from deerflow.agents.thread_state import ThreadState
+
+    class _FrozenDateTime:
+        @classmethod
+        def now(cls):
+            return datetime(2026, 5, 8)
+
+    def _unexpected_memory_lookup(*args, **kwargs):
+        raise AssertionError("subagent date context must not look up user memory")
+
+    seen: list[list] = []
+    task = "Find releases published today."
+
+    class _StrictModel(BaseChatModel):
+        @property
+        def _llm_type(self) -> str:
+            return "strict"
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            captured = list(messages)
+            seen.append(captured)
+
+            system_indices = [i for i, message in enumerate(captured) if isinstance(message, SystemMessage)]
+            assert system_indices == [0], f"strict provider must receive one leading SystemMessage, got {system_indices}"
+
+            system_message = captured[0]
+            reminder_blocks = re.findall(r"<system-reminder>\s*(.*?)\s*</system-reminder>", system_message.content, re.DOTALL)
+            assert reminder_blocks == ["<current_date>2026-05-08, Friday</current_date>"]
+            assert "<memory>" not in system_message.content
+            assert system_message.additional_kwargs.get("hide_from_ui") is True
+
+            human_messages = [message for message in captured if isinstance(message, HumanMessage)]
+            assert len(human_messages) == 1
+            assert human_messages[0].content == task
+            assert human_messages[0].id == "task"
+            return ChatResult(generations=[ChatGeneration(message=AIMessage(content="ok"))])
+
+    app_config = _make_app_config()
+    assert app_config.memory.injection_enabled is True
+    monkeypatch.setattr(dynamic_context, "datetime", _FrozenDateTime)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_memory_context", _unexpected_memory_lookup)
+
+    runtime_middlewares = build_subagent_runtime_middlewares(
+        app_config=app_config,
+        model_name="test-model",
+        agent_name="general-purpose",
+    )
+    # Exercise the builder-owned date/coalescing slice without unrelated
+    # sandbox, tool, or skill middleware side effects.
+    chain = [middleware for middleware in runtime_middlewares if type(middleware).__module__ == dynamic_context.__name__ or isinstance(middleware, SystemMessageCoalescingMiddleware)]
+    agent = create_agent(model=_StrictModel(), tools=[], middleware=chain, state_schema=ThreadState)
+
+    agent.invoke(
+        {
+            "messages": [
+                SystemMessage(content="subagent instructions", id="system"),
+                HumanMessage(content=task, id="task"),
+            ]
+        }
+    )
+
+    assert len(seen) == 1
 
 
 def test_subagent_runtime_middlewares_omit_summarization_when_factory_returns_none(monkeypatch):

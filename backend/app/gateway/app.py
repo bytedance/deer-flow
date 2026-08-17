@@ -27,6 +27,7 @@ from app.gateway.routers import (
     input_polish,
     integrations,
     mcp,
+    mcp_tasks,
     memory,
     models,
     runs,
@@ -322,6 +323,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                    multi_instance=startup_config.scheduler.multi_instance,
+                    run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
@@ -329,25 +332,56 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to initialize scheduled task service")
 
-        try:
-            from app.mcp_tasks import McpTaskService
-            from deerflow.mcp.tasks import McpTaskDriverRegistry
+        from app.mcp_tasks import McpTaskService
+        from deerflow.config.extensions_config import ExtensionsConfig
+        from deerflow.config.mcp_tasks_config import McpTasksConfig
+        from deerflow.mcp.task_tool_caller import McpTaskToolCaller
+        from deerflow.mcp.tasks import (
+            ORDINARY_MCP_TASK_DRIVER,
+            McpTaskDriverRegistry,
+            OrdinaryMcpTaskDriver,
+        )
+        from deerflow.mcp.tasks.runtime import (
+            configured_task_toolset_count,
+            set_mcp_task_config_snapshot,
+            set_mcp_task_submitter,
+            validate_mcp_task_runtime_configuration,
+        )
 
-            if getattr(app.state, "mcp_task_repo", None) is not None:
-                mcp_task_drivers = McpTaskDriverRegistry()
-                mcp_task_service = McpTaskService(
-                    repository=app.state.mcp_task_repo,
-                    drivers=mcp_task_drivers,
-                    poll_interval_seconds=startup_config.mcp_tasks.poll_interval_seconds,
-                    lease_seconds=startup_config.mcp_tasks.lease_seconds,
-                    max_concurrent_polls=startup_config.mcp_tasks.max_concurrent_polls,
+        task_extensions_config = ExtensionsConfig.from_file()
+        mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
+        mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
+        set_mcp_task_submitter(None)
+        set_mcp_task_config_snapshot(task_extensions_config)
+        validate_mcp_task_runtime_configuration(
+            mcp_tasks_config=mcp_tasks_config,
+            extensions_config=task_extensions_config,
+            repository_available=mcp_task_repo is not None,
+        )
+        if mcp_task_repo is not None:
+            mcp_task_drivers = McpTaskDriverRegistry()
+            if configured_task_toolset_count(task_extensions_config):
+                mcp_task_drivers.register(
+                    ORDINARY_MCP_TASK_DRIVER,
+                    OrdinaryMcpTaskDriver(McpTaskToolCaller(task_extensions_config)),
                 )
-                app.state.mcp_task_drivers = mcp_task_drivers
-                app.state.mcp_task_service = mcp_task_service
-                if startup_config.mcp_tasks.enabled:
-                    await mcp_task_service.start()
-        except Exception:
-            logger.exception("Failed to initialize MCP task service")
+            mcp_task_service = McpTaskService(
+                repository=mcp_task_repo,
+                drivers=mcp_task_drivers,
+                poll_interval_seconds=mcp_tasks_config.poll_interval_seconds,
+                lease_seconds=mcp_tasks_config.lease_seconds,
+                max_concurrent_polls=mcp_tasks_config.max_concurrent_polls,
+                max_poll_backoff_seconds=mcp_tasks_config.max_poll_backoff_seconds,
+                input_required_poll_interval_seconds=mcp_tasks_config.input_required_poll_interval_seconds,
+                tracking_degraded_after_errors=mcp_tasks_config.tracking_degraded_after_errors,
+                max_result_bytes=mcp_tasks_config.max_result_bytes,
+                result_preview_max_chars=mcp_tasks_config.result_preview_max_chars,
+            )
+            app.state.mcp_task_drivers = mcp_task_drivers
+            app.state.mcp_task_service = mcp_task_service
+            if mcp_tasks_config.enabled:
+                await mcp_task_service.start()
+                set_mcp_task_submitter(mcp_task_service)
 
         yield
 
@@ -383,6 +417,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await app.state.mcp_task_service.stop()
             except Exception:
                 logger.exception("Failed to stop MCP task service")
+            finally:
+                from deerflow.mcp.tasks.runtime import set_mcp_task_submitter
+
+                set_mcp_task_submitter(None)
+        from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
+
+        set_mcp_task_config_snapshot(None)
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
@@ -614,6 +655,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         ExtensionLoadError,
         initialize_runtime_diagnostics,
         load_extensions,
+        record_runtime_diagnostics,
         set_loaded_extensions,
     )
 
@@ -656,6 +698,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # MCP API is mounted at /api/mcp
     app.include_router(mcp.router)
+
+    # Durable MCP tasks are scoped to their owning thread.
+    app.include_router(mcp_tasks.router)
 
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)
@@ -737,6 +782,14 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             Service health status information.
         """
         return {"status": "healthy", "service": "deer-flow-gateway"}
+
+    # Extension routes are deliberately last: FastAPI/Starlette dispatches in
+    # registration order, so every host route (including conditional routes
+    # and /health) keeps precedence. Definite shadows are rejected with an
+    # attributed diagnostic while unrelated extension routers still mount.
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    record_runtime_diagnostics(include_contributed_routers(app, loaded_extensions))
 
     return app
 

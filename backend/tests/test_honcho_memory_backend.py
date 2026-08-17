@@ -23,6 +23,8 @@ class TestHonchoConfig:
         assert cfg.workspace_overrides == {}
         assert cfg.user_peer_overrides == {}
         assert cfg.assistant_peer == "deerflow"
+        assert cfg.timeout_seconds == 10.0
+        assert cfg.connect_timeout_seconds == 3.0
         assert cfg.message_char_limit == 8000
         assert cfg.max_injection_chars == 6000
         assert cfg.read_fail_closed is False
@@ -68,6 +70,58 @@ class TestHonchoConfig:
             HonchoConfig.from_backend_config({"workspace_overrides": {"alice": None}})
         with pytest.raises(ValueError, match="user_peer_overrides"):
             HonchoConfig.from_backend_config({"user_peer_overrides": {"bob": "  "}})
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            pytest.param("timeout_seconds", 0, id="timeout-zero"),
+            pytest.param("timeout_seconds", -1, id="timeout-negative"),
+            pytest.param("timeout_seconds", float("nan"), id="timeout-nan"),
+            pytest.param("timeout_seconds", float("inf"), id="timeout-inf"),
+            pytest.param("timeout_seconds", float("-inf"), id="timeout-neg-inf"),
+            pytest.param("connect_timeout_seconds", 0, id="connect-timeout-zero"),
+            pytest.param("connect_timeout_seconds", -1, id="connect-timeout-negative"),
+            pytest.param("connect_timeout_seconds", float("nan"), id="connect-timeout-nan"),
+            pytest.param("connect_timeout_seconds", float("inf"), id="connect-timeout-inf"),
+            pytest.param("connect_timeout_seconds", float("-inf"), id="connect-timeout-neg-inf"),
+        ],
+    )
+    def test_rejects_invalid_timeouts(self, key, value):
+        with pytest.raises(ValueError, match=key):
+            HonchoConfig.from_backend_config({key: value})
+
+    @pytest.mark.parametrize("key", ["message_char_limit", "max_injection_chars"])
+    @pytest.mark.parametrize("value", [0, -1])
+    def test_rejects_non_positive_character_limits(self, key, value):
+        with pytest.raises(ValueError, match=key):
+            HonchoConfig.from_backend_config({key: value})
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            pytest.param("timeout_seconds", float("inf"), id="timeout"),
+            pytest.param("connect_timeout_seconds", 0, id="connect-timeout"),
+            pytest.param("message_char_limit", -1, id="message-limit"),
+            pytest.param("max_injection_chars", 0, id="injection-limit"),
+        ],
+    )
+    def test_direct_construction_enforces_limits(self, key, value):
+        with pytest.raises(ValueError, match=key):
+            HonchoConfig(**{key: value})
+
+    def test_accepts_custom_positive_timeouts_and_character_limits(self):
+        cfg = HonchoConfig.from_backend_config(
+            {
+                "timeout_seconds": 2.5,
+                "connect_timeout_seconds": 0.5,
+                "message_char_limit": 12,
+                "max_injection_chars": 8,
+            }
+        )
+        assert cfg.timeout_seconds == 2.5
+        assert cfg.connect_timeout_seconds == 0.5
+        assert cfg.message_char_limit == 12
+        assert cfg.max_injection_chars == 8
 
 
 class TestSanitizeId:
@@ -270,6 +324,21 @@ class TestHonchoManagerWrite:
         mgr.add("t-4", [_msg("human", "0123456789ABCDEF")], user_id="u1")
         sent = [c for c in fake.calls if c[0] == "messages"][0][1][2][0][1]
         assert len(sent) == 10
+
+    def test_from_config_rejects_negative_message_char_limit(self):
+        """add() uses ``text[:message_char_limit]``. A negative limit is a
+        Python negative slice (``text[:-1]``), which deletes a suffix instead
+        of capping length. Fail at config parse so the manager never sees it.
+        """
+        with pytest.raises(ValueError, match="message_char_limit"):
+            HonchoMemoryManager.from_config({"base_url": "http://honcho.test", "message_char_limit": -1})
+
+    def test_from_config_rejects_zero_max_injection_chars(self):
+        """get_context() uses ``representation[:max_injection_chars]``. Zero
+        would inject an empty memory string; reject it at startup.
+        """
+        with pytest.raises(ValueError, match="max_injection_chars"):
+            HonchoMemoryManager.from_config({"base_url": "http://honcho.test", "max_injection_chars": 0})
 
     def test_add_normalizes_list_content(self):
         mgr, fake = _manager()

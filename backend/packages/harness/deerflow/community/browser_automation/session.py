@@ -22,7 +22,7 @@ import threading
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
 
 if TYPE_CHECKING:
@@ -31,6 +31,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+ScreenshotType = Literal["png", "jpeg", "webp"]
 
 # Element roles/tags treated as interactive when building a page snapshot. The
 # model addresses elements by the ``data-df-ref`` index this snapshot stamps, so
@@ -533,9 +534,16 @@ class BrowserSession:
         text = await page.inner_text("body")
         return text[:max_chars]
 
-    async def _screenshot_bytes(self, full_page: bool) -> bytes:
+    async def _screenshot_bytes(
+        self,
+        full_page: bool,
+        image_type: ScreenshotType,
+        quality: int | None,
+    ) -> bytes:
         page = await self._ensure_page()
-        return await page.screenshot(full_page=full_page, type="png")
+        if quality is None:
+            return await page.screenshot(full_page=full_page, type=image_type)
+        return await page.screenshot(full_page=full_page, type=image_type, quality=quality)
 
     async def _live_frame(self) -> bytes:
         page = await self._ensure_page()
@@ -786,9 +794,15 @@ class BrowserSession:
         with self._activity():
             return await self._loop.run(self._get_text(max_chars))
 
-    async def screenshot_bytes(self, full_page: bool = False) -> bytes:
+    async def screenshot_bytes(
+        self,
+        full_page: bool = False,
+        *,
+        image_type: ScreenshotType = "png",
+        quality: int | None = None,
+    ) -> bytes:
         with self._activity():
-            return await self._loop.run(self._screenshot_bytes(full_page))
+            return await self._loop.run(self._screenshot_bytes(full_page, image_type, quality))
 
     async def live_frame(self) -> bytes:
         with self._activity():

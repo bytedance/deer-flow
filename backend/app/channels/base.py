@@ -4,17 +4,42 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import CancelledError as FutureCancelledError
+from concurrent.futures import Future
+from dataclasses import dataclass
 from typing import Any, TypeVar
 
 from app.channels.commands import extract_connect_code
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.message_bus import (
+    InboundMessage,
+    InboundMessageType,
+    InboundQueueClosedError,
+    InboundQueueFullError,
+    InboundReservation,
+    InboundReservationExpiredError,
+    MessageBus,
+    OutboundMessage,
+    ResolvedAttachment,
+)
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+
+@dataclass(eq=False, slots=True)
+class _ThreadsafeSubmission:
+    coroutine: Coroutine[Any, Any, Any]
+    loop: asyncio.AbstractEventLoop
+    name: str
+    msg_id: Any
+    reservation: InboundReservation | None
+    completion: Future[Any]
+    task: asyncio.Task[Any] | None = None
+    cancel_requested: bool = False
 
 
 class Channel(ABC):
@@ -33,6 +58,12 @@ class Channel(ABC):
         self.config = config
         self._running = False
         self._connection_repo: Any = config.get("connection_repo")
+        # Provider SDK callbacks often run on a dedicated thread and submit
+        # preparation work to the Gateway loop. Submission and shutdown share
+        # this lock so stop() cannot miss a future created concurrently.
+        self._threadsafe_submissions: set[_ThreadsafeSubmission] = set()
+        self._threadsafe_submissions_lock = threading.Lock()
+        self._threadsafe_submission_intake_open = True
 
     @property
     def is_running(self) -> bool:
@@ -119,6 +150,127 @@ class Channel(ABC):
         if exc:
             logger.error("[%s] %s failed for msg_id=%s: %s", self.name, name, msg_id, exc)
 
+    def _open_threadsafe_future_intake(self) -> None:
+        """Allow a newly started provider to submit work to its main loop."""
+        with self._threadsafe_submissions_lock:
+            if self._threadsafe_submissions:
+                raise RuntimeError(f"cannot restart {self.name} while cross-thread work is still running")
+            self._threadsafe_submission_intake_open = True
+
+    def _submit_threadsafe_coroutine(
+        self,
+        coroutine: Coroutine[Any, Any, T],
+        loop: asyncio.AbstractEventLoop | None,
+        *,
+        name: str,
+        msg_id: Any,
+        reservation: InboundReservation | None = None,
+    ) -> bool:
+        """Submit provider-thread work while retaining its real asyncio Task."""
+
+        with self._threadsafe_submissions_lock:
+            if not self._threadsafe_submission_intake_open or loop is None or not loop.is_running():
+                coroutine.close()
+                if reservation is not None:
+                    reservation.release()
+                return False
+
+            submission = _ThreadsafeSubmission(
+                coroutine=coroutine,
+                loop=loop,
+                name=name,
+                msg_id=msg_id,
+                reservation=reservation,
+                completion=Future(),
+            )
+            self._threadsafe_submissions.add(submission)
+            try:
+                loop.call_soon_threadsafe(self._start_threadsafe_submission, submission)
+            except RuntimeError:
+                self._threadsafe_submissions.discard(submission)
+                coroutine.close()
+                if reservation is not None:
+                    reservation.release()
+                return False
+        return True
+
+    def _start_threadsafe_submission(self, submission: _ThreadsafeSubmission) -> None:
+        """Create the owned Task on its event loop or finish a pre-start cancel."""
+        task: asyncio.Task[Any] | None = None
+        startup_error: BaseException | None = None
+        with self._threadsafe_submissions_lock:
+            if submission.cancel_requested:
+                self._threadsafe_submissions.discard(submission)
+                cancelled_before_start = True
+            else:
+                cancelled_before_start = False
+                try:
+                    task = submission.loop.create_task(submission.coroutine)
+                except BaseException as exc:
+                    self._threadsafe_submissions.discard(submission)
+                    startup_error = exc
+                else:
+                    submission.task = task
+
+        if cancelled_before_start:
+            submission.coroutine.close()
+            if submission.reservation is not None:
+                submission.reservation.release()
+            submission.completion.cancel()
+            return
+
+        if startup_error is not None:
+            submission.coroutine.close()
+            if submission.reservation is not None:
+                submission.reservation.release()
+            submission.completion.set_exception(startup_error)
+            self._log_future_error(submission.completion, submission.name, submission.msg_id)
+            return
+
+        assert task is not None
+        task.add_done_callback(lambda completed: self._finalize_threadsafe_submission(submission, completed))
+
+    def _finalize_threadsafe_submission(
+        self,
+        submission: _ThreadsafeSubmission,
+        task: asyncio.Task[Any],
+    ) -> None:
+        with self._threadsafe_submissions_lock:
+            self._threadsafe_submissions.discard(submission)
+        if submission.reservation is not None:
+            submission.reservation.release()
+
+        if task.cancelled():
+            submission.completion.cancel()
+        else:
+            try:
+                submission.completion.set_result(task.result())
+            except BaseException as exc:
+                submission.completion.set_exception(exc)
+        self._log_future_error(submission.completion, submission.name, submission.msg_id)
+
+    async def _close_and_drain_threadsafe_futures(self) -> None:
+        """Close submission, then cancel and await the owned asyncio Tasks."""
+        with self._threadsafe_submissions_lock:
+            self._threadsafe_submission_intake_open = False
+            submissions = tuple(self._threadsafe_submissions)
+            tasks: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any]]] = []
+            for submission in submissions:
+                submission.cancel_requested = True
+                if submission.task is not None:
+                    tasks.append((submission.loop, submission.task))
+
+        for loop, task in tasks:
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                logger.warning("[%s] event loop closed before cross-thread task cancellation", self.name)
+        if submissions:
+            await asyncio.gather(
+                *(asyncio.shield(asyncio.wrap_future(submission.completion)) for submission in submissions),
+                return_exceptions=True,
+            )
+
     def _pending_connect_code(self, text: str) -> str | None:
         """Return the one-time bind code if *text* is a ``/connect <code>`` command
         and channel connections are configured, else ``None``.
@@ -154,6 +306,48 @@ class Channel(ABC):
             files=files or [],
             metadata=metadata or {},
         )
+
+    def _reserve_inbound(self, msg: InboundMessage) -> InboundReservation | None:
+        """Reserve bounded intake capacity or explicitly drop under overload.
+
+        Real-time socket/polling providers do not expose a reliable delivery
+        retry contract to this adapter layer. They therefore drop a message
+        that cannot be admitted immediately. ``MessageBus`` emits a
+        rate-limited warning with the cumulative rejection count.
+        """
+        try:
+            return self.bus.reserve_inbound(msg)
+        except InboundQueueFullError:
+            return None
+        except (InboundQueueClosedError, InboundReservationExpiredError):
+            logger.debug("[%s] inbound ignored because channel intake is closed", self.name)
+            return None
+
+    def _commit_reserved_inbound(
+        self,
+        reservation: InboundReservation,
+        msg: InboundMessage,
+    ) -> bool:
+        """Commit a reservation on the MessageBus loop, releasing on failure."""
+        try:
+            reservation.commit(msg)
+            return True
+        except (InboundQueueClosedError, InboundReservationExpiredError):
+            logger.debug("[%s] inbound reservation expired during shutdown", self.name)
+            return False
+        finally:
+            reservation.release()
+
+    async def _publish_inbound_or_drop(self, msg: InboundMessage) -> bool:
+        """Publish from an already-serialized provider loop without waiting."""
+        try:
+            await self.bus.publish_inbound(msg)
+            return True
+        except InboundQueueFullError:
+            return False
+        except InboundQueueClosedError:
+            logger.debug("[%s] inbound ignored because channel intake is closed", self.name)
+            return False
 
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         """Outbound callback registered with the bus.
