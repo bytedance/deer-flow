@@ -3,12 +3,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from deerflow.agents.memory.backends.deermem.deermem.core.eviction import select_facts_for_capacity
+from deerflow.agents.memory.backends.deermem.deermem.core.eviction import EVICTION_POLICY_HYBRID_V1, select_facts_for_capacity
 
 from .config import HybridPolicyConfig
 from .pool import PreparedCase
 
 PolicyName = Literal["confidence", "hybrid-v1"]
+
+
+def require_production_policy(version: str) -> None:
+    """Reject a config whose required policy version has drifted from the production implementation."""
+    if version != EVICTION_POLICY_HYBRID_V1:
+        raise ValueError(f"config requires eviction policy {version!r} but production implements {EVICTION_POLICY_HYBRID_V1!r}")
 
 
 @dataclass(frozen=True)

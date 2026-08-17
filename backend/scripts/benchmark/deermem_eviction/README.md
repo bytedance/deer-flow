@@ -139,7 +139,7 @@ Before freezing, the grader was cross-checked locally against all 90 historical 
 `grade-qa` adds three publishable files to a completed answer run and refuses to overwrite them:
 
 - `qa.rows.jsonl` contains one graded row per case and policy: IDs, scenario/source, kept-fact metadata, the model's prediction, the grade with its deciding rule, the grader version, and non-secret response metadata.
-- `qa.summary.json` reports accuracy by source, scenario, and policy; official scenarios and synthetic corrections are never folded into one metric.
+- `qa.summary.json` reports accuracy by source, scenario, and policy; the summary never folds official scenarios and synthetic corrections into one figure. The only combined figure is the explicitly labeled `overall` suite in `qa.stats.json`, reported alongside — never instead of — the separate official and synthetic suites.
 - `qa.stats.json` reports the exact paired McNemar test and the seeded paired bootstrap difference (`hybrid-v1` minus `confidence`) for the official, synthetic, and overall suites, using the statistics parameters pinned in the config.
 
 Full provider requests, dataset text, and prepared pools must remain in ignored local directories. Provider response headers must never be persisted because they can contain sensitive or account-specific data.

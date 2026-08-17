@@ -9,7 +9,7 @@ from .dataset import LongMemEvalDataset, load_longmemeval
 from .grading import GRADER_VERSION
 from .io import sha256_file
 from .manifest import OfficialManifest, SyntheticManifest, load_official_manifest, load_synthetic_manifest
-from .policy import evaluate_case
+from .policy import evaluate_case, require_production_policy
 from .protocol import build_protocol_cases, validate_official_selection
 from .provider import build_client, resolve_provider_settings
 from .qa import build_answer_task
@@ -32,6 +32,7 @@ def _load_contracts(args: argparse.Namespace) -> tuple[EvaluationConfig, Officia
         raise ValueError("config and manifests use different protocol IDs")
     if config.qa.grader_version != GRADER_VERSION:
         raise ValueError(f"config pins grader {config.qa.grader_version!r} but the committed grader is {GRADER_VERSION!r}")
+    require_production_policy(config.required_policy_version)
     prompt_path = EVAL_ROOT / config.qa.answer_prompt.path
     actual_prompt_sha = sha256_file(prompt_path)
     if actual_prompt_sha != config.qa.answer_prompt.sha256:

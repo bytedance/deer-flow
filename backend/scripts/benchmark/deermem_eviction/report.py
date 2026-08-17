@@ -4,9 +4,10 @@ Grading is join-free by construction: every prediction is graded through
 ``grade_answer(prediction, reference)`` — two strings, no policy identity —
 and only afterwards joined back to its policy through the stable row ID.
 Published rows carry predictions, grades, and non-secret metadata; they never
-contain questions, reference answers, or memory content. Suites are reported
-separately: official LongMemEval scenarios (including the noisy-signal
-control) and the synthetic corrections are never folded into one metric.
+contain questions, reference answers, or memory content. The per-scenario
+summary keeps the official and synthetic sources separate; the statistics
+report the ``official`` and ``synthetic`` suites separately and additionally
+an explicitly labeled combined ``overall`` suite.
 """
 
 from __future__ import annotations

@@ -61,3 +61,16 @@ def test_cli_contract_validation_is_offline(capsys) -> None:
 
     assert main(["validate-contracts"]) == 0
     assert "validated 40 official and 5 synthetic cases" in capsys.readouterr().out
+
+
+def test_required_policy_version_is_checked_against_production() -> None:
+    import pytest
+
+    from deerflow.agents.memory.backends.deermem.deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
+    from scripts.benchmark.deermem_eviction.policy import require_production_policy
+
+    config = load_evaluation_config(EVAL_ROOT / "configs" / "pr4789-reproduction-v1.yaml")
+    assert config.required_policy_version == EVICTION_POLICY_HYBRID_V1
+    require_production_policy(config.required_policy_version)
+    with pytest.raises(ValueError, match="production implements"):
+        require_production_policy("hybrid-v2")

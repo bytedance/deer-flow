@@ -5,7 +5,7 @@ from pathlib import Path
 
 from scripts.benchmark.deermem_eviction.config import load_evaluation_config
 from scripts.benchmark.deermem_eviction.grading import GRADER_VERSION
-from scripts.benchmark.deermem_eviction.stats import exact_mcnemar
+from scripts.benchmark.deermem_eviction.stats import exact_mcnemar, paired_bootstrap_difference
 
 EVAL_ROOT = Path(__file__).parents[1] / "scripts" / "benchmark" / "deermem_eviction"
 RESULTS_ROOT = EVAL_ROOT / "results" / "pr4789-reproduction-v1"
@@ -52,6 +52,7 @@ def test_published_rows_contain_only_allowed_metadata() -> None:
 
 def test_published_statistics_are_recomputable_from_the_rows() -> None:
     rows = _rows()
+    config = load_evaluation_config(EVAL_ROOT / "configs" / "pr4789-reproduction-v1.yaml")
     statistics = json.loads((RESULTS_ROOT / "qa.stats.json").read_text(encoding="utf-8"))
     grades: dict[str, dict[str, bool]] = {}
     sources: dict[str, str] = {}
@@ -59,9 +60,9 @@ def test_published_statistics_are_recomputable_from_the_rows() -> None:
         grades.setdefault(row["case_id"], {})[row["policy"]] = row["grade_correct"]
         sources[row["case_id"]] = row["source"]
     suites = {
-        "official": [case_id for case_id in grades if sources[case_id] == "longmemeval"],
-        "synthetic": [case_id for case_id in grades if sources[case_id] == "synthetic"],
-        "overall": list(grades),
+        "official": [case_id for case_id in sorted(grades) if sources[case_id] == "longmemeval"],
+        "synthetic": [case_id for case_id in sorted(grades) if sources[case_id] == "synthetic"],
+        "overall": sorted(grades),
     }
     for suite, case_ids in suites.items():
         pairs = [(grades[case_id]["confidence"], grades[case_id]["hybrid-v1"]) for case_id in case_ids]
@@ -71,6 +72,12 @@ def test_published_statistics_are_recomputable_from_the_rows() -> None:
         assert published["only_first_correct"] == expected.only_first_correct
         assert published["only_second_correct"] == expected.only_second_correct
         assert statistics["suites"][suite]["cases"] == len(pairs)
+        expected_bootstrap = paired_bootstrap_difference(pairs, seed=config.statistics.bootstrap_seed, iterations=config.statistics.bootstrap_iterations, alpha=config.statistics.alpha)
+        published_bootstrap = statistics["suites"][suite]["bootstrap"]
+        assert published_bootstrap["mean_difference"] == expected_bootstrap.mean_difference
+        assert published_bootstrap["lower"] == expected_bootstrap.lower
+        assert published_bootstrap["upper"] == expected_bootstrap.upper
+        assert (published_bootstrap["seed"], published_bootstrap["iterations"], published_bootstrap["alpha"]) == (expected_bootstrap.seed, expected_bootstrap.iterations, expected_bootstrap.alpha)
 
 
 def test_published_summary_matches_the_rows_and_run_provenance_is_secret_free() -> None:
