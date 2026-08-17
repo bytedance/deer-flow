@@ -153,6 +153,27 @@ class TestReadOnlyPath:
             sandbox.write_file("/mnt/skills/new_file.py", "content")
         assert exc_info.value.errno == errno.EROFS
 
+    def test_bash_write_to_projected_copy_does_not_mutate_source(self, tmp_path):
+        source = tmp_path / "canonical" / "SKILL.md"
+        view = tmp_path / "skills_view" / "public" / "demo" / "SKILL.md"
+        source.parent.mkdir(parents=True)
+        view.parent.mkdir(parents=True)
+        source.write_text("ORIGINAL\n", encoding="utf-8")
+        from deerflow.skills.projection import _copy_into_view
+
+        _copy_into_view(str(source), str(view))
+        assert view.stat().st_ino != source.stat().st_ino
+
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/skills/public/demo", local_path=str(view.parent), read_only=True),
+            ],
+        )
+        sandbox.execute_command("python -c \"from pathlib import Path; Path(r'/mnt/skills/public/demo/SKILL.md').write_text('MUTATED\\n', encoding='utf-8')\"")
+        assert source.read_text(encoding="utf-8") == "ORIGINAL\n"
+        assert view.read_text(encoding="utf-8") == "MUTATED\n"
+
     def test_write_file_allowed_on_writable_mount(self, tmp_path):
         data_dir = tmp_path / "data"
         data_dir.mkdir()

@@ -323,6 +323,10 @@ def build_subagent_runtime_middlewares(
 
         app_config = get_app_config()
 
+    from deerflow.extensions import get_agent_build_extensions
+
+    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
+
     middlewares = _build_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
@@ -502,32 +506,38 @@ def build_subagent_runtime_middlewares(
         # model (it inherits the parent's), so passing it directly is what makes a
         # distinct-model subagent summarize with its own model, not the parent's.
         run_model_name=model_name,
+        extensions=resolved_extensions,
     )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # SystemMessageCoalescingMiddleware (#4040) — DurableContextMiddleware above
-    # inserts a second ``SystemMessage(authority_contract)`` after the leading
-    # system prompt (subagents carry their prompt as a leading ``SystemMessage``
-    # in ``messages``, not via ``create_agent(system_prompt=...)``). Two system
-    # messages — or a non-leading one — are exactly what the strict backends this
-    # targets (vLLM/SGLang/Qwen/Anthropic) reject, so the durable fix would trade
-    # #4039's assistant-first 400 for a duplicate-system 400. Mirror the lead
-    # chain: append the coalescer innermost so it merges every SystemMessage into
-    # one leading ``system_message`` on the outgoing request. It only rewrites the
-    # per-request payload (no ``after_model``/``consume_stop_reason``), so it is
-    # inert to the Phase 2 guard-cap channel, and must sit inner of
-    # DurableContextMiddleware to observe the injected system message.
+    # SubagentDateContextMiddleware (#4781) — inject framework-owned temporal
+    # context before the first model call without registering the lead agent's
+    # DynamicContextMiddleware. The latter also reads user memory, performs a
+    # persisted ID swap, and handles midnight updates; none belongs in a one-shot
+    # subagent execution. This date-only reminder intentionally has no AppConfig
+    # or memory dependency.
+    from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
+
+    middlewares.append(SubagentDateContextMiddleware())
+
+    # SystemMessageCoalescingMiddleware (#4040, #4781) — DurableContextMiddleware
+    # above can insert ``SystemMessage(authority_contract)``, and the date-only
+    # middleware adds another hidden SystemMessage after the leading subagent
+    # prompt. Multiple or non-leading system messages are exactly what strict
+    # backends (vLLM/SGLang/Qwen/Anthropic) reject. Append the coalescer innermost
+    # so every SystemMessage becomes one leading ``system_message`` on the
+    # outgoing request. It only rewrites the per-request payload (no
+    # ``after_model``/``consume_stop_reason``), so it is inert to the Phase 2
+    # guard-cap channel and observes both durable authority and date context.
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
     middlewares.append(SystemMessageCoalescingMiddleware())
 
     from deerflow_extension_api import AgentScope
 
-    from deerflow.extensions import get_agent_build_extensions
     from deerflow.extensions.stack import compose_with_extensions
 
-    resolved_extensions = extensions if extensions is not None else get_agent_build_extensions()
     if not resolved_extensions.has_middleware_contributors:
         return compose_with_extensions(middlewares, AgentScope.SUBAGENT, None, resolved_extensions)
 

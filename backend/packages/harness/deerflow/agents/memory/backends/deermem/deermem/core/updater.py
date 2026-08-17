@@ -9,12 +9,19 @@ import json
 import logging
 import math
 import re
+import time
 import uuid
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ..config import DeerMemConfig
+from .eviction import (
+    EVICTION_POLICY_CONFIDENCE,
+    EVICTION_POLICY_HYBRID_V1,
+    FactEvictionDecision,
+    select_facts_for_capacity,
+)
 from .message_processing import detect_signals, extract_message_text
 from .prompt import (
     format_conversation_for_update,
@@ -72,20 +79,12 @@ def _coerce_source_confidence(fact: dict[str, Any]) -> float:
     return max(0.0, min(val, 1.0)) if math.isfinite(val) else 0.5
 
 
-def _trim_facts_to_max(facts: list[dict[str, Any]], max_facts: int) -> list[dict[str, Any]]:
-    """Keep the highest-confidence facts within ``max_facts`` (confidence coerced).
-
-    Confidence is read via :func:`_coerce_source_confidence` so legacy / imported
-    facts with ``null`` or non-numeric confidence never crash the sort -- the
-    pre-#4023 ``key=lambda f: f.get("confidence", 0)`` form compared ``None`` /
-    ``str`` against ``float`` and raised ``TypeError`` once ``len(facts) >
-    max_facts``. Mirrors upstream's ``_trim_facts_to_max`` (introduced in #4023)
-    so the vendored copy no longer lags the coercion fix the
-    monolithic->vendored rename silently dropped.
-    """
-    if len(facts) <= max_facts:
-        return facts
-    return sorted(facts, key=_coerce_source_confidence, reverse=True)[:max_facts]
+def _next_confirmation_count(fact: dict[str, Any]) -> int:
+    """Increment a valid prior confirmation count, resetting malformed values."""
+    prior_count = fact.get("confirmationCount", 0)
+    if isinstance(prior_count, bool) or not isinstance(prior_count, int) or prior_count < 0:
+        return 1
+    return prior_count + 1
 
 
 def _extract_text(content: Any) -> str:
@@ -243,6 +242,23 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
     history = update_data.get("history")
     new_facts = update_data.get("newFacts")
     facts_to_remove = update_data.get("factsToRemove")
+    facts_to_reinforce = update_data.get("factsToReinforce")
+    normalized_facts_to_reinforce: list[dict[str, str]] = []
+    if isinstance(facts_to_reinforce, list):
+        for entry in facts_to_reinforce:
+            if not isinstance(entry, dict):
+                continue
+            raw_id = entry.get("id")
+            scope = _normalize_gate_label(entry.get("scope"))
+            reason = entry.get("reason")
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                continue
+            normalized_entry = {"id": raw_id.strip()}
+            if scope is not None:
+                normalized_entry["scope"] = scope
+            if isinstance(reason, str) and reason.strip():
+                normalized_entry["reason"] = reason.strip()
+            normalized_facts_to_reinforce.append(normalized_entry)
     normalized_facts_to_remove: list[dict[str, Any]] = []
     if isinstance(facts_to_remove, list):
         for entry in facts_to_remove:
@@ -381,6 +397,7 @@ def _normalize_memory_update_data(update_data: dict[str, Any]) -> dict[str, Any]
         "user": user if isinstance(user, dict) else {},
         "history": history if isinstance(history, dict) else {},
         "newFacts": normalized_new_facts,
+        "factsToReinforce": normalized_facts_to_reinforce,
         "factsToRemove": normalized_facts_to_remove,
         "staleFactsToRemove": normalized_stale_removals,
         "staleFactsToExtend": normalized_stale_extensions,
@@ -473,7 +490,7 @@ def _raise_if_duplicate_fact_content(memory_data: dict[str, Any], content_key: s
 
 
 def _parse_fact_datetime(raw: str) -> datetime | None:
-    """Parse an ISO-8601 datetime string from a fact's createdAt field.
+    """Parse an ISO-8601 datetime string from a fact timestamp field.
 
     Returns ``None`` on any parse failure so callers can safely skip malformed facts.
     """
@@ -563,9 +580,11 @@ def _select_stale_candidates(
     Each fact's effective review age is determined by
     ``_effective_fact_staleness_age``: facts with an LLM-assigned
     ``expected_valid_days`` use that value directly; facts without it fall back
-    to the global ``staleness_age_days``.  Protected categories (default:
-    ``correction``) are excluded because they represent explicit user feedback
-    that should not be auto-pruned by age.
+    to the global ``staleness_age_days``. A valid ``lastConfirmedAt`` resets the
+    review clock because it is explicit evidence that the fact is still true;
+    otherwise ``createdAt`` remains the reference. Protected categories
+    (default: ``correction``) are excluded because they represent explicit user
+    feedback that should not be auto-pruned by age.
     """
     now = datetime.now(UTC)
     protected = frozenset(config.staleness_protected_categories)
@@ -576,15 +595,15 @@ def _select_stale_candidates(
         category = fact.get("category", "")
         if isinstance(category, str) and category in protected:
             continue
-        created_at = _parse_fact_datetime(fact.get("createdAt", ""))
-        if created_at is None:
+        review_reference = _parse_fact_datetime(fact.get("lastConfirmedAt", "")) or _parse_fact_datetime(fact.get("createdAt", ""))
+        if review_reference is None:
             continue
         effective_age = _effective_fact_staleness_age(fact, config)
         # now - timedelta(days=effective_age) can overflow datetime.min when
         # effective_age is a huge persisted value; a window that large means the
         # fact cannot yet be stale, so skip it rather than aborting the cycle.
         cutoff = _safe_add_days(now, -effective_age)
-        if cutoff is not None and created_at < cutoff:
+        if cutoff is not None and review_reference < cutoff:
             candidates.append(fact)
     return candidates
 
@@ -610,14 +629,14 @@ def _build_staleness_section(
         fid = fact.get("id", "?")
         cat = html.escape(str(fact.get("category", "context")).strip() or "context", quote=False)
         conf = _coerce_source_confidence(fact)
-        created_raw = fact.get("createdAt", "")
-        created_short = created_raw[:10] if isinstance(created_raw, str) and len(created_raw) >= 10 else created_raw
+        review_reference = _parse_fact_datetime(fact.get("lastConfirmedAt", "")) or _parse_fact_datetime(fact.get("createdAt", ""))
+        reviewed_short = review_reference.date().isoformat() if review_reference is not None else ""
         # quote=False: content is in element-text position (inside <stale_facts>
         # tags, never an attribute value), so only <, >, & can break structure -
         # leave ' and " untouched. Mirrors the convention in prompt.py #4028.
         content = html.escape(str(fact.get("content", "")), quote=False)
         effective_age = _effective_fact_staleness_age(fact, config)
-        lines.append(f'- [{fid} | {cat} | {conf:.2f} | {created_short} | valid:{effective_age}d] "{content}"')
+        lines.append(f'- [{fid} | {cat} | {conf:.2f} | {reviewed_short} | valid:{effective_age}d] "{content}"')
     return load_prompt("staleness_review", prompts_dir=prompts_dir, agent_name=agent_name).format(stale_facts="\n".join(lines))
 
 
@@ -808,6 +827,72 @@ class MemoryUpdater:
         """Reload memory data via the injected storage."""
         return self._storage.reload(agent_name, user_id=user_id)
 
+    def _select_for_capacity(
+        self,
+        facts: list[dict[str, Any]],
+        *,
+        agent_name: str | None,
+        user_id: str | None,
+    ) -> tuple[list[dict[str, Any]], FactEvictionDecision | None, FactEvictionDecision | None]:
+        """Apply the configured policy and optionally compute hybrid shadow."""
+        if len(facts) <= self._config.max_facts:
+            return facts, None, None
+        uses_hybrid_scoring = self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled
+        usage = (
+            self._storage.get_fact_usage(
+                agent_name=agent_name,
+                user_id=user_id,
+            )
+            if uses_hybrid_scoring and agent_name is not None
+            else {}
+        )
+        common = {
+            "max_facts": self._config.max_facts,
+            "usage": usage,
+            "confidence_weight": self._config.eviction_confidence_weight,
+            "confirmation_weight": self._config.eviction_confirmation_weight,
+            "access_weight": self._config.eviction_access_weight,
+            "confirmation_half_life_days": self._config.eviction_confirmation_half_life_days,
+            "access_half_life_days": self._config.eviction_access_half_life_days,
+            "correction_reserved_fraction": self._config.eviction_correction_reserved_fraction,
+            "correction_reserved_max": self._config.eviction_correction_reserved_max,
+        }
+        decision = select_facts_for_capacity(
+            facts,
+            policy=self._config.fact_eviction_policy,
+            **common,
+        )
+        shadow_decision = None
+        if self._config.fact_eviction_shadow_enabled and self._config.fact_eviction_policy == EVICTION_POLICY_CONFIDENCE:
+            shadow_decision = select_facts_for_capacity(
+                facts,
+                policy=EVICTION_POLICY_HYBRID_V1,
+                **common,
+            )
+        return decision.kept, decision, shadow_decision
+
+    def _record_capacity_decision(
+        self,
+        decision: FactEvictionDecision | None,
+        shadow_decision: FactEvictionDecision | None,
+        *,
+        agent_name: str | None,
+        user_id: str | None,
+    ) -> None:
+        """Write best-effort audit only after canonical persistence succeeds."""
+        if decision is None or agent_name is None:
+            return
+        try:
+            self._storage.record_capacity_eviction(
+                decision,
+                max_facts=self._config.max_facts,
+                agent_name=agent_name,
+                user_id=user_id,
+                shadow_decision=shadow_decision,
+            )
+        except Exception:
+            logger.warning("Failed to record capacity-eviction audit", exc_info=True)
+
     def import_memory_data(self, memory_data: dict[str, Any], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Persist imported memory data via the injected storage."""
         if not isinstance(memory_data, dict):
@@ -833,6 +918,11 @@ class MemoryUpdater:
             for fact in incoming_facts:
                 fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
                 fact["confidence"] = _coerce_source_confidence(fact)
+            incoming_facts, capacity_decision, shadow_decision = self._select_for_capacity(
+                incoming_facts,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
             current_by_id = {str(fact.get("id")): fact for fact in current.get("facts", []) if isinstance(fact, dict)}
             incoming_ids = {str(fact.get("id")) for fact in incoming_facts}
             self._storage.apply_changes(
@@ -847,11 +937,40 @@ class MemoryUpdater:
                 user_id=user_id,
                 expected_manifest_revision=int(current.get("revision") or 0),
             )
+            self._record_capacity_decision(
+                capacity_decision,
+                shadow_decision,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
             return self._storage.load(agent_name, user_id=user_id)
         if agent_name is None:
             memory_data["facts"] = []
+            capacity_decision = None
+            shadow_decision = None
+        else:
+            raw_facts = memory_data.get("facts", [])
+            if not isinstance(raw_facts, list) or any(not isinstance(fact, dict) for fact in raw_facts):
+                raise ValueError("memory_data.facts")
+            normalized_facts = []
+            for raw_fact in raw_facts:
+                fact = copy.deepcopy(raw_fact)
+                fact["id"] = str(fact.get("id") or f"fact_{uuid.uuid4().hex}")
+                fact["confidence"] = _coerce_source_confidence(fact)
+                normalized_facts.append(fact)
+            memory_data["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+                normalized_facts,
+                agent_name=agent_name,
+                user_id=user_id,
+            )
         if not self._storage.save(memory_data, agent_name, user_id=user_id):
             raise OSError("Failed to save imported memory data")
+        self._record_capacity_decision(
+            capacity_decision,
+            shadow_decision,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
         return self._storage.load(agent_name, user_id=user_id)
 
     def clear_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -870,6 +989,10 @@ class MemoryUpdater:
                         user_id=user_id,
                         expected_manifest_revision=int(current.get("revision") or 0),
                     )
+                    self._storage.clear_fact_metadata(
+                        agent_name=agent_name,
+                        user_id=user_id,
+                    )
                     return self.reload_memory_data(agent_name, user_id=user_id)
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
@@ -881,6 +1004,11 @@ class MemoryUpdater:
         cleared_memory["facts"] = []
         if not self._save_memory_to_file(cleared_memory, agent_name, user_id=user_id, expected_revision=int(current.get("revision") or 0)):
             raise OSError("Failed to save cleared memory data")
+        if agent_name is not None:
+            self._storage.clear_fact_metadata(
+                agent_name=agent_name,
+                user_id=user_id,
+            )
         return cleared_memory
 
     def clear_all_memory_data(self, *, user_id: str | None = None) -> dict[str, Any]:
@@ -905,9 +1033,8 @@ class MemoryUpdater:
         which would couple them to the backend's content normalization and could
         misreport a storage cap on backends that normalize differently.
 
-        The new fact is then trimmed by :func:`_trim_facts_to_max` (highest-
-        confidence wins, confidence coerced). If the cap evicts the just-added
-        (lower-confidence) fact, ``fact_id`` is ``None`` so callers report
+        The new fact is then evaluated by the configured capacity policy. If
+        the cap evicts the just-added fact, ``fact_id`` is ``None`` so callers report
         "not stored - cap reached" instead of a dangling id with a false
         "added" status. This restores both the max_facts cap and the post-trim
         existence check (upstream's ``create_memory_fact_with_created_fact``),
@@ -948,7 +1075,11 @@ class MemoryUpdater:
                 # winner's fact, and is rejected here).
                 _raise_if_duplicate_fact_content(memory_data, candidate_key)
                 updated_memory = dict(memory_data)
-                updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+                updated_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+                    [*memory_data.get("facts", []), copy.deepcopy(candidate)],
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
                 kept_ids = {str(fact.get("id")) for fact in updated_memory["facts"]}
                 deletions = [str(fact.get("id")) for fact in memory_data.get("facts", []) if str(fact.get("id")) not in kept_ids]
                 try:
@@ -962,6 +1093,12 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(memory_data.get("revision") or 0),
+                    )
+                    self._record_capacity_decision(
+                        capacity_decision,
+                        shadow_decision,
+                        agent_name=agent_name,
+                        user_id=user_id,
                     )
                     fresh_memory = self.reload_memory_data(agent_name, user_id=user_id)
                     stored = any(fact.get("id") == fact_id for fact in fresh_memory.get("facts", []))
@@ -980,8 +1117,18 @@ class MemoryUpdater:
             memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
             _raise_if_duplicate_fact_content(memory_data, candidate_key)
             updated_memory = dict(memory_data)
-            updated_memory["facts"] = _trim_facts_to_max([*memory_data.get("facts", []), copy.deepcopy(candidate)], self._config.max_facts)
+            updated_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+                [*memory_data.get("facts", []), copy.deepcopy(candidate)],
+                agent_name=agent_name,
+                user_id=user_id,
+            )
             if self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
+                self._record_capacity_decision(
+                    capacity_decision,
+                    shadow_decision,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
                 # If the cap evicted the just-added (lower-confidence) fact,
                 # signal via None so callers don't report a dangling id as
                 # "added".
@@ -1230,6 +1377,7 @@ class MemoryUpdater:
         user_id: str | None = None,
         *,
         metrics: dict[str, Any] | None = None,
+        signals: frozenset[str] = frozenset(),
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
@@ -1242,12 +1390,22 @@ class MemoryUpdater:
             # metric tracks the actual filter rather than a re-derived copy here.
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
+                capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] = []
                 # Deep-copy before in-place mutation so a failed commit cannot
                 # corrupt the cached snapshot. On a manifest conflict the
                 # complete extraction result is reapplied to a fresh document;
                 # its trim/consolidation/delete decisions are snapshot-wide and
                 # must never be replayed as disjoint point writes.
-                updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
+                updated_memory = self._apply_updates(
+                    copy.deepcopy(current_memory),
+                    update_data,
+                    thread_id,
+                    metrics=metrics,
+                    signals=signals,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                    capacity_decisions=capacity_decisions,
+                )
                 updated_memory = _strip_upload_mentions_from_memory(updated_memory)
                 current_by_id = {str(fact.get("id")): fact for fact in current_memory.get("facts", [])}
                 updated_by_id = {str(fact.get("id")): fact for fact in updated_memory.get("facts", [])}
@@ -1270,6 +1428,13 @@ class MemoryUpdater:
                         user_id=user_id,
                         expected_manifest_revision=int(current_memory.get("revision") or 0),
                     )
+                    for decision, shadow_decision in capacity_decisions:
+                        self._record_capacity_decision(
+                            decision,
+                            shadow_decision,
+                            agent_name=agent_name,
+                            user_id=user_id,
+                        )
                     return True
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
@@ -1279,14 +1444,33 @@ class MemoryUpdater:
             raise AssertionError("bounded extracted-update retry did not return or raise")
         # Deep-copy before in-place mutation so a subsequent save() failure
         # cannot corrupt the still-cached original object reference.
-        updated_memory = self._apply_updates(copy.deepcopy(current_memory), update_data, thread_id, metrics=metrics)
+        capacity_decisions = []
+        updated_memory = self._apply_updates(
+            copy.deepcopy(current_memory),
+            update_data,
+            thread_id,
+            metrics=metrics,
+            signals=signals,
+            agent_name=agent_name,
+            user_id=user_id,
+            capacity_decisions=capacity_decisions,
+        )
         updated_memory = _strip_upload_mentions_from_memory(updated_memory)
-        return self._storage.save(
+        saved = self._storage.save(
             updated_memory,
             agent_name,
             user_id=user_id,
             expected_revision=int(current_memory.get("revision") or 0),
         )
+        if saved:
+            for decision, shadow_decision in capacity_decisions:
+                self._record_capacity_decision(
+                    decision,
+                    shadow_decision,
+                    agent_name=agent_name,
+                    user_id=user_id,
+                )
+        return saved
 
     async def aupdate_memory(
         self,
@@ -1494,7 +1678,34 @@ class MemoryUpdater:
                 )
             logger.info("Invoking memory-update LLM (thread=%s trace_id=%s)", thread_id, trace_id)
             attempted = True
-            response = model.invoke(prompt, config=invoke_config)
+            started = time.monotonic()
+            try:
+                response = model.invoke(prompt, config=invoke_config)
+            # Deliberately broader than `Exception` so no terminal path of the
+            # provider call goes unobserved. This is NOT about asyncio
+            # cancellation: this whole method runs on a worker thread (the
+            # debounce timer, or the executor `update_memory` offloads to), and
+            # cancelling the awaiting side never interrupts a running thread, so
+            # `CancelledError` cannot arrive here. Reporting costs nothing on
+            # this path either way — the hook below is a non-blocking submit.
+            except BaseException as exc:
+                self._notify_llm_result(
+                    invoke_config,
+                    prompt=prompt,
+                    response=None,
+                    error=exc,
+                    started=started,
+                    model_name=model_name,
+                )
+                raise
+            self._notify_llm_result(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=None,
+                started=started,
+                model_name=model_name,
+            )
             success = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
@@ -1502,6 +1713,7 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
                 metrics=metrics,
+                signals=frozenset(feed_signals),
             )
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
@@ -1532,6 +1744,37 @@ class MemoryUpdater:
                     response=response,
                     success=success,
                 )
+
+    def _notify_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        started: float,
+        model_name: str | None,
+    ) -> None:
+        """Fire the optional host result hook without affecting the update."""
+        if self._callbacks is None:
+            return
+        hook = getattr(self._callbacks, "on_memory_llm_result", None)
+        if hook is None:
+            return
+        try:
+            hook(
+                invoke_config,
+                prompt=prompt,
+                response=response,
+                error=error,
+                duration_ms=(time.monotonic() - started) * 1000,
+                model_name=model_name,
+            )
+        except Exception:
+            # Only the hook's own failures are non-fatal. `SystemExit` /
+            # `KeyboardInterrupt` mean the process is going down and must not be
+            # swallowed by an observability path.
+            logger.warning("Memory LLM result hook failed (non-fatal)", exc_info=True)
 
     def update_memory(
         self,
@@ -1608,6 +1851,10 @@ class MemoryUpdater:
         thread_id: str | None = None,
         *,
         metrics: dict[str, Any] | None = None,
+        signals: frozenset[str] = frozenset(),
+        agent_name: str | None = None,
+        user_id: str | None = None,
+        capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] | None = None,
     ) -> dict[str, Any]:
         """Apply LLM-generated updates to memory.
 
@@ -1633,6 +1880,30 @@ class MemoryUpdater:
 
         def reject_by_scope_gate(kind: str, reason: str) -> None:
             scope_gate_rejections[kind][reason] += 1
+
+        # Explicit confirmation is distinct from extraction duplication. The
+        # deterministic gate is batch-level: it proves only that a human
+        # message among the last six filtered messages matched a reinforcement
+        # pattern. The LLM remains responsible for binding that signal to an
+        # existing id, which must be user-scoped and carry a non-empty reason.
+        tracks_hybrid_signals = config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or config.fact_eviction_shadow_enabled
+        if tracks_hybrid_signals and "reinforcement" in signals:
+            reinforced_ids = {
+                entry["id"]
+                for entry in update_data.get("factsToReinforce", [])
+                if isinstance(entry, dict) and entry.get("scope") == "user" and isinstance(entry.get("reason"), str) and entry["reason"].strip() and isinstance(entry.get("id"), str)
+            }
+            if reinforced_ids:
+                current_memory["facts"] = [
+                    {
+                        **fact,
+                        "lastConfirmedAt": now,
+                        "confirmationCount": _next_confirmation_count(fact),
+                    }
+                    if isinstance(fact, dict) and fact.get("id") in reinforced_ids
+                    else fact
+                    for fact in current_memory.get("facts", [])
+                ]
 
         # Update user sections
         user_updates = update_data.get("user", {})
@@ -1829,8 +2100,16 @@ class MemoryUpdater:
             current_memory["facts"].append(fact_entry)
             existing_fact_keys.add(fact_key)
 
-        # Enforce max facts limit (coerced confidence -- see _trim_facts_to_max).
-        current_memory["facts"] = _trim_facts_to_max(current_memory["facts"], config.max_facts)
+        # Enforce one capacity policy across automatic, manual, and import
+        # writes. Usage comes from a separate sidecar, so scoring never rewrites
+        # canonical fact timestamps merely because a query recalled them.
+        current_memory["facts"], capacity_decision, shadow_decision = self._select_for_capacity(
+            current_memory["facts"],
+            agent_name=agent_name,
+            user_id=user_id,
+        )
+        if capacity_decision is not None and capacity_decisions is not None:
+            capacity_decisions.append((capacity_decision, shadow_decision))
 
         # Remove contradicted facts only after replacements have passed both
         # gates and survived deduplication/trimming. Task-local contradictions

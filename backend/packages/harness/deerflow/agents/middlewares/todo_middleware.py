@@ -337,7 +337,11 @@ class TodoMiddleware(TodoListMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
-        return handler(self._augment_request(request))
+        # The base class appends the `write_todos` system prompt to the request;
+        # without calling it the model is never told about the todo list feature.
+        # Augment with pending completion reminders on the request that already
+        # carries the injected system prompt.
+        return super().wrap_model_call(request, lambda req: handler(self._augment_request(req)))
 
     @override
     async def awrap_model_call(
@@ -345,7 +349,11 @@ class TodoMiddleware(TodoListMiddleware):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
-        return await handler(self._augment_request(request))
+        # See wrap_model_call: preserve the base class system-prompt injection.
+        async def augmented_handler(req: ModelRequest) -> ModelResponse:
+            return await handler(self._augment_request(req))
+
+        return await super().awrap_model_call(request, augmented_handler)
 
     @override
     def after_agent(self, state: ThreadState, runtime: Runtime) -> dict[str, Any] | None:

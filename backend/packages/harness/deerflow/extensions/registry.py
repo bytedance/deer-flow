@@ -7,12 +7,18 @@ runtime projection.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
-from deerflow_extension_api import ExtensionData, MiddlewareContributor
+from deerflow_extension_api import (
+    ExtensionData,
+    ExtensionService,
+    MiddlewareContributor,
+    SystemModelCallObserver,
+    TaskLifecycleContributor,
+)
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
 
 _Entry = tuple[str, Any]
@@ -28,10 +34,16 @@ class LoadedExtensions:
 
     app_store: ExtensionData
     middleware_contributors: tuple[tuple[str, MiddlewareContributor], ...] = ()
+    task_lifecycle: tuple[tuple[str, TaskLifecycleContributor], ...] = ()
+    system_model_observers: tuple[tuple[str, SystemModelCallObserver], ...] = ()
+    services: tuple[tuple[str, ExtensionService], ...] = ()
+    routers: tuple[tuple[str, Any], ...] = ()
 
     # Precomputed attributes, not methods: hook sites read one attribute to
     # short-circuit, so the zero-extension path constructs nothing.
     has_middleware_contributors: bool = False
+    has_task_lifecycle: bool = False
+    has_system_model_observers: bool = False
     needs_task_store: bool = False
 
 
@@ -46,6 +58,10 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
     def __init__(self) -> None:
         self._middlewares: list[_Entry] = []
+        self._task_lifecycle: list[_Entry] = []
+        self._system_model_observers: list[_Entry] = []
+        self._services: list[_Entry] = []
+        self._routers: list[_Entry] = []
         self._current_source: str | None = None
 
     @contextmanager
@@ -66,6 +82,19 @@ class ExtensionRegistry(ExtensionRegistryContract):
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))
 
+    def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:
+        self._task_lifecycle.append((self._source(), contributor))
+
+    def system_model_observer(self, observer: SystemModelCallObserver) -> None:
+        self._system_model_observers.append((self._source(), observer))
+
+    def service(self, service: ExtensionService) -> None:
+        self._services.append((self._source(), service))
+
+    def routers(self, routers: Sequence[Any]) -> None:
+        source = self._source()
+        self._routers.extend((source, router) for router in routers)
+
     def discard(self, source: str) -> None:
         """Remove every entry registered by ``source``.
 
@@ -79,27 +108,57 @@ class ExtensionRegistry(ExtensionRegistryContract):
         that process one install() at a time should prefer
         ``mark()``/``rollback_to()`` instead.
         """
-        self._middlewares[:] = [entry for entry in self._middlewares if entry[0] != source]
+        for bucket in (
+            self._middlewares,
+            self._task_lifecycle,
+            self._system_model_observers,
+            self._services,
+            self._routers,
+        ):
+            bucket[:] = [entry for entry in bucket if entry[0] != source]
 
-    def mark(self) -> int:
+    def mark(self) -> tuple[int, int, int, int, int]:
         """Snapshot bucket lengths so one install() can be undone positionally."""
-        return len(self._middlewares)
+        return (
+            len(self._middlewares),
+            len(self._task_lifecycle),
+            len(self._system_model_observers),
+            len(self._services),
+            len(self._routers),
+        )
 
-    def rollback_to(self, mark: int) -> None:
+    def rollback_to(self, mark: tuple[int, int, int, int, int]) -> None:
         """Undo every registration made since ``mark``.
 
         Positional rather than source-keyed: two specs may legitimately share
         a ``use`` string with different config, and deleting by source would
         take the other instance's successful registrations with it.
         """
-        del self._middlewares[mark:]
+        for bucket, size in zip(
+            (
+                self._middlewares,
+                self._task_lifecycle,
+                self._system_model_observers,
+                self._services,
+                self._routers,
+            ),
+            mark,
+            strict=True,
+        ):
+            del bucket[size:]
 
     def build(self) -> LoadedExtensions:
         return LoadedExtensions(
             app_store=ExtensionData("app"),
             middleware_contributors=tuple(self._middlewares),
+            task_lifecycle=tuple(self._task_lifecycle),
+            system_model_observers=tuple(self._system_model_observers),
+            services=tuple(self._services),
+            routers=tuple(self._routers),
             has_middleware_contributors=bool(self._middlewares),
-            needs_task_store=bool(self._middlewares),
+            has_task_lifecycle=bool(self._task_lifecycle),
+            has_system_model_observers=bool(self._system_model_observers),
+            needs_task_store=bool(self._middlewares or self._task_lifecycle or self._system_model_observers),
         )
 
 

@@ -94,6 +94,8 @@ def test_plugins_is_registered_as_startup_only():
 def test_singleton_defaults_to_empty():
     loaded = get_loaded_extensions()
     assert loaded.has_middleware_contributors is False
+    assert loaded.has_task_lifecycle is False
+    assert loaded.has_system_model_observers is False
     assert loaded.needs_task_store is False
 
 
@@ -113,6 +115,8 @@ def test_reset_gives_a_fresh_instance():
     assert after is not populated
     assert after is not EMPTY_EXTENSIONS
     assert after.has_middleware_contributors is False
+    assert after.has_task_lifecycle is False
+    assert after.has_system_model_observers is False
 
 
 def test_reset_does_not_leak_app_store_writes():

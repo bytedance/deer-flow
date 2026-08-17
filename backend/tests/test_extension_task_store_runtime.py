@@ -161,14 +161,19 @@ def _subagent_env():
         sys.modules["deerflow.skills.storage"] = storage_module
 
         from deerflow.subagents.config import SubagentConfig
-        from deerflow.subagents.executor import SubagentExecutor
+        from deerflow.subagents.executor import SubagentExecutor, SubagentResult, SubagentStatus
 
         executor_module = sys.modules["deerflow.subagents.executor"]
         executor_module.get_app_config = lambda: SimpleNamespace(
             tool_search=SimpleNamespace(enabled=False),
             authorization=SimpleNamespace(enabled=False),
         )
-        yield SimpleNamespace(SubagentConfig=SubagentConfig, SubagentExecutor=SubagentExecutor)
+        yield SimpleNamespace(
+            SubagentConfig=SubagentConfig,
+            SubagentExecutor=SubagentExecutor,
+            SubagentResult=SubagentResult,
+            SubagentStatus=SubagentStatus,
+        )
     finally:
         for name, original in original_modules.items():
             if original is None:
@@ -197,7 +202,7 @@ class _CapturingSubagent:
         yield {"messages": [AIMessage(content="done")]}
 
 
-async def _run_subagent(monkeypatch, env, *, seen: dict):
+async def _run_subagent(monkeypatch, env, *, seen: dict, result_holder=None):
     async def _initial_state(self, task):
         return ({}, [], None)
 
@@ -205,7 +210,7 @@ async def _run_subagent(monkeypatch, env, *, seen: dict):
     monkeypatch.setattr(env.SubagentExecutor, "_create_agent", lambda self, tools, **kwargs: _CapturingSubagent(seen))
     config = env.SubagentConfig(name="researcher", description="d", system_prompt="p", tools=[])
     executor = env.SubagentExecutor(config=config, tools=[], thread_id="thread-1", run_id=None)
-    return await executor._aexecute("do the thing")
+    return await executor._aexecute("do the thing", result_holder=result_holder)
 
 
 @pytest.mark.anyio
@@ -303,6 +308,33 @@ async def test_subagent_middleware_without_parent_run_receives_its_task_store(mo
     store = (seen.get("context") or {}).get(EXTENSION_TASK_STORE_KEY)
     assert isinstance(store, ExtensionData)
     assert store.scope_id == result.task_id
+
+
+@pytest.mark.anyio
+async def test_async_subagent_task_store_preserves_external_correlation_scope(monkeypatch, _isolated_extensions, _subagent_env):
+    registry = ExtensionRegistry()
+    with registry.attributed_to("demo:install"):
+        registry.middlewares(_MiddlewareContributor())
+    set_loaded_extensions(registry.build())
+    seen: dict = {}
+    result_holder = _subagent_env.SubagentResult(
+        task_id="server-execution-id",
+        external_task_id="provider-tool-call-id",
+        trace_id="trace-1",
+        status=_subagent_env.SubagentStatus.RUNNING,
+    )
+
+    result = await _run_subagent(
+        monkeypatch,
+        _subagent_env,
+        seen=seen,
+        result_holder=result_holder,
+    )
+
+    store = (seen.get("context") or {}).get(EXTENSION_TASK_STORE_KEY)
+    assert isinstance(store, ExtensionData)
+    assert result.task_id == "server-execution-id"
+    assert store.scope_id == "provider-tool-call-id"
 
 
 @pytest.mark.anyio

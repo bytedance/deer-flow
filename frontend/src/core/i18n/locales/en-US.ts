@@ -528,6 +528,10 @@ export const enUS: Translations = {
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
+    modelLoadFailed:
+      "Models couldn't be loaded. Model selection and token usage may be unavailable.",
+    modelLoadRetry: "Retry",
+    modelLoadRetrying: "Retrying…",
   },
 
   // Conversation
@@ -600,6 +604,7 @@ export const enUS: Translations = {
     saveAndConnect: "Save and connect",
     saveChanges: "Save changes",
     descriptions: {
+      buzz: "Buzz channels and direct messages through your DeerFlow agent.",
       telegram: "Telegram direct messages through your DeerFlow bot.",
       slack: "Slack workspace messages and mentions.",
       discord: "Discord server messages through your DeerFlow bot.",

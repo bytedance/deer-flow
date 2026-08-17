@@ -10,6 +10,16 @@ dependencies = [
     "httpx>=0.28.0",
     "python-multipart>=0.0.31",
     "sse-starlette>=2.1.0",
+    # Direct dependency on purpose, even though FastAPI already pulls it in:
+    # app/gateway/request_path.py imports the private
+    # `starlette._utils.get_route_path` so the auth and CSRF predicates
+    # classify the exact string Starlette's router matches on. A private
+    # import is the safest option here because it fails loudly (ImportError at
+    # startup) instead of silently drifting from the dispatcher at a security
+    # boundary -- but it does mean a Starlette bump is a security-relevant
+    # change. Declaring and bounding it here makes that bump visible in the
+    # diff; tests/test_gateway_request_path.py pins the agreement itself.
+    "starlette>=1.3.1,<2",
     "uvicorn[standard]>=0.34.0",
     "lark-oapi>=1.4.0",
     "slack-sdk>=3.33.0",
@@ -34,6 +44,10 @@ browser = ["deerflow-harness[browser]"]
 memory-zh = ["deerflow-harness[memory-zh]"]
 
 [dependency-groups]
+# Managed extension packages are added here by `deerflow extensions install`.
+# Keeping them separate from development tooling lets every startup mode sync
+# the same locked runtime set without promoting those packages to core deps.
+extensions = []
 dev = [
     "blockbuster>=1.5.26,<1.6",
     "hypothesis>=6.100,<7",
@@ -64,6 +78,7 @@ markers = [
 
 [tool.uv]
 index-url = "https://pypi.org/simple"
+default-groups = ["dev", "extensions"]
 # langgraph-sdk 0.4.2 (pulled in by langgraph 1.2.9 for DeltaChannel) pins
 # `websockets<16,>=14`, silently downgrading websockets 16.0 -> 15.0.1. The
 # pin is not grounded in any API incompatibility: websockets 16's only

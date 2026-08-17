@@ -183,6 +183,27 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
     }
 
 
+def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    captured: dict[str, object] = {}
+
+    import deerflow.tools as tools_module
+
+    monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: captured.update(kwargs) or [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
+    monkeypatch.setattr(tools_module, "get_available_tools", lambda **kwargs: [])
+
+    lead_agent_module._make_lead_agent(
+        {"configurable": {"agent_name": "game", "is_bootstrap": True}},
+        app_config=app_config,
+    )
+
+    assert captured["agent_name"] == "game"
+
+
 def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
     """Regression guard: tracing handlers must be appended to
     ``config["callbacks"]`` (graph invocation root), and every in-graph
@@ -643,7 +664,7 @@ def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypa
     monkeypatch.setattr(
         lead_agent_module,
         "TitleMiddleware",
-        lambda *, app_config: captured.setdefault("title_app_config", app_config) or "title-middleware",
+        lambda *, app_config, extensions: captured.setdefault("title_app_config", app_config) or "title-middleware",
     )
     monkeypatch.setattr(
         lead_agent_module,
@@ -688,7 +709,7 @@ def test_build_middlewares_passes_run_model_name_to_summarization(monkeypatch):
         lambda **kwargs: captured.update(kwargs) or None,
     )
     monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
-    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config: "title-middleware")
+    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config, extensions: "title-middleware")
     monkeypatch.setattr(lead_agent_module, "MemoryMiddleware", lambda agent_name=None, *, memory_config: "memory-middleware")
 
     lead_agent_module.build_middlewares(

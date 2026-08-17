@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -105,8 +106,8 @@ class Mem0Config:
             raise ValueError("mem0 score_threshold must be in [0, 1]")
         if config.max_injection_chars <= 0:
             raise ValueError("mem0 max_injection_chars must be positive")
-        if config.timeout_seconds <= 0:
-            raise ValueError("mem0 timeout_seconds must be positive")
+        if not isfinite(config.timeout_seconds) or config.timeout_seconds <= 0:
+            raise ValueError("mem0 timeout_seconds must be a finite value > 0")
         if not config.api_key_env.strip():
             raise ValueError("mem0 api_key_env must be a non-empty env var name")
         parsed_base_url = urlsplit(config.base_url)

@@ -1,6 +1,6 @@
 import { notFound } from "next/navigation";
 
-import ChatPage from "@/app/workspace/chats/[thread_id]/page";
+import ChatPage from "@/components/workspace/chats/chat-page";
 import { DEMO_THREAD_IDS, isDemoThreadId } from "@/core/threads/static-demo";
 
 export const dynamicParams = false;
