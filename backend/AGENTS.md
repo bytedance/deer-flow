@@ -267,11 +267,14 @@ context, make minimal reversible assumptions, list material assumptions, or
 return a structured blocked result for high-risk ambiguity; they must never
 wait for a synchronous human response. Legacy `non_interactive` and
 `disable_clarification` context flags remain supported while entry points
-migrate to an explicit interaction mode. `interaction_mode` is an
-internal-caller-only Gateway context key, just like `non_interactive`; public
-run requests cannot use it to disable clarification or override a scheduled
-run back to interactive behavior. An explicitly supplied unknown mode is a
-configuration error rather than silently falling back to interactive mode.
+migrate to an explicit interaction mode. `interaction_mode`, `non_interactive`,
+`disable_clarification`, and `channel_name` are internal-caller-only Gateway
+context keys; the latter two remain runtime-only and are never copied into
+checkpoint-persisted `configurable`. Public run requests cannot use these keys
+to disable clarification, impersonate a webhook channel, or override a
+scheduled run back to interactive behavior. An explicitly supplied unknown
+mode is a configuration error rather than silently falling back to interactive
+mode.
 
 ### Context Summarization
 

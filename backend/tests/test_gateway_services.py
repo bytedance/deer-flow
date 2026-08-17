@@ -839,24 +839,50 @@ def test_interaction_policy_context_override_is_internal_only():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    merge_run_context_overrides(config, {"non_interactive": True, "interaction_mode": "scheduled"})
+    merge_run_context_overrides(
+        config,
+        {
+            "non_interactive": True,
+            "interaction_mode": "scheduled",
+            "disable_clarification": True,
+            "channel_name": "github",
+        },
+    )
 
     assert "non_interactive" not in config["configurable"]
     assert "non_interactive" not in config["context"]
     assert "interaction_mode" not in config["configurable"]
     assert "interaction_mode" not in config["context"]
+    assert "disable_clarification" not in config["configurable"]
+    assert "disable_clarification" not in config["context"]
+    assert "channel_name" not in config["configurable"]
+    assert "channel_name" not in config["context"]
 
 
 def test_interaction_policy_context_override_honored_for_internal_caller():
     from app.gateway.services import build_run_config, merge_run_context_overrides
 
     config = build_run_config("thread-1", None, None)
-    merge_run_context_overrides(config, {"non_interactive": True, "interaction_mode": "scheduled", "model_name": "gpt"}, internal=True)
+    merge_run_context_overrides(
+        config,
+        {
+            "non_interactive": True,
+            "interaction_mode": "scheduled",
+            "disable_clarification": True,
+            "channel_name": "github",
+            "model_name": "gpt",
+        },
+        internal=True,
+    )
 
     assert config["configurable"]["non_interactive"] is True
     assert config["context"]["non_interactive"] is True
     assert config["configurable"]["interaction_mode"] == "scheduled"
     assert config["context"]["interaction_mode"] == "scheduled"
+    assert config["context"]["disable_clarification"] is True
+    assert config["context"]["channel_name"] == "github"
+    assert "disable_clarification" not in config["configurable"]
+    assert "channel_name" not in config["configurable"]
     assert config["configurable"]["model_name"] == "gpt"
 
 
@@ -1450,10 +1476,8 @@ def test_merge_run_context_overrides_noop_for_empty_context():
 
 
 def test_merge_run_context_overrides_forwards_context_only_keys():
-    """``github_token`` and ``disable_clarification`` must reach ``config['context']``
-    (runtime context → ``runtime.context``) so the bash tool and ClarificationMiddleware
-    can read them. They must NOT be written to ``config['configurable']`` — that dict is
-    persisted in checkpoints, and ``github_token`` is a (short-lived) secret.
+    """``github_token`` must reach ``config['context']`` but not checkpoint-persisted
+    ``configurable``.
 
     Regression for the GitHub channel: without this, the installation token minted by
     ``ChannelManager._apply_channel_policy`` was silently dropped here, so ``gh``
@@ -1467,19 +1491,16 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
         config,
         {
             "github_token": "ghs_installation_token",
-            "disable_clarification": True,
             "agent_name": "coding-llm-gateway",
         },
     )
 
     # Forwarded into runtime context — what tools/middlewares read.
     assert config["context"]["github_token"] == "ghs_installation_token"
-    assert config["context"]["disable_clarification"] is True
     assert config["context"]["agent_name"] == "coding-llm-gateway"
 
     # NOT written into configurable (checkpoint-persisted).
     assert "github_token" not in config.get("configurable", {})
-    assert "disable_clarification" not in config.get("configurable", {})
 
 
 def test_merge_run_context_overrides_context_only_keys_do_not_override_existing():
@@ -2357,16 +2378,43 @@ def test_strip_internal_context_keys_scrubs_config_smuggled_interaction_policy()
     ``config.configurable`` verbatim, so the assembled config gets scrubbed."""
     from app.gateway.services import build_run_config, strip_internal_context_keys
 
-    via_context = build_run_config("thread-1", {"context": {"non_interactive": True, "interaction_mode": "scheduled", "model_name": "gpt"}}, None)
+    via_context = build_run_config(
+        "thread-1",
+        {
+            "context": {
+                "non_interactive": True,
+                "interaction_mode": "scheduled",
+                "disable_clarification": True,
+                "channel_name": "github",
+                "model_name": "gpt",
+            }
+        },
+        None,
+    )
     strip_internal_context_keys(via_context)
     assert "non_interactive" not in via_context["context"]
     assert "interaction_mode" not in via_context["context"]
+    assert "disable_clarification" not in via_context["context"]
+    assert "channel_name" not in via_context["context"]
     assert via_context["context"]["model_name"] == "gpt"
 
-    via_configurable = build_run_config("thread-1", {"configurable": {"non_interactive": True, "interaction_mode": "interactive"}}, None)
+    via_configurable = build_run_config(
+        "thread-1",
+        {
+            "configurable": {
+                "non_interactive": True,
+                "interaction_mode": "interactive",
+                "disable_clarification": True,
+                "channel_name": "github",
+            }
+        },
+        None,
+    )
     strip_internal_context_keys(via_configurable)
     assert "non_interactive" not in via_configurable["configurable"]
     assert "interaction_mode" not in via_configurable["configurable"]
+    assert "disable_clarification" not in via_configurable["configurable"]
+    assert "channel_name" not in via_configurable["configurable"]
 
 
 # --- Authorization identity anti-forgery tests ---
