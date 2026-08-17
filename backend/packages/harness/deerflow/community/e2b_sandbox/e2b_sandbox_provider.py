@@ -108,7 +108,7 @@ _MAX_MOUNT_PASS_TOTAL_BYTES = 512 * 1024 * 1024
 _MAX_MOUNT_PASS_FILES = 2000
 # Deadline checks stop preflight work and new writes. Active SDK writes finish.
 _MOUNT_PASS_DEADLINE_SECONDS = 120
-
+_MOUNT_PASS_DEADLINE_REASON = f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s"
 
 class _MountPassLimitExceeded(Exception):
     """Stop the current mount upload pass at its aggregate resource limit."""
@@ -128,7 +128,7 @@ class _MountUploadBudget:
 
     def check_deadline(self) -> None:
         if self.expired:
-            raise _MountPassLimitExceeded(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
+            raise _MountPassLimitExceeded(_MOUNT_PASS_DEADLINE_REASON)
 
 
 # Metadata keys we attach to every sandbox so we can discover ours via
@@ -1834,7 +1834,7 @@ class E2BSandboxProvider(SandboxProvider):
 
         for host_path, container_path, read_only in mounts:
             if budget.expired:
-                warn_pass_stopped(f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s")
+                warn_pass_stopped(_MOUNT_PASS_DEADLINE_REASON)
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
