@@ -308,6 +308,21 @@ def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tupl
     return ("inline_file", mime_type)
 
 
+def _sha256_of_file(path: Path) -> str:
+    """Return the hex SHA-256 digest of *path* without loading it whole.
+
+    Computing the digest on the Gateway lets the browser skip its own
+    crypto.subtle-based hashing, which is unavailable in non-secure contexts
+    (e.g. http://<lan-ip>:<port>) and otherwise breaks artifact preview +
+    inline editing (see issue #4864).
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 @router.get(
     "/threads/{thread_id}/artifacts/{path:path}",
     summary="Get Artifact File",
@@ -382,7 +397,13 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         request_headers = request.headers if request is not None else {}
         range_header = None if request_headers.get("if-range") else request_headers.get("range")
         ranged_content, status_code, range_headers = _slice_byte_range(content, range_header)
-        inline_headers = {**cache_headers, **range_headers}
+        inline_headers = {
+            **cache_headers,
+            **range_headers,
+            # Real SHA-256 so the browser can skip crypto.subtle (unavailable on
+            # non-secure contexts) when previewing / editing artifacts (#4864).
+            "ETag": f'"{hashlib.sha256(content).hexdigest()}"',
+        }
 
         if mime_type and mime_type.startswith("text/"):
             return Response(content=ranged_content, status_code=status_code, media_type=mime_type, headers=inline_headers)
@@ -411,15 +432,32 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     if kind == "file":
         # Always force download for active content types to prevent script
         # execution in the application origin when users open generated artifacts.
-        return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers=_build_attachment_headers(actual_path.name))
+        content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
+        return FileResponse(
+            path=actual_path,
+            filename=actual_path.name,
+            media_type=mime_type,
+            headers={
+                **_build_attachment_headers(actual_path.name),
+                # Real SHA-256 so the browser can skip crypto.subtle (unavailable
+                # on non-secure contexts) when previewing / editing artifacts (#4864).
+                "ETag": f'"{content_sha256}"',
+            },
+        )
 
     if kind == "inline_file":
         # FileResponse honors byte-Range requests for large text previews and
         # media seeking without buffering the full artifact in the Gateway.
+        content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
         return FileResponse(
             path=actual_path,
             media_type=mime_type,
-            headers={"Content-Disposition": _build_content_disposition("inline", actual_path.name)},
+            headers={
+                "Content-Disposition": _build_content_disposition("inline", actual_path.name),
+                # Real SHA-256 so the browser can skip crypto.subtle (unavailable
+                # on non-secure contexts) when previewing / editing artifacts (#4864).
+                "ETag": f'"{content_sha256}"',
+            },
         )
 
     raise AssertionError(f"Unhandled artifact response kind: {kind!r}")

@@ -7,11 +7,27 @@ import type { AgentThreadState } from "../threads";
 import { buildWriteFileDraftContent } from "./preview";
 import { urlOfArtifact } from "./utils";
 
+function fnv1aHash(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 async function sha256OfText(content: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(content),
-  );
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle) {
+    // crypto.subtle is only exposed in secure contexts (HTTPS or localhost).
+    // On a non-secure origin such as http://<lan-ip>:<port> it is undefined, so
+    // hashing would throw and break artifact preview + inline editing
+    // (issue #4864). The Gateway returns the real SHA-256 via the ETag header,
+    // so this fallback is only a last-resort fingerprint used for draft
+    // reconciliation when that header is absent.
+    return fnv1aHash(content);
+  }
+  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(content));
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
@@ -76,7 +92,7 @@ export async function loadArtifactContent({
   const content = new TextDecoder().decode(bytes, { stream: truncated });
   const etag = response.headers.get("etag");
   const sha256 =
-    etag?.match(/^"([0-9a-f]{64})"$/)?.[1] ??
+    etag?.match(/([0-9a-f]{64})/i)?.[1] ??
     (!truncated ? await sha256OfText(content) : undefined);
   const contentLengthHeader = response.headers.get("Content-Length");
   const contentLength =

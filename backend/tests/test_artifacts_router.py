@@ -358,6 +358,24 @@ def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, mon
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
 
+def test_get_artifact_inline_text_returns_sha256_etag(tmp_path, monkeypatch) -> None:
+    payload = b"hello artifact world"
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
+        )
+
+    assert response.status_code == 200
+    expected = hashlib.sha256(payload).hexdigest()
+    assert response.headers.get("etag") == f'"{expected}"'
+
+
 def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
     payload = ("skill preview \u4e2d\u6587\n" * 100_000).encode()
     skill_path = tmp_path / "sample.skill"
@@ -384,6 +402,26 @@ def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, mon
     assert preview.headers["content-range"] == f"bytes 0-1048575/{len(payload)}"
     assert invalid.status_code == 416
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
+
+
+def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> None:
+    payload = ("skill preview \u4e2d\u6587\n" * 100).encode()
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("SKILL.md", payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md"
+        )
+
+    assert response.status_code == 200
+    expected = hashlib.sha256(payload).hexdigest()
+    assert response.headers.get("etag") == f'"{expected}"'
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
