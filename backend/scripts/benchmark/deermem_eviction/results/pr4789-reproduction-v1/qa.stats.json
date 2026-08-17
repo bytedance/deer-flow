@@ -1,0 +1,65 @@
+{
+  "grader_version": "deterministic-overlap-v1",
+  "policies": [
+    "confidence",
+    "hybrid-v1"
+  ],
+  "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
+  "schema_version": 1,
+  "suites": {
+    "official": {
+      "bootstrap": {
+        "alpha": 0.05,
+        "iterations": 10000,
+        "lower": 0.125,
+        "mean_difference": 0.30000000000000004,
+        "seed": 4789,
+        "upper": 0.475
+      },
+      "cases": 40,
+      "mcnemar": {
+        "both_correct": 21,
+        "both_wrong": 3,
+        "only_first_correct": 2,
+        "only_second_correct": 14,
+        "p_value": 0.004180908203125
+      }
+    },
+    "overall": {
+      "bootstrap": {
+        "alpha": 0.05,
+        "iterations": 10000,
+        "lower": 0.19999999999999996,
+        "mean_difference": 0.3555555555555555,
+        "seed": 4789,
+        "upper": 0.5111111111111112
+      },
+      "cases": 45,
+      "mcnemar": {
+        "both_correct": 22,
+        "both_wrong": 3,
+        "only_first_correct": 2,
+        "only_second_correct": 18,
+        "p_value": 0.0004024505615234375
+      }
+    },
+    "synthetic": {
+      "bootstrap": {
+        "alpha": 0.05,
+        "iterations": 10000,
+        "lower": 0.4,
+        "mean_difference": 0.8,
+        "seed": 4789,
+        "upper": 1.0
+      },
+      "cases": 5,
+      "mcnemar": {
+        "both_correct": 1,
+        "both_wrong": 0,
+        "only_first_correct": 0,
+        "only_second_correct": 4,
+        "p_value": 0.125
+      }
+    }
+  }
+}

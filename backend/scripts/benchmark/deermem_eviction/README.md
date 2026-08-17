@@ -148,6 +148,22 @@ Full provider requests, dataset text, and prepared pools must remain in ignored 
 
 The historical protocol disclosed in #4789 recorded the answer model as `deepseek/deepseek-v4-flash`, an aggregator-style namespace. This evaluation calls the same underlying model (DeepSeek-V4-Flash-0731, released before the historical run) directly through DeepSeek's official OpenAI-compatible API, whose canonical ID is `deepseek-v4-flash`; the config pins that ID. The model actually serving each call is recorded from the provider response in every answer row as `response_model`.
 
+## Published live QA results
+
+`results/pr4789-reproduction-v1/` contains the published artifacts of the equal-budget live run executed at repository revision `ea6d08be` (2026-08-17, DeepSeek official API, `deepseek-v4-flash`): `qa_run.json` (provenance), `qa.rows.jsonl` (90 graded rows), `qa.summary.json`, and `qa.stats.json`. The offline suite verifies that the published statistics are recomputable from the published rows.
+
+QA accuracy at capacity 7 with identical settings for both policies:
+
+| Suite | `confidence` | `hybrid-v1` | Exact McNemar p | Accuracy difference (95% CI) |
+| --- | ---: | ---: | ---: | --- |
+| 40 official | 23/40 | 35/40 | 0.0042 | +0.300 [+0.125, +0.475] |
+| 5 synthetic corrections | 1/5 | 5/5 | 0.1250 | +0.800 [+0.400, +1.000] |
+| 45 overall | 24/45 | 40/45 | 0.0004 | +0.356 [+0.200, +0.511] |
+
+Scenario breakdown: `confirmation_help` 3/10 vs 10/10, `access_help` 3/10 vs 9/10, `confidence_control` 7/10 vs 8/10, `noisy_signal_control` 10/10 vs 8/10, synthetic corrections 1/5 vs 5/5. The noisy-signal control is the one scenario where `hybrid-v1` scored below the confidence baseline in this run; it is reported separately and not folded into any other metric.
+
+Both totals sit well above the historical `14/45` vs `23/45`, primarily because the historical confidence baseline was limited to 1024 output tokens while this run gives both policies the same 2048-token budget. The run consumed 81,742 input and 14,156 output tokens across the 90 calls.
+
 ## Historical-result caveats
 
 The row-level artifacts disclosed in #4789 corrected the PR text's noisy-signal QA result from `5/10 vs 5/10` to `5/10 vs 6/10`. They also showed that the historical confidence rows used a 1024-token baseline, while hybrid rows used 2048 tokens and new calls. The follow-up live run will therefore:
