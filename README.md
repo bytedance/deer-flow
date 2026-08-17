@@ -1137,6 +1137,12 @@ creates while Redis or initial inventory is unavailable. Run Redis with persiste
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.
 
+Each E2B mount upload pass accepts at most 512 MiB and 2,000 files. The pass
+also has a cooperative 120-second deadline. Skill projections and configured
+mounts share these limits. The provider checks the deadline before each mount
+and during directory preflight. The deadline stops new file uploads after it
+expires. It does not interrupt active filesystem or E2B SDK calls.
+
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
 Shutdown closes an unowned discovery client without destroying its VM.
@@ -1475,4 +1481,4 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
