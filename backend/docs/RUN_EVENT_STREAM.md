@@ -76,6 +76,12 @@ through run-event or specialized APIs:
 | `context:memory` | `context` | `record_memory_context()` |
 | `middleware:{tag}` | `middleware` | `record_middleware()` |
 
+`llm.ai.response.metadata.llm_call_index` is a one-based ordinal assigned when
+the corresponding LangChain LLM run first starts. The ordinal stays bound to
+that callback `run_id`, so parallel calls retain start order even if they finish
+out of order. If a provider omits its start callback, `on_llm_end()` assigns the
+ordinal as a compatibility fallback.
+
 Current middleware tags are `guardrail`, `safety_termination`,
 `skill_activation`, and `skill_secrets`. The pattern is intentionally open so
 new middleware tags are additive. Because the full event type is limited to 32

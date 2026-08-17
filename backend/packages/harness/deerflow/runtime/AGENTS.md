@@ -1,3 +1,12 @@
+### Run Event Journal (`runtime/journal.py`)
+
+`RunJournal` assigns `llm.ai.response.metadata.llm_call_index` when it first
+observes a LangChain LLM callback `run_id` in either `on_chat_model_start()` or
+`on_llm_start()`. The run-id mapping is authoritative at `on_llm_end()`, so
+parallel calls keep their start-order indices when they complete out of order;
+the end callback allocates an index only as a compatibility fallback for
+providers that omit start callbacks.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.

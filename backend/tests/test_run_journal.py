@@ -98,6 +98,40 @@ class TestLlmCallbacks:
         assert trace_events[0]["category"] == "message"
 
     @pytest.mark.anyio
+    async def test_concurrent_chat_model_responses_keep_start_order_call_indices(self, journal_setup):
+        j, store = journal_setup
+        first_run_id = uuid4()
+        second_run_id = uuid4()
+
+        j.on_chat_model_start({}, [[]], run_id=first_run_id, tags=["lead_agent"])
+        j.on_chat_model_start({}, [[]], run_id=second_run_id, tags=["middleware:title"])
+        j.on_llm_end(_make_llm_response("second"), run_id=second_run_id, parent_run_id=None, tags=["middleware:title"])
+        j.on_llm_end(_make_llm_response("first"), run_id=first_run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["llm.ai.response"])
+        indices_by_content = {event["content"]["content"]: event["metadata"]["llm_call_index"] for event in events}
+
+        assert indices_by_content == {"first": 1, "second": 2}
+
+    @pytest.mark.anyio
+    async def test_concurrent_llm_responses_keep_start_order_call_indices(self, journal_setup):
+        j, store = journal_setup
+        first_run_id = uuid4()
+        second_run_id = uuid4()
+
+        j.on_llm_start({}, [], run_id=first_run_id, tags=["lead_agent"])
+        j.on_llm_start({}, [], run_id=second_run_id, tags=["subagent:research"])
+        j.on_llm_end(_make_llm_response("second"), run_id=second_run_id, parent_run_id=None, tags=["subagent:research"])
+        j.on_llm_end(_make_llm_response("first"), run_id=first_run_id, parent_run_id=None, tags=["lead_agent"])
+        await j.flush()
+
+        events = await store.list_events("t1", "r1", event_types=["llm.ai.response"])
+        indices_by_content = {event["content"]["content"]: event["metadata"]["llm_call_index"] for event in events}
+
+        assert indices_by_content == {"first": 1, "second": 2}
+
+    @pytest.mark.anyio
     async def test_on_llm_end_lead_agent_produces_ai_message(self, journal_setup):
         j, store = journal_setup
         run_id = uuid4()

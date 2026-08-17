@@ -11,6 +11,8 @@ Key design decisions:
   on_chain_start (fires on every node) — messages here are fully structured.
 - on_chain_start with parent_run_id=None emits a run.start trace marking root invocation.
 - on_llm_end emits llm.ai.response in checkpoint-aligned AIMessage.model_dump() format
+- llm_call_index is assigned by LangChain run_id at LLM start, so concurrent calls keep
+  their start-order index even when their responses finish out of order
 - Token usage accumulated in memory, written to RunRow on run completion
 - Caller identification via tags injection (lead_agent / subagent:{name} / middleware:{name})
 """
@@ -280,7 +282,7 @@ class RunJournal(BaseCallbackHandler):
 
         # LLM request/response tracking
         self._llm_call_index = 0
-        self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
+        self._llm_call_indices: dict[str, int] = {}  # langchain run_id -> start-order index
         self._current_run_tool_call_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
 
@@ -308,6 +310,16 @@ class RunJournal(BaseCallbackHandler):
             text = self._message_text(message).strip()
             if text:
                 self._last_ai_msg = text[:2000]
+
+    def _get_or_assign_llm_call_index(self, run_id: UUID | str) -> int:
+        """Return the stable start-order index for one LangChain LLM run."""
+        rid = str(run_id)
+        call_index = self._llm_call_indices.get(rid)
+        if call_index is None:
+            self._llm_call_index += 1
+            call_index = self._llm_call_index
+            self._llm_call_indices[rid] = call_index
+        return call_index
 
     def on_chain_start(
         self,
@@ -380,8 +392,7 @@ class RunJournal(BaseCallbackHandler):
         """
         rid = str(run_id)
         self._llm_start_times[rid] = time.monotonic()
-        self._llm_call_index += 1
-        self._seen_llm_starts.add(rid)
+        self._get_or_assign_llm_call_index(rid)
 
         logger.debug(
             "on_chat_model_start %s: tags=%s num_batches=%d message_counts=%s",
@@ -411,8 +422,10 @@ class RunJournal(BaseCallbackHandler):
                     break
 
     def on_llm_start(self, serialized: dict, prompts: list[str], *, run_id: UUID, parent_run_id: UUID | None = None, tags: list[str] | None = None, metadata: dict[str, Any] | None = None, **kwargs: Any) -> None:
-        # Fallback: on_chat_model_start is preferred. This just tracks latency.
-        self._llm_start_times[str(run_id)] = time.monotonic()
+        # Fallback for non-chat models; chat models use on_chat_model_start.
+        rid = str(run_id)
+        self._llm_start_times[rid] = time.monotonic()
+        self._get_or_assign_llm_call_index(rid)
 
     def on_llm_end(
         self,
@@ -457,13 +470,9 @@ class RunJournal(BaseCallbackHandler):
                 elif fallback_text:
                     self._llm_error_fallback_message = fallback_text[:2000]
 
-            # Resolve call index
-            call_index = self._llm_call_index
-            if rid not in self._seen_llm_starts:
-                # Fallback: on_chat_model_start was not called
-                self._llm_call_index += 1
-                call_index = self._llm_call_index
-                self._seen_llm_starts.add(rid)
+            # Resolve the index assigned when this call started. The helper's
+            # fallback preserves events from providers that omit start callbacks.
+            call_index = self._get_or_assign_llm_call_index(rid)
 
             # Message event: checkpoint-aligned llm.ai.response payload.
             self._put(
