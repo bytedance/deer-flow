@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -42,11 +43,38 @@ def _gateway_volume_for(target: str) -> str:
     return matches[0]
 
 
+def _mount_options(volume: str) -> set[str]:
+    """Return the option flags of a short-syntax ``source:target[:options]`` mount.
+
+    Options are comma-separated, so ``ro`` can legally appear as ``ro,z`` or
+    ``z,ro``. Testing the raw string for a ``:ro`` suffix would read those as
+    writable and let a read-only regression through.
+    """
+    parts = volume.split(":")
+    if len(parts) < 3:
+        return set()
+    return {option.strip() for option in parts[2].split(",") if option.strip()}
+
+
+@pytest.mark.parametrize(
+    ("volume", "expected"),
+    [
+        ("./src:/dst", set()),
+        ("./src:/dst:ro", {"ro"}),
+        ("./src:/dst:ro,z", {"ro", "z"}),
+        ("./src:/dst:z,ro", {"z", "ro"}),
+        ("./src:/dst:rw", {"rw"}),
+    ],
+)
+def test_mount_options_parses_comma_separated_flags(volume: str, expected: set[str]) -> None:
+    assert _mount_options(volume) == expected
+
+
 def test_extensions_config_is_mounted_writable() -> None:
     mount = _gateway_volume_for(EXTENSIONS_CONFIG_TARGET)
-    assert not mount.endswith(":ro"), f"the Gateway writes {EXTENSIONS_CONFIG_TARGET} at runtime, so it must not be mounted read-only: {mount}"
+    assert "ro" not in _mount_options(mount), f"the Gateway writes {EXTENSIONS_CONFIG_TARGET} at runtime, so it must not be mounted read-only: {mount}"
 
 
 def test_app_config_stays_read_only() -> None:
     mount = _gateway_volume_for(APP_CONFIG_TARGET)
-    assert mount.endswith(":ro"), f"no API writes {APP_CONFIG_TARGET}; it must stay read-only: {mount}"
+    assert "ro" in _mount_options(mount), f"no API writes {APP_CONFIG_TARGET}; it must stay read-only: {mount}"
