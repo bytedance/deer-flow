@@ -2,6 +2,30 @@ import { expect, test } from "@playwright/test";
 
 import { MOCK_THREAD_ID, mockLangGraphAPI } from "./utils/mock-api";
 
+test("hides background tasks and sends no task request when the feature is unavailable", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [{ thread_id: MOCK_THREAD_ID, title: "Background work" }],
+    features: { mcpTasksEnabled: false },
+  });
+
+  let taskRequests = 0;
+  await page.route(`**/api/threads/${MOCK_THREAD_ID}/mcp-tasks*`, (route) => {
+    taskRequests += 1;
+    return route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ detail: "MCP task service is unavailable" }),
+    });
+  });
+
+  await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+  await expect(page.getByTestId("background-tasks-trigger")).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(taskRequests).toBe(0);
+});
+
 test("shows, refreshes, and cancels current-chat background tasks", async ({
   page,
 }) => {

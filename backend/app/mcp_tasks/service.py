@@ -253,7 +253,17 @@ class McpTaskService:
             limit=self._max_concurrent_polls,
         )
         if records:
-            await asyncio.gather(*(self._cancel_one(record) for record in records))
+            results = await asyncio.gather(
+                *(self._cancel_one(record) for record in records),
+                return_exceptions=True,
+            )
+            for record, result in zip(records, results, strict=True):
+                if isinstance(result, BaseException):
+                    logger.error(
+                        "Unexpected MCP task cancellation failure (task_id=%s); the lease will expire for recovery",
+                        record.get("id"),
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
 
     async def _cancel_one(self, record: dict[str, Any]) -> None:
         driver_name = str(record.get("driver_name") or "")

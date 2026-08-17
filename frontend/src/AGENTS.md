@@ -19,10 +19,13 @@
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
    Current-chat MCP background tasks use `core/background-tasks`: the header
-   trigger is hidden for new/mock/static-demo threads, lists at most 20 local
-   task records, refreshes every 3 seconds while any task is active (15 seconds
-   otherwise), fetches bounded task details only while a user expands a card,
-   and cancels through the thread-scoped local-ID endpoint. The expanded view
+   trigger is hidden for new/mock/static-demo threads and unless `/api/features`
+   reports the startup-scoped `mcp_tasks` capability; the list query is disabled
+   while that capability is unavailable, so default-disabled and memory-backend
+   deployments never poll an endpoint that cannot serve tasks. It lists at most
+   20 local task records, refreshes every 3 seconds while any task is active
+   (15 seconds otherwise), fetches bounded task details only while a user expands
+   a card, and cancels through the thread-scoped local-ID endpoint. The expanded view
    shows result/preview, artifact metadata, input requests, and the latest poll
    or cancellation error without exposing the persisted remote handle. A
    persisted cancel request remains "Cancelling…" only while the task status is

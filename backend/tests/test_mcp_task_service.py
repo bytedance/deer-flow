@@ -357,6 +357,46 @@ async def test_cancel_failure_schedules_retry_from_call_completion_time():
 
 
 @pytest.mark.asyncio
+async def test_cancel_recovery_failures_are_isolated_and_later_phases_continue(caplog):
+    records = [
+        {**_claimed_row(), "id": "task-broken", "cancel_attempt_count": 1},
+        {**_claimed_row(), "id": "task-sibling", "remote_task_id": "remote-2", "cancel_attempt_count": 1},
+    ]
+
+    async def release_cancel_claim(task_id, **_kwargs):
+        if task_id == "task-broken":
+            raise RuntimeError("cancel recovery store unavailable")
+        return True
+
+    repo = SimpleNamespace(
+        claim_cancel_requests=AsyncMock(return_value=records),
+        release_cancel_claim=AsyncMock(side_effect=release_cancel_claim),
+        claim_due_tasks=AsyncMock(return_value=[]),
+        claim_notification_work=AsyncMock(return_value=[]),
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", FakeDriver(cancel_error=RuntimeError("cancel unavailable")))
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=AsyncMock(),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        await service.run_once(now=datetime.now(UTC))
+
+    assert repo.release_cancel_claim.await_count == 2
+    repo.claim_due_tasks.assert_awaited_once()
+    repo.claim_notification_work.assert_awaited_once()
+    assert "task-broken" in caplog.text
+    assert "cancel recovery store unavailable" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_notification_delivery_waits_for_successful_agent_run():
     repo = SimpleNamespace(
         mark_notification_dispatched=AsyncMock(return_value=True),

@@ -352,6 +352,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         task_extensions_config = ExtensionsConfig.from_file()
         mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
         mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
+        app.state.mcp_tasks_available = False
         set_mcp_task_submitter(None)
         set_mcp_task_config_snapshot(task_extensions_config)
         validate_mcp_task_runtime_configuration(
@@ -389,6 +390,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             if mcp_tasks_config.enabled:
                 await mcp_task_service.start()
                 set_mcp_task_submitter(mcp_task_service)
+                app.state.mcp_tasks_available = True
 
         yield
 
@@ -420,6 +422,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 logger.exception("Failed to stop scheduled task service")
 
         if getattr(app.state, "mcp_task_service", None) is not None:
+            app.state.mcp_tasks_available = False
             try:
                 await app.state.mcp_task_service.stop()
             except Exception:

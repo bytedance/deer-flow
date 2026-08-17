@@ -32,17 +32,25 @@ import {
   useBackgroundTasks,
   useCancelBackgroundTask,
 } from "@/core/background-tasks";
+import { useMcpTasksEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatTimeAgo } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
 
 export function ThreadBackgroundTasks({ threadId }: { threadId: string }) {
   const { t } = useI18n();
-  const tasksQuery = useBackgroundTasks(threadId);
+  const { enabled: mcpTasksEnabled } = useMcpTasksEnabled();
+  const tasksQuery = useBackgroundTasks(threadId, {
+    enabled: mcpTasksEnabled,
+  });
   const cancelTask = useCancelBackgroundTask(threadId);
   const tasks = tasksQuery.data ?? [];
   const activeTasks = tasks.filter(isActiveBackgroundTask);
   const recentTasks = tasks.filter((task) => !isActiveBackgroundTask(task));
+
+  if (!mcpTasksEnabled) {
+    return null;
+  }
 
   return (
     <Sheet>
