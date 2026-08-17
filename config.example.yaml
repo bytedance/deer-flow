@@ -1509,6 +1509,15 @@ verification:
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
 
 # acp_agents:
+#   mcode:
+#     # MiniMax Code speaks ACP directly; no adapter package is required.
+#     # Install with `npm install --global @minimax-ai/code`, then run `mcode login`.
+#     command: mcode
+#     args: ["acp"]
+#     description: MiniMax Code for implementation, refactoring, debugging, and repository tasks
+#     # auto_approve_permissions: false  # Enable only for trusted tasks that need MCode to edit files or run commands
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
+#
 #   claude_code:
 #     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
 #     # speak ACP directly. Install `claude-agent-acp` separately or use:
@@ -1775,6 +1784,26 @@ memory:
       # temperature:            # optional
     max_facts: 100 # Maximum number of facts to store
     fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    # Capacity eviction defaults to the historical confidence-only ranking.
+    # Opt in to hybrid-v1 to score confidence (65%), explicit-confirmation
+    # freshness (25%, 90-day half-life), and query-driven access heat (10%,
+    # 30-day half-life). Actual memory_search hits count; default injection does
+    # not. A bounded 10% correction reserve aligns storage with guaranteed
+    # correction injection. Confirmation detection is batch-level: it checks
+    # human messages among the last six filtered messages, while the LLM binds
+    # that signal to a factsToReinforce ID without a second correspondence
+    # check. Shadow mode audits hybrid disagreements without changing which
+    # facts confidence-only keeps.
+    fact_eviction_policy: confidence # confidence | hybrid-v1
+    fact_eviction_shadow_enabled: false
+    eviction_confidence_weight: 0.65
+    eviction_confirmation_weight: 0.25
+    eviction_access_weight: 0.10
+    eviction_confirmation_half_life_days: 90
+    eviction_access_half_life_days: 30
+    eviction_correction_reserved_fraction: 0.10
+    eviction_correction_reserved_max: 10
+    eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection
     # Token counting strategy for memory-injection budgeting:
     #   tiktoken (default) - accurate, but the encoding BPE data may be
@@ -2090,8 +2119,9 @@ scheduler:
 # ============================================================================
 # Long-running MCP Tasks Configuration
 # ============================================================================
-# Protocol-neutral durable task runtime. This foundation is disabled by
-# default; an MCP task driver must be configured before tasks can be submitted.
+# Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is
+# disabled by default; task_toolsets are configured per server in
+# extensions_config.json.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
 # mcp_tasks:
@@ -2099,11 +2129,21 @@ scheduler:
 #   poll_interval_seconds: 5     # Scan interval and default task retry interval
 #   lease_seconds: 120           # Expired claims become recoverable after this delay
 #   max_concurrent_polls: 8      # Maximum status calls started by one worker per scan
+#   max_poll_backoff_seconds: 300             # Cap for exponential retries after transient errors
+#   input_required_poll_interval_seconds: 60  # Minimum poll interval while waiting for user input
+#   tracking_degraded_after_errors: 3         # Consecutive errors before query API reports degraded tracking
+#   max_result_bytes: 65536                    # Full JSON result storage limit
+#   result_preview_max_chars: 2000             # Text preview retained when a result exceeds the limit
 mcp_tasks:
   enabled: false
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_polls: 8
+  max_poll_backoff_seconds: 300
+  input_required_poll_interval_seconds: 60
+  tracking_degraded_after_errors: 3
+  max_result_bytes: 65536
+  result_preview_max_chars: 2000
 
 # ============================================================================
 # Run Ownership Configuration

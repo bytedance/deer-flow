@@ -175,9 +175,13 @@ class OAuthTokenManager:
         return _OAuthToken(access_token=access_token, token_type=token_type, expires_at=expires_at)
 
 
-def build_oauth_tool_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
+def build_oauth_tool_interceptor(
+    extensions_config: ExtensionsConfig,
+    *,
+    token_manager: OAuthTokenManager | None = None,
+) -> Any | None:
     """Build a tool interceptor that injects OAuth Authorization headers."""
-    token_manager = OAuthTokenManager.from_extensions_config(extensions_config)
+    token_manager = token_manager or OAuthTokenManager.from_extensions_config(extensions_config)
     if not token_manager.has_oauth_servers():
         return None
 

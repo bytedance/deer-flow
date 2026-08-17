@@ -8,6 +8,35 @@ Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login acce
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
+Standalone local LangGraph Studio is recognized only through the upstream
+`Auth.types.StudioUser` principal type, never by its reusable identity string.
+The type is resolved once at import; an older SDK without it degrades to normal
+owner scoping instead of failing requests.
+For that principal's assistant reads/searches, `langgraph_auth.add_owner_filter`
+selects genuine server-registered assistants plus assistants owned by Studio;
+all other resources remain owner-scoped. Assistant create/update handlers make
+both `user_id` and `created_by=user` server-owned, because LangGraph gives
+`created_by=system` privileged ownership semantics during run creation. The
+custom application module in `langgraph_studio.py` is imported before the
+locked in-memory runtime lifespan. At that pre-runtime boundary it derives
+genuine system assistant IDs from the CLI-provided graph registry, removes
+their persisted active/version rows so graph registration recreates them, and
+demotes every other legacy `created_by=system` marker in both active assistants
+and version history. This must happen before runtime 0.30.0 loads and purges
+system-marked rows; a user application lifespan is too late. LangGraph executes
+this file-backed custom app without first registering its module in
+`sys.modules`; keep its annotations eager so dataclass processing remains
+compatible with that loader, and preserve the direct file-loader regression
+test. An empty graph registry or absent persistence file is a no-op, while
+persistence parse/write errors fail startup closed. The harness requires
+in-memory runtime 0.30.0 or newer, and a persisted store containing no
+expected registered assistant row emits a drift warning so changes to
+LangGraph's internal persistence contract are observable. Because current
+create/update writes and all legacy
+versions are sanitized, ordinary owner-scoped assistant version selection
+remains enabled. Ordinary authenticated users retain owner-scoped assistant
+reads/searches.
+
 **Routers**:
 
 | Router | Endpoints |
@@ -16,6 +45,7 @@ Localhost persistence deliberately reads the direct request `Host` and ignores `
 | **Features** (`/api/features`) | `GET /` - report config-gated feature availability (`agents_api.enabled`, `browser_control.enabled`) for frontend UI gating |
 | **Console** (`/api/console`) | Read-only cross-thread observability for the current user (the data layer for an operations dashboard or external monitoring): `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods); requires a SQL database backend — returns 503 on `database.backend: memory`. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). All priced models must use one currency; mixed currencies disable cost reporting and leave cost/currency fields null instead of producing invalid aggregates. Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - replace the full config with whole-payload stdio validation; `PATCH /config` - toggle one server while preserving the raw extensions config and validating only an enabled target; both writes reload config and reset the process-local MCP cache |
+| **MCP Tasks** (`/api/threads/{id}/mcp-tasks`) | `GET /` - current user's durable tasks for one owned thread; `GET /{task_id}` - bounded result/input/error detail without remote task IDs or driver configuration |
 | **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`); `POST /reload` - admin-only process-local prompt-cache invalidation after trusted external filesystem changes |
 | **Integrations** (`/api/integrations`) | `GET /lark/status` - inspect managed Lark/Feishu CLI integration state, including `sandbox_runtime_mode` / `sandbox_runtime_ready` (whether `lark-cli` will actually be present in the sandbox at chat time); `POST /lark/install` - admin-only install of the official `lark-*` managed skill pack; `POST /lark/config/start` and `/lark/config/complete` - internal first-time Lark connection setup; `POST /lark/config/credentials` - atomically switch the caller's per-user Lark app after validating the new `app_id`/`app_secret` through the official CLI's live tenant-token probe, revoke/remove the previous OAuth tokens, and restore the prior credential tree if the switch fails; `POST /lark/auth/start` and `/lark/auth/complete` - browser device-flow user authorization without terminal access, with optional `domains` / exact `scope` for incremental permission grants. Config and auth flows carry a server-issued, per-user generation persisted under the credential lock; a rejected direct switch leaves the current generation unchanged, stale completions return 409, and browser re-registration uses the same token-clearing/revocation transaction as direct credential switches. |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |

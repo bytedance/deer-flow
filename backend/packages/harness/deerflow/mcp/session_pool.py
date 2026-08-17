@@ -351,6 +351,19 @@ class MCPSessionPool:
         for loop, _ready, task, close_evt in inflight:
             await self._shutdown_entry(loop, task, close_evt, cancel=True)
 
+    async def close_session(self, server_name: str, scope_key: str) -> None:
+        """Close one exact server/scope session so a retry reconnects cleanly."""
+        key = (server_name, scope_key)
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            inflight = self._inflight.pop(key, None)
+        if entry is not None:
+            _session, loop, task, close_evt = entry
+            await self._shutdown_entry(loop, task, close_evt)
+        if inflight is not None:
+            loop, _ready, task, close_evt = inflight
+            await self._shutdown_entry(loop, task, close_evt, cancel=True)
+
     async def close_server(self, server_name: str) -> None:
         """Close all sessions for a given server."""
         with self._lock:
