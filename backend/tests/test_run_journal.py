@@ -1082,6 +1082,52 @@ class TestChatModelStartHumanMessage:
         assert not any(e["event_type"] == "llm.human.input" for e in events)
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "control_name",
+        ["summary", "loop_warning", "budget_warning", "progress_hint", "todo_reminder", "todo_completion_reminder"],
+    )
+    async def test_named_control_messages_are_not_captured(self, journal_setup, control_name):
+        """Middleware-injected control messages are model-facing nudges, not user input.
+
+        These messages are appended by ``wrap_model_call`` / ``before_model`` hooks
+        and are not always tagged ``hide_from_ui`` (some paths keep them out of
+        state entirely). A control message at the tail of a compacted context must
+        not be mistaken for the run's real prompt and persisted as
+        ``llm.human.input`` — that clobbers the actual user text in the history
+        feed (issue #3337, second problem)."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        control_message = HumanMessage(
+            content="<system_reminder>internal control nudge</system_reminder>",
+            name=control_name,
+        )
+        j.on_chat_model_start({}, [[control_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg is None
+        events = await store.list_events("t1", "r1")
+        assert not any(e["event_type"] == "llm.human.input" for e in events)
+
+    @pytest.mark.anyio
+    async def test_control_message_does_not_shadow_real_user_prompt(self, journal_setup):
+        """A trailing control message must not displace the real user prompt."""
+        from langchain_core.messages import HumanMessage
+
+        j, store = journal_setup
+        real_prompt = HumanMessage(content="Summarize the quarterly report")
+        control_message = HumanMessage(content="<system_reminder>loop</system_reminder>", name="loop_warning")
+        # Control message appended after the real prompt (reversed scan order).
+        j.on_chat_model_start({}, [[real_prompt, control_message]], run_id=uuid4(), tags=["lead_agent"])
+        await j.flush()
+
+        assert j._first_human_msg == "Summarize the quarterly report"
+        events = await store.list_events("t1", "r1")
+        human_events = [e for e in events if e["event_type"] == "llm.human.input"]
+        assert len(human_events) == 1
+        assert human_events[0]["content"]["content"] == "Summarize the quarterly report"
+
+    @pytest.mark.anyio
     async def test_hidden_human_input_response_is_captured(self, journal_setup):
         """Hidden HumanInputCard replies are user-authored and must survive compaction."""
         from langchain_core.messages import HumanMessage

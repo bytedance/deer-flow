@@ -48,7 +48,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_LEGACY_SUMMARY_MESSAGE_NAME = "summary"
+# Request-only control messages appended by middleware ``wrap_model_call`` /
+# ``before_model`` hooks. They are model-facing nudges, not user input, but they
+# are not always tagged ``hide_from_ui`` (some paths deliberately keep them out
+# of state so they never reach the UI). Name them here so a control message at
+# the tail of a compacted context is never mistaken for the run's real prompt
+# and persisted as ``llm.human.input`` — which would clobber the actual user
+# text in the history feed (issue #3337, second problem).
+_CONTROL_MESSAGE_NAMES = frozenset(
+    {
+        "summary",
+        "loop_warning",
+        "budget_warning",
+        "progress_hint",
+        "todo_reminder",
+        "todo_completion_reminder",
+    }
+)
 _RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
@@ -56,7 +72,7 @@ _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"}
 def _should_persist_human_input_message(message: BaseMessage) -> bool:
     if not isinstance(message, HumanMessage):
         return False
-    if message.name == _LEGACY_SUMMARY_MESSAGE_NAME:
+    if message.name in _CONTROL_MESSAGE_NAMES:
         return False
     if message.additional_kwargs.get("hide_from_ui") is not True:
         return True
