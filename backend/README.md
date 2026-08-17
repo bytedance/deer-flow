@@ -298,6 +298,8 @@ reactivate server-only privileges or be discarded by runtime startup cleanup.
 Run `uv sync` after dependency changes; this compatibility path requires the
 declared LangGraph runtime versions and warns when the persisted-store contract
 does not match its expectations.
+The same file-based custom-app loading path used by this command is covered by
+the backend regression suite.
 
 ---
 

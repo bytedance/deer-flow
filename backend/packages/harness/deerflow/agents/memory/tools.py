@@ -141,9 +141,9 @@ def memory_add_tool(
         except NotImplementedError:
             return json.dumps({"error": f"memory backend {type(manager).__name__} does not support create_fact"})
         if fact_id is None:
-            # max_facts cap kept higher-confidence facts and evicted the new one;
-            # the fact was not stored -- report honestly instead of a dangling id.
-            return json.dumps({"error": "Fact was not stored because memory.max_facts kept higher-confidence facts"})
+            # The configured max_facts policy evicted the new fact; report the
+            # capacity result instead of a dangling id.
+            return json.dumps({"error": "Fact was not stored because the configured memory.max_facts capacity policy evicted it"})
         return json.dumps({"fact_id": fact_id, "status": "added"})
     except ValueError as exc:
         return json.dumps({"error": str(exc)})

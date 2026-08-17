@@ -51,6 +51,7 @@ describe("loadArtifactContent", () => {
       expect(new Headers(init?.headers).get("Range")).toBe(
         `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}`,
       );
+      expect(init?.credentials).toBe("include");
       return new Response(bytes, {
         status: 206,
         headers: {
