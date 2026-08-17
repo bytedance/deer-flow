@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Collection
 from html import escape
 from typing import override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
@@ -258,12 +259,16 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         messages = _insert_after_leading_system_messages(
             list(request.messages),
             [
-                SystemMessage(content=_AUTHORITY_CONTRACT),
+                SystemMessage(
+                    content=_AUTHORITY_CONTRACT,
+                    additional_kwargs=provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "durable_context"),
+                ),
                 HumanMessage(
                     content=data_block,
                     additional_kwargs={
                         "hide_from_ui": True,
                         _DURABLE_CONTEXT_DATA_KEY: True,
+                        **provenance_kwargs(ContentKind.DURABLE_CONTEXT, "durable_context_data"),
                     },
                 ),
             ],

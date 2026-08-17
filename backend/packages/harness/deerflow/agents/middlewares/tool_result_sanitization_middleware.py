@@ -34,6 +34,8 @@ from langchain_core.messages import ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
+
 logger = logging.getLogger(__name__)
 
 # Tool names whose results are attacker-influenceable remote content. The
@@ -98,7 +100,9 @@ def _sanitize_tool_message(message: ToolMessage) -> ToolMessage:
     new_content = _neutralize_content(message.content)
     if new_content == message.content:
         return message
-    return message.model_copy(update={"content": new_content})
+    new_kwargs = dict(message.additional_kwargs or {})
+    append_tool_transform(new_kwargs, "sanitized", by="ToolResultSanitizationMiddleware")
+    return message.model_copy(update={"content": new_content, "additional_kwargs": new_kwargs})
 
 
 def _sanitize_result(result: ToolMessage | Command) -> ToolMessage | Command:
