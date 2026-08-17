@@ -1,5 +1,6 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import errno
 import json
 import logging
 import os
@@ -420,8 +421,33 @@ def _fsync_directory_best_effort(directory: Path) -> None:
             logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
 
 
+def _overwrite_in_place(target_path: Path, source_path: Path) -> None:
+    """Copy *source_path* onto *target_path* without unlinking the destination inode.
+
+    Fallback for destinations that cannot be replaced by rename — see
+    :func:`atomic_write_extensions_config`. This deliberately truncates the
+    live file, so a crash mid-write leaves it short; the caller only reaches
+    this path when the atomic route is impossible.
+    """
+    payload = source_path.read_bytes()
+    with open(target_path, "wb") as target_file:
+        target_file.write(payload)
+        target_file.flush()
+        os.fsync(target_file.fileno())
+
+
 def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
-    """Write extensions config without exposing a truncated or partial file."""
+    """Write extensions config without exposing a truncated or partial file.
+
+    Falls back to a non-atomic in-place overwrite when the destination is a
+    bind-mounted file: Docker mounts ``extensions_config.json`` as its own
+    mount point, and the kernel refuses to rename over a mount point with
+    ``EBUSY`` regardless of whether the mount is read-only. Without the
+    fallback every Gateway write to this file fails in the production
+    compose stack (MCP enable/disable, ``PUT``/``PATCH /api/mcp/config``,
+    skill updates), contradicting the documented promise that the file is
+    editable at runtime through the API.
+    """
     path = Path(path)
     target_path = path.resolve(strict=False) if path.is_symlink() else path
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -449,7 +475,16 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
 
-        os.replace(temporary_path, target_path)
+        try:
+            os.replace(temporary_path, target_path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                raise
+            logger.warning(
+                "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
+                target_path,
+            )
+            _overwrite_in_place(target_path, temporary_path)
         _fsync_directory_best_effort(target_path.parent)
     finally:
         if temporary_path is not None:
