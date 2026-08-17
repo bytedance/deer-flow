@@ -227,8 +227,3 @@ class NotificationDeliveryRepository:
             await session.commit()
             await session.refresh(row)
             return self._to_dict(row)
-
-    async def list_by_task_run(self, task_run_id: str) -> list[dict[str, Any]]:
-        async with self.session_factory() as session:
-            result = await session.execute(select(NotificationDeliveryRow).where(NotificationDeliveryRow.task_run_id == task_run_id).order_by(NotificationDeliveryRow.created_at, NotificationDeliveryRow.id))
-            return [self._to_dict(row) for row in result.scalars()]

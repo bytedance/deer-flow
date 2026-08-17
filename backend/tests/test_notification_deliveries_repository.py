@@ -64,7 +64,8 @@ class TestNotificationDeliveryRepository:
 
         assert second["id"] == first["id"]
         assert second["payload"] == {"summary": "daily report ready"}
-        assert len(await repo.list_by_task_run("run-1")) == 1
+        claimed = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=10)
+        assert len(claimed) == 1
 
     @pytest.mark.anyio
     async def test_enqueue_allows_distinct_events_and_targets(self, repo):
@@ -72,7 +73,8 @@ class TestNotificationDeliveryRepository:
         await repo.enqueue(**_enqueue_kwargs(event="run_failed"))
         await repo.enqueue(**_enqueue_kwargs(target="bob"))
 
-        assert len(await repo.list_by_task_run("run-1")) == 3
+        claimed = await repo.claim_due_deliveries(now=datetime.now(UTC), limit=10)
+        assert len(claimed) == 3
 
     @pytest.mark.anyio
     async def test_claim_returns_only_due_pending_rows(self, repo):
@@ -259,16 +261,6 @@ class TestNotificationDeliveryRepository:
             updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
         assert updated["attempts"] == 0
         assert updated["status"] == "pending"
-
-    @pytest.mark.anyio
-    async def test_list_by_task_run_scopes_to_one_run(self, repo):
-        await repo.enqueue(**_enqueue_kwargs(task_run_id="run-a"))
-        await repo.enqueue(**_enqueue_kwargs(task_run_id="run-b"))
-
-        rows = await repo.list_by_task_run("run-a")
-
-        assert len(rows) == 1
-        assert rows[0]["task_run_id"] == "run-a"
 
     @pytest.mark.anyio
     async def test_unique_constraint_rejects_manual_duplicate(self, repo):
