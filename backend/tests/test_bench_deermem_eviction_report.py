@@ -71,7 +71,7 @@ def _write_response(output_dir: Path, case: PreparedCase, policy: str, predictio
         "prediction": prediction,
         "attempts": 1,
         "request_fingerprint": "f" * 64,
-        "response_model": "deepseek/deepseek-v4-flash",
+        "response_model": "deepseek-v4-flash",
         "usage": {"prompt_tokens": 10, "completion_tokens": 2},
         "created_at": "2026-08-17T00:00:00Z",
     }

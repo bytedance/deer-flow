@@ -144,6 +144,10 @@ Before freezing, the grader was cross-checked locally against all 90 historical 
 
 Full provider requests, dataset text, and prepared pools must remain in ignored local directories. Provider response headers must never be persisted because they can contain sensitive or account-specific data.
 
+## Model addressing
+
+The historical protocol disclosed in #4789 recorded the answer model as `deepseek/deepseek-v4-flash`, an aggregator-style namespace. This evaluation calls the same underlying model (DeepSeek-V4-Flash-0731, released before the historical run) directly through DeepSeek's official OpenAI-compatible API, whose canonical ID is `deepseek-v4-flash`; the config pins that ID. The model actually serving each call is recorded from the provider response in every answer row as `response_model`.
+
 ## Historical-result caveats
 
 The row-level artifacts disclosed in #4789 corrected the PR text's noisy-signal QA result from `5/10 vs 5/10` to `5/10 vs 6/10`. They also showed that the historical confidence rows used a 1024-token baseline, while hybrid rows used 2048 tokens and new calls. The follow-up live run will therefore:

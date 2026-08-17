@@ -122,7 +122,7 @@ def _mock_client(handler, qa) -> httpx.Client:
 
 
 def _success_body(prediction: str = "Lyon") -> dict:
-    return {"model": "deepseek/deepseek-v4-flash", "choices": [{"message": {"role": "assistant", "content": prediction}}], "usage": {"prompt_tokens": 100, "completion_tokens": 3, "detail": "ignored"}}
+    return {"model": "deepseek-v4-flash", "choices": [{"message": {"role": "assistant", "content": prediction}}], "usage": {"prompt_tokens": 100, "completion_tokens": 3, "detail": "ignored"}}
 
 
 def test_request_answer_parses_prediction_and_non_secret_metadata() -> None:
@@ -137,7 +137,7 @@ def test_request_answer_parses_prediction_and_non_secret_metadata() -> None:
     assert answer.prediction == "Lyon"
     assert answer.attempts == 1
     assert answer.usage == {"prompt_tokens": 100, "completion_tokens": 3}
-    assert answer.response_model == "deepseek/deepseek-v4-flash"
+    assert answer.response_model == "deepseek-v4-flash"
     payload = json.loads(seen[0].content)
     assert payload["model"] == qa.model
     assert payload["temperature"] == qa.temperature

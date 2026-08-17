@@ -43,7 +43,7 @@ qa:
   provider: openai-compatible
   api_key_env: DEERMEM_EVAL_ANSWER_API_KEY
   base_url_env: DEERMEM_EVAL_ANSWER_BASE_URL
-  model: deepseek/deepseek-v4-flash
+  model: deepseek-v4-flash
   temperature: 0
   max_tokens: 2048
   stream: false
