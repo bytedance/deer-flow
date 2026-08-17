@@ -1,8 +1,8 @@
 """Public contracts for DeerFlow extensions.
 
-This package MUST NOT import `deerflow`. Everything an extension needs to
-integrate lives here, so an extension depends on this package alone and can
-be released independently of the host.
+This package MUST NOT import `deerflow`. Every host contract an extension
+needs lives here, while framework imports remain direct extension dependencies;
+extensions can therefore be released independently of the host.
 """
 
 from __future__ import annotations
@@ -10,8 +10,17 @@ from __future__ import annotations
 from deerflow_extension_api.contracts import (
     ExtensionInstall,
     ExtensionRegistry,
+    ExtensionRuntimeDeps,
+    ExtensionService,
     HostPolicySnapshot,
     MiddlewareContributor,
+    SystemModelCallObserver,
+    SystemModelRequest,
+    SystemModelResult,
+    SystemOperationKind,
+    TaskInfo,
+    TaskLifecycleContributor,
+    TaskOutcome,
     extension,
 )
 from deerflow_extension_api.placement import (
@@ -26,11 +35,9 @@ from deerflow_extension_api.runtime_bridge import (
 )
 from deerflow_extension_api.state import ExtensionData
 
-#: Contract version. Pre-1.0: the contract surface is observational only
-#: (contributors and observers), so minors may break and only patches promise
-#: to be additive. From 1.0 on, bump the major on any breaking change; see the
-#: spec's evolution rules for what counts as additive.
-API_VERSION = "0.1.0"
+#: Contract version. Before 1.0, minors may break and patches are additive.
+#: From 1.0 on, bump the major for breaking changes.
+API_VERSION = "0.1.2"
 
 __all__ = [
     "API_VERSION",
@@ -40,10 +47,19 @@ __all__ = [
     "ExtensionData",
     "ExtensionInstall",
     "ExtensionRegistry",
+    "ExtensionRuntimeDeps",
+    "ExtensionService",
     "HostPolicySnapshot",
     "MiddlewareContributor",
     "MiddlewarePlacement",
     "Placement",
+    "SystemModelCallObserver",
+    "SystemModelRequest",
+    "SystemModelResult",
+    "SystemOperationKind",
+    "TaskInfo",
+    "TaskLifecycleContributor",
+    "TaskOutcome",
     "extension",
     "task_store_from_runtime",
 ]

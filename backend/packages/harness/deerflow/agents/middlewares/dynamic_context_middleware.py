@@ -66,6 +66,20 @@ _SUMMARY_MESSAGE_NAME = "summary"
 INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
 
 
+def _format_current_date() -> str:
+    return datetime.now().strftime("%Y-%m-%d, %A")
+
+
+def _format_current_date_reminder(current_date: str) -> str:
+    return "\n".join(
+        [
+            "<system-reminder>",
+            f"<current_date>{current_date}</current_date>",
+            "</system-reminder>",
+        ]
+    )
+
+
 def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
     """Return the id *message_id* had before the reminder ID-swap.
 
@@ -143,6 +157,42 @@ def _is_user_injection_target(message: object) -> bool:
     return True
 
 
+class SubagentDateContextMiddleware(AgentMiddleware):
+    """Inject hidden current-date context once per built-in subagent execution.
+
+    Built-in subagents need the same temporal anchor as the lead agent, but not
+    its user-memory lookup, frozen-conversation ID swap, or midnight refresh
+    lifecycle. Each subagent graph is one-shot and starts from fresh state, so a
+    single ``before_agent`` update makes the date available before its first
+    model call without coupling the two runtime paths.
+    """
+
+    @staticmethod
+    def _inject() -> dict:
+        current_date = _format_current_date()
+        reminder = _format_current_date_reminder(current_date)
+        return {
+            "messages": [
+                SystemMessage(
+                    content=reminder,
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        _REMINDER_DATE_KEY: current_date,
+                    },
+                )
+            ]
+        }
+
+    @override
+    def before_agent(self, state, runtime: Runtime) -> dict:
+        return self._inject()
+
+    @override
+    async def abefore_agent(self, state, runtime: Runtime) -> dict:
+        return self._inject()
+
+
 class DynamicContextMiddleware(AgentMiddleware):
     """Inject memory and current date as a SystemMessage <system-reminder>.
 
@@ -152,6 +202,16 @@ class DynamicContextMiddleware(AgentMiddleware):
     persists it (same message ID).  The first message is then frozen for the whole
     session — its content never changes again, so the prefix cache can hit on every
     subsequent turn.
+
+    Fallback (missed earlier injection)
+    -----------------------------------
+    If an earlier turn ended without any reminder (e.g. the async ``abefore_agent``
+    degraded path skipped injection on a timeout), the first-injection branch runs
+    on a history that already holds several turns.  The reminder then attaches to
+    the **last** user message instead: the ID-swap's ``{id}__user`` copy is
+    appended by ``add_messages``, so attaching to an earlier message would move
+    that stale prompt ahead of the current question and the model would answer
+    the old prompt as the current turn.
 
     Midnight crossing
     -----------------
@@ -186,29 +246,15 @@ class DynamicContextMiddleware(AgentMiddleware):
             if injection_enabled
             else ""
         )
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-
-        date_reminder = "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        current_date = _format_current_date()
+        date_reminder = _format_current_date_reminder(current_date)
 
         memory_block = memory_context.strip() if memory_context else None
 
         return date_reminder, memory_block
 
     def _build_date_update_reminder(self) -> str:
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
-        return "\n".join(
-            [
-                "<system-reminder>",
-                f"<current_date>{current_date}</current_date>",
-                "</system-reminder>",
-            ]
-        )
+        return _format_current_date_reminder(_format_current_date())
 
     @staticmethod
     def _make_reminder_and_user_messages(
@@ -270,7 +316,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         if not messages:
             return None
 
-        current_date = datetime.now().strftime("%Y-%m-%d, %A")
+        current_date = _format_current_date()
         last_date = _last_injected_date(messages)
         logger.debug(
             "DynamicContextMiddleware._inject: msg_count=%d last_date=%r current_date=%r",
@@ -281,16 +327,26 @@ class DynamicContextMiddleware(AgentMiddleware):
 
         if last_date is None:
             # ── First turn: inject full reminder as a SystemMessage ─────
-            first_idx = next((i for i, m in enumerate(messages) if _is_user_injection_target(m)), None)
-            if first_idx is None:
+            #
+            # Scan from the end so the reminder attaches to the LAST user
+            # injection target.  Normally that is also the only message.  But
+            # when an earlier turn ended without any reminder — e.g. the async
+            # ``abefore_agent`` degraded path skipped injection on a timeout —
+            # history already holds multiple turns and the ID-swap's
+            # ``{id}__user`` copy is APPENDED by ``add_messages``; choosing an
+            # earlier message here would move the old first user prompt to the
+            # tail, ahead of the latest question, and the model would answer
+            # the stale first message as if it were the current turn.
+            target_idx = next((i for i in reversed(range(len(messages))) if _is_user_injection_target(messages[i])), None)
+            if target_idx is None:
                 return None
             date_reminder, memory_block = self._build_full_reminder(runtime)
             logger.info(
-                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into first HumanMessage id=%r",
+                "DynamicContextMiddleware: injecting full reminder (has_memory=%s) into last HumanMessage id=%r",
                 memory_block is not None,
-                messages[first_idx].id,
+                messages[target_idx].id,
             )
-            result_msgs = self._make_reminder_and_user_messages(messages[first_idx], date_reminder, memory_block, reminder_date=current_date)
+            result_msgs = self._make_reminder_and_user_messages(messages[target_idx], date_reminder, memory_block, reminder_date=current_date)
             return {"messages": result_msgs}
 
         if last_date == current_date:

@@ -52,7 +52,7 @@ from app.channels import buzz_nostr
 from app.channels.base import Channel
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
+from app.channels.message_bus import InboundMessage, InboundMessageType, InboundQueueFullError, MessageBus, OutboundMessage
 
 logger = logging.getLogger(__name__)
 
@@ -941,6 +941,11 @@ class BuzzChannel(Channel):
                     await self._handle_chat_event(ev)
                 elif ev_kind in (buzz_nostr.KIND_MEMBER_ADDED, buzz_nostr.KIND_MEMBER_REMOVED):
                     await self._handle_membership_event(ev)
+            except InboundQueueFullError:
+                # This is not malformed relay input. Escape to _run_loop so the
+                # connection is reopened with the last processed watermark and
+                # relay history can retry the message once intake has capacity.
+                raise
             except Exception:
                 # Defense in depth against malformed tags/timestamps inside an
                 # otherwise well-shaped EVENT frame (e.g. a non-integer created_at,

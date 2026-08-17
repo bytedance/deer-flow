@@ -18,6 +18,13 @@ local function now_ms()
     return tonumber(current[1]) * 1000 + math.floor(tonumber(current[2]) / 1000)
 end
 
+-- Number of 'meta:*' fields initialize() writes. Live entries ('r:'/'s:') are
+-- counted as HLEN minus this, so the two must move together: adding a meta
+-- field without updating this constant makes the ledger over-count usage and
+-- reject one reservation early. test_ledger_meta_field_count_matches_constant
+-- pins it against initialize()'s actual output.
+local META_FIELD_COUNT = 3
+
 local function initialize(hard_limit)
     redis.call('HSET', KEYS[1],
         'meta:state', 'initializing',
@@ -57,7 +64,7 @@ if operation == 'reserve' then
     if redis.call('HEXISTS', KEYS[1], field) == 1 then
         return 'GRANTED'
     end
-    if redis.call('HLEN', KEYS[1]) - 3 >= tonumber(hard_limit) then
+    if redis.call('HLEN', KEYS[1]) - META_FIELD_COUNT >= tonumber(hard_limit) then
         return 'FULL'
     end
     redis.call('HSET', KEYS[1], field, tostring(now_ms()))

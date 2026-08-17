@@ -111,6 +111,7 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
 
 
 async def _persist_delivery_receipt(
@@ -558,12 +559,20 @@ async def run_agent(
     run_id = record.run_id
     thread_id = record.thread_id
 
-    from deerflow_extension_api import ExtensionData
+    from deerflow_extension_api import ExtensionData, TaskInfo
 
     from deerflow.extensions import get_loaded_extensions
+    from deerflow.extensions.notify import (
+        lead_task_id,
+        lead_task_outcome,
+        notify_task_start,
+        notify_task_stop,
+    )
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
+    task_info: TaskInfo | None = None
+    deferred_stop_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -677,8 +686,25 @@ async def run_agent(
             return
         started = True
 
+        task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
-            task_store = ExtensionData(run_id)
+            task_store = ExtensionData(task_id)
+
+        if extensions.has_task_lifecycle:
+            task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+            )
+            assert task_store is not None
+            await notify_task_start(
+                extensions,
+                task_store,
+                task_info,
+                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+            )
 
         if not record.ownership_lost and thread_store is not None:
             try:
@@ -990,6 +1016,8 @@ async def run_agent(
                 abort_event=record.abort_event,
                 user_id=resolve_runtime_user_id(runtime),
                 deerflow_trace_id=deerflow_trace_id,
+                task_store=task_store,
+                extensions=extensions,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -1240,11 +1268,43 @@ async def run_agent(
                 await ctx.on_run_completed(record)
             except Exception:
                 logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+
+        if task_info is not None and task_store is not None:
+            # Keep the finalizing barrier held until stop observers finish, so
+            # a same-thread replacement cannot overlap this task's lifecycle.
+            try:
+                await notify_task_stop(
+                    extensions,
+                    task_store,
+                    task_info,
+                    lead_task_outcome(
+                        aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
+                        succeeded=record.status == RunStatus.success,
+                    ),
+                    timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                )
+            except Exception:
+                logger.warning(
+                    "Extension task-stop notification failed for run %s (non-fatal)",
+                    run_id,
+                    exc_info=True,
+                )
+            except BaseException as exc:
+                # Cancellation here must not strand the finalizing barrier or
+                # leave stream consumers waiting for the end frame.
+                deferred_stop_interrupt = exc
+                logger.warning(
+                    "Extension task-stop notification interrupted for run %s; completing cleanup first",
+                    run_id,
+                )
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+
+        if deferred_stop_interrupt is not None:
+            raise deferred_stop_interrupt
 
 
 # ---------------------------------------------------------------------------
@@ -1410,6 +1470,8 @@ async def _prepare_goal_continuation_input(
     abort_event: asyncio.Event | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1490,6 +1552,8 @@ async def _prepare_goal_continuation_input(
             thread_id=thread_id,
             user_id=user_id,
             deerflow_trace_id=deerflow_trace_id,
+            task_store=task_store,
+            extensions=extensions,
         )
         if abort_event is not None and abort_event.is_set():
             return None

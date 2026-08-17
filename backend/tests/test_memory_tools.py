@@ -234,7 +234,7 @@ class TestMemoryAddTool:
 
         result_json = memory_add_tool.func(SimpleNamespace(context={}), "low confidence fact", confidence=0.1)
         result = json.loads(result_json)
-        assert result == {"error": "Fact was not stored because memory.max_facts kept higher-confidence facts"}
+        assert result == {"error": "Fact was not stored because the configured memory.max_facts capacity policy evicted it"}
         assert recorded == ["low confidence fact"]
 
     def test_uses_runtime_scope(self, monkeypatch):

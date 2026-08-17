@@ -3,6 +3,8 @@ import copy
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.prompt import format_conversation_for_update
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
@@ -153,6 +155,213 @@ def test_apply_updates_skips_whitespace_only_facts() -> None:
     # The whitespace-only fact must not be stored; the real fact still is.
     assert [fact["content"] for fact in result["facts"]] == ["User prefers dark mode"]
     assert all(fact["content"].strip() for fact in result["facts"])
+
+
+def test_apply_updates_reinforces_existing_fact_only_with_detected_signal() -> None:
+    updater = _make_updater(config=_memory_config(fact_eviction_policy="hybrid-v1"))
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_preference",
+                "content": "User prefers concise answers",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "source": "thread-a",
+            }
+        ]
+    )
+    update_data = {
+        "newFacts": [],
+        "factsToReinforce": [
+            {
+                "id": "fact_preference",
+                "scope": "user",
+                "reason": "The user explicitly confirmed this preference",
+            }
+        ],
+    }
+
+    without_signal = updater._apply_updates(copy.deepcopy(current_memory), update_data)
+    with_signal = updater._apply_updates(
+        copy.deepcopy(current_memory),
+        update_data,
+        signals=frozenset({"reinforcement"}),
+    )
+
+    assert "lastConfirmedAt" not in without_signal["facts"][0]
+    assert with_signal["facts"][0]["lastConfirmedAt"].endswith("Z")
+    assert with_signal["facts"][0]["confirmationCount"] == 1
+
+    confidence_only = _make_updater()
+    without_hybrid_tracking = confidence_only._apply_updates(
+        copy.deepcopy(current_memory),
+        update_data,
+        signals=frozenset({"reinforcement"}),
+    )
+    assert "lastConfirmedAt" not in without_hybrid_tracking["facts"][0]
+
+
+@pytest.mark.parametrize(
+    ("prior_count", "expected_count"),
+    [
+        (3, 4),
+        (0, 1),
+        (True, 1),
+        (-1, 1),
+        ("3", 1),
+    ],
+)
+def test_apply_updates_normalizes_prior_confirmation_count(prior_count: object, expected_count: int) -> None:
+    updater = _make_updater(config=_memory_config(fact_eviction_policy="hybrid-v1"))
+    current_memory = _make_memory(
+        facts=[
+            {
+                "id": "fact_preference",
+                "content": "User prefers concise answers",
+                "category": "preference",
+                "confidence": 0.8,
+                "createdAt": "2026-01-01T00:00:00Z",
+                "source": "thread-a",
+                "confirmationCount": prior_count,
+            }
+        ]
+    )
+    update_data = {
+        "newFacts": [],
+        "factsToReinforce": [
+            {
+                "id": "fact_preference",
+                "scope": "user",
+                "reason": "The user explicitly confirmed this preference",
+            }
+        ],
+    }
+
+    result = updater._apply_updates(
+        current_memory,
+        update_data,
+        signals=frozenset({"reinforcement"}),
+    )
+
+    assert result["facts"][0]["confirmationCount"] == expected_count
+
+
+def test_parse_memory_update_response_normalizes_reinforcement_entries() -> None:
+    parsed = _parse_memory_update_response(
+        '{"user":{},"history":{},"newFacts":[],"factsToReinforce":[{"id":" fact_a ","scope":"USER","reason":" explicit confirmation "},{"id":"fact_b","scope":"thread","reason":"one-off"},{"id":"","scope":"user","reason":"bad"}]}'
+    )
+
+    assert parsed["factsToReinforce"] == [
+        {"id": "fact_a", "scope": "user", "reason": "explicit confirmation"},
+        {"id": "fact_b", "scope": "thread", "reason": "one-off"},
+    ]
+
+
+def test_automatic_update_uses_hybrid_capacity_policy() -> None:
+    updater = _make_updater(
+        config=_memory_config(
+            fact_eviction_policy="hybrid-v1",
+            max_facts=10,
+            fact_confidence_threshold=0.7,
+        )
+    )
+    current_memory = _make_memory(
+        facts=[
+            *[
+                {
+                    "id": f"high_{index}",
+                    "content": f"high {index}",
+                    "category": "preference",
+                    "confidence": 0.99,
+                    "createdAt": "2026-08-12T00:00:00Z",
+                }
+                for index in range(8)
+            ],
+            {
+                "id": "stale_high",
+                "content": "stale high confidence",
+                "category": "preference",
+                "confidence": 0.9,
+                "createdAt": "2025-01-01T00:00:00Z",
+            },
+            {
+                "id": "confirmed_recently",
+                "content": "recently confirmed preference",
+                "category": "preference",
+                "confidence": 0.7,
+                "createdAt": "2025-01-01T00:00:00Z",
+                "lastConfirmedAt": "2026-08-12T00:00:00Z",
+            },
+        ]
+    )
+
+    result = updater._apply_updates(
+        current_memory,
+        {
+            "newFacts": [
+                {
+                    "content": "new useful context",
+                    "category": "context",
+                    "confidence": 0.8,
+                    **_DURABLE_USER_FACT,
+                }
+            ]
+        },
+        agent_name="default",
+    )
+
+    kept_ids = {fact["id"] for fact in result["facts"]}
+    assert "confirmed_recently" in kept_ids
+    assert "stale_high" not in kept_ids
+
+
+def test_confidence_capacity_does_not_read_usage_sidecar() -> None:
+    storage = _MemoryStorage()
+    storage.get_fact_usage = MagicMock(return_value={})
+    updater = _make_updater(
+        config=_memory_config(max_facts=1),
+        storage=storage,
+    )
+
+    updater._select_for_capacity(
+        [
+            {"id": "high", "confidence": 0.9},
+            {"id": "low", "confidence": 0.8},
+        ],
+        agent_name="default",
+        user_id="user-a",
+    )
+
+    storage.get_fact_usage.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        _memory_config(max_facts=1, fact_eviction_policy="hybrid-v1"),
+        _memory_config(max_facts=1, fact_eviction_shadow_enabled=True),
+    ],
+    ids=["hybrid", "shadow"],
+)
+def test_hybrid_capacity_reads_usage_sidecar(config: DeerMemConfig) -> None:
+    storage = _MemoryStorage()
+    storage.get_fact_usage = MagicMock(return_value={})
+    updater = _make_updater(config=config, storage=storage)
+
+    updater._select_for_capacity(
+        [
+            {"id": "high", "confidence": 0.9},
+            {"id": "low", "confidence": 0.8},
+        ],
+        agent_name="default",
+        user_id="user-a",
+    )
+
+    storage.get_fact_usage.assert_called_once_with(
+        agent_name="default",
+        user_id="user-a",
+    )
 
 
 def test_prepare_update_prompt_preserves_non_ascii_memory_text() -> None:
@@ -926,6 +1135,81 @@ class TestUpdateMemoryStructuredResponse:
 
         assert result is True
         model.invoke.assert_called_once()
+
+    def test_result_callback_observes_successful_provider_call(self):
+        calls: list[dict[str, object]] = []
+
+        class _Callbacks:
+            def on_memory_llm_call(self, invoke_config, **kwargs):
+                return None
+
+            def on_memory_llm_result(self, invoke_config, **kwargs):
+                calls.append({"invoke_config": invoke_config, **kwargs})
+
+        valid_json = '{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}'
+        model = self._make_mock_model(valid_json)
+        updater = _make_updater(llm=model, callbacks=_Callbacks())
+        msg = MagicMock(type="human", content="Hello")
+        ai_msg = MagicMock(type="ai", content="Hi", tool_calls=[])
+
+        assert updater.update_memory([msg, ai_msg]) is True
+        assert len(calls) == 1
+        assert calls[0]["response"] is model.invoke.return_value
+        assert calls[0]["error"] is None
+        assert calls[0]["model_name"] is None
+        assert calls[0]["duration_ms"] >= 0
+
+    def test_result_callback_observes_provider_failure_and_is_fail_open(self):
+        calls: list[dict[str, object]] = []
+
+        class _Callbacks:
+            def on_memory_llm_call(self, invoke_config, **kwargs):
+                return None
+
+            def on_memory_llm_result(self, invoke_config, **kwargs):
+                calls.append({"invoke_config": invoke_config, **kwargs})
+
+        provider_error = RuntimeError("provider down")
+        model = MagicMock()
+        model.invoke.side_effect = provider_error
+        updater = _make_updater(llm=model, callbacks=_Callbacks())
+        msg = MagicMock(type="human", content="Hello")
+        ai_msg = MagicMock(type="ai", content="Hi", tool_calls=[])
+
+        assert updater.update_memory([msg, ai_msg]) is False
+        assert len(calls) == 1
+        assert calls[0]["response"] is None
+        assert calls[0]["error"] is provider_error
+
+        class _BrokenCallbacks(_Callbacks):
+            def on_memory_llm_result(self, invoke_config, **kwargs):
+                raise RuntimeError("observer callback broke")
+
+        working_model = self._make_mock_model('{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}')
+        fail_open_updater = _make_updater(
+            llm=working_model,
+            callbacks=_BrokenCallbacks(),
+        )
+        assert fail_open_updater.update_memory([msg, ai_msg]) is True
+
+    def test_result_callback_does_not_swallow_interpreter_shutdown(self):
+        # Fail-open covers the hook's own failures, not a process teardown
+        # signal: swallowing SystemExit here would let an observability path
+        # keep a shutting-down interpreter alive.
+        class _ExitingCallbacks:
+            def on_memory_llm_call(self, invoke_config, **kwargs):
+                return None
+
+            def on_memory_llm_result(self, invoke_config, **kwargs):
+                raise SystemExit("interpreter is going down")
+
+        model = self._make_mock_model('{"user": {}, "history": {}, "newFacts": [], "factsToRemove": []}')
+        updater = _make_updater(llm=model, callbacks=_ExitingCallbacks())
+        msg = MagicMock(type="human", content="Hello")
+        ai_msg = MagicMock(type="ai", content="Hi", tool_calls=[])
+
+        with pytest.raises(SystemExit):
+            updater.update_memory([msg, ai_msg])
 
     def test_list_content_response_parses(self):
         """LLM response as list-of-blocks should be extracted, not repr'd."""
