@@ -15,7 +15,7 @@ The first stage is entirely offline:
 - compares `confidence` and the production `hybrid-v1` policy at capacities 5, 7, and 9;
 - writes metadata-only row results that are safe to publish.
 
-The live QA runner and deterministic grader are intentionally not part of this first scaffold. They will use the fixed answer prompt and provider environment-variable names already recorded in the config. Both policies must be rerun with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline will not be reproduced.
+The deterministic grader (`grading.py`, see below) is implemented and frozen. The live QA runner is intentionally not part of this scaffold yet. It will use the fixed answer prompt and provider environment-variable names already recorded in the config. Both policies must be rerun with the same `max_tokens=2048`; the historical optimization that reused a 1024-token confidence baseline will not be reproduced.
 
 ## Pinned inputs
 
@@ -89,6 +89,23 @@ At capacity 7, the offline result reproduces the disclosed support-retention tot
 
 This is a deterministic selector result, not evidence that production reinforcement detection or query access heat is unbiased. The eventual QA report must keep official, synthetic-correction, and noisy-signal results separate.
 
+## Deterministic grading
+
+`grading.py` implements the disclosed grader as a pure, offline module versioned as `deterministic-overlap-v1`; the config pins that identity via `qa.grader_version`, and `validate-contracts` rejects a mismatch. The grader is blind by construction: `grade_answer(prediction, reference)` accepts only the two answer strings and never a policy identity.
+
+Normalization lowercases, replaces every non-alphanumeric character with a space, and maps the English number words one through ten and fifteen to digits. Rules apply in order:
+
+1. reject an empty prediction or the exact `INSUFFICIENT` sentinel;
+2. accept exact normalized-token equality;
+3. accept containment of one token sequence in the other as a contiguous subsequence (token-level, so `5` never matches inside `25`);
+4. accept a prediction whose integer tokens all fall inside an explicit `ranging from X ... to Y` reference range;
+5. reject conflicting integer tokens when both sides contain integers;
+6. otherwise require at least 60% unique non-stopword token overlap in both directions.
+
+The disclosure in #4789 did not publish an exact stopword list, so the list committed in `grading.py` is a fixed part of this grader version: common English function words, with `yes`, `no`, and `not` deliberately excluded because negation can be the entire answer. Changing the list or any rule requires a new `grader_version`.
+
+Before freezing, the grader was cross-checked locally against all 90 historical `(prediction, reference)` pairs disclosed in #4789 — the saved QA grades for both policies across 45 cases — and reproduced every historical grade exactly, with no per-result tuning afterward.
+
 ## Output contract
 
 `run-policy` creates three files:
@@ -117,4 +134,4 @@ The default tests are offline and use only synthetic LongMemEval-shaped rows:
 PYTHONPATH=. uv run pytest tests/test_bench_deermem_eviction_*.py -q
 ```
 
-They cover config and manifest contracts, prompt hashing, dataset-integrity rejection, evidence extraction, distractor filtering, deterministic pool construction, production selector behavior, correction reservation, public-result redaction, and overwrite protection.
+They cover config and manifest contracts, prompt hashing, dataset-integrity rejection, evidence extraction, distractor filtering, deterministic pool construction, production selector behavior, correction reservation, public-result redaction, overwrite protection, and every grading rule with its edge cases.

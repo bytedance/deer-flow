@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .config import EvaluationConfig, load_evaluation_config
 from .dataset import LongMemEvalDataset, load_longmemeval
+from .grading import GRADER_VERSION
 from .io import sha256_file
 from .manifest import OfficialManifest, SyntheticManifest, load_official_manifest, load_synthetic_manifest
 from .policy import evaluate_case
@@ -25,6 +26,8 @@ def _load_contracts(args: argparse.Namespace) -> tuple[EvaluationConfig, Officia
     synthetic = load_synthetic_manifest(args.synthetic_manifest)
     if {config.protocol_id, official.protocol_id, synthetic.protocol_id} != {config.protocol_id}:
         raise ValueError("config and manifests use different protocol IDs")
+    if config.qa.grader_version != GRADER_VERSION:
+        raise ValueError(f"config pins grader {config.qa.grader_version!r} but the committed grader is {GRADER_VERSION!r}")
     prompt_path = EVAL_ROOT / config.qa.answer_prompt.path
     actual_prompt_sha = sha256_file(prompt_path)
     if actual_prompt_sha != config.qa.answer_prompt.sha256:
