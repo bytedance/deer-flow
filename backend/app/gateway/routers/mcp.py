@@ -346,6 +346,15 @@ _CODE_INJECTING_ENV_VARS = frozenset(
 )
 
 
+class McpUserScopedAuthConfigResponse(BaseModel):
+    """Per-user credential injection configuration for an MCP server."""
+
+    enabled: bool = Field(default=True, description="Whether user-scoped credential injection is enabled")
+    header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
+    users: dict[str, str] = Field(default_factory=dict, description="Map of DeerFlow user id to credential header value")
+    on_missing: Literal["deny", "passthrough"] = Field(default="deny", description="Behavior when the calling user has no mapped credential")
+
+
 class McpOAuthConfigResponse(BaseModel):
     """OAuth configuration for an MCP server."""
 
@@ -376,6 +385,7 @@ class McpServerConfigResponse(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
+    user_auth: McpUserScopedAuthConfigResponse | None = Field(default=None, description="Per-user credential injection for MCP HTTP/SSE servers")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
@@ -652,12 +662,16 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
                 "refresh_token": None,
             }
         )
+    masked_user_auth = None
+    if server.user_auth is not None:
+        masked_user_auth = server.user_auth.model_copy(update={"users": {k: _MASKED_VALUE for k in server.user_auth.users}})
     masked_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.model_extra or {}).items()}
     return server.model_copy(
         update={
             "env": masked_env,
             "headers": masked_headers,
             "oauth": masked_oauth,
+            "user_auth": masked_user_auth,
             **masked_extra,
         }
     )
@@ -719,11 +733,31 @@ def _merge_preserving_secrets(
                 "refresh_token": merged_refresh_token,
             }
         )
+    merged_user_auth = incoming.user_auth
+    if incoming.user_auth is not None:
+        existing_users = existing.user_auth.users if existing.user_auth is not None else {}
+        merged_users = {}
+        for k, v in incoming.user_auth.users.items():
+            if v == _MASKED_VALUE:
+                if k in existing_users:
+                    merged_users[k] = existing_users[k]
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot set user_auth credential for '{k}' to masked value '***'; provide a real value.",
+                    )
+            else:
+                merged_users[k] = v
+        merged_user_auth = incoming.user_auth.model_copy(update={"users": merged_users})
+
     update = {
         "env": merged_env,
         "headers": merged_headers,
         "oauth": merged_oauth,
+        "user_auth": merged_user_auth,
     }
+    if "user_auth" not in incoming.model_fields_set:
+        update["user_auth"] = existing.user_auth
     if "routing" not in incoming.model_fields_set:
         update["routing"] = existing.routing
     if "tools" not in incoming.model_fields_set:

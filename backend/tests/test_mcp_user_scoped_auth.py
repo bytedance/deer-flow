@@ -1,0 +1,237 @@
+"""Tests for per-user credential injection on shared MCP servers."""
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+from langchain_core.tools import ToolException
+from langchain_mcp_adapters.interceptors import MCPToolCallRequest
+
+from deerflow.config.extensions_config import (
+    ExtensionsConfig,
+    McpServerConfig,
+    McpUserScopedAuthConfig,
+)
+from deerflow.mcp.interceptors import build_mcp_tool_interceptors
+from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
+
+
+def _config(**user_auth_kwargs) -> ExtensionsConfig:
+    return ExtensionsConfig(
+        mcp_servers={
+            "shared-http": McpServerConfig(
+                enabled=True,
+                type="http",
+                url="https://mcp.example.com/mcp",
+                headers={"Authorization": "Bearer discovery-token"},
+                user_auth=McpUserScopedAuthConfig(**user_auth_kwargs),
+            ),
+            "other": McpServerConfig(enabled=True, type="http", url="https://other.example.com/mcp"),
+        },
+        skills={},
+    )
+
+
+def _request(server_name: str = "shared-http", headers: dict | None = None, runtime: object | None = None) -> MCPToolCallRequest:
+    return MCPToolCallRequest(
+        name="act",
+        args={},
+        server_name=server_name,
+        headers=headers,
+        runtime=runtime,
+    )
+
+
+def _runtime_for_user(user_id: str) -> object:
+    return SimpleNamespace(server_info=None, context={"user_id": user_id})
+
+
+async def _echo_handler(request: MCPToolCallRequest) -> MCPToolCallRequest:
+    return request
+
+
+def test_no_user_auth_servers_returns_none():
+    config = ExtensionsConfig(
+        mcp_servers={"plain": McpServerConfig(enabled=True, type="http", url="https://x.example.com")},
+        skills={},
+    )
+    assert build_user_scoped_auth_interceptor(config) is None
+
+
+def test_disabled_user_auth_returns_none():
+    config = _config(users={"u1": "Bearer t1"}, enabled=False)
+    assert build_user_scoped_auth_interceptor(config) is None
+
+
+def test_disabled_server_is_ignored():
+    config = _config(users={"u1": "Bearer t1"})
+    config.mcp_servers["shared-http"].enabled = False
+    assert build_user_scoped_auth_interceptor(config) is None
+
+
+def test_mapped_user_gets_own_credential():
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1", "u2": "Bearer t2"}))
+    result = asyncio.run(interceptor(_request(headers={"Authorization": "Bearer discovery-token"}, runtime=_runtime_for_user("u2")), _echo_handler))
+    assert result.headers["Authorization"] == "Bearer t2"
+
+
+def test_custom_header_and_other_headers_preserved():
+    interceptor = build_user_scoped_auth_interceptor(_config(header="X-Api-Key", users={"u1": "k1"}))
+    result = asyncio.run(interceptor(_request(headers={"Accept": "application/json"}, runtime=_runtime_for_user("u1")), _echo_handler))
+    assert result.headers == {"Accept": "application/json", "X-Api-Key": "k1"}
+
+
+def test_other_server_passes_through_untouched():
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}))
+    request = _request(server_name="other", headers={"Authorization": "Bearer static"}, runtime=_runtime_for_user("u1"))
+    result = asyncio.run(interceptor(request, _echo_handler))
+    assert result is request
+
+
+def test_unmapped_user_denied_without_calling_handler():
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException, match="No credential is configured"):
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("stranger")), handler))
+    handler.assert_not_awaited()
+
+
+def test_empty_resolved_credential_is_denied():
+    """An unset $ENV_VAR reference resolves to "" and must fail closed."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": ""}))
+    with pytest.raises(ToolException, match="No credential is configured"):
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), AsyncMock()))
+
+
+def test_on_missing_passthrough_keeps_static_headers():
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}, on_missing="passthrough"))
+    request = _request(headers={"Authorization": "Bearer discovery-token"}, runtime=_runtime_for_user("stranger"))
+    result = asyncio.run(interceptor(request, _echo_handler))
+    assert result.headers["Authorization"] == "Bearer discovery-token"
+
+
+def test_default_user_fallback_is_denied_when_unmapped():
+    """Without any resolvable identity the DEFAULT_USER_ID fallback must not inherit a credential."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}))
+    with patch("deerflow.mcp.user_scoped_auth._current_runtime", return_value=None), pytest.raises(ToolException):
+        asyncio.run(interceptor(_request(runtime=None), AsyncMock()))
+
+
+def test_env_var_reference_resolution(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_USER_CRED", "Bearer from-env")
+    config_file = tmp_path / "extensions_config.json"
+    config_file.write_text(
+        """
+        {
+          "mcpServers": {
+            "shared-http": {
+              "enabled": true,
+              "type": "http",
+              "url": "https://mcp.example.com/mcp",
+              "user_auth": {"users": {"u1": "$TEST_USER_CRED", "u2": "$TEST_USER_CRED_UNSET"}}
+            }
+          }
+        }
+        """
+    )
+    config = ExtensionsConfig.from_file(str(config_file))
+    user_auth = config.mcp_servers["shared-http"].user_auth
+    assert user_auth.users["u1"] == "Bearer from-env"
+    assert user_auth.users["u2"] == ""
+
+
+def test_registered_after_oauth_in_shared_assembly():
+    config = _config(users={"u1": "Bearer t1"})
+
+    async def oauth(request, handler):  # pragma: no cover - identity only
+        return await handler(request)
+
+    interceptors = build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: oauth)
+    assert len(interceptors) == 2
+    assert interceptors[0] is oauth
+    assert interceptors[1].__name__ == "user_scoped_auth_interceptor"
+
+
+def test_shared_assembly_skips_when_no_user_auth():
+    config = ExtensionsConfig(
+        mcp_servers={"plain": McpServerConfig(enabled=True, type="http", url="https://x.example.com")},
+        skills={},
+    )
+    interceptors = build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: None)
+    assert interceptors == []
+
+
+def test_gateway_masks_user_auth_credentials():
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _mask_server_config,
+    )
+
+    server = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "Bearer real-secret"}),
+    )
+    masked = _mask_server_config(server)
+    assert masked.user_auth.users == {"u1": "***"}
+    assert masked.user_auth.header == "Authorization"
+
+
+def test_gateway_merge_preserves_masked_user_auth_values():
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "Bearer real-secret"}),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "***", "u2": "Bearer new-secret"}),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.user_auth.users == {"u1": "Bearer real-secret", "u2": "Bearer new-secret"}
+
+
+def test_gateway_merge_rejects_masked_value_for_new_user():
+    from fastapi import HTTPException
+
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(type="http", url="https://mcp.example.com/mcp")
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"new-user": "***"}),
+    )
+    with pytest.raises(HTTPException):
+        _merge_preserving_secrets(incoming, existing)
+
+
+def test_gateway_merge_preserves_user_auth_when_field_omitted():
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "Bearer real-secret"}),
+    )
+    incoming = McpServerConfigResponse(type="http", url="https://mcp.example.com/mcp")
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.user_auth is not None
+    assert merged.user_auth.users == {"u1": "Bearer real-secret"}

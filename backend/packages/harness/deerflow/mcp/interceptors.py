@@ -7,6 +7,7 @@ from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
+from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
 from deerflow.reflection import resolve_variable
 
 logger = logging.getLogger(__name__)
@@ -16,14 +17,22 @@ def build_mcp_tool_interceptors(
     extensions_config: ExtensionsConfig,
     *,
     oauth_builder: Any = build_oauth_tool_interceptor,
+    user_auth_builder: Any = build_user_scoped_auth_interceptor,
     resolver: Any = resolve_variable,
     target_logger: logging.Logger = logger,
 ) -> list[Any]:
-    """Build OAuth followed by configured custom MCP interceptors."""
+    """Build OAuth, user-scoped auth, then configured custom MCP interceptors."""
     interceptors: list[Any] = []
     oauth_interceptor = oauth_builder(extensions_config)
     if oauth_interceptor is not None:
         interceptors.append(oauth_interceptor)
+
+    # After OAuth so a server declaring both gets the per-user credential:
+    # interceptors wrap outermost-first, so the later-registered user-scoped
+    # override runs closer to the transport and wins the final header value.
+    user_auth_interceptor = user_auth_builder(extensions_config)
+    if user_auth_interceptor is not None:
+        interceptors.append(user_auth_interceptor)
 
     raw_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
     if isinstance(raw_paths, str):
