@@ -28,7 +28,9 @@ dependencies = [
     "langgraph>=1.2.9,<1.3",
     "langgraph-api>=0.8.1",
     "langgraph-cli>=0.4.24",
-    "langgraph-runtime-inmem>=0.28.0",
+    # Standalone Studio's pre-runtime persistence repair is validated against
+    # the 0.30.0 store lifecycle and must not resolve an older implementation.
+    "langgraph-runtime-inmem>=0.30.0",
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
     "packaging>=24.2",

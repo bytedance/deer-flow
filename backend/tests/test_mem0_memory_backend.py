@@ -77,6 +77,9 @@ class TestMem0Config:
             ("score_threshold", 1.5),
             ("max_injection_chars", 0),
             ("timeout_seconds", 0),
+            ("timeout_seconds", float("nan")),
+            ("timeout_seconds", float("inf")),
+            ("timeout_seconds", float("-inf")),
         ],
     )
     def test_invalid_values_rejected(self, key: str, value: object) -> None:

@@ -32,6 +32,7 @@ from pydantic import PrivateAttr
 from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
 
 from .deermem.config import DeerMemConfig
+from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
 from .deermem.core.llm import build_llm
 from .deermem.core.message_processing import (
     SIGNAL_NAMES,
@@ -340,9 +341,25 @@ class DeerMem(MemoryManager):
             return []
         resolved_agent_name = _resolve_agent_name(agent_name)
         indexed = self._fts5_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
-        if indexed:
-            return indexed
-        return self._substring_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
+        results = indexed or self._substring_search(
+            query,
+            top_k=top_k,
+            user_id=user_id,
+            agent_name=resolved_agent_name,
+            category=category,
+        )
+        if results and (self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled):
+            try:
+                self._storage.record_fact_accesses(
+                    [str(fact["id"]) for fact in results if fact.get("id")],
+                    agent_name=resolved_agent_name,
+                    user_id=user_id,
+                )
+            except Exception:
+                # Usage is an eviction hint, never canonical memory. A sidecar
+                # write failure must not make memory_search lose its results.
+                logger.warning("Failed to record memory-search access heat", exc_info=True)
+        return results
 
     def _fts5_search(
         self,

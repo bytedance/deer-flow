@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import pytest
 
-from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskSnapshot, TaskStatus, TaskSubmission
+from deerflow.mcp.tasks import McpTaskDriverRegistry, TaskSnapshot, TaskStatus, TaskSubmission, TaskSubmitRequest
 
 
 def test_task_snapshot_normalizes_string_statuses():
@@ -37,6 +37,22 @@ def test_snapshot_keeps_valid_poll_interval_schedulable():
 def test_submission_rejects_empty_remote_id():
     with pytest.raises(ValueError, match="remote_task_id must not be empty"):
         TaskSubmission(remote_task_id="  ", snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED))
+
+
+def test_task_storage_identifiers_reject_values_longer_than_the_database_columns():
+    for field_name, request_kwargs in (
+        ("server_name", {"server_name": "s" * 129, "task_name": "report"}),
+        ("task_name", {"server_name": "reports", "task_name": "t" * 256}),
+    ):
+        with pytest.raises(ValueError, match=field_name):
+            TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-1",
+                run_id=None,
+                tool_call_id=None,
+                arguments={},
+                **request_kwargs,
+            )
 
 
 def test_driver_registry_rejects_duplicate_names():

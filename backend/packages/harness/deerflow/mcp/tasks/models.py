@@ -1,9 +1,21 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Any
+
+from deerflow.constants import (
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
+
+
+def _validate_storage_text(value: str, *, field_name: str, max_length: int) -> None:
+    if not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+    if len(value) > max_length:
+        raise ValueError(f"{field_name} must not exceed {max_length} characters")
 
 
 class TaskStatus(StrEnum):
@@ -21,6 +33,7 @@ POLLABLE_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
     {
         TaskStatus.SUBMITTED,
         TaskStatus.WORKING,
+        TaskStatus.INPUT_REQUIRED,
     }
 )
 TERMINAL_TASK_STATUSES: frozenset[TaskStatus] = frozenset(
@@ -44,6 +57,9 @@ class TaskSnapshot:
 
     status: TaskStatus
     result: Any | None = None
+    result_preview: str | None = None
+    result_truncated: bool = False
+    result_artifact: dict[str, str] | None = None
     error: str | None = None
     input_required: dict[str, Any] | None = None
     poll_after_seconds: float | None = None
@@ -51,7 +67,7 @@ class TaskSnapshot:
     def __post_init__(self) -> None:
         if not isinstance(self.status, TaskStatus):
             object.__setattr__(self, "status", TaskStatus(self.status))
-        if self.poll_after_seconds is not None and (not math.isfinite(self.poll_after_seconds) or self.poll_after_seconds <= 0):
+        if self.poll_after_seconds is not None and (not isfinite(self.poll_after_seconds) or self.poll_after_seconds <= 0):
             # NaN and infinity survive a bare `<= 0` check but break the consumer,
             # which turns this interval into a `timedelta` for the next poll.
             raise ValueError("poll_after_seconds must be a finite positive number")
@@ -103,6 +119,18 @@ class TaskSubmitRequest:
     arguments: dict[str, Any]
     driver_data: dict[str, Any] = field(default_factory=dict)
     local_task_id: str | None = None
+
+    def __post_init__(self) -> None:
+        _validate_storage_text(
+            self.server_name,
+            field_name="server_name",
+            max_length=MCP_TASK_SERVER_NAME_MAX_LENGTH,
+        )
+        _validate_storage_text(
+            self.task_name,
+            field_name="task_name",
+            max_length=MCP_TASK_NAME_MAX_LENGTH,
+        )
 
 
 @dataclass(frozen=True, slots=True)
