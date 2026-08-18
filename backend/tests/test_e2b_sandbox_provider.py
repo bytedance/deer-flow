@@ -846,6 +846,60 @@ def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, raw, expe
     assert config["mount_upload_deadline_seconds"] == expected
 
 
+def test_load_config_custom_mount_upload_deadline_flows_to_apply_mounts(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 61.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+
+    class FakeConfig:
+        sandbox = SimpleNamespace(
+            model_extra={"mount_upload_deadline_seconds": 60},
+            api_key="test-key",
+            template=None,
+            image=None,
+            domain=None,
+            home_dir=None,
+            idle_timeout=None,
+            replicas=None,
+            overflow_policy=None,
+            acquire_timeout=None,
+            burst_limit=None,
+            mounts=[SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False)],
+            environment=None,
+            ownership=None,
+            mount_upload_deadline_seconds=60,
+        )
+        skills = SimpleNamespace(container_path="/mnt/skills")
+
+    monkeypatch.setattr(mod, "get_app_config", lambda: FakeConfig())
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    provider._config = provider._load_config()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert provider._config["mount_upload_deadline_seconds"] == 60
+    assert len(client.files.write_calls) == 1
+    assert "time budget 60s" in caplog.text
+
+
 def test_apply_mounts_deadline_reason_shows_configured_value(monkeypatch, tmp_path, caplog):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     monkeypatch.setattr(

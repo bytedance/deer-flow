@@ -21,6 +21,7 @@ provider fields during startup.
       reconciliation_max_pages: 10
       reconciliation_max_items: 200
       reconciliation_max_seconds: 15
+      mount_upload_deadline_seconds: 120   # mount upload pass deadline; default: 120
       ownership:
         type: redis                    # shares ownership and capacity across Gateways
         redis_url: redis://redis:6379/0
@@ -46,6 +47,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -110,7 +112,7 @@ _MAX_MOUNT_PASS_FILES = 2000
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
 
-def _mount_deadline_reason(deadline_seconds: int = _MOUNT_PASS_DEADLINE_SECONDS) -> str:
+def _mount_deadline_reason(deadline_seconds: int) -> str:
     return f"time budget {deadline_seconds}s"
 
 
@@ -121,7 +123,7 @@ class _MountPassLimitExceeded(Exception):
 @dataclass
 class _MountUploadBudget:
     deadline: float
-    deadline_seconds: int = _MOUNT_PASS_DEADLINE_SECONDS
+    deadline_seconds: int
     attempted_bytes: int = 0
     attempted_files: int = 0
     completed_bytes: int = 0
@@ -330,10 +332,7 @@ class E2BSandboxProvider(SandboxProvider):
                 0.1,
                 float(_opt("reconciliation_max_seconds", DEFAULT_RECONCILIATION_MAX_SECONDS)),
             ),
-            "mount_upload_deadline_seconds": max(
-                1,
-                int(_opt("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)),
-            ),
+            "mount_upload_deadline_seconds": self._resolve_mount_upload_deadline(_opt),
         }
 
     @staticmethod
@@ -345,6 +344,18 @@ class E2BSandboxProvider(SandboxProvider):
             else:
                 resolved[key] = "" if value is None else str(value)
         return resolved
+
+    @staticmethod
+    def _resolve_mount_upload_deadline(_opt: Callable[[str, Any], Any]) -> int:
+        raw = _opt("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        value = int(raw)
+        if value < 1:
+            logger.warning(
+                "E2BSandboxProvider: invalid mount_upload_deadline_seconds=%d; clamping to 1",
+                value,
+            )
+            return 1
+        return value
 
     def _get_sandbox_cls(self) -> type[E2BClientSandbox]:
         """Return the e2b SDK Sandbox class."""
