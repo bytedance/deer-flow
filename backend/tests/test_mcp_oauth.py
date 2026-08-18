@@ -116,7 +116,10 @@ def test_oauth_extra_token_params_cannot_override_grant_type(monkeypatch):
                         "client_id": "client-id",
                         "client_secret": "client-secret",
                         # A careless copy-paste from another OAuth config.
-                        "extra_token_params": {"grant_type": "password"},
+                        "extra_token_params": {
+                            "grant_type": "password",
+                            "resource": "https://api.example.com",
+                        },
                     },
                 }
             }
@@ -129,8 +132,10 @@ def test_oauth_extra_token_params_cannot_override_grant_type(monkeypatch):
 
     # The reserved grant_type must win over the operator-supplied param so
     # the value sent to the token endpoint matches the branch logic that
-    # picked client_credentials below.
+    # picked client_credentials below. Other extension params still pass
+    # through unchanged.
     assert post_calls[0]["data"]["grant_type"] == "client_credentials"
+    assert post_calls[0]["data"]["resource"] == "https://api.example.com"
 
 
 def test_build_oauth_interceptor_injects_authorization_header(monkeypatch):
