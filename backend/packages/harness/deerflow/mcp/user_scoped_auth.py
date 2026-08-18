@@ -101,7 +101,14 @@ def build_user_scoped_auth_interceptor(extensions_config: ExtensionsConfig) -> A
                 request.server_name,
                 user_id,
             )
-            raise ToolException(f"No credential is configured for your account on MCP server '{request.server_name}'. Ask the operator to add your user id to that server's user_auth.users map (or set its environment variable).")
+            # The resolved id is included so the operator can copy the exact
+            # ``users`` key: it differs by deployment path (a safe-slug like
+            # ``alice-example-com-ab12cd34`` via LangGraph auth, a raw user
+            # UUID via the embedded Gateway). It is the caller's own id, so
+            # surfacing it leaks nothing across users.
+            raise ToolException(
+                f"No credential is configured for your account (user id '{user_id}') on MCP server '{request.server_name}'. Ask the operator to add this exact id to that server's user_auth.users map (or set its environment variable)."
+            )
 
         updated_headers = dict(request.headers or {})
         updated_headers[user_auth.header] = credential

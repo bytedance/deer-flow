@@ -146,6 +146,14 @@ discovery.
 - The Gateway API masks `user_auth.users` values in GET responses and preserves
   stored credentials when masked values are round-tripped through PUT.
 
+**Finding the right `users` key.** The resolved user id depends on how the
+deployment authenticates: with LangGraph Server auth it is the safe-slug form
+of the authenticated identity (e.g. `alice-example-com-ab12cd34`), while the
+embedded Gateway resolves the DeerFlow user's raw id (a UUID). The simplest way
+to get the exact key is to have the user attempt a call before being mapped:
+the fail-closed error message includes their resolved id verbatim, ready to
+copy into `user_auth.users`.
+
 ## Managing MCP servers
 
 MCP servers can be managed in several ways:

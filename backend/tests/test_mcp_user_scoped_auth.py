@@ -339,3 +339,59 @@ def test_gateway_rejects_blank_user_auth_header():
     # Non-blank still fine, and default untouched.
     assert McpUserScopedAuthConfigResponse(header="X-Api-Key").header == "X-Api-Key"
     assert McpUserScopedAuthConfigResponse().header == "Authorization"
+
+
+def test_deny_error_includes_the_callers_resolved_user_id():
+    """The users key format differs by deployment path; the fail-closed error
+    must show the caller's own resolved id so the operator can copy the exact key."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}))
+    with pytest.raises(ToolException, match="user id 'stranger-uuid'"):
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("stranger-uuid")), AsyncMock()))
+
+
+def test_user_credential_wins_over_oauth_set_header_through_real_composition():
+    """Pin the wrap-order property functionally, not just list order: an OAuth
+    interceptor that actually sets Authorization must lose the final header to
+    the per-user credential, through the same composition the session-pool
+    tool path uses."""
+    from deerflow.mcp.interceptors import compose_tool_interceptors
+
+    config = _config(users={"u1": "Bearer user-cred"})
+
+    async def oauth(request, handler):
+        headers = dict(request.headers or {})
+        headers["Authorization"] = "Bearer oauth-token"
+        return await handler(request.override(headers=headers))
+
+    interceptors = build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: oauth)
+    handler = compose_tool_interceptors(interceptors, _echo_handler)
+    final = asyncio.run(handler(_request(runtime=_runtime_for_user("u1"))))
+    assert final.headers["Authorization"] == "Bearer user-cred"
+    # And on a server without user_auth the OAuth header must survive untouched.
+    final_other = asyncio.run(handler(_request(server_name="other", runtime=_runtime_for_user("u1"))))
+    assert final_other.headers["Authorization"] == "Bearer oauth-token"
+
+
+def test_gateway_masks_sensitive_user_auth_extra_keys():
+    """Secret-bearing extras inside user_auth must be masked by GET like the
+    identical keys at server level, and a masked round-trip must preserve them."""
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _mask_server_config,
+        _merge_preserving_secrets,
+    )
+
+    server = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "Bearer s1"}, client_secret="super-secret", custom_note="keep-me"),
+    )
+    masked = _mask_server_config(server)
+    assert masked.user_auth.model_extra["client_secret"] == "***"
+    assert masked.user_auth.model_extra["custom_note"] == "keep-me"
+
+    # Round-trip: PUT of the masked GET payload keeps the stored secret.
+    merged = _merge_preserving_secrets(masked, server)
+    assert merged.user_auth.model_extra["client_secret"] == "super-secret"
+    assert merged.user_auth.users == {"u1": "Bearer s1"}

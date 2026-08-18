@@ -64,3 +64,23 @@ def build_mcp_tool_interceptors(
                 exc_info=True,
             )
     return interceptors
+
+
+def compose_tool_interceptors(interceptors: list[Any], base_handler: Any) -> Any:
+    """Compose interceptors onion-style around ``base_handler``: first = outermost.
+
+    The later-registered interceptor runs closer to the transport, so its
+    header writes win over earlier ones — the property user-scoped auth relies
+    on to override an OAuth-injected credential. This is the single wrap
+    convention; the session-pool tool path composes through here so tests that
+    pin the override property exercise the production composition.
+    """
+    handler = base_handler
+    for interceptor in reversed(interceptors):
+        outer = handler
+
+        async def wrapped(req: Any, _i: Any = interceptor, _h: Any = outer) -> Any:
+            return await _i(req, _h)
+
+        handler = wrapped
+    return handler

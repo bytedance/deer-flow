@@ -678,7 +678,12 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
         )
     masked_user_auth = None
     if server.user_auth is not None:
-        masked_user_auth = server.user_auth.model_copy(update={"users": {k: _MASKED_VALUE for k in server.user_auth.users}})
+        # Extras inside user_auth get the same sensitive-key masking as
+        # server-level extras: they round-trip through PUT (extra="allow"), so
+        # an operator-stored secret-bearing key must not come back in
+        # cleartext from GET while the identical key at server level is masked.
+        masked_ua_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.user_auth.model_extra or {}).items()}
+        masked_user_auth = server.user_auth.model_copy(update={"users": {k: _MASKED_VALUE for k in server.user_auth.users}, **masked_ua_extra})
     masked_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.model_extra or {}).items()}
     return server.model_copy(
         update={
@@ -764,7 +769,17 @@ def _merge_preserving_secrets(
         for name in ("enabled", "header", "on_missing"):
             if name in set_fields:
                 effective[name] = getattr(incoming_ua, name)
-        effective.update(incoming_ua.model_extra or {})
+        # Extras are masked by GET (see _mask_server_config), so a round-trip
+        # PUT must swap masked sentinel values back for the stored ones —
+        # the same contract server-level extras get below.
+        base_extra = (base.model_extra or {}) if base is not None else {}
+        for key, value in (incoming_ua.model_extra or {}).items():
+            effective[key] = _merge_extra_value_preserving_masked(
+                key,
+                value,
+                base_extra.get(key),
+                existing_present=key in base_extra,
+            )
         if "users" in set_fields:
             # An explicitly sent map replaces the stored one (so a full
             # round-trip can remove a user), with masked values swapped back
