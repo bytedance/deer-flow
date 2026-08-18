@@ -6,7 +6,7 @@
     "official_manifest_sha256": "7f9b26f3bfb7a19c75af53af77ac5ebaa02eeb05c7824c5b5c08be0d9e43db4b",
     "synthetic_manifest_sha256": "2f0c7f9bc05f87322bf3e2d8c33aeb9ec3bf27fb12772cda43915e4d75c2be1e"
   },
-  "created_at": "2026-08-18T02:46:09.953936Z",
+  "created_at": "2026-08-18T04:12:21.258451Z",
   "dataset": {
     "filename": "longmemeval_oracle.json",
     "repository": "xiaowu0162/longmemeval-cleaned",
@@ -15,7 +15,7 @@
   },
   "git": {
     "dirty": false,
-    "head": "497ff3d03bd2500cdc4e8fbb3e7a41306b5cf0eb"
+    "head": "01f99d61d3e068083978c72c43f5de67d2543c92"
   },
   "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
   "qa": {

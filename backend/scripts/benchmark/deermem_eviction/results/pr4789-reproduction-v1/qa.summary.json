@@ -26,9 +26,9 @@
       "source": "longmemeval"
     },
     {
-      "accuracy": 0.6,
+      "accuracy": 0.7,
       "cases": 10,
-      "correct": 6,
+      "correct": 7,
       "policy": "hybrid-v1",
       "scenario": "confidence_control",
       "source": "longmemeval"
@@ -42,9 +42,9 @@
       "source": "longmemeval"
     },
     {
-      "accuracy": 0.9,
+      "accuracy": 1.0,
       "cases": 10,
-      "correct": 9,
+      "correct": 10,
       "policy": "hybrid-v1",
       "scenario": "confirmation_help",
       "source": "longmemeval"
