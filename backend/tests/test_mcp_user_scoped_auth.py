@@ -323,3 +323,19 @@ def test_stdio_server_user_auth_is_skipped_with_warning(caplog):
         interceptor = build_user_scoped_auth_interceptor(config)
     assert interceptor is None  # no eligible servers -> nothing registered, no deny errors
     assert any("user_auth" in r.message and "stdio" in r.message for r in caplog.records)
+
+
+def test_gateway_rejects_blank_user_auth_header():
+    """A blank header must be rejected at the gateway, not persisted and left to
+    wedge extensions_config.json on reload (harness-side validator would raise)."""
+    import pydantic
+    import pytest
+
+    from app.gateway.routers.mcp import McpUserScopedAuthConfigResponse
+
+    for blank in ("", "   ", "\t"):
+        with pytest.raises(pydantic.ValidationError, match="must not be empty"):
+            McpUserScopedAuthConfigResponse(header=blank)
+    # Non-blank still fine, and default untouched.
+    assert McpUserScopedAuthConfigResponse(header="X-Api-Key").header == "X-Api-Key"
+    assert McpUserScopedAuthConfigResponse().header == "Authorization"

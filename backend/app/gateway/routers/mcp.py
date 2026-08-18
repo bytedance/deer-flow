@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
@@ -357,6 +357,16 @@ class McpUserScopedAuthConfigResponse(BaseModel):
     # this, an operator's unknown key inside user_auth would be silently
     # stripped by the next admin PUT, while server-level extras are preserved.
     model_config = ConfigDict(extra="allow")
+
+    # Mirror the harness-side non-blank check: a blank header accepted here
+    # would be persisted, then fail ExtensionsConfig validation on reload —
+    # wedging every subsequent config load until the file is hand-edited.
+    @field_validator("header")
+    @classmethod
+    def _validate_header_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("user_auth.header must not be empty")
+        return value
 
 
 class McpOAuthConfigResponse(BaseModel):
