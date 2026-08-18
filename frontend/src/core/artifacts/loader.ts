@@ -5,16 +5,20 @@ import { fetch } from "@/core/api/fetcher";
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
+import { sha256Hex } from "./sha256";
 import { urlOfArtifact } from "./utils";
 
 async function sha256OfText(content: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(content),
-  );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  const bytes = new TextEncoder().encode(content);
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
+  }
+  // Non-secure contexts (http over a non-localhost host) have no `crypto.subtle`;
+  // fall back to a pure-JS SHA-256 so preview and inline editing keep working.
+  return sha256Hex(bytes);
 }
 
 export const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;
