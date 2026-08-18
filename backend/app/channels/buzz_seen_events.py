@@ -78,6 +78,9 @@ class BuzzSeenEventStore:
         self._loaded = False
         self._dirty = False
         self._flush_handle: asyncio.TimerHandle | None = None
+        # The loop the pending handle was scheduled on. TimerHandle has no
+        # public get_loop(), so it is tracked here to detect a stale handle.
+        self._flush_loop: asyncio.AbstractEventLoop | None = None
 
     # -- persistence ---------------------------------------------------------
 
@@ -141,7 +144,13 @@ class BuzzSeenEventStore:
         except RuntimeError:
             self.flush()
             return
-        if self._flush_handle is None:
+        # A pending handle pinned to a since-closed loop would otherwise block
+        # scheduling forever, silently stopping persistence until an explicit
+        # flush() (only reachable when callers span loops, e.g. tests).
+        if self._flush_handle is None or self._flush_loop is not loop:
+            if self._flush_handle is not None:
+                self._flush_handle.cancel()
+            self._flush_loop = loop
             self._flush_handle = loop.call_later(FLUSH_DELAY_SECONDS, self._flush_scheduled)
 
     def _flush_scheduled(self) -> None:

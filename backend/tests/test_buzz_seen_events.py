@@ -321,3 +321,27 @@ def test_service_wiring_injects_persistent_store_path(tmp_path, monkeypatch):
     captured_config.clear()
     asyncio.run(service._start_channel("buzz", {"relay_url": "wss://x", "private_key": SK3_HEX, "seen_event_store_path": "/custom/seen.json"}))
     assert captured_config["seen_event_store_path"] == "/custom/seen.json"
+
+
+def test_stale_timer_from_closed_loop_does_not_block_rescheduling(tmp_path):
+    """A pending flush timer pinned to a since-closed loop must not stop the
+    store from scheduling on a new loop (it would silently stop persisting)."""
+    from app.channels import buzz_seen_events
+
+    path = tmp_path / "seen.json"
+    store = BuzzSeenEventStore(path)
+
+    async def record_and_abandon():
+        store.record(CHANNEL, "e1")  # schedules a timer on THIS loop...
+
+    asyncio.run(record_and_abandon())  # ...which closes before the timer fires
+    assert store._flush_handle is not None  # the stale handle survives the loop
+
+    async def record_on_new_loop():
+        store.record(CHANNEL, "e2")
+        assert store._flush_loop is asyncio.get_running_loop()
+        await asyncio.sleep(buzz_seen_events.FLUSH_DELAY_SECONDS + 0.1)
+
+    asyncio.run(record_on_new_loop())
+    persisted = json.loads(path.read_text())
+    assert persisted[CHANNEL] == ["e1", "e2"]  # both records made it to disk
