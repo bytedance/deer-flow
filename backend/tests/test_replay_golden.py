@@ -33,13 +33,18 @@ def _install_real_subagent_executor(monkeypatch: pytest.MonkeyPatch) -> None:
     the executor afterwards avoids the circular import that ``tests/conftest.py``
     protects lightweight unit tests from, while letting the already-imported task
     tool execute the real implementation. ``monkeypatch`` restores the mocked
-    module and every patched attribute after the test.
+    module, its parent-package binding, and every patched attribute after the test.
     """
     import deerflow.subagents as subagents_package
 
     task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
     module_name = "deerflow.subagents.executor"
+    # Importing a child module also writes ``executor`` onto its parent package.
+    # Track that dictionary entry explicitly so teardown cannot leave the real
+    # executor reachable after ``sys.modules`` has been restored to conftest's mock.
+    monkeypatch.setitem(subagents_package.__dict__, "executor", None)
+    monkeypatch.delitem(subagents_package.__dict__, "executor")
     monkeypatch.delitem(sys.modules, module_name)
     executor_module = importlib.import_module(module_name)
 
@@ -143,7 +148,7 @@ def _run_replay_scenario(
     return home, replay_run
 
 
-def _final_assistant_text(events: list[dict]) -> str | None:
+def _final_assistant_message(events: list[dict]) -> dict | None:
     for event in reversed(events):
         if event["event"] != "values" or not isinstance(event["data"], dict):
             continue
@@ -155,7 +160,7 @@ def _final_assistant_text(events: list[dict]) -> str | None:
                 continue
             content = message.get("content")
             if isinstance(content, str) and content:
-                return content
+                return message
     return None
 
 
@@ -176,10 +181,14 @@ def test_replay_subagent_file_task_ultra_matches_golden_and_semantics(tmp_path: 
     assert "task_running" in task_event_types
     assert task_event_types[-1] == "task_completed"
     assert not {"task_failed", "task_cancelled", "task_timed_out"}.intersection(task_event_types)
-    assert len({event["task_id"] for event in task_events}) == 1
+    assert {event["task_id"] for event in task_events} == {"call_subagent_replay_task"}
     assert task_events[-1]["result"] == "hi from subagent replay."
 
     workspace_files = list(home.glob(f"users/*/threads/{replay_run.thread_id}/user-data/workspace/subagent-note.txt"))
     assert len(workspace_files) == 1
     assert workspace_files[0].read_text(encoding="utf-8") == "hi from subagent replay."
-    assert _final_assistant_text(replay_run.events) == "hi from subagent replay."
+
+    final_assistant = _final_assistant_message(replay_run.events)
+    assert final_assistant is not None
+    assert final_assistant.get("id") == "replay-lead-final"
+    assert final_assistant.get("content") == "hi from subagent replay."
