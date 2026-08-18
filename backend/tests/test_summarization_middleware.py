@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
 
@@ -426,14 +426,12 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
     assert manager.add_nowait.call_args.kwargs["user_id"] == "alice"
 
 
-def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
-    """__user (untagged) must be rescued alongside its tagged ID-swap peers.
+def test_stale_user_peer_is_compressed_not_rescued() -> None:
+    """A stale untagged ``__user`` peer is no longer rescued — only the latest user message is.
 
-    The ID-swap triplet from _make_reminder_and_user_messages is:
-    [SystemMessage(id=X, reminder=True), HumanMessage(id=X__memory, reminder=True),
-     HumanMessage(id=X__user)] — only the first two are tagged. Without peer
-    rescue, __user stays in to_summarize and is compressed into prose, orphaning
-    the tagged messages and losing the user question from direct model context.
+    A historical ``__user`` peer now compresses like any other history; only tagged
+    reminders (date SystemMessage + ``__memory``) and the latest real user message
+    are rescued.
     """
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
@@ -470,28 +468,30 @@ def test_id_swap_user_peer_is_preserved_across_summarization() -> None:
     )
 
     assert len(captured) == 1
-    # The __user message should NOT be in messages_to_summarize
+    # The __user peer is no longer the current request (user-2 is) — it compresses.
     summarized_contents = [m.content for m in captured[0].messages_to_summarize]
-    assert "What is the weather in Tokyo?" not in summarized_contents
+    assert "What is the weather in Tokyo?" in summarized_contents
 
-    # All three triplet members should be in preserved_messages
+    # tagged reminder + memory survive, but the __user peer is no longer rescued.
     preserved_ids = [m.id for m in captured[0].preserved_messages]
     assert stable_id in preserved_ids
     assert f"{stable_id}__memory" in preserved_ids
-    assert f"{stable_id}__user" in preserved_ids
+    assert f"{stable_id}__user" not in preserved_ids
+    # The latest user message (user-2) survives.
+    assert any(m.content == "user-2" for m in captured[0].preserved_messages)
 
-    # The emitted state includes all three triplet members
+    # The emitted state likewise no longer contains the stale __user peer.
     emitted = result["messages"]
     assert isinstance(emitted[0], RemoveMessage)
     # Find the triplet members in the emitted messages
     emitted_ids = [m.id for m in emitted[1:]]  # Skip RemoveMessage
     assert stable_id in emitted_ids
     assert f"{stable_id}__memory" in emitted_ids
-    assert f"{stable_id}__user" in emitted_ids
+    assert f"{stable_id}__user" not in emitted_ids
 
 
-def test_id_swap_user_peer_preserved_without_memory() -> None:
-    """When there's no __memory in the triplet, __user is still rescued."""
+def test_stale_user_peer_compressed_without_memory() -> None:
+    """Without ``__memory``, the stale ``__user`` peer still compresses; only the reminder survives."""
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
 
@@ -521,11 +521,11 @@ def test_id_swap_user_peer_preserved_without_memory() -> None:
 
     assert len(captured) == 1
     summarized_contents = [m.content for m in captured[0].messages_to_summarize]
-    assert "How are you?" not in summarized_contents
+    assert "How are you?" in summarized_contents
 
     preserved_ids = [m.id for m in captured[0].preserved_messages]
     assert stable_id in preserved_ids
-    assert f"{stable_id}__user" in preserved_ids
+    assert f"{stable_id}__user" not in preserved_ids
 
 
 def test_non_reminder_messages_with_double_underscore_id_not_rescued() -> None:
@@ -558,15 +558,11 @@ def test_non_reminder_messages_with_double_underscore_id_not_rescued() -> None:
     assert "standalone-reminder" in preserved_ids
 
 
-def test_multiple_id_swap_triplets_preserve_chronological_order() -> None:
-    """When multiple ID-swap triplets sit in one summarization window, rescued
-    messages must retain their original chronological order — not be scrambled
-    by separating tagged reminders from untagged peers.
+def test_multiple_id_swap_triplets_preserve_tagged_order() -> None:
+    """Multiple ID-swap triplets in one window: tagged reminders keep chronological order, user peers compress.
 
-    Regression: the previous reminders+peers concatenation rescued as
-    [Sys(base1), Sys(base2), Mem(base1), Mem(base2), User(base1), User(base2)],
-    detaching each user question from its AI answer. The single-pass partition
-    preserves [Sys(base1), Mem(base1), User(base1), Sys(base2), Mem(base2), User(base2)].
+    Peer rescue is gone: only tagged reminders (date SystemMessage + ``__memory``)
+    survive, while untagged ``__user`` peers compress with history.
     """
     captured: list[SummarizationEvent] = []
     middleware = _middleware(before_summarization=[captured.append])
@@ -619,18 +615,22 @@ def test_multiple_id_swap_triplets_preserve_chronological_order() -> None:
     )
 
     assert len(captured) == 1
-    # Rescued messages must appear in their original chronological order:
-    # each triplet stays contiguous, not re-grouped by role.
+    # tagged reminders + memory keep chronological order (base1 before base2),
+    # but untagged user peers are no longer rescued — they fall into to_summarize.
     preserved = captured[0].preserved_messages
-    rescued_ids = [m.id for m in preserved if m.id and (is_dynamic_context_reminder(m) or m.id in (f"{base1}__user", f"{base2}__user"))]
+    rescued_ids = [m.id for m in preserved if is_dynamic_context_reminder(m)]
     assert rescued_ids == [
         base1,
         f"{base1}__memory",
-        f"{base1}__user",
         base2,
         f"{base2}__memory",
-        f"{base2}__user",
     ]
+    preserved_ids = [m.id for m in preserved]
+    assert f"{base1}__user" not in preserved_ids
+    assert f"{base2}__user" not in preserved_ids
+    summarized_contents = [m.content for m in captured[0].messages_to_summarize]
+    assert "What is the weather?" in summarized_contents
+    assert "How are you?" in summarized_contents
 
 
 def test_factory_attaches_memory_flush_hook_by_default(monkeypatch):
@@ -1206,3 +1206,95 @@ async def test_text_extraction_failure_falls_back_to_run_model_async(monkeypatch
     assert built == ["run-model"]
     assert result is not None
     assert result["summary_text"] == "from-run-model"
+
+
+def test_current_request_survives_and_stale_peer_compresses() -> None:
+    """Regression: with a stale peer and a current request in one window, the current request survives and the stale peer compresses.
+
+    Mirrors the production incident: a first-turn request is ID-swapped into
+    reminder(X) + X__user (stale), while a later turn's request is a plain
+    HumanMessage. On summarization the stale X__user must NOT be rescued into
+    preserved, the current request must stay preserved, and messages_to_summarize
+    must be non-empty (guards the no-op regression).
+    """
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], keep=("messages", 10))
+
+    stable_id = "60fe6f08-83cf-48d6-a2e6-2042830011d6"
+    reminder = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-08-18, Tuesday</current_date>\n</system-reminder>",
+        id=stable_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True, "reminder_date": "2026-08-18, Tuesday"},
+    )
+    old_user = HumanMessage(
+        content="definition request for metric A",
+        id=f"{stable_id}__user",
+    )
+    new_user = HumanMessage(
+        content="single-metric analysis for metric B",
+        id="c75368cd-d46e-4f22-8202-29a06e4929a3",
+    )
+
+    messages = [
+        reminder,
+        old_user,
+        new_user,
+        AIMessage(content="run2 ai", id="ai-1", tool_calls=[{"id": "tc-1", "name": "queryMetrics", "args": {}}]),
+        ToolMessage(content="{}", tool_call_id="tc-1", id="tool-1"),
+        AIMessage(content="run2 ai2", id="ai-2"),
+        ToolMessage(content="{}", tool_call_id="tc-2", id="tool-2"),
+        ToolMessage(content="{}", tool_call_id="tc-3", id="tool-3"),
+        ToolMessage(content="{}", tool_call_id="tc-4", id="tool-4"),
+        AIMessage(content="run2 ai3", id="ai-3"),
+        ToolMessage(content="{}", tool_call_id="tc-5", id="tool-5"),
+        AIMessage(content="run2 ai4", id="ai-4"),
+        ToolMessage(content="{}", tool_call_id="tc-6", id="tool-6"),
+        ToolMessage(content="{}", tool_call_id="tc-7", id="tool-7"),
+    ]
+
+    middleware.before_model({"messages": messages}, _runtime())
+
+    assert len(captured) == 1
+    ev = captured[0]
+    preserved_ids = [m.id for m in ev.preserved_messages]
+    # The current request survives.
+    assert new_user.id in preserved_ids
+    # The stale peer no longer escapes compression — it lands in to_summarize.
+    assert old_user.id not in preserved_ids
+    summarized_contents = [m.content for m in ev.messages_to_summarize]
+    assert any("metric A" in c for c in summarized_contents)
+    # Compression is non-empty (guards the no-op regression).
+    assert len(ev.messages_to_summarize) > 0
+
+
+def test_first_turn_long_analysis_preserves_current_request() -> None:
+    """First-turn long analysis: the current request (X__user peer) stays preserved even outside the keep window, and early AI/Tool turns still compress."""
+    captured: list[SummarizationEvent] = []
+    middleware = _middleware(before_summarization=[captured.append], keep=("messages", 10))
+
+    stable_id = "ctx-001"
+    reminder = SystemMessage(
+        content="<system-reminder>\n<current_date>2026-05-08, Friday</current_date>\n</system-reminder>",
+        id=stable_id,
+        additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+    )
+    user = HumanMessage(content="first-turn long request", id=f"{stable_id}__user")
+
+    messages = [reminder, user]
+    for k in range(1, 13):
+        messages.append(AIMessage(content=f"ai{k}", id=f"ai{k}", tool_calls=[{"id": f"tc{k}", "name": "t", "args": {}}]))
+        messages.append(ToolMessage(content=f"r{k}", tool_call_id=f"tc{k}", id=f"tool{k}"))
+
+    middleware.before_model({"messages": messages}, _runtime())
+
+    assert len(captured) == 1
+    ev = captured[0]
+    preserved_ids = [m.id for m in ev.preserved_messages]
+    # The current request (the only real user message) survives.
+    assert user.id in preserved_ids
+    # The tagged reminder survives.
+    assert stable_id in preserved_ids
+    # Early AI/Tool turns still compress — non-empty.
+    summarized_ids = [m.id for m in ev.messages_to_summarize]
+    assert len(summarized_ids) > 0
+    assert "ai1" in summarized_ids
