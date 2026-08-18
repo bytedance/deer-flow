@@ -742,7 +742,6 @@ export function MemorySettingsPage() {
       setSelectedFactIds(newSelected);
     }}
   />
-  <div className="min-w-0 flex-1 space-y-2 [overflow-wrap:anywhere]">
                           <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
                             <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
                               <span>
@@ -782,6 +781,7 @@ export function MemorySettingsPage() {
                             <p className="text-sm [overflow-wrap:anywhere]">
                               {fact.content}
                             </p>
+                          </div>
                           </div>
 
 
