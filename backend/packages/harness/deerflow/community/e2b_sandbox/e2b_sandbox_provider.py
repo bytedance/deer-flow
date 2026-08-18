@@ -110,8 +110,8 @@ _MAX_MOUNT_PASS_FILES = 2000
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
 
-def _mount_deadline_reason() -> str:
-    return f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s"
+def _mount_deadline_reason(deadline_seconds: int = _MOUNT_PASS_DEADLINE_SECONDS) -> str:
+    return f"time budget {deadline_seconds}s"
 
 
 class _MountPassLimitExceeded(Exception):
@@ -121,6 +121,7 @@ class _MountPassLimitExceeded(Exception):
 @dataclass
 class _MountUploadBudget:
     deadline: float
+    deadline_seconds: int = _MOUNT_PASS_DEADLINE_SECONDS
     attempted_bytes: int = 0
     attempted_files: int = 0
     completed_bytes: int = 0
@@ -132,7 +133,7 @@ class _MountUploadBudget:
 
     def check_deadline(self) -> None:
         if self.expired:
-            raise _MountPassLimitExceeded(_mount_deadline_reason())
+            raise _MountPassLimitExceeded(_mount_deadline_reason(self.deadline_seconds))
 
 
 # Metadata keys we attach to every sandbox so we can discover ours via
@@ -150,6 +151,7 @@ E2B_EXTRA_CONFIG_KEYS = frozenset(
         "api_key",
         "domain",
         "home_dir",
+        "mount_upload_deadline_seconds",
         "reconciliation_grace_seconds",
         "reconciliation_interval_seconds",
         "reconciliation_max_items",
@@ -327,6 +329,10 @@ class E2BSandboxProvider(SandboxProvider):
             "reconciliation_max_seconds": max(
                 0.1,
                 float(_opt("reconciliation_max_seconds", DEFAULT_RECONCILIATION_MAX_SECONDS)),
+            ),
+            "mount_upload_deadline_seconds": max(
+                1,
+                int(_opt("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)),
             ),
         }
 
@@ -1801,7 +1807,11 @@ class E2BSandboxProvider(SandboxProvider):
 
     def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
         started_at = time.monotonic()
-        budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
+        deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        budget = _MountUploadBudget(
+            deadline=started_at + deadline_seconds,
+            deadline_seconds=deadline_seconds,
+        )
 
         def warn_pass_stopped(reason: str) -> None:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -1838,7 +1848,7 @@ class E2BSandboxProvider(SandboxProvider):
 
         for host_path, container_path, read_only in mounts:
             if budget.expired:
-                warn_pass_stopped(_mount_deadline_reason())
+                warn_pass_stopped(_mount_deadline_reason(deadline_seconds))
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
