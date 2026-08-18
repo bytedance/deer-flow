@@ -66,6 +66,16 @@ _TOOL_CASES = [
     (update_agent, {}),
 ]
 
+_SANDBOX_TOOL_CASES = [
+    (bash_tool, {"command": "ls"}, {"command"}),
+    (ls_tool, {"path": "/tmp"}, {"path"}),
+    (glob_tool, {"pattern": "*.py", "path": "/tmp"}, {"pattern", "path"}),
+    (grep_tool, {"pattern": "x", "path": "/tmp"}, {"pattern", "path"}),
+    (read_file_tool, {"path": "/tmp/x"}, {"path"}),
+    (write_file_tool, {"path": "/tmp/x", "content": "hi"}, {"path", "content"}),
+    (str_replace_tool, {"path": "/tmp/x", "old_str": "a", "new_str": "b"}, {"path", "old_str", "new_str"}),
+]
+
 
 @pytest.mark.parametrize(
     ("tool_obj", "extra_args"),
@@ -102,6 +112,22 @@ def test_write_file_append_is_discoverable_in_tool_schema() -> None:
     assert append_field.default is False
     assert append_field.description
     assert "append" in append_field.description
+
+
+@pytest.mark.parametrize(
+    ("tool_obj", "operational_args", "required_args"),
+    _SANDBOX_TOOL_CASES,
+    ids=[case[0].name for case in _SANDBOX_TOOL_CASES],
+)
+def test_sandbox_tool_description_is_optional_but_discoverable(tool_obj, operational_args, required_args) -> None:
+    """Provider tool calls may omit UI-only descriptions without blocking execution."""
+    parameters = convert_to_openai_tool(tool_obj)["function"]["parameters"]
+
+    assert set(parameters["required"]) == required_args
+    assert parameters["properties"]["description"]["description"]
+
+    validated = tool_obj.tool_call_schema.model_validate(operational_args)
+    assert validated.description == ""
 
 
 def test_list_uploaded_files_model_schema_excludes_injected_runtime() -> None:
