@@ -48,15 +48,12 @@ logger = logging.getLogger(__name__)
 # surfaces the target site's response-status text (``X-Response-Status``, a
 # free-form reason phrase controlled by whatever server is being captured) into
 # its result message, so it is untrusted remote content too and belongs here.
-#
-# Known limitation: the gate is name-based. An MCP server may expose a
-# remote-content tool under an arbitrary name (e.g. ``fetch_url`` /
-# ``scrape_page``); its results are equally untrusted but are NOT matched here,
-# so they reach the model unneutralized. A name heuristic (matching
-# fetch/search/crawl substrings) is intentionally avoided because it would also
-# mangle legitimate *local* tool output (e.g. a ``file_search`` result). Robust
-# MCP coverage should tag remote-content tools via metadata at registration
-# rather than by name; tracked as a follow-up.
+# The gate is name-based for the first-party web tools; MCP-sourced tools are
+# covered by their ``deerflow_mcp`` metadata tag instead (every MCP server is
+# third-party remote code, so its results are untrusted regardless of what the
+# tool is named). A name heuristic for MCP tools (matching fetch/search/crawl
+# substrings) is intentionally avoided because it would also mangle legitimate
+# *local* tool output (e.g. a ``file_search`` result).
 _REMOTE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset(
     {
         "web_fetch",
