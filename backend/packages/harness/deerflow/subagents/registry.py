@@ -179,7 +179,7 @@ def get_subagent_names(*, app_config: Any | None = None, allowed_subagents: list
         if not definition.enabled:
             continue
         if definition.name in names:
-            logger.warning("Managed subagent '%s' conflicts with a built-in or config.yaml definition and is excluded from runtime", definition.name)
+            logger.debug("Managed subagent '%s' conflicts with a built-in or config.yaml definition and is excluded from runtime", definition.name)
             continue
         names.append(definition.name)
 

@@ -76,6 +76,11 @@ function splitNames(value: string): string[] | null {
   return values.length ? Array.from(new Set(values)) : null;
 }
 
+function positiveInteger(value: string): number | null {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function formatOverrideValue(value: unknown): string {
   if (Array.isArray(value)) return value.join(", ");
   if (value && typeof value === "object") return JSON.stringify(value);
@@ -260,6 +265,10 @@ function SubagentEditor({
   }
 
   async function save() {
+    const maxTurns = positiveInteger(draft.maxTurns);
+    const timeoutSeconds = positiveInteger(draft.timeoutSeconds);
+    if (maxTurns === null || timeoutSeconds === null) return;
+
     const payload = {
       display_name: draft.displayName.trim() || null,
       description: draft.description.trim(),
@@ -267,8 +276,8 @@ function SubagentEditor({
       model: draft.model,
       tools: splitNames(draft.tools),
       skills: splitNames(draft.skills),
-      max_turns: Number(draft.maxTurns),
-      timeout_seconds: Number(draft.timeoutSeconds),
+      max_turns: maxTurns,
+      timeout_seconds: timeoutSeconds,
     };
     try {
       if (isNew) {
@@ -366,6 +375,7 @@ function SubagentEditor({
             <Input
               type="number"
               min={1}
+              step={1}
               value={draft.maxTurns}
               onChange={(event) => set("maxTurns", event.target.value)}
             />
@@ -374,6 +384,7 @@ function SubagentEditor({
             <Input
               type="number"
               min={1}
+              step={1}
               value={draft.timeoutSeconds}
               onChange={(event) => set("timeoutSeconds", event.target.value)}
             />
@@ -393,7 +404,9 @@ function SubagentEditor({
               pending ||
               !draft.name.trim() ||
               !draft.description.trim() ||
-              !draft.systemPrompt.trim()
+              !draft.systemPrompt.trim() ||
+              positiveInteger(draft.maxTurns) === null ||
+              positiveInteger(draft.timeoutSeconds) === null
             }
           >
             {pending ? t.common.loading : t.common.save}

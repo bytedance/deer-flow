@@ -285,6 +285,25 @@ def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):
     assert "Available: planner" in message.content
 
 
+def test_task_tool_explains_when_caller_policy_permits_no_subagents(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = []
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, allowed_subagents: [])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-empty-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: none permitted by caller policy" in message.content
+
+
 def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     """The lead run binds one immutable extension snapshot; delegation must
     carry that same object rather than re-reading the process singleton, which
