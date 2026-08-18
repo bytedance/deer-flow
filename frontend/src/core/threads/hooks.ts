@@ -601,9 +601,11 @@ export function mergeMessages(
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
  * the `values` event containing the user message. Those steps are not part of
  * the pre-submit baseline, so move only that visible pending segment behind the
- * first new human message without disturbing established history or hidden
- * checkpoint controls. The caller keeps the baseline after stream completion
- * because the SDK may retain its transient event order until the next submit.
+ * first new human message. Conversely, a baseline message from an established
+ * turn can be woven after that human when history confirms the input before a
+ * live checkpoint tail; move those established messages back before the input.
+ * The caller keeps the baseline after stream completion because the SDK may
+ * retain its transient event order until the next submit.
  */
 export function restoreLocalTurnMessageOrder(
   messages: Message[],
@@ -637,15 +639,29 @@ export function restoreLocalTurnMessageOrder(
       stablePrefix.push(message);
     }
   }
-  if (earlyPendingSteps.length === 0) {
+  const displacedBaselineMessages: Message[] = [];
+  const stableSuffix: Message[] = [];
+  for (const message of messages.slice(pendingHumanIndex + 1)) {
+    const identity = messageIdentity(message);
+    if (identity && baselineMessageIdentities.has(identity)) {
+      displacedBaselineMessages.push(message);
+    } else {
+      stableSuffix.push(message);
+    }
+  }
+  if (
+    earlyPendingSteps.length === 0 &&
+    displacedBaselineMessages.length === 0
+  ) {
     return messages;
   }
 
   return [
     ...stablePrefix,
+    ...displacedBaselineMessages,
     messages[pendingHumanIndex]!,
     ...earlyPendingSteps,
-    ...messages.slice(pendingHumanIndex + 1),
+    ...stableSuffix,
   ];
 }
 

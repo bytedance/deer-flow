@@ -1624,6 +1624,62 @@ test("local turn order keeps early streamed steps behind the user message", () =
   ]);
 });
 
+test("local turn order keeps an existing clarification card with its original turn", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "clarification-call",
+    content: "Which market should I research?",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+    "tool:clarification-call",
+  ]);
+
+  // A live checkpoint tail can be woven after the newly persisted human
+  // message even though the card was already visible before submission.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        clarificationCard,
+        currentStep,
+      ],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAnswer,
+    clarificationCard,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
 test("reconnected turn order moves same-run steps back behind the user message", () => {
   // Reload mid-run: replayed `messages-tuple` steps reach the merged list
   // before the turn's human message (the retained replay buffer may have
