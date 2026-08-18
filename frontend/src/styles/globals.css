@@ -326,6 +326,15 @@ html.dark .shiki span {
     @apply bg-background text-foreground;
   }
 
+  /* Buttons and elements with interactive ARIA roles get pointer cursor by
+     default. Browser UA sets <button> to cursor: default; Tailwind v4 preflight
+     does not reset cursor; headless libraries (Radix UI) provide no visual
+     styles. Utility classes like cursor-default still override this rule. */
+  button,
+  [role="button"] {
+    cursor: pointer;
+  }
+
   .container-md {
     width: 100%;
     @media (width >= 40rem) {

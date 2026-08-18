@@ -430,7 +430,7 @@ export function BrowserViewPanel({
           {displayUrl ? (
             <img
               ref={surfaceRef}
-              className="absolute inset-0 h-full w-full cursor-default object-contain object-center"
+              className="absolute inset-0 h-full w-full cursor-pointer object-contain object-center"
               src={displayUrl}
               alt={frame?.title ?? "Browser view"}
               draggable={false}
