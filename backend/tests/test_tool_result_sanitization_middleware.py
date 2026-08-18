@@ -193,10 +193,16 @@ class TestKnownScopeBoundary:
     def test_untagged_mcp_named_tool_is_not_sanitized(self):
         # An MCP-registered tool that never got the deerflow_mcp metadata tag
         # (e.g. loaded through a path that does not tag) is still passed through
-        # unchanged. Coverage follows the tag, not the name.
+        # unchanged. Coverage follows the tag, not the name. The tool object is
+        # present here with a non-empty metadata dict, so the untagged branch of
+        # (metadata or {}).get(key) is what this test pins.
         mw = ToolResultSanitizationMiddleware()
         msg = _msg(_MALICIOUS_PAGE, name="fetch_url")
-        result = mw.wrap_tool_call(_request("fetch_url"), lambda _: msg)
+        request = SimpleNamespace(
+            tool_call={"name": "fetch_url", "id": "tc-1"},
+            tool=SimpleNamespace(metadata={"other_marker": True}),
+        )
+        result = mw.wrap_tool_call(request, lambda _: msg)
         assert result is msg
         assert "<system-reminder>" in result.content
 
