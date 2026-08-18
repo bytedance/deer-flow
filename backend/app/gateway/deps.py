@@ -132,9 +132,10 @@ def _validate_agent_storage(config: AppConfig) -> None:
     """Fail fast on an agent-storage backend the database cannot support.
 
     ``agent_storage.backend: db`` needs a durable, shared SQL database — a
-    ``memory`` database is per-process, so agent definitions would silently
-    diverge across nodes (and there is no SQL URL to open). Mirrors deermem's
-    create_storage fail-fast and the multi-worker gate above.
+    ``memory`` database is per-process, so custom-agent and managed-subagent
+    definitions would silently diverge across nodes (and there is no SQL URL
+    to open). Mirrors deermem's create_storage fail-fast and the multi-worker
+    gate above.
 
     Also warns when a multi-worker Postgres deployment leaves agent storage on
     ``file``: custom agents created on one node's local disk are invisible to
@@ -155,7 +156,9 @@ def _validate_agent_storage(config: AppConfig) -> None:
         workers = 1
     if workers > 1 and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': custom agents are stored per-node on local disk and are not visible across workers/nodes. Set agent_storage.backend='db' to share them.",
+            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "custom agents and managed subagents are stored per-node on local disk and are not visible "
+            "across workers/nodes. Set agent_storage.backend='db' to share them.",
             workers,
         )
 

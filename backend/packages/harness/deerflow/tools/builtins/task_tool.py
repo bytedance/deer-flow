@@ -262,11 +262,16 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
+    allowed_subagents = metadata.get("allowed_subagents")
+    if allowed_subagents is None:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    else:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
     # Get subagent configuration
     config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
-    if config is None:
+    if config is None or subagent_type not in available_subagent_names:
         available = ", ".join(available_subagent_names)
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
         return _task_result_command(
@@ -298,8 +303,6 @@ async def task_tool(
     trace_id = None
     user_id = None
     deerflow_trace_id = None
-    metadata: dict = {}
-
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
@@ -308,7 +311,6 @@ async def task_tool(
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
         # Try to get parent model from configurable
-        metadata = runtime.config.get("metadata", {})
         parent_model = metadata.get("model_name")
 
         # Get or generate trace_id for distributed tracing

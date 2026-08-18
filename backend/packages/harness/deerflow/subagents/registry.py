@@ -4,6 +4,7 @@ import logging
 from dataclasses import replace
 from typing import Any
 
+from deerflow.persistence.managed_subagents import ManagedSubagentDefinition, get_managed_subagent_store
 from deerflow.sandbox.security import is_host_bash_allowed
 from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
@@ -47,13 +48,38 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
     )
 
 
+def _managed_definitions(*, app_config: Any | None = None) -> list[ManagedSubagentDefinition]:
+    """Load deployment-managed definitions from the selected persistence backend."""
+    store_config = app_config if hasattr(app_config, "agent_storage") else None
+    return get_managed_subagent_store(store_config).list()
+
+
+def _build_managed_subagent_config(name: str, *, app_config: Any | None = None) -> SubagentConfig | None:
+    for definition in _managed_definitions(app_config=app_config):
+        if definition.name != name or not definition.enabled:
+            continue
+        return SubagentConfig(
+            name=definition.name,
+            description=definition.description,
+            system_prompt=definition.system_prompt,
+            tools=definition.tools,
+            disallowed_tools=definition.disallowed_tools,
+            skills=definition.skills,
+            model=definition.model,
+            max_turns=definition.max_turns,
+            timeout_seconds=definition.timeout_seconds,
+        )
+    return None
+
+
 def get_subagent_config(name: str, *, app_config: Any | None = None) -> SubagentConfig | None:
     """Get a subagent configuration by name, with config.yaml overrides applied.
 
     Resolution order (mirrors Codex's config layering):
     1. Built-in subagents (general-purpose, bash)
     2. Custom subagents from config.yaml custom_agents section
-    3. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, skills)
+    3. Enabled administrator-managed subagents
+    4. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, skills)
 
     Args:
         name: The name of the subagent.
@@ -66,6 +92,8 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     config = BUILTIN_SUBAGENTS.get(name)
     if config is None:
         config = _build_custom_subagent_config(name, app_config=app_config)
+    if config is None:
+        config = _build_managed_subagent_config(name, app_config=app_config)
     if config is None:
         return None
 
@@ -116,22 +144,22 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     return config
 
 
-def list_subagents(*, app_config: Any | None = None) -> list[SubagentConfig]:
+def list_subagents(*, app_config: Any | None = None, allowed_subagents: list[str] | None = None) -> list[SubagentConfig]:
     """List all available subagent configurations (with config.yaml overrides applied).
 
     Returns:
         List of all registered SubagentConfig instances (built-in + custom).
     """
     configs = []
-    for name in get_subagent_names(app_config=app_config):
+    for name in get_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents):
         config = get_subagent_config(name, app_config=app_config)
         if config is not None:
             configs.append(config)
     return configs
 
 
-def get_subagent_names(*, app_config: Any | None = None) -> list[str]:
-    """Get all available subagent names (built-in + custom).
+def get_subagent_names(*, app_config: Any | None = None, allowed_subagents: list[str] | None = None) -> list[str]:
+    """Get registered subagent names, optionally restricted by the caller policy.
 
     Returns:
         List of subagent names.
@@ -144,16 +172,31 @@ def get_subagent_names(*, app_config: Any | None = None) -> list[str]:
         if custom_name not in names:
             names.append(custom_name)
 
+    # Built-in and config.yaml definitions have operator-controlled precedence.
+    # A managed definition that later conflicts remains persisted for the
+    # Settings UI, but is excluded from runtime discovery.
+    for definition in _managed_definitions(app_config=app_config):
+        if not definition.enabled:
+            continue
+        if definition.name in names:
+            logger.warning("Managed subagent '%s' conflicts with a built-in or config.yaml definition and is excluded from runtime", definition.name)
+            continue
+        names.append(definition.name)
+
+    if allowed_subagents is not None:
+        allowed = set(allowed_subagents)
+        names = [name for name in names if name in allowed]
+
     return names
 
 
-def get_available_subagent_names(*, app_config: Any | None = None) -> list[str]:
+def get_available_subagent_names(*, app_config: Any | None = None, allowed_subagents: list[str] | None = None) -> list[str]:
     """Get subagent names that should be exposed to the active runtime.
 
     Returns:
         List of subagent names visible to the current sandbox configuration.
     """
-    names = get_subagent_names(app_config=app_config)
+    names = get_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
     try:
         host_bash_allowed = is_host_bash_allowed(app_config) if hasattr(app_config, "sandbox") else is_host_bash_allowed()
     except Exception:

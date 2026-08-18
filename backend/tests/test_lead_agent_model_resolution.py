@@ -1308,6 +1308,39 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
     assert captured["thinking_enabled"] is True  # request wins over agent's False
 
 
+def test_empty_allowed_subagents_disables_requested_delegation(monkeypatch):
+    """A request switch cannot widen an explicit Custom Agent hard deny."""
+    app_config = _make_app_config([_make_model("agent-model", supports_thinking=False)])
+    agent_config = _make_agent_config(model="agent-model", allowed_subagents=[])
+
+    import deerflow.tools as tools_module
+
+    get_available_tools = MagicMock(return_value=[])
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+    monkeypatch.setattr(tools_module, "get_available_tools", get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    config = {
+        "context": {
+            "agent_name": "researcher",
+            "subagent_enabled": True,
+        }
+    }
+    lead_agent_module._make_lead_agent(config, app_config=app_config)
+
+    get_available_tools.assert_called_once_with(
+        model_name="agent-model",
+        groups=None,
+        subagent_enabled=False,
+        app_config=app_config,
+    )
+    assert config["context"]["subagent_enabled"] is False
+    assert config["configurable"]["subagent_enabled"] is False
+    assert config["metadata"]["allowed_subagents"] == []
+
+
 def test_make_lead_agent_no_agent_settings_passes_none_overrides(monkeypatch):
     """Without a custom agent, model_overrides is None (no behavior change)."""
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
