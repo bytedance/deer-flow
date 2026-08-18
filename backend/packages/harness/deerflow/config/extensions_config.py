@@ -114,10 +114,7 @@ class McpUserScopedAuthConfig(BaseModel):
     )
     on_missing: Literal["deny", "passthrough"] = Field(
         default="deny",
-        description=(
-            "Behavior when the calling user has no mapped credential (or the mapped value resolved empty): "
-            "'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"
-        ),
+        description=("Behavior when the calling user has no mapped credential (or the mapped value resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
     )
     model_config = ConfigDict(extra="allow")
 
