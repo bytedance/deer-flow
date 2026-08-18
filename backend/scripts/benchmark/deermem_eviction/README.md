@@ -150,21 +150,21 @@ The historical protocol disclosed in #4789 recorded the answer model as `deepsee
 
 ## Published live QA results
 
-`results/pr4789-reproduction-v1/` contains the published artifacts of the equal-budget live run executed at repository revision `ea6d08be` (2026-08-17, DeepSeek official API, `deepseek-v4-flash`): `qa_run.json` (provenance), `qa.rows.jsonl` (90 graded rows), `qa.summary.json`, and `qa.stats.json`. The offline suite verifies that the published statistics are recomputable from the published rows.
+`results/pr4789-reproduction-v1/` contains the published artifacts of the equal-budget live run executed at repository revision `497ff3d0` (2026-08-18, DeepSeek official API, `deepseek-v4-flash`), after the evidence renderer was restored to the historical `SESSION {id} AT {date}` representation: `qa_run.json` (provenance), `qa.rows.jsonl` (90 graded rows), `qa.summary.json`, and `qa.stats.json`. An earlier live run executed under the divergent bracket rendering was discarded entirely rather than partially reused. The offline suite verifies that the published statistics are recomputable from the published rows.
 
 QA accuracy at capacity 7 with identical settings for both policies:
 
 | Suite | `confidence` | `hybrid-v1` | Exact McNemar p | Accuracy difference (95% CI) |
 | --- | ---: | ---: | ---: | --- |
-| 40 official | 23/40 | 35/40 | 0.0042 | +0.300 [+0.125, +0.475] |
+| 40 official | 23/40 | 33/40 | 0.0129 | +0.250 [+0.075, +0.425] |
 | 5 synthetic corrections | 1/5 | 5/5 | 0.1250 | +0.800 [+0.400, +1.000] |
-| 45 overall | 24/45 | 40/45 | 0.0004 | +0.356 [+0.200, +0.511] |
+| 45 overall | 24/45 | 38/45 | 0.0013 | +0.311 [+0.156, +0.467] |
 
-Scenario breakdown: `confirmation_help` 3/10 vs 10/10, `access_help` 3/10 vs 9/10, `confidence_control` 7/10 vs 8/10, `noisy_signal_control` 10/10 vs 8/10, synthetic corrections 1/5 vs 5/5. The noisy-signal control is the one scenario where `hybrid-v1` scored below the confidence baseline in this run; it is reported separately and not folded into any other metric.
+Scenario breakdown: `confirmation_help` 3/10 vs 9/10, `access_help` 3/10 vs 9/10, `confidence_control` 8/10 vs 6/10, `noisy_signal_control` 9/10 vs 9/10, synthetic corrections 1/5 vs 5/5. The confidence control is the one scenario where `hybrid-v1` scored below the confidence baseline in this run; it is reported separately and not folded into any other metric.
 
-Decomposing that noisy-signal cell from the published rows: both policies retained the support fact in all ten noisy-signal cases, so the two rows `hybrid-v1` lost (`993da5e2`, `9a707b81`) are not eviction failures. In both, the hybrid run produced a more verbose phrasing of the same answer (`About one week.`, `21 days ago.`) that the frozen grader rejected under its numeric-conflict rule against a multi-number reference, while the confidence run's terser phrasing (`1 week`, `21`) matched through the substring rule. The opposite also occurs (`af082822`: the hybrid run's terse `2` and the confidence run's `2 weeks ago.` both pass). The policies retain different distractor sets, which nudges answer phrasing; the grader remains frozen and the cell is reported as-is.
+Decomposing the discordant cells from the published rows: `hybrid-v1` lost exactly two cases against the baseline (`1cea1afa`, `2698e78f`, both confidence-control), and in both the support fact was retained, so neither is an eviction failure. In `1cea1afa` the model abstained with `INSUFFICIENT` despite the retained support; in `2698e78f` it answered `Weekly.` — semantically the same answer the confidence run phrased differently — which the frozen grader rejects because it shares no non-stopword token with the reference phrasing. The policies retain different distractor sets, which nudges answer phrasing and abstention; the grader remains frozen and the cells are reported as-is.
 
-Both totals sit well above the historical `14/45` vs `23/45`, primarily because the historical confidence baseline was limited to 1024 output tokens while this run gives both policies the same 2048-token budget. The run consumed 81,742 input and 14,156 output tokens across the 90 calls.
+Both totals sit well above the historical `14/45` vs `23/45`, primarily because the historical confidence baseline was limited to 1024 output tokens while this run gives both policies the same 2048-token budget. The run consumed 81,463 input and 17,009 output tokens across the 90 calls.
 
 ## Historical-result caveats
 

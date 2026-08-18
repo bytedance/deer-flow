@@ -1,8 +1,12 @@
 {
   "artifacts": {
-    "config_sha256": "e0bcd1581be8457c614a4159b87304e54501d48a7e07990b02f1f6f8627fa026"
+    "answer_prompt_sha256": "2bd4f166219946ccff7ac86f52a053c6dbf8be6d27e178c398d6bf70cf8a7423",
+    "config_sha256": "e0bcd1581be8457c614a4159b87304e54501d48a7e07990b02f1f6f8627fa026",
+    "dataset_sha256": "821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c",
+    "official_manifest_sha256": "7f9b26f3bfb7a19c75af53af77ac5ebaa02eeb05c7824c5b5c08be0d9e43db4b",
+    "synthetic_manifest_sha256": "2f0c7f9bc05f87322bf3e2d8c33aeb9ec3bf27fb12772cda43915e4d75c2be1e"
   },
-  "created_at": "2026-08-17T05:03:04.143615Z",
+  "created_at": "2026-08-18T02:46:09.953936Z",
   "dataset": {
     "filename": "longmemeval_oracle.json",
     "repository": "xiaowu0162/longmemeval-cleaned",
@@ -11,7 +15,7 @@
   },
   "git": {
     "dirty": false,
-    "head": "ea6d08be1148fc812b7604e17d7d73dd05e6881c"
+    "head": "497ff3d03bd2500cdc4e8fbb3e7a41306b5cf0eb"
   },
   "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
   "qa": {
@@ -27,5 +31,5 @@
     "timeout_seconds": 120,
     "workers": 3
   },
-  "schema_version": 1
+  "schema_version": 2
 }

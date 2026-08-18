@@ -18,17 +18,17 @@
       "source": "longmemeval"
     },
     {
-      "accuracy": 0.7,
+      "accuracy": 0.8,
       "cases": 10,
-      "correct": 7,
+      "correct": 8,
       "policy": "confidence",
       "scenario": "confidence_control",
       "source": "longmemeval"
     },
     {
-      "accuracy": 0.8,
+      "accuracy": 0.6,
       "cases": 10,
-      "correct": 8,
+      "correct": 6,
       "policy": "hybrid-v1",
       "scenario": "confidence_control",
       "source": "longmemeval"
@@ -42,25 +42,25 @@
       "source": "longmemeval"
     },
     {
-      "accuracy": 1.0,
+      "accuracy": 0.9,
       "cases": 10,
-      "correct": 10,
+      "correct": 9,
       "policy": "hybrid-v1",
       "scenario": "confirmation_help",
       "source": "longmemeval"
     },
     {
-      "accuracy": 1.0,
+      "accuracy": 0.9,
       "cases": 10,
-      "correct": 10,
+      "correct": 9,
       "policy": "confidence",
       "scenario": "noisy_signal_control",
       "source": "longmemeval"
     },
     {
-      "accuracy": 0.8,
+      "accuracy": 0.9,
       "cases": 10,
-      "correct": 8,
+      "correct": 9,
       "policy": "hybrid-v1",
       "scenario": "noisy_signal_control",
       "source": "longmemeval"

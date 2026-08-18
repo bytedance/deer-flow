@@ -11,36 +11,36 @@
       "bootstrap": {
         "alpha": 0.05,
         "iterations": 10000,
-        "lower": 0.125,
-        "mean_difference": 0.30000000000000004,
+        "lower": 0.07500000000000007,
+        "mean_difference": 0.25,
         "seed": 4789,
-        "upper": 0.475
+        "upper": 0.425
       },
       "cases": 40,
       "mcnemar": {
         "both_correct": 21,
-        "both_wrong": 3,
+        "both_wrong": 5,
         "only_first_correct": 2,
-        "only_second_correct": 14,
-        "p_value": 0.004180908203125
+        "only_second_correct": 12,
+        "p_value": 0.012939453125
       }
     },
     "overall": {
       "bootstrap": {
         "alpha": 0.05,
         "iterations": 10000,
-        "lower": 0.19999999999999996,
-        "mean_difference": 0.3555555555555555,
+        "lower": 0.15555555555555556,
+        "mean_difference": 0.3111111111111111,
         "seed": 4789,
-        "upper": 0.5111111111111112
+        "upper": 0.4666666666666667
       },
       "cases": 45,
       "mcnemar": {
         "both_correct": 22,
-        "both_wrong": 3,
+        "both_wrong": 5,
         "only_first_correct": 2,
-        "only_second_correct": 18,
-        "p_value": 0.0004024505615234375
+        "only_second_correct": 16,
+        "p_value": 0.001312255859375
       }
     },
     "synthetic": {
