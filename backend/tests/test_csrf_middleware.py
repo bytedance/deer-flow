@@ -61,8 +61,8 @@ def test_trusted_proxy_network_parsing_is_cached_by_environment_value(monkeypatc
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "192.168.200.0/24")
     assert [str(network) for network in _trusted_proxy_networks()] == ["192.168.200.0/24"]
     assert parsed == ["10.0.0.0/8", "192.168.200.0/24"]
-    
-    
+
+
 def test_url_reconstruction_cannot_create_a_csrf_exemption():
     client = TestClient(_make_app(), base_url="https://deerflow.example")
 
