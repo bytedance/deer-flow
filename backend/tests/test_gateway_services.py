@@ -2199,11 +2199,90 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
 
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
+    assert captured["body"].config == {"recursion_limit": 100}
     assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
     assert captured["if_not_exists"] == "create"
     assert captured["on_completion"] is None
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
+
+
+def test_launch_scheduled_thread_run_uses_configured_recursion_limit(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_scheduled_thread_run
+    from deerflow.config.app_config import AppConfig, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "scheduler": {"recursion_limit": 1000},
+            }
+        )
+    )
+
+    async def _scenario():
+        captured: dict[str, object] = {}
+
+        async def fake_start_run(body, thread_id, request):
+            captured["config"] = body.config
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="Run in background",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                owner_user_id="user-1",
+            )
+        return captured
+
+    captured = asyncio.run(_scenario())
+    assert captured["config"] == {"recursion_limit": 1000}
+
+
+def test_launch_scheduled_thread_run_recursion_limit_is_clamped_to_ceiling(_stub_app_config):
+    """A scheduler.recursion_limit above max_recursion_limit is clamped at dispatch, so the run request never carries an unclamped value."""
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import launch_scheduled_thread_run
+    from deerflow.config.app_config import AppConfig, set_app_config
+
+    set_app_config(
+        AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "max_recursion_limit": 1000,
+                "scheduler": {"recursion_limit": 5000},
+            }
+        )
+    )
+
+    async def _scenario():
+        captured: dict[str, object] = {}
+
+        async def fake_start_run(body, thread_id, request):
+            captured["config"] = body.config
+            return SimpleNamespace(run_id="run-1", thread_id=thread_id)
+
+        with patch("app.gateway.services.start_run", side_effect=fake_start_run):
+            await launch_scheduled_thread_run(
+                thread_id="thread-scheduled",
+                assistant_id="lead_agent",
+                prompt="Run in background",
+                app=SimpleNamespace(state=SimpleNamespace()),
+                owner_user_id="user-1",
+            )
+        return captured
+
+    captured = asyncio.run(_scenario())
+    assert captured["config"] == {"recursion_limit": 1000}
 
 
 def test_launch_scheduled_thread_run_rejects_legacy_auth_token():

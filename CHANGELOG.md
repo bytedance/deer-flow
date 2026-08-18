@@ -123,6 +123,9 @@ This section accumulates work toward the **2.1.0** milestone
   `present_files` no longer report success when delivery fails. ([#4365])
 - **uploads:** Lazy-load historical files via a `list_uploaded_files` tool
   instead of injecting the full manifest. ([#4174])
+- **scheduler:** `scheduler.recursion_limit` in `config.yaml` sets the LangGraph
+  super-step cap for scheduled runs (default 100, clamped by
+  `max_recursion_limit`). The web UI still sends 1000 for interactive chat.
 
 #### Memory
 
