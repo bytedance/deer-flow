@@ -2206,16 +2206,12 @@ def test_sync_outputs_to_host_skips_mtime_restoration_on_overflow(monkeypatch, t
 
     e2b_provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
 
-    real_utime = os.utime
-
     def _raise_overflow(path, times=None, ns=None):
         raise OverflowError("timestamp out of range")
 
     monkeypatch.setattr(e2b_provider_mod.os, "utime", _raise_overflow)
 
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
-
-    monkeypatch.setattr(e2b_provider_mod.os, "utime", real_utime)
 
     paths = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
     target = paths / "user-data" / "outputs" / "far-future.txt"
