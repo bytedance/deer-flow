@@ -188,7 +188,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       onOpenChange={(open) => props.onOpenChange?.(open)}
     >
       <DialogContent
-        className="flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col sm:max-w-5xl md:max-w-6xl"
+        className="flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-5xl md:max-w-6xl"
         aria-describedby={undefined}
       >
         <DialogHeader className="gap-1">
@@ -211,7 +211,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                         "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                         active
                           ? "bg-primary text-primary-foreground shadow-sm"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                          : "text-muted-foreground hover:bg-secondary hover:text-foreground",
                       )}
                     >
                       <Icon className="size-4" />
@@ -223,7 +223,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </ul>
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
-            <div className="space-y-8 p-6">
+            <div className="space-y-6 p-5">
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
