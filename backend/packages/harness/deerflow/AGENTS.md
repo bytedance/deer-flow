@@ -101,3 +101,8 @@ An invalid mount does not block later mounts.
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
 
 A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
+
+A ``_MountUploadResult`` is attached to ``E2BSandbox.mount_upload_result``
+after creation. Downstream code can inspect ``result.truncated`` and
+``result.reason`` to discover whether the sandbox received all configured
+mounts without re-parsing Gateway logs.

@@ -119,6 +119,24 @@ class _MountPassLimitExceeded(Exception):
 
 
 @dataclass
+class _MountUploadResult:
+    """Structured outcome of a mount upload pass.
+
+    Carried on :attr:`E2BSandbox.mount_upload_result` so downstream code
+    (logging, system-prompt injection, Gateway status) can discover whether
+    the sandbox received all configured mounts without re-parsing Gateway
+    logs.
+    """
+
+    truncated: bool
+    reason: str | None
+    attempted_files: int
+    attempted_bytes: int
+    completed_files: int
+    completed_bytes: int
+
+
+@dataclass
 class _MountUploadBudget:
     deadline: float
     attempted_bytes: int = 0
@@ -1145,12 +1163,14 @@ class E2BSandboxProvider(SandboxProvider):
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
+        mount_result: _MountUploadResult | None = None
         try:
-            self._apply_mounts(client, user_id=user_id)
+            mount_result = self._apply_mounts(client, user_id=user_id)
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
         sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        sandbox.mount_upload_result = mount_result
 
         # Commit atomically.  If the provider shut down during bootstrap or
         # mounts, kill the VM rather than parking it under ``_sandboxes``
@@ -1799,9 +1819,10 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
             return []
 
-    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> _MountUploadResult:
         started_at = time.monotonic()
         budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
+        truncation_reason: str | None = None
 
         def warn_pass_stopped(reason: str) -> None:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -1838,7 +1859,8 @@ class E2BSandboxProvider(SandboxProvider):
 
         for host_path, container_path, read_only in mounts:
             if budget.expired:
-                warn_pass_stopped(_mount_deadline_reason())
+                truncation_reason = _mount_deadline_reason()
+                warn_pass_stopped(truncation_reason)
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
@@ -1860,10 +1882,20 @@ class E2BSandboxProvider(SandboxProvider):
             try:
                 self._upload_tree(client, host_path, container_path, read_only, budget=budget)
             except _MountPassLimitExceeded as e:
-                warn_pass_stopped(str(e))
+                truncation_reason = str(e)
+                warn_pass_stopped(truncation_reason)
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
+
+        return _MountUploadResult(
+            truncated=truncation_reason is not None,
+            reason=truncation_reason,
+            attempted_files=budget.attempted_files,
+            attempted_bytes=budget.attempted_bytes,
+            completed_files=budget.completed_files,
+            completed_bytes=budget.completed_bytes,
+        )
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
