@@ -1,10 +1,11 @@
 """Answer-prompt rendering for the live QA comparison.
 
 Rendering is pinned by the committed template (hash-checked by the config) and
-by this module: retained facts are sorted by fact ID, each fact renders as
-``[{fact_id}]`` followed by its content on the next line, fact blocks are joined
-with a single newline, and the ``CURRENT DATE`` line is omitted when the case
-has no question date.
+by this module: retained facts are sorted by their historical protocol fact IDs
+(``gold_{case}`` / ``d_{case}_{index}_{source}``), each fact renders as
+``[{fact_id}]`` followed by its content on the next line, fact blocks are
+joined with a blank line, and the ``CURRENT DATE`` line is omitted when the
+case has no question date.
 """
 
 from __future__ import annotations
@@ -51,7 +52,7 @@ def render_answer_messages(template: str, *, question: str, question_date: str |
     if len({fact_id for fact_id, _ in ordered}) != len(ordered):
         raise ValueError("Retained facts must have unique IDs")
     current_date_section = f"CURRENT DATE: {question_date}\n" if question_date else ""
-    stored_memory = "\n".join(f"[{fact_id}]\n{content}" for fact_id, content in ordered)
+    stored_memory = "\n\n".join(f"[{fact_id}]\n{content}" for fact_id, content in ordered)
     user = user_part.replace(_CURRENT_DATE_PLACEHOLDER, current_date_section).replace(_STORED_MEMORY_PLACEHOLDER, stored_memory).replace(_QUESTION_PLACEHOLDER, question)
     return ({"role": "system", "content": system_part}, {"role": "user", "content": user})
 

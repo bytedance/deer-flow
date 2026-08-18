@@ -83,7 +83,8 @@ def test_policy_result_contains_ids_and_scores_but_not_dataset_text() -> None:
     result = evaluate_case(case, policy_name="hybrid-v1", capacity=7).to_public_dict()
 
     assert result["case_id"] == "support"
-    assert result["support_fact_ids"] == ["support"]
+    assert result["support_fact_ids"] == ["gold_support"]
+    assert all(fact_id.startswith("d_support_") or fact_id == "gold_support" for fact_id in result["kept_fact_ids"])
     assert "question" not in result
     assert "answer" not in result
     assert "facts" not in result

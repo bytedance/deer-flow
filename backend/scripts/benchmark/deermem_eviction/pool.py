@@ -82,9 +82,9 @@ def _distractor_metadata(scenario: Scenario, *, index: int, outranking_count: in
     raise ValueError(f"Unknown evaluation scenario: {scenario}")
 
 
-def _fact(record: EvidenceRecord, metadata: _FactMetadata, *, evaluation_time: datetime) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _fact(record: EvidenceRecord, metadata: _FactMetadata, *, fact_id: str, evaluation_time: datetime) -> tuple[dict[str, Any], dict[str, Any] | None]:
     fact: dict[str, Any] = {
-        "id": record.question_id,
+        "id": fact_id,
         "content": record.content,
         "category": metadata.category,
         "confidence": metadata.confidence,
@@ -117,24 +117,26 @@ def build_case(
         raise ValueError("The pr4789 reproduction protocol requires exactly nine distractors")
     if not 1 <= loss_rank <= 10:
         raise ValueError("loss_rank must be between 1 and 10")
-    fact_ids = [support.question_id, *(item.question_id for item in distractors)]
-    if len(fact_ids) != len(set(fact_ids)):
-        raise ValueError("A prepared pool cannot contain duplicate fact IDs")
+    source_ids = [support.question_id, *(item.question_id for item in distractors)]
+    if len(source_ids) != len(set(source_ids)):
+        raise ValueError("A prepared pool cannot contain duplicate source records")
 
     facts: list[dict[str, Any]] = []
     usage: dict[str, dict[str, Any]] = {}
-    support_fact, support_usage = _fact(support, _support_metadata(scenario), evaluation_time=evaluation_time)
+    support_fact_id = f"gold_{support.question_id}"
+    support_fact, support_usage = _fact(support, _support_metadata(scenario), fact_id=support_fact_id, evaluation_time=evaluation_time)
     facts.append(support_fact)
     if support_usage is not None:
-        usage[support.question_id] = support_usage
+        usage[support_fact_id] = support_usage
 
     outranking_count = loss_rank - 1
     for index, record in enumerate(distractors):
         metadata = _distractor_metadata(scenario, index=index, outranking_count=outranking_count, question_type=record.question_type)
-        fact, fact_usage = _fact(record, metadata, evaluation_time=evaluation_time)
+        fact_id = f"d_{support.question_id}_{index}_{record.question_id}"
+        fact, fact_usage = _fact(record, metadata, fact_id=fact_id, evaluation_time=evaluation_time)
         facts.append(fact)
         if fact_usage is not None:
-            usage[record.question_id] = fact_usage
+            usage[fact_id] = fact_usage
 
     facts.sort(key=lambda fact: str(fact["id"]))
     resolved_source = source or ("synthetic" if scenario == "correction_reserve" else "longmemeval")
@@ -149,5 +151,5 @@ def build_case(
         evaluation_time=evaluation_time.astimezone(UTC),
         facts=facts,
         usage=usage,
-        support_fact_ids=(support.question_id,),
+        support_fact_ids=(support_fact_id,),
     )

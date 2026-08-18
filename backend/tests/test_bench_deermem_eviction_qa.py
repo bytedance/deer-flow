@@ -75,7 +75,7 @@ def test_rendering_pins_fact_order_date_line_and_block_format() -> None:
     assert messages[0]["role"] == "system"
     assert messages[0]["content"] == "Answer using only the stored memory below. If the answer is not supported, output exactly INSUFFICIENT. For a YES/NO question, output only YES or NO. Otherwise give only the shortest direct answer."
     assert messages[1]["role"] == "user"
-    assert messages[1]["content"] == ("CURRENT DATE: 2023/05/20 (Sat) 02:21\nSTORED MEMORY:\n[fact-a]\nThe user moved to Lyon.\n[fact-b]\nThe cat sleeps in the study.\n\nQUESTION: Where does the user live?")
+    assert messages[1]["content"] == ("CURRENT DATE: 2023/05/20 (Sat) 02:21\nSTORED MEMORY:\n[fact-a]\nThe user moved to Lyon.\n\n[fact-b]\nThe cat sleeps in the study.\n\nQUESTION: Where does the user live?")
 
 
 def test_rendering_omits_the_date_line_when_absent() -> None:

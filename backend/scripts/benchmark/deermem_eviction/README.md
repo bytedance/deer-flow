@@ -101,7 +101,7 @@ The distractor bank contains the first 40 eligible `single-session-user` and `si
 sha256("deermem-medium-v1:{case_id}")
 ```
 
-Nine consecutive records are selected with wraparound. Facts are sorted by ID before they enter the production selector, making its stable input-order tie break equivalent to the published score-then-ID rule. Access metadata uses the fixed evaluation clock, so no wall-clock decay can change a rerun.
+Nine consecutive records are selected with wraparound. Pool facts carry the historical protocol fact IDs: the support fact is `gold_{case}` and distractor `i` (0-based, in bank-draw order) is `d_{case}_{i}_{source}`. Facts are sorted by these IDs before they enter the production selector and before prompt rendering, so the selector's stable input-order tie break reproduces the historical tie-break exactly (distractors in draw order first, the support fact last), and the rendered `STORED MEMORY` joins fact blocks with a blank line. Access metadata uses the fixed evaluation clock, so no wall-clock decay can change a rerun.
 
 At capacity 7, the offline result reproduces the disclosed support-retention totals:
 
