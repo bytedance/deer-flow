@@ -121,6 +121,33 @@ class _MountPassLimitExceeded(Exception):
 
 
 @dataclass
+class MountUploadResult:
+    """Structured outcome of a mount upload pass.
+
+    ``truncated`` is ``True`` only when the upload pass was stopped early
+    by a resource limit (deadline, file count, or byte budget).  Individual
+    mount failures (missing host path, SDK errors) are logged but do NOT
+    set ``truncated`` — use ``completed_files < attempted_files`` or
+    Gateway logs to diagnose those.
+
+    Carried on :attr:`E2BSandbox.mount_upload_result` so downstream code
+    (logging, system-prompt injection, Gateway status) can discover
+    truncation without re-parsing Gateway logs.
+
+    ``None`` on a reclaimed sandbox means "not available" (the result was
+    recorded at creation time and is only preserved within the same
+    Gateway process lifetime).
+    """
+
+    truncated: bool
+    reason: str | None
+    attempted_files: int
+    attempted_bytes: int
+    completed_files: int
+    completed_bytes: int
+
+
+@dataclass
 class _MountUploadBudget:
     deadline: float
     deadline_seconds: int
@@ -198,6 +225,9 @@ class E2BSandboxProvider(SandboxProvider):
         # Per-(user,thread) lock to serialise acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
         self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
+        # Mount upload results keyed by sandbox id. Survives warm-pool
+        # reclaim so the result is available after reconnect.
+        self._mount_results: dict[str, MountUploadResult] = {}
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
@@ -1162,12 +1192,16 @@ class E2BSandboxProvider(SandboxProvider):
 
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
+        mount_result: MountUploadResult | None = None
         try:
-            self._apply_mounts(client, user_id=user_id)
+            mount_result = self._apply_mounts(client, user_id=user_id)
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
         sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        sandbox.mount_upload_result = mount_result
+        if mount_result is not None:
+            self._mount_results[sandbox_id] = mount_result
 
         # Commit atomically.  If the provider shut down during bootstrap or
         # mounts, kill the VM rather than parking it under ``_sandboxes``
@@ -1636,6 +1670,7 @@ class E2BSandboxProvider(SandboxProvider):
         The caller must hold ``self._lock``.
         """
         sandbox = E2BSandbox(id=sandbox_id, client=client, home_dir=self._config["home_dir"])
+        sandbox.mount_upload_result = self._mount_results.get(sandbox_id)
         self._sandboxes[sandbox_id] = sandbox
         self._warm_pool.pop(sandbox_id, None)
         if thread_id:
@@ -1816,13 +1851,14 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
             return []
 
-    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> MountUploadResult:
         started_at = time.monotonic()
         deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
         budget = _MountUploadBudget(
             deadline=started_at + deadline_seconds,
             deadline_seconds=deadline_seconds,
         )
+        truncation_reason: str | None = None
 
         def warn_pass_stopped(reason: str) -> None:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -1859,7 +1895,8 @@ class E2BSandboxProvider(SandboxProvider):
 
         for host_path, container_path, read_only in mounts:
             if budget.expired:
-                warn_pass_stopped(_mount_deadline_reason(deadline_seconds))
+                truncation_reason = _mount_deadline_reason(deadline_seconds)
+                warn_pass_stopped(truncation_reason)
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
@@ -1881,10 +1918,20 @@ class E2BSandboxProvider(SandboxProvider):
             try:
                 self._upload_tree(client, host_path, container_path, read_only, budget=budget)
             except _MountPassLimitExceeded as e:
-                warn_pass_stopped(str(e))
+                truncation_reason = str(e)
+                warn_pass_stopped(truncation_reason)
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
+
+        return MountUploadResult(
+            truncated=truncation_reason is not None,
+            reason=truncation_reason,
+            attempted_files=budget.attempted_files,
+            attempted_bytes=budget.attempted_bytes,
+            completed_files=budget.completed_files,
+            completed_bytes=budget.completed_bytes,
+        )
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
@@ -2454,6 +2501,7 @@ class E2BSandboxProvider(SandboxProvider):
             except Exception:
                 pass
             return
+        self._mount_results.pop(sandbox.id, None)
         if error := self._kill_client(getattr(sandbox, "_client", None)):
             logger.debug(
                 "kill() on e2b sandbox %s raised (probably already gone): %s",

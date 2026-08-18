@@ -270,6 +270,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._deployment_capacity = None
     provider._owned_sandbox_ids = set()
     provider._acquire_inflight = set()
+    provider._mount_results = {}
     provider._orphan_first_seen = {}
     provider._maintenance_stop = threading.Event()
     provider._lease_thread = None
@@ -933,6 +934,196 @@ def test_apply_mounts_deadline_reason_shows_configured_value(monkeypatch, tmp_pa
     assert len(client.files.write_calls) == 1
     assert "time budget 180s" in caplog.text
     assert "attempted_files=1" in caplog.text
+
+
+def test_apply_mounts_returns_result_on_success(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+    assert result.completed_files == 2
+    assert result.completed_bytes == 11
+    assert result.attempted_files == 2
+    assert result.attempted_bytes == 11
+
+
+def test_apply_mounts_returns_truncated_result_on_deadline(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        result = provider._apply_mounts(client, user_id="user-1")
+
+    assert result.truncated is True
+    assert result.reason is not None
+    assert "time budget" in result.reason
+    assert result.completed_files <= result.attempted_files
+
+
+def test_apply_mounts_returns_truncated_result_on_file_count(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        result = provider._apply_mounts(client, user_id="user-1")
+
+    assert result.truncated is True
+    assert "file count cap" in result.reason
+
+
+def test_apply_mounts_returns_truncated_result_on_byte_budget(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 7)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5678")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        result = provider._apply_mounts(client, user_id="user-1")
+
+    assert result.truncated is True
+    assert "byte budget" in result.reason
+
+
+def test_apply_mounts_non_limit_failure_is_not_reported_as_truncation(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+
+    class FailWriteAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            raise RuntimeError("SDK write failed")
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=FailWriteAPI())
+
+    result = provider._apply_mounts(client, user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+
+
+def test_apply_mounts_missing_host_path_is_not_reported_as_truncation(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(tmp_path / "nonexistent"), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient()
+
+    result = provider._apply_mounts(client, user_id="user-1")
+
+    assert result.truncated is False
+    assert result.reason is None
+    assert result.attempted_files == 0
+
+
+def test_create_sandbox_stores_mount_result_on_sandbox(monkeypatch):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = []
+
+    sandbox_id = provider._create_sandbox("t1", user_id="u1")
+    sandbox = provider.get(sandbox_id)
+
+    assert sandbox is not None
+    assert sandbox.mount_upload_result is not None
+    assert sandbox.mount_upload_result.truncated is False
+    assert sandbox.mount_upload_result.reason is None
+
+
+def test_mount_result_survives_warm_pool_reclaim(monkeypatch):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    provider = _make_provider()
+    _install_fake_sdk(monkeypatch, provider)
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = []
+
+    sandbox_id = provider._create_sandbox("t1", user_id="u1")
+    sandbox = provider.get(sandbox_id)
+    assert sandbox is not None
+    original_result = sandbox.mount_upload_result
+    assert original_result is not None
+
+    provider.release(sandbox_id)
+    assert provider.get(sandbox_id) is None
+
+    reclaimed_id = provider.acquire("t1", user_id="u1")
+    assert reclaimed_id == sandbox_id
+    reclaimed_sandbox = provider.get(sandbox_id)
+    assert reclaimed_sandbox is not None
+    assert reclaimed_sandbox.mount_upload_result is not None
+    assert reclaimed_sandbox.mount_upload_result.truncated == original_result.truncated
+    assert reclaimed_sandbox.mount_upload_result.reason == original_result.reason
 
 
 def test_skill_projection_and_configured_mount_share_upload_budget(monkeypatch, tmp_path):
