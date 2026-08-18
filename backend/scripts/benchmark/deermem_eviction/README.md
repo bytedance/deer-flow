@@ -77,7 +77,7 @@ PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction run-qa \
   --output-dir /tmp/deermem-eviction-qa-run
 ```
 
-The runner resolves credentials only from the two environment variables named in the config and fails before touching the dataset when either is missing. Model, temperature, `max_tokens`, stream, timeout, retry attempts, and worker count all come from the versioned config; both policies use identical settings. Each row is written to `responses/<case>__<policy>.json` as soon as its call succeeds, so rerunning the same command resumes a partial run without repeating completed calls; `qa_run.json` binds the output directory to one config identity and rejects resumption with a different config. Row files contain the prediction and non-secret metadata only — never questions, reference answers, memory content, credentials, or response headers.
+The runner resolves credentials only from the two environment variables named in the config and fails before touching the dataset when either is missing. Model, temperature, `max_tokens`, stream, timeout, retry attempts, and worker count all come from the versioned config; both policies use identical settings. Each row is written to `responses/<case>__<policy>.json` as soon as its call succeeds, so rerunning the same command resumes a partial run without repeating completed calls. `qa_run.json` binds the output directory to the full protocol identity — the SHA-256 of the config, both manifests, the answer prompt, and the dataset — and rejects resumption when any of them changed. A stored row is reused only when its row identity, kept facts, and `request_fingerprint` all match the task recomputed from the current protocol; a row whose fingerprint no longer matches is re-called rather than silently reused. Row files contain the prediction and non-secret metadata only — never questions, reference answers, memory content, credentials, or response headers.
 
 Grade a completed answer run and write the public QA results (no provider calls):
 
@@ -93,7 +93,7 @@ Grading happens through `grade_answer(prediction, reference)` — two strings, n
 
 Official samples are independently recomputed from the pinned dataset rather than merely checked for existence. For each of the two eligible question types, the loader applies the published exclusions, sorts by `question_id`, and selects the first 20. Consecutive groups of five are assigned according to the manifest's explicit `scenario_order` field.
 
-Evidence extraction iterates `haystack_sessions`. Within each session it selects turns marked `has_answer`; when a session contains no marked turn, it falls back to user turns. Each rendered session is prefixed with its session ID and date. Evidence-length filters apply to this final rendered value.
+Evidence extraction iterates `haystack_sessions`. Within each session it selects turns marked `has_answer`; when a session contains no marked turn, it falls back to user turns. Each rendered session is prefixed with the historical `SESSION {id} AT {date}` line — the exact byte representation matters, because evidence-length filters apply to this final rendered value and the 700-character distractor-bank bound decides bank membership (the cross-check in #4810 caught a divergent prefix format precisely this way).
 
 The distractor bank contains the first 40 eligible `single-session-user` and `single-session-preference` records sorted by question ID. A case offset is derived from the first four bytes of:
 

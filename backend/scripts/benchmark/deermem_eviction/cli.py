@@ -119,7 +119,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         assert provider_settings is not None
         template = prompt_path.read_text(encoding="utf-8")
         tasks = [build_answer_task(case, evaluate_case(case, policy_name=policy_name, capacity=config.pool.qa_capacity, hybrid_config=config.policies.hybrid_v1), template) for case in cases for policy_name in ("confidence", "hybrid-v1")]
-        ensure_run_config_identity(args.output_dir, config=config, config_path=args.config, dataset_path=args.dataset, backend_root=BACKEND_ROOT)
+        ensure_run_config_identity(
+            args.output_dir,
+            config=config,
+            config_path=args.config,
+            official_manifest_path=args.official_manifest,
+            synthetic_manifest_path=args.synthetic_manifest,
+            prompt_path=prompt_path,
+            dataset_path=args.dataset,
+            backend_root=BACKEND_ROOT,
+        )
         with build_client(provider_settings, config.qa) as client:
             report = run_answer_calls(tasks, config=config, client=client, output_dir=args.output_dir)
         print(f"answer rows: {report.reused} reused, {report.called} called, {len(report.failed)} failed")

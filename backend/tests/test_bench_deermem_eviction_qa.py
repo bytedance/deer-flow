@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -235,24 +236,61 @@ def test_run_answer_calls_reports_failures_without_writing_rows(tmp_path: Path) 
     assert not response_path(tmp_path, tasks[0].row_id).exists()
 
 
-def test_run_directory_is_bound_to_one_config_identity(tmp_path: Path) -> None:
+def test_run_directory_is_bound_to_the_full_protocol_identity(tmp_path: Path) -> None:
     config = _load_config()
-    config_path = EVAL_ROOT / "configs" / "pr4789-reproduction-v1.yaml"
+    paths = {
+        "config_path": EVAL_ROOT / "configs" / "pr4789-reproduction-v1.yaml",
+        "official_manifest_path": EVAL_ROOT / "manifests" / "longmemeval-pr4789-v1.json",
+        "synthetic_manifest_path": EVAL_ROOT / "manifests" / "synthetic-corrections-pr4789-v1.json",
+        "prompt_path": EVAL_ROOT / "prompts" / "answer-v1.txt",
+    }
     dataset_path = tmp_path / "dataset.json"
     dataset_path.write_text("[]", encoding="utf-8")
     backend_root = Path(__file__).parents[1]
     output_dir = tmp_path / "run"
 
-    ensure_run_config_identity(output_dir, config=config, config_path=config_path, dataset_path=dataset_path, backend_root=backend_root)
+    ensure_run_config_identity(output_dir, config=config, dataset_path=dataset_path, backend_root=backend_root, **paths)
     marker = json.loads((output_dir / "qa_run.json").read_text(encoding="utf-8"))
     assert marker["qa"]["model"] == config.qa.model
+    assert set(marker["artifacts"]) == {"config_sha256", "official_manifest_sha256", "synthetic_manifest_sha256", "answer_prompt_sha256", "dataset_sha256"}
     assert "secret" not in json.dumps(marker).lower()
-    ensure_run_config_identity(output_dir, config=config, config_path=config_path, dataset_path=dataset_path, backend_root=backend_root)
+    ensure_run_config_identity(output_dir, config=config, dataset_path=dataset_path, backend_root=backend_root, **paths)
 
-    other_config = tmp_path / "other-config.yaml"
-    other_config.write_text(config_path.read_text(encoding="utf-8") + "\n# changed\n", encoding="utf-8")
-    with pytest.raises(ValueError, match="different config"):
-        ensure_run_config_identity(output_dir, config=config, config_path=other_config, dataset_path=dataset_path, backend_root=backend_root)
+    for changed_key, marker_field in (("config_path", "config_sha256"), ("synthetic_manifest_path", "synthetic_manifest_sha256"), ("prompt_path", "answer_prompt_sha256")):
+        changed_paths = dict(paths)
+        changed_file = tmp_path / f"changed-{changed_key}"
+        changed_file.write_text(paths[changed_key].read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        changed_paths[changed_key] = changed_file
+        with pytest.raises(ValueError, match=f"different protocol artifacts.*{marker_field}"):
+            ensure_run_config_identity(output_dir, config=config, dataset_path=dataset_path, backend_root=backend_root, **changed_paths)
+
+
+def test_resume_revalidates_stored_rows_against_the_current_task(tmp_path: Path) -> None:
+    config = _load_config()
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_success_body())
+
+    tasks = _tasks(count=1)
+    with _mock_client(handler, config.qa) as client:
+        run_answer_calls(tasks, config=config, client=client, output_dir=tmp_path, backoff_seconds=0)
+        assert len(calls) == 1
+
+        unchanged = run_answer_calls(tasks, config=config, client=client, output_dir=tmp_path, backoff_seconds=0)
+        assert (unchanged.reused, unchanged.called) == (1, 0)
+        assert len(calls) == 1
+
+        changed_message = replace(tasks[0], messages=(tasks[0].messages[0], {"role": "user", "content": "a different question"}))
+        after_message_change = run_answer_calls([changed_message], config=config, client=client, output_dir=tmp_path, backoff_seconds=0)
+        assert (after_message_change.reused, after_message_change.called) == (0, 1)
+        assert len(calls) == 2
+
+        changed_kept = replace(changed_message, kept_fact_ids=("fact-a",))
+        after_kept_change = run_answer_calls([changed_kept], config=config, client=client, output_dir=tmp_path, backoff_seconds=0)
+        assert (after_kept_change.reused, after_kept_change.called) == (0, 1)
+        assert len(calls) == 3
 
 
 def test_cli_run_qa_fails_fast_without_provider_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

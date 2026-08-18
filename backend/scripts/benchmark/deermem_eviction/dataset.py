@@ -63,7 +63,7 @@ def _selected_evidence_sessions(row: dict[str, Any]) -> list[tuple[Any, Any, lis
 def extract_evidence(row: dict[str, Any]) -> str:
     rendered_sessions: list[str] = []
     for session_id, date, selected in _selected_evidence_sessions(row):
-        lines = [f"[session_id={session_id} date={date}]"]
+        lines = [f"SESSION {session_id} AT {date}"]
         lines.extend(f"{str(turn.get('role') or 'unknown').upper()}: {turn['content']}" for turn in selected)
         rendered_sessions.append("\n".join(lines))
     return "\n\n".join(rendered_sessions)

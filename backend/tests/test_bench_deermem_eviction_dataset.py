@@ -57,7 +57,7 @@ def test_extract_evidence_uses_marked_turns_and_per_session_user_fallback() -> N
         ],
     }
 
-    assert extract_evidence(row) == ("[session_id=s1 date=2026/01/01]\nASSISTANT: marked answer\n\n[session_id=s2 date=2026/01/02]\nUSER: fallback user")
+    assert extract_evidence(row) == ("SESSION s1 AT 2026/01/01\nASSISTANT: marked answer\n\nSESSION s2 AT 2026/01/02\nUSER: fallback user")
 
 
 def test_distractor_bank_is_filtered_sorted_and_bounded() -> None:

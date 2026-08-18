@@ -4,8 +4,12 @@ Every row (case x policy at the QA capacity) is persisted as its own JSON file
 as soon as its provider call succeeds, so a partial paid run can be resumed
 without repeating completed calls. Row files contain the prediction and
 non-secret metadata only — never questions, reference answers, memory content,
-credentials, or response headers. A run directory is bound to one config
-identity; resuming with a different config is rejected.
+credentials, or response headers. A run directory is bound to the full
+protocol identity — config, official and synthetic manifests, answer prompt,
+and dataset — and resuming with any changed artifact is rejected. A stored
+row is reused only when its identity, kept facts, and request fingerprint all
+match the task recomputed from the current protocol; anything else is
+re-called.
 """
 
 from __future__ import annotations
@@ -15,12 +19,13 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import httpx
 
 from .config import EvaluationConfig
 from .io import load_json, sha256_file
-from .provider import ProviderCallError, request_answer
+from .provider import ProviderCallError, request_answer, request_fingerprint
 from .qa import AnswerTask
 from .results import _atomic_write_text, _git_metadata
 
@@ -71,16 +76,34 @@ def _write_row(path: Path, task: AnswerTask, prediction: str, *, attempts: int, 
     _atomic_write_text(path, json.dumps(row, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
-def ensure_run_config_identity(output_dir: Path, *, config: EvaluationConfig, config_path: Path, dataset_path: Path, backend_root: Path) -> None:
+def ensure_run_config_identity(
+    output_dir: Path,
+    *,
+    config: EvaluationConfig,
+    config_path: Path,
+    official_manifest_path: Path,
+    synthetic_manifest_path: Path,
+    prompt_path: Path,
+    dataset_path: Path,
+    backend_root: Path,
+) -> None:
     marker_path = output_dir / "qa_run.json"
-    config_sha256 = sha256_file(config_path)
+    artifacts = {
+        "config_sha256": sha256_file(config_path),
+        "official_manifest_sha256": sha256_file(official_manifest_path),
+        "synthetic_manifest_sha256": sha256_file(synthetic_manifest_path),
+        "answer_prompt_sha256": sha256_file(prompt_path),
+        "dataset_sha256": sha256_file(dataset_path),
+    }
     if marker_path.exists():
         marker = load_json(marker_path)
-        if marker.get("artifacts", {}).get("config_sha256") != config_sha256:
-            raise ValueError(f"{marker_path} was produced with a different config; use a new output directory")
+        stored = marker.get("artifacts", {})
+        changed = sorted(name for name in artifacts if stored.get(name) != artifacts[name])
+        if changed:
+            raise ValueError(f"{marker_path} was produced with different protocol artifacts ({', '.join(changed)}); use a new output directory")
         return
     marker = {
-        "schema_version": 1,
+        "schema_version": 2,
         "protocol_id": config.protocol_id,
         "created_at": datetime.now(UTC).isoformat().removesuffix("+00:00") + "Z",
         "git": _git_metadata(backend_root),
@@ -88,9 +111,9 @@ def ensure_run_config_identity(output_dir: Path, *, config: EvaluationConfig, co
             "repository": config.dataset.repository,
             "revision": config.dataset.revision,
             "filename": config.dataset.filename,
-            "sha256": sha256_file(dataset_path),
+            "sha256": artifacts["dataset_sha256"],
         },
-        "artifacts": {"config_sha256": config_sha256},
+        "artifacts": artifacts,
         "qa": {
             "capacity": config.pool.qa_capacity,
             "model": config.qa.model,
@@ -108,10 +131,20 @@ def ensure_run_config_identity(output_dir: Path, *, config: EvaluationConfig, co
     _atomic_write_text(marker_path, json.dumps(marker, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
+def _row_matches_task(row: dict[str, Any], task: AnswerTask, expected_fingerprint: str) -> bool:
+    return (
+        row.get("row_id") == task.row_id and row.get("policy") == task.policy and row.get("capacity") == task.capacity and tuple(row.get("kept_fact_ids", ())) == task.kept_fact_ids and row.get("request_fingerprint") == expected_fingerprint
+    )
+
+
 def run_answer_calls(tasks: list[AnswerTask], *, config: EvaluationConfig, client: httpx.Client, output_dir: Path, backoff_seconds: float | None = None) -> AnswerRunReport:
     if len({task.row_id for task in tasks}) != len(tasks):
         raise ValueError("answer tasks must have unique row IDs")
-    pending = [task for task in tasks if load_completed_row(response_path(output_dir, task.row_id)) is None]
+    pending = []
+    for task in tasks:
+        row = load_completed_row(response_path(output_dir, task.row_id))
+        if row is None or not _row_matches_task(row, task, request_fingerprint(config.qa, task.messages)):
+            pending.append(task)
     reused = len(tasks) - len(pending)
     failed: list[str] = []
     call_kwargs = {} if backoff_seconds is None else {"backoff_seconds": backoff_seconds}

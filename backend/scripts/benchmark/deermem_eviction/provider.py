@@ -62,9 +62,17 @@ def _is_retryable_status(status_code: int) -> bool:
     return status_code == 429 or status_code >= 500
 
 
+def request_payload(qa: QAConfig, messages: tuple[dict[str, str], ...]) -> dict[str, object]:
+    return {"model": qa.model, "temperature": qa.temperature, "max_tokens": qa.max_tokens, "stream": qa.stream, "messages": list(messages)}
+
+
+def request_fingerprint(qa: QAConfig, messages: tuple[dict[str, str], ...]) -> str:
+    return hashlib.sha256(json.dumps(request_payload(qa, messages), ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
 def request_answer(client: httpx.Client, qa: QAConfig, messages: tuple[dict[str, str], ...], *, backoff_seconds: float = RETRY_BACKOFF_SECONDS) -> AnswerCall:
-    payload = {"model": qa.model, "temperature": qa.temperature, "max_tokens": qa.max_tokens, "stream": qa.stream, "messages": list(messages)}
-    request_fingerprint = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+    payload = request_payload(qa, messages)
+    fingerprint = request_fingerprint(qa, messages)
     last_error = "no attempt was made"
     for attempt in range(1, qa.max_attempts + 1):
         if attempt > 1 and backoff_seconds > 0:
@@ -90,5 +98,5 @@ def request_answer(client: httpx.Client, qa: QAConfig, messages: tuple[dict[str,
         raw_usage = body.get("usage")
         usage = {key: value for key, value in raw_usage.items() if isinstance(value, int)} if isinstance(raw_usage, dict) else {}
         response_model = body.get("model") if isinstance(body.get("model"), str) else None
-        return AnswerCall(prediction=prediction, attempts=attempt, request_fingerprint=request_fingerprint, response_model=response_model, usage=usage)
+        return AnswerCall(prediction=prediction, attempts=attempt, request_fingerprint=fingerprint, response_model=response_model, usage=usage)
     raise ProviderCallError(f"provider call failed after {qa.max_attempts} attempts: {last_error}")
