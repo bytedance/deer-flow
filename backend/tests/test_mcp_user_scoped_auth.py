@@ -235,3 +235,91 @@ def test_gateway_merge_preserves_user_auth_when_field_omitted():
     merged = _merge_preserving_secrets(incoming, existing)
     assert merged.user_auth is not None
     assert merged.user_auth.users == {"u1": "Bearer real-secret"}
+
+
+def test_partial_user_auth_put_preserves_stored_subfields():
+    """A payload like {"enabled": false} must not wipe users or reset on_missing."""
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "Bearer real-secret"}, on_missing="passthrough", header="X-Api-Key"),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(enabled=False),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.user_auth.enabled is False
+    assert merged.user_auth.users == {"u1": "Bearer real-secret"}
+    assert merged.user_auth.on_missing == "passthrough"
+    assert merged.user_auth.header == "X-Api-Key"
+
+
+def test_explicit_users_map_still_replaces_and_can_remove():
+    """An explicitly sent map replaces the stored one, so removal via full round-trip works."""
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "Bearer s1", "u2": "Bearer s2"}),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        user_auth=McpUserScopedAuthConfigResponse(users={"u1": "***"}),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.user_auth.users == {"u1": "Bearer s1"}  # u2 removed, u1 preserved through mask
+
+
+def test_user_auth_extra_keys_survive_parse_mask_and_merge():
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _mask_server_config,
+        _merge_preserving_secrets,
+    )
+
+    ua = McpUserScopedAuthConfigResponse(**{"users": {"u1": "Bearer s"}, "custom_note": "keep-me"})
+    assert (ua.model_extra or {}).get("custom_note") == "keep-me"
+    server = McpServerConfigResponse(type="http", url="https://x", user_auth=ua)
+    masked = _mask_server_config(server)
+    assert (masked.user_auth.model_extra or {}).get("custom_note") == "keep-me"
+    merged = _merge_preserving_secrets(
+        McpServerConfigResponse(type="http", url="https://x", user_auth=McpUserScopedAuthConfigResponse(enabled=False)),
+        server,
+    )
+    assert (merged.user_auth.model_extra or {}).get("custom_note") == "keep-me"
+
+
+def test_stdio_server_user_auth_is_skipped_with_warning(caplog):
+    import logging
+
+    config = ExtensionsConfig(
+        mcp_servers={
+            "local-stdio": McpServerConfig(
+                enabled=True,
+                type="stdio",
+                command="npx",
+                args=["-y", "some-server"],
+                user_auth=McpUserScopedAuthConfig(users={"u1": "Bearer t1"}),
+            ),
+        },
+        skills={},
+    )
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.user_scoped_auth"):
+        interceptor = build_user_scoped_auth_interceptor(config)
+    assert interceptor is None  # no eligible servers -> nothing registered, no deny errors
+    assert any("user_auth" in r.message and "stdio" in r.message for r in caplog.records)

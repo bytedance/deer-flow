@@ -353,6 +353,10 @@ class McpUserScopedAuthConfigResponse(BaseModel):
     header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
     users: dict[str, str] = Field(default_factory=dict, description="Map of DeerFlow user id to credential header value")
     on_missing: Literal["deny", "passthrough"] = Field(default="deny", description="Behavior when the calling user has no mapped credential")
+    # Mirror the harness-side McpUserScopedAuthConfig (extra="allow"): without
+    # this, an operator's unknown key inside user_auth would be silently
+    # stripped by the next admin PUT, while server-level extras are preserved.
+    model_config = ConfigDict(extra="allow")
 
 
 class McpOAuthConfigResponse(BaseModel):
@@ -735,20 +739,41 @@ def _merge_preserving_secrets(
         )
     merged_user_auth = incoming.user_auth
     if incoming.user_auth is not None:
-        existing_users = existing.user_auth.users if existing.user_auth is not None else {}
-        merged_users = {}
-        for k, v in incoming.user_auth.users.items():
-            if v == _MASKED_VALUE:
-                if k in existing_users:
-                    merged_users[k] = existing_users[k]
+        # Sub-field-aware merge: a partial user_auth payload (e.g. just
+        # {"enabled": false}) must not wipe the stored credential map or reset
+        # other stored sub-fields. Only sub-fields the request explicitly set
+        # replace stored values; the rest carry over — the same contract the
+        # block-level `model_fields_set` check below applies one level up.
+        incoming_ua = incoming.user_auth
+        base = existing.user_auth
+        set_fields = incoming_ua.model_fields_set
+        effective: dict[str, Any] = {}
+        if base is not None:
+            effective.update({name: getattr(base, name) for name in ("enabled", "header", "users", "on_missing")})
+            effective.update(base.model_extra or {})
+        for name in ("enabled", "header", "on_missing"):
+            if name in set_fields:
+                effective[name] = getattr(incoming_ua, name)
+        effective.update(incoming_ua.model_extra or {})
+        if "users" in set_fields:
+            # An explicitly sent map replaces the stored one (so a full
+            # round-trip can remove a user), with masked values swapped back
+            # for the stored credentials.
+            existing_users = base.users if base is not None else {}
+            merged_users = {}
+            for k, v in incoming_ua.users.items():
+                if v == _MASKED_VALUE:
+                    if k in existing_users:
+                        merged_users[k] = existing_users[k]
+                    else:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Cannot set user_auth credential for '{k}' to masked value '***'; provide a real value.",
+                        )
                 else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Cannot set user_auth credential for '{k}' to masked value '***'; provide a real value.",
-                    )
-            else:
-                merged_users[k] = v
-        merged_user_auth = incoming.user_auth.model_copy(update={"users": merged_users})
+                    merged_users[k] = v
+            effective["users"] = merged_users
+        merged_user_auth = McpUserScopedAuthConfigResponse(**effective)
 
     update = {
         "env": merged_env,

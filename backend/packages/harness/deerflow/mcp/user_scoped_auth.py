@@ -57,8 +57,21 @@ def build_user_scoped_auth_interceptor(extensions_config: ExtensionsConfig) -> A
     """
     user_auth_by_server: dict[str, McpUserScopedAuthConfig] = {}
     for server_name, server_config in extensions_config.get_enabled_mcp_servers().items():
-        if server_config.user_auth is not None and server_config.user_auth.enabled:
-            user_auth_by_server[server_name] = server_config.user_auth
+        if server_config.user_auth is None or not server_config.user_auth.enabled:
+            continue
+        if server_config.type not in ("sse", "http"):
+            # A stdio server has no HTTP headers: the pooled stdio path forwards
+            # rewritten headers as call meta, never a transport header, so the
+            # credential would go nowhere while deny errors still fired for
+            # unmapped users. Warn-and-skip matches the existing convention for
+            # transport/config mismatches (e.g. tool_call_timeout on non-stdio).
+            logger.warning(
+                "MCP server '%s' declares user_auth but uses the '%s' transport; user-scoped credentials only apply to 'sse'/'http' servers — ignoring user_auth for this server",
+                server_name,
+                server_config.type,
+            )
+            continue
+        user_auth_by_server[server_name] = server_config.user_auth
 
     if not user_auth_by_server:
         return None
