@@ -378,6 +378,9 @@ class BuzzChannel(Channel):
         self._pending_auth_event_id = None
         self._session_started_at = None
         self._pending_auth_challenge = None
+        # Seen-id persistence is coalesced (FLUSH_DELAY_SECONDS); a clean stop
+        # must not lose records still inside that window to a replay on restart.
+        self._seen_events.flush()
         logger.info("[buzz] channel stopped")
 
     # -- subscriptions ------------------------------------------------------

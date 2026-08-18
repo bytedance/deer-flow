@@ -18,13 +18,30 @@ never be skipped, preserving the connector's fail-toward-replay invariant.
 
 Failure policy is fail-open in both directions: an unreadable file loads as
 empty (costing at most one replayed answer, the pre-existing behavior) and a
-failed write is logged and retried on the next record (costing replay, never a
+failed write is logged and retried on the next flush (costing replay, never a
 skip). The id lists are bounded per channel and the channel map is bounded like
-the connector's other remote-fed maps.
+the connector's other remote-fed maps. That per-channel bound also bounds the
+restart protection itself: after a gateway restart ``_seen_created_at`` is
+empty, the resubscribe REQ carries no ``since``, and the relay's default
+backlog replays — only the newest ``MAX_IDS_PER_CHANNEL`` processed ids per
+channel are dropped, so a relay backlog deeper than that would re-answer the
+tail. If a relay ever serves a deeper default backlog, raise
+``MAX_IDS_PER_CHANNEL`` here.
+
+Writes are coalesced: ``record()`` marks the store dirty and schedules one
+flush per ``FLUSH_DELAY_SECONDS`` on the running event loop, so a reconnect
+backlog burst pays one O(store) file write instead of one per event. With no
+running loop (tests, tooling) ``record()`` flushes synchronously, and
+``BuzzChannel.stop()`` flushes pending state on shutdown. This class is not
+thread-safe by design: everything runs on the single channel event loop
+(mutation in ``_handle_chat_event``, the coalesced flush via ``call_later`` on
+that same loop). Anyone adding an off-loop user — e.g. a threaded flusher —
+must add a lock around ``_ids``/``_sets`` first, as ChannelStore does.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import tempfile
@@ -32,6 +49,10 @@ from collections import OrderedDict, deque
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Coalescing window for persisting the store. Losing this window's records in a
+# crash only costs replay (fail-open), never a skip.
+FLUSH_DELAY_SECONDS = 1.0
 
 # Ids retained per channel. Reconnect replay is normally the single watermark
 # event; the deep case is a channel whose cursor was evicted, which replays the
@@ -55,6 +76,8 @@ class BuzzSeenEventStore:
         self._ids: OrderedDict[str, deque[str]] = OrderedDict()
         self._sets: dict[str, set[str]] = {}
         self._loaded = False
+        self._dirty = False
+        self._flush_handle: asyncio.TimerHandle | None = None
 
     # -- persistence ---------------------------------------------------------
 
@@ -84,6 +107,7 @@ class BuzzSeenEventStore:
     def _save(self) -> None:
         if self._path is None:
             return
+        tmp_name: str | None = None
         try:
             path = self._path
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -93,11 +117,49 @@ class BuzzSeenEventStore:
             # would fail open into replay on the next start, which is
             # recoverable — but there is no reason to accept even that).
             with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, suffix=".tmp", delete=False, encoding="utf-8") as fh:
-                json.dump(payload, fh)
                 tmp_name = fh.name
+                json.dump(payload, fh)
             Path(tmp_name).replace(path)
+            self._dirty = False
         except Exception:
-            logger.warning("[buzz] failed to persist seen-event store (will retry on next processed event)", exc_info=True)
+            # Mirror ChannelStore._save: never leave the temp file behind, or a
+            # persistently failing write accumulates one *.tmp per attempt.
+            if tmp_name is not None:
+                Path(tmp_name).unlink(missing_ok=True)
+            logger.warning("[buzz] failed to persist seen-event store (will retry on next flush)", exc_info=True)
+
+    def _request_flush(self) -> None:
+        """Coalesce persistence: at most one write per FLUSH_DELAY_SECONDS.
+
+        With no running event loop (tests, tooling) the write happens
+        synchronously, preserving the immediate-durability semantics direct
+        callers had before coalescing existed.
+        """
+        self._dirty = True
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self.flush()
+            return
+        if self._flush_handle is None:
+            self._flush_handle = loop.call_later(FLUSH_DELAY_SECONDS, self._flush_scheduled)
+
+    def _flush_scheduled(self) -> None:
+        self._flush_handle = None
+        if self._dirty:
+            self._save()
+
+    def flush(self) -> None:
+        """Persist pending records now (no-op when nothing is dirty).
+
+        Called on channel stop so a clean shutdown never loses records to the
+        coalescing window; a crash inside the window only costs replay.
+        """
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+        if self._dirty:
+            self._save()
 
     def _enforce_channel_cap(self) -> None:
         while len(self._ids) > MAX_CHANNELS:
@@ -114,7 +176,7 @@ class BuzzSeenEventStore:
         return event_id in self._sets.get(channel_id, ())
 
     def record(self, channel_id: str, event_id: str) -> None:
-        """Record a fully processed event and persist the store."""
+        """Record a fully processed event and schedule a coalesced persist."""
         if not channel_id or not event_id:
             return
         self._ensure_loaded()
@@ -133,4 +195,4 @@ class BuzzSeenEventStore:
         # Move the channel to the back so the channel-cap eviction is LRU-ish.
         self._ids.move_to_end(channel_id)
         self._enforce_channel_cap()
-        self._save()
+        self._request_flush()

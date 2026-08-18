@@ -126,9 +126,11 @@ def test_redelivered_event_is_dropped_across_restart(tmp_path):
     """The bug: a relay reconnect after a gateway restart re-answered the last message."""
     path = tmp_path / "seen.json"
     ev = _event()
-    ch1, captured1 = _started_with_store(BuzzSeenEventStore(path))
+    store1 = BuzzSeenEventStore(path)
+    ch1, captured1 = _started_with_store(store1)
     _dispatch(ch1, ev)
     assert len(captured1) == 1
+    store1.flush()  # what BuzzChannel.stop() does on a clean shutdown
 
     # Simulated restart: a fresh channel instance, fresh store object, same file.
     ch2, captured2 = _started_with_store(BuzzSeenEventStore(path))
@@ -188,3 +190,134 @@ def test_default_config_uses_memory_only_store():
     )
     assert isinstance(ch._seen_events, BuzzSeenEventStore)
     assert ch._seen_events._path is None
+
+
+def test_channel_cap_evicts_least_recently_recorded(tmp_path):
+    from app.channels.buzz_seen_events import MAX_CHANNELS
+
+    store = BuzzSeenEventStore(tmp_path / "seen.json")
+    for i in range(MAX_CHANNELS):
+        store.record(f"chan-{i}", f"id-{i}")
+    # Touch the oldest channel so LRU ordering (move_to_end) protects it.
+    store.record("chan-0", "id-0b")
+    store.record("chan-new", "id-new")  # overflows the map by one
+    assert store.seen("chan-0", "id-0")  # refreshed -> survived
+    assert store.seen("chan-new", "id-new")
+    assert not store.seen("chan-1", "id-1")  # now the least recently used -> evicted
+    # The persisted form respects the cap too.
+    persisted = json.loads((tmp_path / "seen.json").read_text())
+    assert len(persisted) == MAX_CHANNELS
+    assert "chan-1" not in persisted
+
+
+def test_saves_are_coalesced_under_a_running_loop(tmp_path):
+    """One timer (and at most one file write) per burst, not one write per record."""
+    from app.channels import buzz_seen_events
+
+    path = tmp_path / "seen.json"
+    store = BuzzSeenEventStore(path)
+    saves = []
+    original_save = store._save
+
+    def counting_save():
+        saves.append(1)
+        original_save()
+
+    store._save = counting_save
+
+    async def burst():
+        for i in range(50):
+            store.record(CHANNEL, f"id-{i}")
+        assert saves == []  # nothing written yet: flush is pending on the loop
+        assert store._flush_handle is not None
+        await asyncio.sleep(buzz_seen_events.FLUSH_DELAY_SECONDS + 0.1)
+
+    asyncio.run(burst())
+    assert len(saves) == 1
+    persisted = json.loads(path.read_text())
+    assert len(persisted[CHANNEL]) == 50
+
+
+def test_flush_persists_pending_records_and_is_idempotent(tmp_path):
+    path = tmp_path / "seen.json"
+    store = BuzzSeenEventStore(path)
+
+    async def record_only():
+        store.record(CHANNEL, "e1")
+        assert not path.exists()  # still inside the coalescing window
+
+    asyncio.run(record_only())
+    store.flush()
+    assert BuzzSeenEventStore(path).seen(CHANNEL, "e1")
+    mtime = path.stat().st_mtime_ns
+    store.flush()  # nothing dirty -> no rewrite
+    assert path.stat().st_mtime_ns == mtime
+
+
+def test_failed_save_leaves_no_tmp_files(tmp_path, monkeypatch):
+    """A persistent write failure must not accumulate *.tmp files (ChannelStore parity)."""
+    path = tmp_path / "seen.json"
+    store = BuzzSeenEventStore(path)
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("app.channels.buzz_seen_events.json.dump", boom)
+    for i in range(3):
+        store.record(CHANNEL, f"id-{i}")  # sync context -> each record attempts a save
+    assert not path.exists()
+    assert [p.name for p in tmp_path.iterdir()] == []  # no *.tmp litter
+    monkeypatch.undo()
+    store.record(CHANNEL, "id-3")  # recovery: next flush persists everything
+    assert json.loads(path.read_text())[CHANNEL] == ["id-0", "id-1", "id-2", "id-3"]
+
+
+def test_channel_stop_flushes_pending_records(tmp_path):
+    """A clean stop must not lose records still inside the coalescing window."""
+    path = tmp_path / "seen.json"
+    store = BuzzSeenEventStore(path)
+    ch, captured = _started_with_store(store)
+    ev = _event()
+
+    async def dispatch_then_stop():
+        await ch.handle_relay_frame(json.dumps(["EVENT", "sub1", ev]))
+        assert not path.exists()  # flush still pending
+        ch._running = True  # stop() is a no-op on a never-started channel
+        ch.bus.subscribe_outbound(ch._on_outbound)
+        await ch.stop()
+
+    asyncio.run(dispatch_then_stop())
+    assert len(captured) == 1
+    assert BuzzSeenEventStore(path).seen(CHANNEL, str(ev["id"]))
+
+
+def test_service_wiring_injects_persistent_store_path(tmp_path, monkeypatch):
+    """The _start_channel wiring is what makes real deployments durable — a
+    silent regression there would revert to memory-only with all unit tests green."""
+    from app.channels.service import ChannelService
+
+    captured_config = {}
+
+    class StubChannel:
+        def __init__(self, bus, config):
+            captured_config.update(config)
+            self.is_running = True
+
+        async def start(self):
+            pass
+
+    class StubPaths:
+        base_dir = str(tmp_path)
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: StubPaths())
+    monkeypatch.setattr("deerflow.reflection.resolve_class", lambda path, base_class=None: StubChannel)
+
+    service = ChannelService(channels_config={})
+    started = asyncio.run(service._start_channel("buzz", {"relay_url": "wss://x", "private_key": SK3_HEX}))
+    assert started
+    expected = str(tmp_path / "channels" / "buzz_seen_events.json")
+    assert captured_config["seen_event_store_path"] == expected
+    # An explicitly configured path must win over the default wiring.
+    captured_config.clear()
+    asyncio.run(service._start_channel("buzz", {"relay_url": "wss://x", "private_key": SK3_HEX, "seen_event_store_path": "/custom/seen.json"}))
+    assert captured_config["seen_event_store_path"] == "/custom/seen.json"
