@@ -87,7 +87,8 @@ def _setup(tmp_path: Path):
     _write_response(tmp_path, synthetic, "confidence", "NO")
     _write_response(tmp_path, synthetic, "hybrid-v1", "NO")
     results = {f"{case.case_id}__{policy}": _policy_result(case, policy) for case in cases for policy in ("confidence", "hybrid-v1")}
-    return cases, results
+    fingerprints = {row_id: "f" * 64 for row_id in results}
+    return cases, results, fingerprints
 
 
 def test_exact_mcnemar_matches_the_two_sided_exact_binomial() -> None:
@@ -113,9 +114,9 @@ def test_paired_bootstrap_is_seed_deterministic_and_signed_second_minus_first() 
 
 
 def test_grading_is_blind_and_joined_by_row_id(tmp_path: Path) -> None:
-    cases, results = _setup(tmp_path)
+    cases, results, fingerprints = _setup(tmp_path)
     rows = collect_answer_rows(tmp_path, cases)
-    graded = grade_answer_rows(cases, results, rows)
+    graded = grade_answer_rows(cases, results, rows, expected_fingerprints=fingerprints)
     by_row = {row["row_id"]: row for row in graded}
     assert not by_row["case-off__confidence"]["grade_correct"]
     assert by_row["case-off__hybrid-v1"]["grade_correct"]
@@ -125,7 +126,7 @@ def test_grading_is_blind_and_joined_by_row_id(tmp_path: Path) -> None:
 
 
 def test_collect_and_integrity_checks_reject_incomplete_or_tampered_rows(tmp_path: Path) -> None:
-    cases, results = _setup(tmp_path)
+    cases, results, fingerprints = _setup(tmp_path)
     response_path(tmp_path, "case-syn__hybrid-v1").unlink()
     with pytest.raises(AnswerRowIntegrityError, match="case-syn__hybrid-v1"):
         collect_answer_rows(tmp_path, cases)
@@ -133,7 +134,7 @@ def test_collect_and_integrity_checks_reject_incomplete_or_tampered_rows(tmp_pat
     _write_response(tmp_path, cases[1], "hybrid-v1", "NO", capacity=5)
     rows = collect_answer_rows(tmp_path, cases)
     with pytest.raises(AnswerRowIntegrityError, match="capacity/policy"):
-        grade_answer_rows(cases, results, rows)
+        grade_answer_rows(cases, results, rows, expected_fingerprints=fingerprints)
 
     _write_response(tmp_path, cases[1], "hybrid-v1", "NO")
     rows = collect_answer_rows(tmp_path, cases)
@@ -141,13 +142,18 @@ def test_collect_and_integrity_checks_reject_incomplete_or_tampered_rows(tmp_pat
     tampered["case-syn__hybrid-v1"] = _policy_result(_case("case-syn", source="synthetic", scenario="correction_reserve", answer="NO"), "hybrid-v1")
     object.__setattr__(tampered["case-syn__hybrid-v1"], "kept_fact_ids", ("other-fact",))
     with pytest.raises(AnswerRowIntegrityError, match="kept facts"):
-        grade_answer_rows(cases, tampered, rows)
+        grade_answer_rows(cases, tampered, rows, expected_fingerprints=fingerprints)
+
+    stale = dict(fingerprints)
+    stale["case-syn__hybrid-v1"] = "0" * 64
+    with pytest.raises(AnswerRowIntegrityError, match="request fingerprint"):
+        grade_answer_rows(cases, results, rows, expected_fingerprints=stale)
 
 
 def test_summary_and_statistics_keep_suites_separate(tmp_path: Path) -> None:
-    cases, results = _setup(tmp_path)
+    cases, results, fingerprints = _setup(tmp_path)
     config = _load_config()
-    graded = grade_answer_rows(cases, results, collect_answer_rows(tmp_path, cases))
+    graded = grade_answer_rows(cases, results, collect_answer_rows(tmp_path, cases), expected_fingerprints=fingerprints)
     summary = summarize_qa_rows(graded)
     assert {(group["source"], group["scenario"], group["policy"]): group["accuracy"] for group in summary} == {
         ("longmemeval", "access_help", "confidence"): 0.0,
@@ -164,9 +170,9 @@ def test_summary_and_statistics_keep_suites_separate(tmp_path: Path) -> None:
 
 
 def test_written_report_redacts_dataset_text_and_refuses_overwrite(tmp_path: Path) -> None:
-    cases, results = _setup(tmp_path)
+    cases, results, fingerprints = _setup(tmp_path)
     config = _load_config()
-    graded = grade_answer_rows(cases, results, collect_answer_rows(tmp_path, cases))
+    graded = grade_answer_rows(cases, results, collect_answer_rows(tmp_path, cases), expected_fingerprints=fingerprints)
     write_qa_report(tmp_path, graded=graded, summary=summarize_qa_rows(graded), statistics=compute_qa_statistics(graded, config), config=config)
     rows_text = (tmp_path / "qa.rows.jsonl").read_text(encoding="utf-8")
     assert "Secret question text" not in rows_text

@@ -76,6 +76,32 @@ def _write_row(path: Path, task: AnswerTask, prediction: str, *, attempts: int, 
     _atomic_write_text(path, json.dumps(row, ensure_ascii=False, indent=2, sort_keys=True) + "\n")
 
 
+def _protocol_artifact_hashes(*, config_path: Path, official_manifest_path: Path, synthetic_manifest_path: Path, prompt_path: Path, dataset_path: Path) -> dict[str, str]:
+    return {
+        "config_sha256": sha256_file(config_path),
+        "official_manifest_sha256": sha256_file(official_manifest_path),
+        "synthetic_manifest_sha256": sha256_file(synthetic_manifest_path),
+        "answer_prompt_sha256": sha256_file(prompt_path),
+        "dataset_sha256": sha256_file(dataset_path),
+    }
+
+
+def _changed_artifacts(marker: dict[str, Any], artifacts: dict[str, str]) -> list[str]:
+    stored = marker.get("artifacts", {})
+    return sorted(name for name in artifacts if stored.get(name) != artifacts[name])
+
+
+def verify_run_identity(output_dir: Path, *, config_path: Path, official_manifest_path: Path, synthetic_manifest_path: Path, prompt_path: Path, dataset_path: Path) -> None:
+    """Read-only check that a completed run directory was produced by the current protocol artifacts."""
+    marker_path = output_dir / "qa_run.json"
+    if not marker_path.exists():
+        raise ValueError(f"{marker_path} is missing; grading requires the marker written by run-qa")
+    artifacts = _protocol_artifact_hashes(config_path=config_path, official_manifest_path=official_manifest_path, synthetic_manifest_path=synthetic_manifest_path, prompt_path=prompt_path, dataset_path=dataset_path)
+    changed = _changed_artifacts(load_json(marker_path), artifacts)
+    if changed:
+        raise ValueError(f"{marker_path} was produced with different protocol artifacts ({', '.join(changed)}); refusing to grade")
+
+
 def ensure_run_config_identity(
     output_dir: Path,
     *,
@@ -88,17 +114,9 @@ def ensure_run_config_identity(
     backend_root: Path,
 ) -> None:
     marker_path = output_dir / "qa_run.json"
-    artifacts = {
-        "config_sha256": sha256_file(config_path),
-        "official_manifest_sha256": sha256_file(official_manifest_path),
-        "synthetic_manifest_sha256": sha256_file(synthetic_manifest_path),
-        "answer_prompt_sha256": sha256_file(prompt_path),
-        "dataset_sha256": sha256_file(dataset_path),
-    }
+    artifacts = _protocol_artifact_hashes(config_path=config_path, official_manifest_path=official_manifest_path, synthetic_manifest_path=synthetic_manifest_path, prompt_path=prompt_path, dataset_path=dataset_path)
     if marker_path.exists():
-        marker = load_json(marker_path)
-        stored = marker.get("artifacts", {})
-        changed = sorted(name for name in artifacts if stored.get(name) != artifacts[name])
+        changed = _changed_artifacts(load_json(marker_path), artifacts)
         if changed:
             raise ValueError(f"{marker_path} was produced with different protocol artifacts ({', '.join(changed)}); use a new output directory")
         return

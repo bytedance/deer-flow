@@ -49,7 +49,7 @@ def collect_answer_rows(output_dir: Path, cases: list[PreparedCase]) -> dict[str
     return rows
 
 
-def grade_answer_rows(cases: list[PreparedCase], results_by_row: dict[str, PolicyResult], rows: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def grade_answer_rows(cases: list[PreparedCase], results_by_row: dict[str, PolicyResult], rows: dict[str, dict[str, Any]], *, expected_fingerprints: dict[str, str]) -> list[dict[str, Any]]:
     cases_by_id = {case.case_id: case for case in cases}
     graded: list[dict[str, Any]] = []
     for row_id in sorted(rows):
@@ -60,6 +60,8 @@ def grade_answer_rows(cases: list[PreparedCase], results_by_row: dict[str, Polic
             raise AnswerRowIntegrityError(f"row {row_id} kept facts do not match the deterministic selector output")
         if row.get("capacity") != result.capacity or row.get("policy") != result.policy:
             raise AnswerRowIntegrityError(f"row {row_id} capacity/policy does not match the protocol")
+        if row.get("request_fingerprint") != expected_fingerprints.get(row_id):
+            raise AnswerRowIntegrityError(f"row {row_id} request fingerprint does not match the task recomputed from the current protocol")
         prediction = str(row["prediction"])
         grade = grade_answer(prediction, case.answer)
         graded.append(

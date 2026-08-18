@@ -12,7 +12,7 @@ from scripts.benchmark.deermem_eviction.policy import PolicyResult
 from scripts.benchmark.deermem_eviction.pool import PreparedCase
 from scripts.benchmark.deermem_eviction.provider import ProviderCallError, ProviderConfigurationError, ProviderSettings, build_client, request_answer, resolve_provider_settings
 from scripts.benchmark.deermem_eviction.qa import build_answer_task, render_answer_messages
-from scripts.benchmark.deermem_eviction.runner import ensure_run_config_identity, response_path, run_answer_calls
+from scripts.benchmark.deermem_eviction.runner import ensure_run_config_identity, response_path, run_answer_calls, verify_run_identity
 
 EVAL_ROOT = Path(__file__).parents[1] / "scripts" / "benchmark" / "deermem_eviction"
 
@@ -263,6 +263,30 @@ def test_run_directory_is_bound_to_the_full_protocol_identity(tmp_path: Path) ->
         changed_paths[changed_key] = changed_file
         with pytest.raises(ValueError, match=f"different protocol artifacts.*{marker_field}"):
             ensure_run_config_identity(output_dir, config=config, dataset_path=dataset_path, backend_root=backend_root, **changed_paths)
+
+
+def test_verify_run_identity_is_read_only_and_names_the_changed_artifact(tmp_path: Path) -> None:
+    config = _load_config()
+    paths = {
+        "config_path": EVAL_ROOT / "configs" / "pr4789-reproduction-v1.yaml",
+        "official_manifest_path": EVAL_ROOT / "manifests" / "longmemeval-pr4789-v1.json",
+        "synthetic_manifest_path": EVAL_ROOT / "manifests" / "synthetic-corrections-pr4789-v1.json",
+        "prompt_path": EVAL_ROOT / "prompts" / "answer-v1.txt",
+    }
+    dataset_path = tmp_path / "dataset.json"
+    dataset_path.write_text("[]", encoding="utf-8")
+    output_dir = tmp_path / "run"
+
+    with pytest.raises(ValueError, match="missing"):
+        verify_run_identity(output_dir, dataset_path=dataset_path, **paths)
+
+    ensure_run_config_identity(output_dir, config=config, dataset_path=dataset_path, backend_root=Path(__file__).parents[1], **paths)
+    verify_run_identity(output_dir, dataset_path=dataset_path, **paths)
+
+    changed_prompt = tmp_path / "changed-prompt.txt"
+    changed_prompt.write_text(paths["prompt_path"].read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="refusing to grade.*|answer_prompt_sha256"):
+        verify_run_identity(output_dir, dataset_path=dataset_path, **{**paths, "prompt_path": changed_prompt})
 
 
 def test_resume_revalidates_stored_rows_against_the_current_task(tmp_path: Path) -> None:

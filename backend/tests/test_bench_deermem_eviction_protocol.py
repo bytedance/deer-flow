@@ -5,9 +5,9 @@ from typing import Any
 
 import pytest
 
-from scripts.benchmark.deermem_eviction.dataset import DatasetIntegrityError, LongMemEvalDataset
+from scripts.benchmark.deermem_eviction.dataset import DatasetIntegrityError, EvidenceRecord, LongMemEvalDataset
 from scripts.benchmark.deermem_eviction.manifest import OfficialManifest
-from scripts.benchmark.deermem_eviction.protocol import validate_official_selection
+from scripts.benchmark.deermem_eviction.protocol import _distractors, validate_official_selection
 
 SCENARIO_ORDER = ["confirmation_help", "access_help", "confidence_control", "noisy_signal_control"]
 
@@ -100,3 +100,23 @@ def test_selection_recomputation_requires_enough_eligible_rows() -> None:
     rows = [row for row in _rows_with_exclusions() if row["question_id"] != "tr-020"]
     with pytest.raises(DatasetIntegrityError, match="not enough eligible"):
         validate_official_selection(_dataset(rows), _manifest())
+
+
+def _bank(size: int = 5) -> list[EvidenceRecord]:
+    return [EvidenceRecord(question_id=f"b{index}", question_type="single-session-user", question="q?", answer="a", question_date=None, content=f"evidence {index}") for index in range(size)]
+
+
+def test_distractor_offset_derivation_and_wraparound_are_pinned() -> None:
+    # Hardcoded expectations for sha256(f"offset-ns:{case_id}").digest()[:4] % 5;
+    # a regression in the digest slice, modulus, or wraparound changes these indices.
+    bank = _bank()
+    no_wrap = _distractors("case-a", bank, count=3, namespace="offset-ns")
+    assert [record.question_id for record in no_wrap] == ["b0", "b1", "b2"]
+    wraps = _distractors("case-c", bank, count=3, namespace="offset-ns")
+    assert [record.question_id for record in wraps] == ["b3", "b4", "b0"]
+    assert [record.question_id for record in _distractors("case-a", bank, count=3, namespace="alt-ns")] == ["b1", "b2", "b3"]
+
+
+def test_distractor_selection_requires_a_large_enough_bank() -> None:
+    with pytest.raises(DatasetIntegrityError, match="required"):
+        _distractors("case-a", _bank(size=2), count=3, namespace="offset-ns")

@@ -87,7 +87,7 @@ PYTHONPATH=. uv run python -m scripts.benchmark.deermem_eviction grade-qa \
   --output-dir /tmp/deermem-eviction-qa-run
 ```
 
-Grading happens through `grade_answer(prediction, reference)` — two strings, no policy identity — and is joined back to policies only afterwards through stable row IDs. Before grading, the command recomputes the deterministic selector output and rejects any answer row whose kept facts, capacity, or policy disagree with it, and refuses to proceed while any of the 90 rows is missing.
+Grading happens through `grade_answer(prediction, reference)` — two strings, no policy identity — and is joined back to policies only afterwards through stable row IDs. Before grading, the command verifies (read-only) that the run marker's five protocol artifact hashes match the current config, manifests, prompt, and dataset, recomputes the deterministic selector output and every task's request fingerprint, and rejects any answer row whose kept facts, capacity, policy, or stored fingerprint disagree with the recomputed protocol; it refuses to proceed while any of the 90 rows is missing. A published `qa.rows.jsonl` therefore certifies that its predictions were produced under the exact protocol being graded, not under an earlier serialization.
 
 ## Deterministic reconstruction
 

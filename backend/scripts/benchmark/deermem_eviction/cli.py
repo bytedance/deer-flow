@@ -11,11 +11,11 @@ from .io import sha256_file
 from .manifest import OfficialManifest, SyntheticManifest, load_official_manifest, load_synthetic_manifest
 from .policy import evaluate_case, require_production_policy
 from .protocol import build_protocol_cases, validate_official_selection
-from .provider import build_client, resolve_provider_settings
+from .provider import build_client, request_fingerprint, resolve_provider_settings
 from .qa import build_answer_task
 from .report import collect_answer_rows, compute_qa_statistics, grade_answer_rows, summarize_qa_rows, write_qa_report
 from .results import write_policy_run
-from .runner import ensure_run_config_identity, run_answer_calls
+from .runner import ensure_run_config_identity, run_answer_calls, verify_run_identity
 
 EVAL_ROOT = Path(__file__).resolve().parent
 BACKEND_ROOT = EVAL_ROOT.parents[2]
@@ -136,11 +136,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"  failed {failure}")
         return 1 if report.failed else 0
     if args.command == "grade-qa":
-        results_by_row = {
-            f"{case.case_id}__{policy_name}": evaluate_case(case, policy_name=policy_name, capacity=config.pool.qa_capacity, hybrid_config=config.policies.hybrid_v1) for case in cases for policy_name in ("confidence", "hybrid-v1")
-        }
+        template = prompt_path.read_text(encoding="utf-8")
+        results_by_row = {}
+        expected_fingerprints = {}
+        for case in cases:
+            for policy_name in ("confidence", "hybrid-v1"):
+                result = evaluate_case(case, policy_name=policy_name, capacity=config.pool.qa_capacity, hybrid_config=config.policies.hybrid_v1)
+                task = build_answer_task(case, result, template)
+                results_by_row[task.row_id] = result
+                expected_fingerprints[task.row_id] = request_fingerprint(config.qa, task.messages)
+        verify_run_identity(args.output_dir, config_path=args.config, official_manifest_path=args.official_manifest, synthetic_manifest_path=args.synthetic_manifest, prompt_path=prompt_path, dataset_path=args.dataset)
         rows = collect_answer_rows(args.output_dir, cases)
-        graded = grade_answer_rows(cases, results_by_row, rows)
+        graded = grade_answer_rows(cases, results_by_row, rows, expected_fingerprints=expected_fingerprints)
         summary = summarize_qa_rows(graded)
         statistics = compute_qa_statistics(graded, config)
         write_qa_report(args.output_dir, graded=graded, summary=summary, statistics=statistics, config=config)
