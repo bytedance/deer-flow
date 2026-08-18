@@ -610,3 +610,50 @@ class DeerMem(MemoryManager):
             )
         )
         return _compat_document(memory_data)
+
+    def batch_delete_facts(
+        self,
+        fact_ids: list[str],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Delete multiple facts by id. Returns memory data with deleted facts removed."""
+        resolved_agent = _resolve_agent_name(agent_name)
+        memory_data = None
+        for fact_id in fact_ids:
+            memory_data = _call_backend(
+                lambda fid=fact_id: self._updater.delete_memory_fact(
+                    fid,
+                    agent_name=resolved_agent,
+                    user_id=user_id,
+                )
+            )
+        return _compat_document(memory_data) if memory_data is not None else {}
+
+    def batch_update_facts(
+        self,
+        updates: list[dict[str, Any]],
+        *,
+        agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Update multiple facts. Each update dict must contain 'fact_id' and optional
+        'content', 'category', 'confidence' fields."""
+        resolved_agent = _resolve_agent_name(agent_name)
+        memory_data = None
+        for update in updates:
+            fact_id = update.get("fact_id")
+            if not fact_id:
+                continue
+            memory_data = _call_backend(
+                lambda u=update, fid=fact_id: self._updater.update_memory_fact(
+                    fid,
+                    content=u.get("content"),
+                    category=u.get("category"),
+                    confidence=u.get("confidence"),
+                    agent_name=resolved_agent,
+                    user_id=user_id,
+                )
+            )
+        return _compat_document(memory_data) if memory_data is not None else {}

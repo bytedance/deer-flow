@@ -82,3 +82,34 @@ export function useUpdateMemoryFact() {
     },
   });
 }
+
+import {
+  batchDeleteMemoryFacts,
+  batchUpdateMemoryFacts,
+} from "./api";
+import type {
+  BatchDeleteInput,
+  BatchUpdateInput,
+} from "./types";
+
+export function useBatchDeleteMemoryFacts() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: BatchDeleteInput) => batchDeleteMemoryFacts(input),
+    onSuccess: (memory) => {
+      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    },
+  });
+}
+
+export function useBatchUpdateMemoryFacts() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: (input: BatchUpdateInput) => batchUpdateMemoryFacts(input),
+    onSuccess: (memory) => {
+      queryClient.setQueryData<UserMemory>(["memory"], memory);
+    },
+  });
+}
