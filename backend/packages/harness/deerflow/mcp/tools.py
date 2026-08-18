@@ -14,12 +14,19 @@ from urllib.parse import unquote, urlparse
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
-from deerflow.config.extensions_config import ExtensionsConfig, resolve_effective_mcp_routing
+from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
+from deerflow.mcp.tasks.runtime import (
+    McpTaskConfigurationError,
+    get_mcp_task_submitter,
+    validate_mcp_task_config_snapshot,
+)
 from deerflow.reflection import resolve_variable
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
@@ -612,6 +619,132 @@ def _make_session_pool_tool(
     )
 
 
+def _raw_mcp_tool_name(
+    tool: BaseTool,
+    *,
+    server_name: str,
+    tool_name_prefix: bool,
+) -> str:
+    prefix = f"{server_name}_"
+    if tool_name_prefix and tool.name.startswith(prefix):
+        return tool.name[len(prefix) :]
+    return tool.name
+
+
+def _make_background_submit_tool(
+    tool: BaseTool,
+    *,
+    server_name: str,
+    task_name: str,
+    submit_tool: str,
+    status_tool: str,
+    cancel_tool: str,
+) -> BaseTool:
+    background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
+
+    async def submit_in_background(
+        runtime: Runtime | None = None,
+        **arguments: Any,
+    ) -> dict[str, Any]:
+        submitter = get_mcp_task_submitter()
+        thread_id = _extract_thread_id(runtime)
+        user_id = resolve_runtime_user_id(runtime)
+        context = runtime.context if runtime is not None and runtime.context else {}
+        run_id = context.get("run_id")
+        tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
+        created = await submitter.submit(
+            driver_name=ORDINARY_MCP_TASK_DRIVER,
+            request=TaskSubmitRequest(
+                user_id=user_id,
+                thread_id=thread_id,
+                run_id=str(run_id) if run_id is not None else None,
+                tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
+                server_name=server_name,
+                task_name=task_name,
+                arguments=arguments,
+                driver_data={
+                    "submit_tool": submit_tool,
+                    "status_tool": status_tool,
+                    "cancel_tool": cancel_tool,
+                },
+            ),
+        )
+        return {
+            "task_id": created["id"],
+            "task_name": task_name,
+            "status": created["status"],
+            "message": "Task is running in the background.",
+        }
+
+    return StructuredTool(
+        name=tool.name,
+        description=(f"{tool.description}\n\n{background_contract}" if tool.description else background_contract),
+        args_schema=tool.args_schema,
+        coroutine=submit_in_background,
+        metadata=tool.metadata,
+    )
+
+
+def _configure_task_tools_for_server(
+    tools: list[BaseTool],
+    *,
+    server_name: str,
+    server_config: McpServerConfig,
+    tool_name_prefix: bool,
+) -> list[BaseTool]:
+    """Hide driver-only tools and replace submit with a durable wrapper."""
+    if not server_config.task_toolsets:
+        return tools
+
+    by_raw_name = {
+        _raw_mcp_tool_name(
+            tool,
+            server_name=server_name,
+            tool_name_prefix=tool_name_prefix,
+        ): tool
+        for tool in tools
+    }
+    expected = {
+        raw_name
+        for toolset in server_config.task_toolsets
+        for raw_name in (
+            toolset.submit_tool,
+            toolset.status_tool,
+            toolset.cancel_tool,
+        )
+    }
+    missing = sorted(expected - by_raw_name.keys())
+    if missing:
+        raise McpTaskConfigurationError(f"MCP server {server_name!r} task_toolsets reference missing raw tool(s): {', '.join(missing)}")
+
+    hidden = {raw_name for toolset in server_config.task_toolsets for raw_name in (toolset.status_tool, toolset.cancel_tool)}
+    submit_by_name = {toolset.submit_tool: toolset for toolset in server_config.task_toolsets}
+    configured: list[BaseTool] = []
+    for tool in tools:
+        raw_name = _raw_mcp_tool_name(
+            tool,
+            server_name=server_name,
+            tool_name_prefix=tool_name_prefix,
+        )
+        if raw_name in hidden:
+            continue
+        toolset = submit_by_name.get(raw_name)
+        if toolset is None:
+            configured.append(tool)
+            continue
+        configured.append(
+            _make_background_submit_tool(
+                tool,
+                server_name=server_name,
+                task_name=toolset.name,
+                submit_tool=toolset.submit_tool,
+                status_tool=toolset.status_tool,
+                cancel_tool=toolset.cancel_tool,
+            )
+        )
+    return configured
+
+
 async def get_mcp_tools() -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
@@ -635,6 +768,7 @@ async def get_mcp_tools() -> list[BaseTool]:
     # made through the Gateway API (which runs in a separate process) are immediately
     # reflected when initializing MCP tools.
     extensions_config = ExtensionsConfig.from_file()
+    validate_mcp_task_config_snapshot(extensions_config)
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
@@ -655,34 +789,12 @@ async def get_mcp_tools() -> list[BaseTool]:
                 existing_headers["Authorization"] = auth_header
                 servers_config[server_name]["headers"] = existing_headers
 
-        tool_interceptors: list[Any] = []
-        oauth_interceptor = build_oauth_tool_interceptor(extensions_config)
-        if oauth_interceptor is not None:
-            tool_interceptors.append(oauth_interceptor)
-
-        # Load custom interceptors declared in extensions_config.json
-        # Format: "mcpInterceptors": ["pkg.module:builder_func", ...]
-        raw_interceptor_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
-        if isinstance(raw_interceptor_paths, str):
-            raw_interceptor_paths = [raw_interceptor_paths]
-        elif not isinstance(raw_interceptor_paths, list):
-            if raw_interceptor_paths is not None:
-                logger.warning(f"mcpInterceptors must be a list of strings, got {type(raw_interceptor_paths).__name__}; skipping")
-            raw_interceptor_paths = []
-        for interceptor_path in raw_interceptor_paths:
-            try:
-                builder = resolve_variable(interceptor_path)
-                interceptor = builder()
-                if callable(interceptor):
-                    tool_interceptors.append(interceptor)
-                    logger.info(f"Loaded MCP interceptor: {interceptor_path}")
-                elif interceptor is not None:
-                    logger.warning(f"Builder {interceptor_path} returned non-callable {type(interceptor).__name__}; skipping")
-            except Exception as e:
-                logger.warning(
-                    f"Failed to load MCP interceptor {interceptor_path}: {e}",
-                    exc_info=True,
-                )
+        tool_interceptors = build_mcp_tool_interceptors(
+            extensions_config,
+            oauth_builder=build_oauth_tool_interceptor,
+            resolver=resolve_variable,
+            target_logger=logger,
+        )
 
         client = MultiServerMCPClient(
             servers_config,
@@ -766,6 +878,7 @@ async def get_mcp_tools() -> list[BaseTool]:
             transport = servers_config[source_name].get("transport", "stdio")
             server_cfg = extensions_config.mcp_servers.get(source_name)
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
+            current_server_tools: list[BaseTool] = []
             for tool in server_tools:
                 if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
                     logger.warning(
@@ -784,7 +897,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                 if transport == "stdio":
                     _timeout = server_cfg.tool_call_timeout if server_cfg else None
                     _init_timeout = _resolve_session_init_timeout(server_cfg)
-                    wrapped_tools.append(
+                    current_server_tools.append(
                         _make_session_pool_tool(
                             tool,
                             source_name,
@@ -802,7 +915,16 @@ async def get_mcp_tools() -> list[BaseTool]:
                             source_name,
                             transport,
                         )
-                    wrapped_tools.append(tool)
+                    current_server_tools.append(tool)
+
+            if server_cfg is not None:
+                current_server_tools = _configure_task_tools_for_server(
+                    current_server_tools,
+                    server_name=source_name,
+                    server_config=server_cfg,
+                    tool_name_prefix=tool_name_prefix,
+                )
+            wrapped_tools.extend(current_server_tools)
 
         # Patch tools to support sync invocation, as deerflow client streams synchronously
         for tool in wrapped_tools:
@@ -811,6 +933,8 @@ async def get_mcp_tools() -> list[BaseTool]:
 
         return wrapped_tools
 
+    except McpTaskConfigurationError:
+        raise
     except Exception as e:
         logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
         return []

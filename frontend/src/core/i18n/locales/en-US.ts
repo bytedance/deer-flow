@@ -528,6 +528,10 @@ export const enUS: Translations = {
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
+    modelLoadFailed:
+      "Models couldn't be loaded. Model selection and token usage may be unavailable.",
+    modelLoadRetry: "Retry",
+    modelLoadRetrying: "Retrying…",
   },
 
   // Conversation

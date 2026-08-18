@@ -237,6 +237,7 @@ The scheduled-task MVP adds a scheduler section to `config.yaml`:
 ```yaml
 scheduler:
   enabled: false
+  multi_instance: false
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
@@ -246,8 +247,13 @@ scheduler:
 Notes:
 
 - `enabled: false` keeps background polling off by default.
-- `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
+- `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
+- `max_concurrent_runs` is a shared global cap in multi-instance mode. It counts active `queued`/`running` scheduled-run rows plus valid pre-launch dispatch leases, and Postgres serializes the budget read with due-task claims so long runs or concurrent Pods cannot exceed it.
+- Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
 - All scheduler fields are restart-required; edits need a Gateway restart.
+- **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
+- **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and includes active scheduled runs plus dispatch reservations. Plan capacity accordingly; it does not multiply with the replica count.
+- **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
 - Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
 - The MVP supports only `once` and `cron`.
@@ -736,7 +742,7 @@ To keep this off the default attack surface:
 > for CLI auto-auth in **all** modes. These hold long-lived CLI credentials;
 > scope or omit them when the gateway runs untrusted workloads.
 
-### CLI Credential Mounts (Claude Code / Codex)
+### CLI Credential Mounts (Claude Code / Codex / MiniMax Code)
 
 DeerFlow can reuse your Claude Code / Codex CLI subscription login as a model
 provider (`ClaudeChatModel`, the Codex provider) or for ACP agents that run the
@@ -764,6 +770,16 @@ its config directory, so it needs no `~/.claude` mount at all. Prefer the
 adapter's documented env auth, and reach for the
 `docker-compose.cli-auth.yaml` overlay only as a fallback for an adapter that
 genuinely reads the full CLI config directory.
+
+MiniMax Code is a native ACP agent, so it does not need an adapter. For local
+Gateway runs, install it with `npm install --global @minimax-ai/code`, run
+`mcode login`, and configure `acp_agents.mcode` with `command: mcode` and
+`args: ["acp"]`. The executable and its authenticated runtime must be available
+inside the Gateway environment; a host-only installation is not visible to a
+Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
+Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
+only when the agent is expected to edit files or run commands for a trusted
+task.
 
 
 ## Best Practices

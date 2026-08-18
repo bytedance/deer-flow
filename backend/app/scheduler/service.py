@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # byte-identical outcomes for the same "task already has an active run" condition.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _SKIP_ACTIVE_RUN_ERROR = "skipped: a previous run of this task is still active"
+_RESTART_RECOVERY_ERROR = "interrupted: gateway restarted before the run reached a terminal state"
+_LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its run lease"
 
 
 class ScheduledTaskService:
@@ -32,6 +34,8 @@ class ScheduledTaskService:
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
+        multi_instance: bool = False,
+        run_lease_grace_seconds: int = 10,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -39,24 +43,40 @@ class ScheduledTaskService:
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
+        self._multi_instance = multi_instance
+        self._run_lease_grace_seconds = run_lease_grace_seconds
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._skip_next_lease_reconciliation = False
 
     async def run_once(self, *, now: datetime) -> None:
-        # ``max_concurrent_runs`` is a global cap on active scheduled runs, not
-        # just a per-poll claim batch: long runs accumulate across poll cycles,
-        # so each cycle only claims into the remaining budget.
-        active = await self._task_run_repo.count_active_runs()
-        budget = self._max_concurrent_runs - active
-        if budget <= 0:
-            return
-        claimed = await self._task_repo.claim_due_tasks(
-            now=now,
-            lease_owner=self._lease_owner,
-            lease_seconds=self._lease_seconds,
-            limit=budget,
-        )
+        if self._multi_instance:
+            if self._skip_next_lease_reconciliation:
+                self._skip_next_lease_reconciliation = False
+            else:
+                await self._reconcile_active_state(now=now)
+            claimed = await self._task_repo.claim_due_tasks(
+                now=now,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._lease_seconds,
+                limit=self._max_concurrent_runs,
+                global_max_concurrent_runs=self._max_concurrent_runs,
+            )
+        else:
+            # In single-instance mode the count and claim do not need a shared
+            # database lock. Multi-instance mode performs both inside the
+            # repository's short Postgres advisory-lock transaction above.
+            active = await self._task_run_repo.count_active_runs()
+            budget = self._max_concurrent_runs - active
+            if budget <= 0:
+                return
+            claimed = await self._task_repo.claim_due_tasks(
+                now=now,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._lease_seconds,
+                limit=budget,
+            )
         for task in claimed:
             await self.dispatch_task(task, now=now, trigger="scheduled")
 
@@ -105,6 +125,7 @@ class ScheduledTaskService:
         now: datetime,
         trigger: str,
     ) -> dict[str, Any]:
+        expected_lease_owner = self._lease_owner if trigger == "scheduled" else None
         execution_thread_id = task.get("thread_id")
         if task.get("context_mode") == "fresh_thread_per_run" or execution_thread_id is None:
             execution_thread_id = str(uuid.uuid4())
@@ -133,6 +154,7 @@ class ScheduledTaskService:
                 last_thread_id=execution_thread_id,
                 last_error=str(exc),
                 increment_run_count=False,
+                expected_lease_owner=expected_lease_owner,
             )
             return {
                 "outcome": "failed",
@@ -160,6 +182,36 @@ class ScheduledTaskService:
             if trigger == "manual":
                 return self._active_run_conflict_result(execution_thread_id)
             return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
+
+        # Global concurrent-run budget check for manual triggers.  The poller
+        # enforces max_concurrent_runs via count_active_runs() before
+        # claim_due_tasks(); a manual trigger bypasses that path and must apply
+        # the same cap so it cannot push the active count above the limit.
+        # Like the poller's count this is a non-atomic fast path; the partial
+        # unique index uq_scheduled_task_run_active is the atomic arbiter that
+        # rejects a second active insert for the *same task*, but there is no
+        # DB-level constraint that caps the global count, so we treat this as a
+        # best-effort guard consistent with how the poller enforces the budget.
+        if trigger == "manual" and self._max_concurrent_runs > 0:
+            active = await self._task_run_repo.count_active_runs()
+            if active >= self._max_concurrent_runs:
+                return {
+                    "outcome": "conflict",
+                    "task_run_id": None,
+                    "run_id": None,
+                    "thread_id": execution_thread_id,
+                    "error": "global concurrent-run limit reached",
+                }
+        if self._multi_instance and trigger == "manual":
+            task = await self._task_repo.claim_dispatch_lease(
+                task["id"],
+                lease_owner=self._lease_owner,
+                now=now,
+                lease_seconds=self._lease_seconds,
+            )
+            if task is None:
+                return self._active_run_conflict_result(execution_thread_id)
+            expected_lease_owner = self._lease_owner
 
         task_run_id = f"task-run-{uuid.uuid4().hex}"
         try:
@@ -236,6 +288,7 @@ class ScheduledTaskService:
                 # Same race as the run-row write above: a fast-failing run's
                 # completion hook may have already finalized a `once` task.
                 protect_terminal=True,
+                expected_lease_owner=expected_lease_owner,
             )
             return {
                 "outcome": "launched",
@@ -256,6 +309,7 @@ class ScheduledTaskService:
                     thread_id=execution_thread_id,
                     now=now,
                     error=str(exc),
+                    trigger=trigger,
                 )
 
             next_at = next_run_at(
@@ -309,6 +363,7 @@ class ScheduledTaskService:
                         last_error=None,
                         increment_run_count=True,
                         protect_terminal=True,
+                        expected_lease_owner=expected_lease_owner,
                     )
                 except Exception:
                     logger.exception(
@@ -343,6 +398,7 @@ class ScheduledTaskService:
                 last_thread_id=execution_thread_id,
                 last_error=str(exc),
                 increment_run_count=False,
+                expected_lease_owner=expected_lease_owner,
             )
             return {
                 "outcome": "conflict" if self._is_overlap_conflict(exc) else "failed",
@@ -391,7 +447,14 @@ class ScheduledTaskService:
             trigger=trigger,
             status="skipped",
         )
-        return await self._finalize_skip(task, task_run_id=task_run_id, thread_id=thread_id, now=now, error=_SKIP_ACTIVE_RUN_ERROR)
+        return await self._finalize_skip(
+            task,
+            task_run_id=task_run_id,
+            thread_id=thread_id,
+            now=now,
+            error=_SKIP_ACTIVE_RUN_ERROR,
+            trigger=trigger,
+        )
 
     async def _finalize_skip(
         self,
@@ -401,6 +464,7 @@ class ScheduledTaskService:
         thread_id: str,
         now: datetime,
         error: str,
+        trigger: str,
     ) -> dict[str, Any]:
         next_at = next_run_at(
             task["schedule_type"],
@@ -424,6 +488,7 @@ class ScheduledTaskService:
             last_thread_id=task.get("last_thread_id"),
             last_error=error if task["schedule_type"] == "once" else None,
             increment_run_count=False,
+            expected_lease_owner=self._lease_owner if trigger == "scheduled" else None,
         )
         return {
             "outcome": "skipped",
@@ -487,24 +552,51 @@ class ScheduledTaskService:
     async def start(self) -> None:
         if self._task is not None:
             return
-        restart_error = "interrupted: gateway restarted before the run reached a terminal state"
-        try:
-            stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
-            if stale:
-                logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
-        except Exception:
-            logger.exception("Failed to sweep stale scheduled task runs at startup")
-        try:
-            # The run rows above are only half the story: a launched `once`
-            # task is parked in "running" until the (now dead) completion hook
-            # would have finalized it, so reconcile the parent rows too.
-            stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
-            if stuck:
-                logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
-        except Exception:
-            logger.exception("Failed to reconcile stuck once tasks at startup")
+        restart_error = _RESTART_RECOVERY_ERROR
+        if self._multi_instance:
+            await self._reconcile_active_state(now=datetime.now(UTC))
+            self._skip_next_lease_reconciliation = True
+        else:
+            try:
+                stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
+                if stale:
+                    logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
+            except Exception:
+                logger.exception("Failed to sweep stale scheduled task runs at startup")
+            try:
+                # The run rows above are only half the story: a launched `once`
+                # task is parked in "running" until the (now dead) completion hook
+                # would have finalized it, so reconcile the parent rows too.
+                stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
+                if stuck:
+                    logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
+            except Exception:
+                logger.exception("Failed to reconcile stuck once tasks at startup")
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
+
+    async def _reconcile_active_state(self, *, now: datetime) -> None:
+        error = _LEASE_RECOVERY_ERROR
+        try:
+            stale = await self._task_run_repo.reconcile_active_runs(
+                error=error,
+                now=now,
+                lease_grace_seconds=self._run_lease_grace_seconds,
+            )
+            if stale:
+                logger.warning("Marked %d stale scheduled task run(s) as interrupted after lease reconciliation", stale)
+        except Exception:
+            logger.exception("Failed to reconcile scheduled task runs with leases")
+        try:
+            stuck = await self._task_repo.reconcile_stuck_once_tasks(
+                error=error,
+                now=now,
+                lease_grace_seconds=self._run_lease_grace_seconds,
+            )
+            if stuck:
+                logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)
+        except Exception:
+            logger.exception("Failed to reconcile once tasks with leases")
 
     async def stop(self) -> None:
         if self._task is None:

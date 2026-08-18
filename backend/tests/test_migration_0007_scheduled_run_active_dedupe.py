@@ -169,7 +169,7 @@ async def test_migration_supersedes_duplicate_active_runs_before_unique_index(tm
 
         with sqlite3.connect(db_path) as raw:
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version_row[0] == "0011_mcp_tasks"
+        assert version_row[0] == "0012_mcp_task_results"
 
         # Sanity: the invariant the index enforces now holds — at most one
         # active row per task_id.

@@ -21,6 +21,8 @@ from deerflow_extension_api import (
     ExtensionData,
     ExtensionInstall,
     ExtensionRegistry,
+    ExtensionRuntimeDeps,
+    ExtensionService,
     HostPolicySnapshot,
     MiddlewareContributor,
     MiddlewarePlacement,
@@ -63,6 +65,7 @@ def test_middleware_placement_defaults():
     "cls",
     [
         HostPolicySnapshot,
+        ExtensionRuntimeDeps,
         AgentBuildContext,
         TaskInfo,
         SystemModelRequest,
@@ -77,7 +80,7 @@ def test_every_dataclass_is_frozen(cls):
 
 @pytest.mark.parametrize(
     "cls",
-    [HostPolicySnapshot, TaskInfo, SystemModelRequest, SystemModelResult],
+    [HostPolicySnapshot, ExtensionRuntimeDeps, TaskInfo, SystemModelRequest, SystemModelResult],
 )
 def test_additive_dataclasses_are_constructible_with_required_fields_only(cls):
     """Fields added later must carry defaults, or old extensions break on upgrade.
@@ -114,6 +117,7 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
     "protocol",
     [
         ExtensionRegistry,
+        ExtensionService,
         MiddlewareContributor,
         TaskLifecycleContributor,
         SystemModelCallObserver,
@@ -195,16 +199,18 @@ def test_system_model_request_normalizes_messages_into_an_immutable_sequence():
     assert SystemModelRequest(messages=("already", "a", "tuple")).messages == ("already", "a", "tuple")
 
 
-def test_future_contribution_points_are_not_advertised_before_the_host_supports_them():
-    """A merged slice must not silently accept registrations it cannot run."""
+def test_gateway_contribution_points_are_part_of_the_public_surface():
     import deerflow_extension_api
 
     for name in (
         "ExtensionRuntimeDeps",
         "ExtensionService",
     ):
-        assert name not in deerflow_extension_api.__all__
-        assert not hasattr(deerflow_extension_api, name)
+        assert name in deerflow_extension_api.__all__
+        assert hasattr(deerflow_extension_api, name)
+    assert callable(ExtensionRegistry.service)
+    assert callable(ExtensionRegistry.routers)
+    assert not hasattr(deerflow_extension_api, "RouterContributor")
 
 
 def test_task_store_from_runtime_reads_the_host_key():
@@ -263,6 +269,15 @@ def test_distribution_marks_the_contract_package_as_typed():
     assert marker.is_file()
 
 
+def test_contract_package_keeps_runtime_dependencies_empty():
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).parent.parent / "packages" / "extension-api" / "pyproject.toml"
+
+    assert tomllib.loads(pyproject.read_text())["project"]["dependencies"] == []
+
+
 def test_harness_pins_the_contract_package_exactly():
     """The version contract (extension-system design): the host pins the
     contract package exactly, extensions use ranges. A range here would let an
@@ -289,5 +304,17 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.1.1"
+    assert API_VERSION == "0.1.2"
     assert API_VERSION == version("deerflow-extension-api")
+
+
+def test_extension_service_contract_is_public_and_defaults_to_noop():
+    class _Bare:
+        pass
+
+    deps = ExtensionRuntimeDeps()
+
+    assert deps.app_store is None
+    assert deps.session_factory is None
+    assert asyncio.run(ExtensionService.start(_Bare(), deps)) is None
+    assert asyncio.run(ExtensionService.stop(_Bare())) is None

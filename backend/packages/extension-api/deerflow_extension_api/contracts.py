@@ -10,7 +10,7 @@ Compatibility rules enforced throughout this module:
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_checkable
 
@@ -152,6 +152,26 @@ class MiddlewareContributor(Protocol):
         return ()
 
 
+# --- Extension services ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ExtensionRuntimeDeps:
+    """Host capabilities bound after Gateway infrastructure is ready."""
+
+    app_store: ExtensionData | None = None
+    policy: HostPolicySnapshot = field(default_factory=HostPolicySnapshot)
+    session_factory: Any | None = None
+
+
+class ExtensionService(Protocol):
+    async def start(self, deps: ExtensionRuntimeDeps) -> None:
+        return None
+
+    async def stop(self) -> None:
+        return None
+
+
 # --- Registration surface ---------------------------------------------------
 
 
@@ -159,11 +179,10 @@ class MiddlewareContributor(Protocol):
 class ExtensionRegistry(Protocol):
     """The write-only registration surface handed to ``install()``.
 
-    Structural and minimal on purpose. This first capability slice exposes
-    middleware contribution only; later slices can add defaulted registration
-    methods without breaking existing implementations. The host's concrete
-    registry additionally carries host-only machinery (attribution, positional
-    rollback, build) that is deliberately absent here.
+    Structural and minimal on purpose. Every method has a default so additive
+    contract releases remain compatible with older registry implementations.
+    The host's concrete registry additionally carries host-only machinery
+    (attribution, positional rollback, build) that is deliberately absent here.
     """
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
@@ -173,6 +192,18 @@ class ExtensionRegistry(Protocol):
         return None
 
     def system_model_observer(self, observer: SystemModelCallObserver) -> None:
+        return None
+
+    def service(self, service: ExtensionService) -> None:
+        return None
+
+    def routers(self, routers: Sequence[Any]) -> None:
+        """Register HTTP routers constructed eagerly during extension install.
+
+        Router types stay ``Any`` so this contract package has no FastAPI
+        dependency. The host validates supported route shapes before mounting;
+        runtime resources belong in a separately registered service.
+        """
         return None
 
 
