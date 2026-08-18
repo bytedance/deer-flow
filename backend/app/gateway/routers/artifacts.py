@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import hashlib
 import logging
 import mimetypes
@@ -315,9 +316,20 @@ def _sha256_of_file(path: Path) -> str:
     crypto.subtle-based hashing, which is unavailable in non-secure contexts
     (e.g. http://<lan-ip>:<port>) and otherwise breaks artifact preview +
     inline editing (see issue #4864).
+
+    The digest is cached by (path, mtime_ns, size) so the many small ``Range``
+    requests a browser issues while scrubbing/paginating a preview do not each
+    re-hash a potentially huge artifact from scratch (raised in PR review).
     """
+    stat = path.stat()
+    return _sha256_of_file_cached(str(path), stat.st_mtime_ns, stat.st_size)
+
+
+@functools.lru_cache(maxsize=256)
+def _sha256_of_file_cached(path: str, mtime_ns: int, size: int) -> str:
+    """Cached SHA-256 of *path*; the size/mtime args invalidate stale entries."""
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    with open(path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()

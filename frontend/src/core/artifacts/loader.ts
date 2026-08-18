@@ -92,7 +92,7 @@ export async function loadArtifactContent({
   const content = new TextDecoder().decode(bytes, { stream: truncated });
   const etag = response.headers.get("etag");
   const sha256 =
-    etag?.match(/([0-9a-f]{64})/i)?.[1] ??
+    etag?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]?.toLowerCase() ??
     (!truncated ? await sha256OfText(content) : undefined);
   const contentLengthHeader = response.headers.get("Content-Length");
   const contentLength =

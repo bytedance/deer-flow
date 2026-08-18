@@ -435,6 +435,9 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    # The forced-download branch must carry a real SHA-256 ETag so the
+    # frontend can enable inline editing (see issue #4864 review feedback).
+    assert response.headers.get("etag") == f'"{hashlib.sha256(content.encode()).hexdigest()}"'
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
