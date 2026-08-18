@@ -7,6 +7,8 @@ import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,6 +22,9 @@ from deerflow.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+_non_atomic_fallback_targets: set[Path] = set()
+_non_atomic_fallback_targets_lock = threading.Lock()
 
 
 def normalize_mcp_transport_alias(data: Any) -> Any:
@@ -436,6 +441,20 @@ def _overwrite_in_place(target_path: Path, source_path: Path) -> None:
         os.fsync(target_file.fileno())
 
 
+def _log_non_atomic_fallback(target_path: Path) -> None:
+    """Warn once per target when a bind mount forces the unsafe write path."""
+    warning_key = target_path.resolve(strict=False)
+    with _non_atomic_fallback_targets_lock:
+        first_fallback = warning_key not in _non_atomic_fallback_targets
+        _non_atomic_fallback_targets.add(warning_key)
+
+    logger.log(
+        logging.WARNING if first_fallback else logging.DEBUG,
+        "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
+        target_path,
+    )
+
+
 def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
     """Write extensions config without exposing a truncated or partial file.
 
@@ -480,10 +499,7 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
         except OSError as exc:
             if exc.errno != errno.EBUSY:
                 raise
-            logger.warning(
-                "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
-                target_path,
-            )
+            _log_non_atomic_fallback(target_path)
             _overwrite_in_place(target_path, temporary_path)
         _fsync_directory_best_effort(target_path.parent)
     finally:
@@ -530,6 +546,47 @@ def get_extensions_config() -> ExtensionsConfig:
 #: has no event-loop affinity, so writers running on different loops still
 #: exclude each other.
 extensions_config_write_lock = threading.Lock()
+
+
+@contextmanager
+def extensions_config_file_lock(path: Path) -> Iterator[None]:
+    """Exclude read-modify-write cycles in other Gateway processes.
+
+    ``extensions_config_write_lock`` serializes threads in this process. This
+    sidecar advisory lock extends the same critical section across worker
+    processes and separate embedded clients that share the config directory.
+    Callers must hold both locks around the complete read, merge, write, and
+    reload cycle; locking only the final atomic replace still permits lost
+    updates.
+    """
+    target_path = Path(path)
+    target_path = target_path.resolve(strict=False) if target_path.is_symlink() else target_path.absolute()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_path.parent / f".{target_path.name}.lock"
+
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
