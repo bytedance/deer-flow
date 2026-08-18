@@ -209,6 +209,10 @@ Memory backend async boundary:
 
 CI runs these regression tests for every pull request via [.github/workflows/backend-unit-tests.yml](../.github/workflows/backend-unit-tests.yml).
 
+`make doctor` treats `x_search` as optional. When configured through
+`deerflow.community.xquik`, it verifies `XQUIK_API_KEY` or an environment-backed
+`api_key` reference and warns about literal credentials in `config.yaml`.
+
 Agentic browser sessions are process-local. The Gateway startup safety gate rejects
 `GATEWAY_WORKERS > 1` when `browser_navigate` is configured, because ordinary
 uvicorn worker dispatch does not provide thread affinity for browser tools, REST

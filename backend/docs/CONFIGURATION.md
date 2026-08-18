@@ -300,6 +300,7 @@ tools:
 
 **Built-in Tools**:
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
+- `x_search` - Search X/Twitter posts with native Latest/Top ordering and structured metrics (Xquik)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -308,6 +309,24 @@ tools:
 - `write_file` - Write file contents
 - `str_replace` - String replacement in files
 - `bash` - Execute bash commands
+
+Enable structured X post search as a separate, optional tool. It can coexist
+with the general `web_search` provider:
+
+```yaml
+tools:
+  - name: x_search
+    group: web
+    use: deerflow.community.xquik.tools:x_search_tool
+    max_results: 5
+    api_key: $XQUIK_API_KEY
+```
+
+`x_search` supports chronological `Latest` and engagement-ranked `Top` results.
+It returns post text, author details, timestamps, URLs, and engagement metrics.
+Create an API key at [Xquik](https://xquik.com). Xquik is an independent
+third-party service. Not affiliated with X Corp. "Twitter" and "X" are
+trademarks of X Corp.
 
 Browserless can be configured as an opt-in visual capture tool:
 
@@ -681,6 +700,7 @@ models:
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
+- `XQUIK_API_KEY` - Xquik API key for the optional `x_search` tool
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
