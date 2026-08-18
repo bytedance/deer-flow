@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import {
+  batchDeleteMemoryFacts,
+  batchUpdateMemoryFacts,
   clearMemory,
   createMemoryFact,
   deleteMemoryFact,
@@ -9,6 +11,8 @@ import {
   updateMemoryFact,
 } from "./api";
 import type {
+  BatchDeleteInput,
+  BatchUpdateInput,
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
@@ -81,16 +85,6 @@ export function useUpdateMemoryFact() {
       queryClient.setQueryData<UserMemory>(["memory"], memory);
     },
   });
-}
-
-import {
-  batchDeleteMemoryFacts,
-  batchUpdateMemoryFacts,
-} from "./api";
-import type {
-  BatchDeleteInput,
-  BatchUpdateInput,
-} from "./types";
 
 export function useBatchDeleteMemoryFacts() {
   const queryClient = useQueryClient();

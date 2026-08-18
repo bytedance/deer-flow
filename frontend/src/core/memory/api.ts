@@ -2,6 +2,8 @@ import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 
 import type {
+  BatchDeleteInput,
+  BatchUpdateInput,
   MemoryFactInput,
   MemoryFactPatchInput,
   UserMemory,
@@ -147,12 +149,6 @@ export async function updateMemoryFact(
   );
   return readMemoryResponse(response, "Failed to update memory fact");
 }
-
-import type {
-  BatchDeleteInput,
-  BatchFactUpdateInput,
-  BatchUpdateInput,
-} from "./types";
 
 export async function batchDeleteMemoryFacts(
   input: BatchDeleteInput,

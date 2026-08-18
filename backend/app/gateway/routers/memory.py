@@ -395,22 +395,20 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
 class BatchFactUpdateRequest(BaseModel):
     """Request model for batch fact update."""
 
-    fact_id: str = Field(..., description="Fact ID to update")
+    fact_id: str = Field(..., min_length=1, description="Fact ID to update")
     content: str | None = Field(default=None, min_length=1, description="Fact content")
     category: str | None = Field(default=None, description="Fact category")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
-
 class BatchDeleteRequest(BaseModel):
     """Request model for batch fact deletion."""
 
-    fact_ids: list[str] = Field(..., min_length=1, description="List of fact IDs to delete")
-
+    fact_ids: list[str] = Field(..., min_length=1, max_length=100, description="List of fact IDs to delete (max 100)")
 
 class BatchUpdateRequest(BaseModel):
     """Request model for batch fact update."""
 
-    updates: list[BatchFactUpdateRequest] = Field(..., min_length=1, description="List of fact updates")
+    updates: list[BatchFactUpdateRequest] = Field(..., min_length=1, max_length=100, description="List of fact updates (max 100)")
 
 
 @router.post(
@@ -469,7 +467,6 @@ async def batch_delete_facts_endpoint(request: BatchDeleteRequest, http_request:
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to batch delete memory facts.") from exc
 
-    return MemoryResponse(**memory_data)
 
 @router.get(
     "/memory/export",

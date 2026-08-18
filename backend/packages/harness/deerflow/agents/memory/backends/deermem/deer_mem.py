@@ -618,18 +618,18 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        """Delete multiple facts by id. Returns memory data with deleted facts removed."""
+        """Atomically delete multiple facts in one transaction.
+        Pre-validates every id before mutating anything.
+        """
         resolved_agent = _resolve_agent_name(agent_name)
-        memory_data = None
-        for fact_id in fact_ids:
-            memory_data = _call_backend(
-                lambda fid=fact_id: self._updater.delete_memory_fact(
-                    fid,
-                    agent_name=resolved_agent,
-                    user_id=user_id,
-                )
+        memory_data = _call_backend(
+            lambda: self._updater.batch_delete_memory_facts(
+                fact_ids,
+                agent_name=resolved_agent,
+                user_id=user_id,
             )
-        return _compat_document(memory_data) if memory_data is not None else {}
+        )
+        return _compat_document(memory_data)
 
     def batch_update_facts(
         self,
@@ -638,22 +638,17 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         user_id: str | None = None,
     ) -> dict[str, Any]:
-        """Update multiple facts. Each update dict must contain 'fact_id' and optional
-        'content', 'category', 'confidence' fields."""
+        """Atomically update multiple facts in one transaction.
+        Pre-validates every fact_id and field before mutating anything.
+        Each update dict must contain 'fact_id' and optional 'content', 'category',
+        'confidence' fields. Raises ValueError for empty fact_id.
+        """
         resolved_agent = _resolve_agent_name(agent_name)
-        memory_data = None
-        for update in updates:
-            fact_id = update.get("fact_id")
-            if not fact_id:
-                continue
-            memory_data = _call_backend(
-                lambda u=update, fid=fact_id: self._updater.update_memory_fact(
-                    fid,
-                    content=u.get("content"),
-                    category=u.get("category"),
-                    confidence=u.get("confidence"),
-                    agent_name=resolved_agent,
-                    user_id=user_id,
-                )
+        memory_data = _call_backend(
+            lambda: self._updater.batch_update_memory_facts(
+                updates,
+                agent_name=resolved_agent,
+                user_id=user_id,
             )
-        return _compat_document(memory_data) if memory_data is not None else {}
+        )
+        return _compat_document(memory_data)

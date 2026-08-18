@@ -757,6 +757,18 @@ export const zhCN: Translations = {
       clearAllConfirmDescription:
         "这会删除所有已保存的摘要和事实。此操作无法撤销。",
       clearAllSuccess: "已清空全部记忆",
+      batchSelectCount: "已选 {count} 项",
+      batchDeleteSelected: "删除选中",
+      batchMoveToCategory: "移动到分类",
+      batchClearSelection: "清除选择",
+      batchDeleteTitle: "要删除 {count} 条事实吗？",
+      batchDeleteDescription: "这会立即从记忆中删除 {count} 条事实。此操作无法撤销。",
+      batchDeleteSuccess: "已删除 {count} 条事实",
+      batchCategoryTitle: "将 {count} 条事实移动到分类",
+      batchCategoryDescription: "选择一个分类以移动所有选中的事实。",
+      batchCategoryPlaceholder: "输入分类名称",
+      batchCategoryAction: "更新分类",
+      batchCategorySuccess: "已更新 {count} 条事实",
       factDeleteConfirmTitle: "要删除这条事实吗？",
       factDeleteConfirmDescription:
         "这条事实会立即从记忆中删除。此操作无法撤销。",
