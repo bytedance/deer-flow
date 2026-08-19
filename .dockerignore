@@ -1,4 +1,4 @@
-.env
+**/.env
 Dockerfile
 .dockerignore
 .git
@@ -65,6 +65,14 @@ frontend/node_modules
 backend/.venv
 backend/htmlcov
 backend/.coverage
+
+# Runtime data written by a running DeerFlow, not build inputs. backend/Dockerfile
+# does `COPY backend ./backend`, so leaving these in the context both bakes the
+# sqlite database, per-user uploads and the JWT secret into the image and breaks
+# the build outright once the app has created directories owned by the container's
+# root that the build client cannot read.
+**/.deer-flow/
+backend/sandbox/
 *.md
 !README.md
 !frontend/README.md
