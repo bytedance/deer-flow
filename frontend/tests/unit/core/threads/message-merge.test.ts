@@ -9,6 +9,7 @@ import {
   computeSummarizationTransientMessages,
   countHumanMessagesExcludingSuperseded,
   flattenThreadHistoryPages,
+  getCurrentTurnRunIds,
   getSummarizationMiddlewareMessages,
   getThreadHistoryNextPageParam,
   getVisibleOptimisticMessages,
@@ -1680,11 +1681,105 @@ test("local turn order keeps an existing clarification card with its original tu
   ]);
 });
 
+test("local turn order preserves relative order across displaced message sources", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const historyOnlyCard = {
+    id: "history-only-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "history-only-call",
+    content: "Which market should I research?",
+  } as Message;
+  const baselineAnswer = {
+    id: "baseline-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        currentHuman,
+        historyOnlyCard,
+        baselineAnswer,
+        currentStep,
+      ],
+      new Set(["message:previous-human", "message:baseline-answer"]),
+      new Set(["tool:history-only-call"]),
+    ),
+  ).toEqual([
+    previousHuman,
+    historyOnlyCard,
+    baselineAnswer,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
+test("current turn run id derivation selects only visible non-baseline steps", () => {
+  const baselineStep = {
+    id: "baseline-step",
+    type: "ai",
+    content: "Previous answer",
+    run_id: "run-previous",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Current progress",
+    run_id: "run-current",
+  } as Message;
+  const runlessStep = {
+    id: "runless-step",
+    type: "tool",
+    content: "Pending metadata",
+    tool_call_id: "runless-call",
+  } as Message;
+  const hiddenStep = {
+    id: "hidden-step",
+    type: "ai",
+    content: "Internal control",
+    run_id: "run-hidden",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+
+  expect(
+    getCurrentTurnRunIds(
+      [baselineStep, currentStep, runlessStep, hiddenStep],
+      new Set(["message:baseline-step"]),
+    ),
+  ).toEqual(new Set(["run-current"]));
+  expect(
+    getCurrentTurnRunIds([runlessStep], new Set(["message:baseline-step"])),
+  ).toEqual(new Set());
+  expect(getCurrentTurnRunIds([currentStep], null)).toEqual(new Set());
+});
+
 test("local turn order keeps the current run's persisted steps after the new human", () => {
   // After an interrupt/stop, the current turn's already-executed steps are
   // flushed into canonical history. They belong AFTER the new human input even
   // though history now confirms them — treating them as displaced old message
   // would move the current run's own progress above the message that owns it.
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research the robot sector",
+  } as Message;
   const currentHuman = {
     id: "current-human",
     type: "human",
@@ -1715,15 +1810,36 @@ test("local turn order keeps the current run's persisted steps after the new hum
   // The human already at its correct position, followed by its own steps.
   expect(
     restoreLocalTurnMessageOrder(
-      [currentHuman, currentAnsweredStep, currentToolStep],
+      [previousHuman, currentHuman, currentAnsweredStep, currentToolStep],
       baselineIdentities,
       historyIdentities,
       new Set(["run-current"]),
     ),
-  ).toEqual([currentHuman, currentAnsweredStep, currentToolStep]);
+  ).toEqual([
+    previousHuman,
+    currentHuman,
+    currentAnsweredStep,
+    currentToolStep,
+  ]);
 
-  // Even when the current turn's human is missing its run_id (fallback path),
-  // explicit current-turn run ids keep its steps in place below the human.
+  // An empty explicit set exercises the fallback to the pending human's
+  // run_id and still protects the persisted current-run steps.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [previousHuman, currentHuman, currentAnsweredStep, currentToolStep],
+      baselineIdentities,
+      historyIdentities,
+      new Set(),
+    ),
+  ).toEqual([
+    previousHuman,
+    currentHuman,
+    currentAnsweredStep,
+    currentToolStep,
+  ]);
+
+  // Even when the current turn's human is missing its run_id, explicit
+  // current-turn run ids keep its steps in place below the human.
   const humanWithoutRun = {
     id: "current-human",
     type: "human",
@@ -1731,12 +1847,17 @@ test("local turn order keeps the current run's persisted steps after the new hum
   } as Message;
   expect(
     restoreLocalTurnMessageOrder(
-      [humanWithoutRun, currentAnsweredStep, currentToolStep],
+      [previousHuman, humanWithoutRun, currentAnsweredStep, currentToolStep],
       baselineIdentities,
       historyIdentities,
       new Set(["run-current"]),
     ),
-  ).toEqual([humanWithoutRun, currentAnsweredStep, currentToolStep]);
+  ).toEqual([
+    previousHuman,
+    humanWithoutRun,
+    currentAnsweredStep,
+    currentToolStep,
+  ]);
 });
 
 test("local turn order restores a clarification card that only canonical history confirmed", () => {

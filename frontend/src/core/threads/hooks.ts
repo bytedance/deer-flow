@@ -598,6 +598,37 @@ export function mergeMessages(
 }
 
 /**
+ * Collect live run ids that were not part of the pre-submit checkpoint.
+ * An empty result intentionally lets restoreLocalTurnMessageOrder fall back to
+ * the pending human's run_id when interrupt/stop has already flushed the live
+ * steps into canonical history.
+ */
+export function getCurrentTurnRunIds(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string> | null,
+): Set<string> {
+  const runIds = new Set<string>();
+  if (baselineMessageIdentities === null) {
+    return runIds;
+  }
+
+  for (const message of messages) {
+    if (
+      (message.type !== "ai" && message.type !== "tool") ||
+      isHiddenFromUIMessage(message)
+    ) {
+      continue;
+    }
+    const identity = messageIdentity(message);
+    const runId = getMessageRunId(message);
+    if (runId && (!identity || !baselineMessageIdentities.has(identity))) {
+      runIds.add(runId);
+    }
+  }
+  return runIds;
+}
+
+/**
  * Keep messages from a locally submitted turn behind that turn's user input.
  * LangGraph `messages-tuple` events can publish the first AI/tool steps before
  * the `values` event containing the user message. Those steps are not part of
@@ -668,36 +699,30 @@ export function restoreLocalTurnMessageOrder(
       stablePrefix.push(message);
     }
   }
-  const displacedBaselineMessages: Message[] = [];
-  const displacedHistoryMessages: Message[] = [];
+  const displacedMessages: Message[] = [];
   const stableSuffix: Message[] = [];
   for (const message of messages.slice(pendingHumanIndex + 1)) {
     const identity = messageIdentity(message);
-    if (identity && baselineMessageIdentities.has(identity)) {
-      displacedBaselineMessages.push(message);
-    } else if (
+    const wasPresentBeforeSubmit =
+      identity !== undefined && baselineMessageIdentities.has(identity);
+    const wasConfirmedInPreviousHistory =
       (message.type === "ai" || message.type === "tool") &&
       !isHiddenFromUIMessage(message) &&
       isConfirmedHistoryMessage(identity) &&
-      !isCurrentTurnStep(message)
-    ) {
-      displacedHistoryMessages.push(message);
+      !isCurrentTurnStep(message);
+    if (wasPresentBeforeSubmit || wasConfirmedInPreviousHistory) {
+      displacedMessages.push(message);
     } else {
       stableSuffix.push(message);
     }
   }
-  if (
-    earlyPendingSteps.length === 0 &&
-    displacedBaselineMessages.length === 0 &&
-    displacedHistoryMessages.length === 0
-  ) {
+  if (earlyPendingSteps.length === 0 && displacedMessages.length === 0) {
     return messages;
   }
 
   return [
     ...stablePrefix,
-    ...displacedBaselineMessages,
-    ...displacedHistoryMessages,
+    ...displacedMessages,
     messages[pendingHumanIndex]!,
     ...earlyPendingSteps,
     ...stableSuffix,
@@ -2602,21 +2627,10 @@ export function useThreadStream({
     // The current turn's run(s): visible ai/tool steps that appear in the live
     // checkpoint but are NOT part of the pre-submit baseline. These are output
     // from the in-flight submit and must never be moved before their human.
-    const currentTurnRunIds = new Set<string>();
-    if (localTurnOrderBaseline !== null) {
-      for (const m of renderMessages) {
-        if (
-          (m.type === "ai" || m.type === "tool") &&
-          !isHiddenFromUIMessage(m)
-        ) {
-          const identity = messageIdentity(m);
-          const runId = getMessageRunId(m);
-          if (runId && (!identity || !localTurnOrderBaseline.has(identity))) {
-            currentTurnRunIds.add(runId);
-          }
-        }
-      }
-    }
+    const currentTurnRunIds = getCurrentTurnRunIds(
+      renderMessages,
+      localTurnOrderBaseline,
+    );
     const restored =
       localTurnOrderBaseline === null
         ? restoreReconnectedTurnMessageOrder(merged)
