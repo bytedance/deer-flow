@@ -166,6 +166,7 @@ async def _ensure_thread_metadata(
     record: RunRecord,
     *,
     owner_user_id: str | None,
+    require_existing_thread: bool = False,
 ) -> None:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
@@ -177,6 +178,8 @@ async def _ensure_thread_metadata(
                 await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
             existing = await thread_store.get(record.thread_id)
     if existing is None:
+        if require_existing_thread:
+            raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
@@ -1121,7 +1124,12 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
-    if user is not None:
+
+    async def thread_access_allowed() -> bool:
+        if user is None:
+            if not require_existing_thread:
+                return True
+            return await run_ctx.thread_store.get(thread_id) is not None
         allowed = await run_ctx.thread_store.check_access(
             thread_id,
             str(user.id),
@@ -1136,8 +1144,10 @@ async def start_run(
                 owner_user_id,
                 require_existing=require_existing_thread,
             )
-        if not allowed:
-            raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+        return allowed
+
+    if not await thread_access_allowed():
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
@@ -1174,10 +1184,12 @@ async def start_run(
                     run_ctx,
                     record,
                     owner_user_id=owner_user_id,
+                    require_existing_thread=require_existing_thread,
                 )
             )
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
+            metadata_failure: Exception | None = None
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
@@ -1189,11 +1201,13 @@ async def start_run(
                         metadata_task.result()
                     except asyncio.CancelledError:
                         pass
-                    except Exception:
+                    except Exception as exc:
                         metadata_failure_logged = True
+                        metadata_failure = exc
                         logger.warning(
-                            "Failed to ensure thread_meta for %s (non-fatal)",
+                            "Failed to ensure thread_meta for %s%s",
                             sanitize_log_param(thread_id),
+                            "" if require_existing_thread else " (non-fatal)",
                             exc_info=True,
                         )
                 elif abort_task not in done:
@@ -1202,6 +1216,8 @@ async def start_run(
                         sanitize_log_param(thread_id),
                         _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     )
+                    if require_existing_thread:
+                        metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
             finally:
                 if metadata_task.done():
                     if not metadata_failure_logged:
@@ -1217,7 +1233,13 @@ async def start_run(
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            # Continue through run_agent even after metadata abort/timeout:
+            if metadata_failure is not None and require_existing_thread:
+                await run_mgr.fail_start_if_pending(
+                    record.run_id,
+                    error=str(metadata_failure),
+                )
+            # Continue through run_agent even after metadata abort, timeout,
+            # or strict verification failure:
             # its startup barrier is the single path that turns pending
             # cancellation into no-agent-construction plus publish_end.
             await run_agent(
@@ -1241,6 +1263,14 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
+                # A strict caller may have observed the thread before a
+                # concurrent delete removed it while checkpoint preparation
+                # yielded. Recheck immediately before durable admission. The
+                # delete route holds a durable thread-operation reservation,
+                # so after this point either the run or the delete wins; they
+                # cannot both succeed across Gateway workers.
+                if require_existing_thread and not await thread_access_allowed():
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,

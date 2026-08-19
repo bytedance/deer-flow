@@ -641,8 +641,15 @@ class McpTaskRepository:
         count_failure: bool,
         now: datetime,
     ) -> bool:
-        """Stop retrying one permanently undeliverable event snapshot."""
-        values: dict[str, Any] = {
+        """Stop one failed snapshot, preserving any newer event for delivery."""
+        base_filters = (
+            McpTaskRow.id == task_id,
+            McpTaskRow.notification_lease_owner == lease_owner,
+            McpTaskRow.notification_lease_expires_at >= now,
+            McpTaskRow.dispatch_version == dispatch_version,
+            McpTaskRow.notification_status.in_(("claimed", "retry", "dispatched")),
+        )
+        dead_letter_values: dict[str, Any] = {
             "notification_status": "dead_letter",
             "notification_error": error,
             "next_notification_at": None,
@@ -655,22 +662,33 @@ class McpTaskRepository:
             "updated_at": now,
         }
         if count_failure:
-            values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
-        stmt = (
-            update(McpTaskRow)
-            .where(
-                McpTaskRow.id == task_id,
-                McpTaskRow.notification_lease_owner == lease_owner,
-                McpTaskRow.notification_lease_expires_at >= now,
-                McpTaskRow.dispatch_version == dispatch_version,
-                McpTaskRow.notification_status.in_(("claimed", "retry")),
-            )
-            .values(**values)
-        )
+            dead_letter_values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
+
         async with self._sf() as session:
-            result = await session.execute(stmt)
+            dead_lettered = await session.execute(update(McpTaskRow).where(*base_filters, McpTaskRow.event_version <= dispatch_version).values(**dead_letter_values))
+            if dead_lettered.rowcount:
+                await session.commit()
+                return True
+
+            replaced_by_latest = await session.execute(
+                update(McpTaskRow)
+                .where(*base_filters, McpTaskRow.event_version > dispatch_version)
+                .values(
+                    notification_status="pending",
+                    notification_error=None,
+                    notification_attempt_count=0,
+                    next_notification_at=now,
+                    notification_lease_owner=None,
+                    notification_lease_expires_at=None,
+                    dispatch_version=None,
+                    dispatch_attempt=0,
+                    dispatch_event=None,
+                    notification_run_id=None,
+                    updated_at=now,
+                )
+            )
             await session.commit()
-            return bool(result.rowcount)
+            return bool(replaced_by_latest.rowcount)
 
     async def defer_dispatched_notification(
         self,

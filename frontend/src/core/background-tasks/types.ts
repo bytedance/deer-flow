@@ -44,6 +44,18 @@ export type BackgroundTaskDetail = BackgroundTask & {
 export const ACTIVE_BACKGROUND_TASK_STATUSES: ReadonlySet<BackgroundTaskStatus> =
   new Set(["submitted", "working", "input_required"]);
 
+export const ACTIVE_BACKGROUND_TASK_NOTIFICATION_STATUSES: ReadonlySet<BackgroundTaskNotificationStatus> =
+  new Set(["pending", "claimed", "retry", "dispatched"]);
+
 export function isActiveBackgroundTask(task: BackgroundTask): boolean {
   return ACTIVE_BACKGROUND_TASK_STATUSES.has(task.status);
+}
+
+export function shouldPollBackgroundTaskDetail(
+  task: BackgroundTaskDetail,
+): boolean {
+  return (
+    isActiveBackgroundTask(task) ||
+    ACTIVE_BACKGROUND_TASK_NOTIFICATION_STATUSES.has(task.notification_status)
+  );
 }

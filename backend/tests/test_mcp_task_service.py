@@ -679,6 +679,42 @@ async def test_notification_retry_budget_dead_letters_before_creating_another_ru
 
 
 @pytest.mark.asyncio
+async def test_dispatched_notification_retry_budget_dead_letters_before_hydrating_run():
+    repo = SimpleNamespace(
+        dead_letter_notification=AsyncMock(return_value=True),
+    )
+    get_run = AsyncMock()
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(),
+        get_run=get_run,
+    )
+    now = datetime.now(UTC)
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "dispatched",
+            "notification_run_id": "notify-run-1",
+            "notification_error": "run store unavailable",
+            "dispatch_version": 2,
+            "notification_attempt_count": 5,
+        },
+        now=now,
+    )
+
+    get_run.assert_not_awaited()
+    dead_lettered = repo.dead_letter_notification.await_args.kwargs
+    assert dead_lettered["dispatch_version"] == 2
+    assert dead_lettered["count_failure"] is False
+    assert "5 failed attempts" in dead_lettered["error"]
+
+
+@pytest.mark.asyncio
 async def test_submit_preserves_persistence_error_when_compensation_cancel_fails(caplog):
     repo = FailingCreateRepository()
     driver = FakeDriver(

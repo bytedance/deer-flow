@@ -2392,6 +2392,55 @@ def test_start_run_strict_mode_rejects_missing_thread(_stub_app_config):
     asyncio.run(_scenario())
 
 
+def test_start_run_strict_mode_rechecks_thread_after_checkpoint_preparation(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import start_run
+
+    async def _scenario():
+        request, run_store, thread_store = _make_start_run_persistence_context()
+        request.state = SimpleNamespace(
+            auth_source="session",
+            user=SimpleNamespace(id="user-1", system_role="user"),
+        )
+        await thread_store.create("deleted-thread", user_id="user-1")
+
+        async def delete_thread_during_checkpoint_preparation(*_args, **_kwargs):
+            await thread_store.delete("deleted-thread", user_id="user-1")
+
+        record = None
+        error = None
+        with (
+            patch(
+                "app.gateway.services.ensure_checkpoint_history_seeded",
+                side_effect=delete_thread_during_checkpoint_preparation,
+            ),
+            patch("app.gateway.services.run_agent", new_callable=AsyncMock),
+        ):
+            try:
+                record = await start_run(
+                    _run_create_request(),
+                    "deleted-thread",
+                    request,
+                    require_existing_thread=True,
+                )
+            except HTTPException as exc:
+                error = exc
+            if record is not None:
+                await record.task
+
+        assert error is not None
+        assert error.status_code == 404
+        assert await thread_store.get("deleted-thread", user_id="user-1") is None
+        assert await run_store.list_by_thread("deleted-thread", user_id="user-1") == []
+
+    asyncio.run(_scenario())
+
+
 # ---------------------------------------------------------------------------
 # build_run_config — context / configurable precedence (LangGraph >= 0.6.0)
 # ---------------------------------------------------------------------------

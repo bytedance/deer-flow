@@ -8,7 +8,10 @@ import {
   fetchBackgroundTask,
   fetchBackgroundTasks,
 } from "./api";
-import { isActiveBackgroundTask } from "./types";
+import {
+  isActiveBackgroundTask,
+  shouldPollBackgroundTaskDetail,
+} from "./types";
 
 export const backgroundTasksQueryKey = (threadId: string) =>
   ["background-tasks", threadId] as const;
@@ -40,7 +43,7 @@ export function useBackgroundTask(
     queryFn: () => fetchBackgroundTask(threadId, taskId),
     enabled: options.enabled !== false && Boolean(threadId) && Boolean(taskId),
     refetchInterval: (query) =>
-      query.state.data && isActiveBackgroundTask(query.state.data)
+      query.state.data && shouldPollBackgroundTaskDetail(query.state.data)
         ? 3000
         : false,
     refetchIntervalInBackground: false,

@@ -34,6 +34,7 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
   });
 
   let getCalls = 0;
+  let exportDetailCalls = 0;
   let reportCancelRequested = false;
   await page.route(
     `**/api/threads/${MOCK_THREAD_ID}/mcp-tasks/*/cancel`,
@@ -58,8 +59,10 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
 
   await page.route(
     `**/api/threads/${MOCK_THREAD_ID}/mcp-tasks/task-export`,
-    (route) =>
-      route.fulfill({
+    (route) => {
+      exportDetailCalls += 1;
+      const notificationStopped = exportDetailCalls > 1;
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
@@ -78,11 +81,14 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
           input_required: null,
           last_poll_error: "Remote worker disconnected",
           last_polled_at: "2026-08-07T23:01:00+00:00",
-          notification_status: "retry",
-          notification_error: "Agent notification failed",
-          notification_attempt_count: 2,
+          notification_status: notificationStopped ? "dead_letter" : "retry",
+          notification_error: notificationStopped
+            ? "Notification delivery stopped after 5 failed attempts"
+            : "Agent notification failed",
+          notification_attempt_count: notificationStopped ? 5 : 2,
         }),
-      }),
+      });
+    },
   );
 
   await page.route(
@@ -218,6 +224,15 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
   await expect(
     page.getByText("/mnt/user-data/outputs/export.zip"),
   ).toBeVisible();
+  await expect(
+    page.getByText(
+      "Chat notification delivery stopped after repeated or permanent failures.",
+    ),
+  ).toBeVisible({ timeout: 7_000 });
+  await expect(
+    page.getByText("Notification delivery stopped after 5 failed attempts"),
+  ).toBeVisible();
+  expect(exportDetailCalls).toBeGreaterThan(1);
 
   await page
     .getByTestId("background-task-task-review")

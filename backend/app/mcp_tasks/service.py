@@ -327,6 +327,19 @@ class McpTaskService:
     async def _notify_one(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
         dispatch_version = int(record.get("dispatch_version") or 0)
+        notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
+        if notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
+            previous_error = record.get("notification_error") or "delivery failed"
+            await self._repository.dead_letter_notification(
+                task_id,
+                lease_owner=self._lease_owner,
+                dispatch_version=dispatch_version,
+                error=_bound_error(f"Notification delivery stopped after {notification_attempts} failed attempts: {previous_error}"),
+                count_failure=False,
+                now=now,
+            )
+            return
+
         if record.get("notification_status") == "dispatched":
             run = await self._get_run(record.get("notification_run_id"), user_id=record["user_id"])
             status = getattr(run, "status", None)
@@ -369,19 +382,6 @@ class McpTaskService:
                     next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
                     now=now,
                 )
-            return
-
-        notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
-        if notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
-            previous_error = record.get("notification_error") or "delivery failed"
-            await self._repository.dead_letter_notification(
-                task_id,
-                lease_owner=self._lease_owner,
-                dispatch_version=dispatch_version,
-                error=_bound_error(f"Notification delivery stopped after {notification_attempts} failed attempts: {previous_error}"),
-                count_failure=False,
-                now=now,
-            )
             return
 
         source_run = await self._get_run(record.get("run_id"), user_id=record["user_id"]) if record.get("run_id") else None

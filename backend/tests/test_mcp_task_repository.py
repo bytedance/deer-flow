@@ -646,6 +646,146 @@ async def test_permanent_notification_failure_is_not_reclaimed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dispatched_notification_can_be_dead_lettered_after_retry_budget(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-dispatched-budget", now=now)
+    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-dispatched-budget",
+        lease_owner="poller",
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    dispatch_version = first[0]["dispatch_version"]
+    assert await repo.mark_notification_dispatched(
+        "task-dispatched-budget",
+        lease_owner="notifier",
+        dispatch_version=dispatch_version,
+        run_id="notify-run-1",
+        now=now,
+    )
+
+    claimed = await repo.claim_notification_work(
+        now=now,
+        lease_owner="budget-checker",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert claimed[0]["notification_status"] == "dispatched"
+    assert await repo.dead_letter_notification(
+        "task-dispatched-budget",
+        lease_owner="budget-checker",
+        dispatch_version=dispatch_version,
+        error="Notification delivery stopped after 5 failed attempts",
+        count_failure=False,
+        now=now,
+    )
+
+    stored = await repo.get("task-dispatched-budget", user_id="user-1")
+    assert stored is not None
+    assert stored["notification_status"] == "dead_letter"
+    assert stored["notification_run_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_dead_lettering_dispatched_snapshot_preserves_newer_event(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-dispatched-latest", now=now)
+    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-dispatched-latest",
+        lease_owner="poller",
+        status="input_required",
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required={"prompt": "Approve?"},
+        next_poll_at=now,
+        polled_at=now,
+    )
+    first = await repo.claim_notification_work(
+        now=now,
+        lease_owner="notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    dispatch_version = first[0]["dispatch_version"]
+    assert await repo.mark_notification_dispatched(
+        "task-dispatched-latest",
+        lease_owner="notifier",
+        dispatch_version=dispatch_version,
+        run_id="notify-run-1",
+        now=now,
+    )
+
+    await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
+    await repo.apply_snapshot(
+        "task-dispatched-latest",
+        lease_owner="poller",
+        status="completed",
+        result={"done": True},
+        result_preview=None,
+        result_truncated=False,
+        result_artifact=None,
+        error=None,
+        input_required=None,
+        next_poll_at=None,
+        polled_at=now,
+    )
+    claimed = await repo.claim_notification_work(
+        now=now,
+        lease_owner="budget-checker",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert claimed[0]["dispatch_version"] == dispatch_version
+    assert await repo.dead_letter_notification(
+        "task-dispatched-latest",
+        lease_owner="budget-checker",
+        dispatch_version=dispatch_version,
+        error="old snapshot exhausted its retry budget",
+        count_failure=False,
+        now=now,
+    )
+
+    stored = await repo.get("task-dispatched-latest", user_id="user-1")
+    assert stored is not None
+    assert stored["notification_status"] == "pending"
+    assert stored["notification_attempt_count"] == 0
+    assert stored["notification_error"] is None
+    latest = await repo.claim_notification_work(
+        now=now,
+        lease_owner="latest-notifier",
+        lease_seconds=60,
+        limit=1,
+        tracking_degraded_after_errors=3,
+    )
+    assert latest[0]["dispatch_version"] > dispatch_version
+    assert latest[0]["dispatch_event"]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_path):
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
