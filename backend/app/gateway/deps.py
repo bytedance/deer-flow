@@ -785,13 +785,13 @@ async def get_current_user_from_request(request: Request):
     return user
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
-    """Require the authenticated caller to be an admin user.
+async def is_admin_user(request: Request) -> bool:
+    """Return whether the authenticated caller is an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
     reaches a router. Falling back to the strict dependency keeps the route safe
     in tests or alternative ASGI compositions that mount a router without the
-    global middleware. ``detail`` is the route-specific 403 message.
+    global middleware.
 
     Centralising this here means a future change to the admin definition (e.g.
     allowing an internal system role, adding audit logging, or switching to a
@@ -803,7 +803,17 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
     if user is None:
         user = await get_current_user_from_request(request)
 
-    if getattr(user, "system_role", None) != "admin":
+    return getattr(user, "system_role", None) == "admin"
+
+
+async def require_admin_user(request: Request, *, detail: str) -> None:
+    """Require the authenticated caller to be an admin user.
+
+    ``detail`` is the route-specific 403 message. The shared predicate keeps
+    read-side redaction and write authorization on the same admin definition.
+    """
+
+    if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
 
 

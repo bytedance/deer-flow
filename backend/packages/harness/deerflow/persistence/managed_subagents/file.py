@@ -26,6 +26,9 @@ def _normalized_name(name: str) -> str:
 
 
 class FileManagedSubagentStore(ManagedSubagentStore):
+    def cache_identity(self) -> Hashable:
+        return ("file", str(get_paths().managed_subagents_dir))
+
     def get(self, name: str) -> ManagedSubagentDefinition:
         path = get_paths().managed_subagent_file(_normalized_name(name))
         if not path.is_file():

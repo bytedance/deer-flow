@@ -8,7 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, ValidationError
 
-from app.gateway.deps import require_admin_user
+from app.gateway.deps import is_admin_user, require_admin_user
 from deerflow.config.app_config import get_app_config
 from deerflow.persistence.managed_subagents import (
     ManagedSubagentDefinition,
@@ -72,10 +72,6 @@ class ManagedSubagentUpdateRequest(BaseModel):
     max_turns: int | None = Field(default=None, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     enabled: bool | None = None
-
-
-def _is_admin(request: Request) -> bool:
-    return getattr(getattr(request.state, "user", None), "system_role", None) == "admin"
 
 
 def _validate_model(model: str, app_config) -> None:
@@ -166,7 +162,8 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
 @router.get("", response_model=SubagentsListResponse, summary="List Subagents")
 async def list_subagents(request: Request) -> SubagentsListResponse:
     """List the runtime catalog; prompts remain visible only to admins."""
-    return await asyncio.to_thread(_catalog, _is_admin(request))
+    include_system_prompt = await is_admin_user(request)
+    return await asyncio.to_thread(_catalog, include_system_prompt)
 
 
 @router.post("", response_model=SubagentResponse, status_code=201, summary="Create Managed Subagent")

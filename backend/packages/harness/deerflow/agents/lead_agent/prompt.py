@@ -360,6 +360,8 @@ def _build_subagent_section(
         available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
     else:
         available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    if not available_names:
+        return ""
     bash_available = "bash" in available_names
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's

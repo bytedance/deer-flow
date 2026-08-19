@@ -56,3 +56,37 @@ def test_config_yaml_overrides_remain_explicitly_higher_priority(monkeypatch):
     resolved = registry.get_subagent_config("planner", app_config=config)
     assert resolved.model == "configured-model"
     assert resolved.max_turns == 12
+
+
+def test_managed_definitions_cache_reuses_and_invalidates_store_snapshot(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.revision = 1
+            self.definitions = [_managed("planner")]
+            self.list_calls = 0
+
+        def signature(self):
+            return self.revision
+
+        def cache_identity(self):
+            return "fake-managed-subagent-store"
+
+        def list(self):
+            self.list_calls += 1
+            return self.definitions
+
+    store = FakeStore()
+    config = SubagentsAppConfig()
+    registry._clear_managed_definitions_cache()
+    monkeypatch.setattr(registry, "get_managed_subagent_store", lambda *_: store)
+
+    assert "planner" in registry.get_subagent_names(app_config=config)
+    assert registry.get_subagent_config("planner", app_config=config).description == "Managed planner"
+    assert store.list_calls == 1
+
+    store.revision = 2
+    store.definitions = [_managed("writer")]
+
+    assert "writer" in registry.get_subagent_names(app_config=config)
+    assert "planner" not in registry.get_subagent_names(app_config=config)
+    assert store.list_calls == 2

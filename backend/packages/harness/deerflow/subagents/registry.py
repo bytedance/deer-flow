@@ -1,6 +1,8 @@
 """Subagent registry for managing available subagents."""
 
 import logging
+import threading
+from collections.abc import Hashable
 from dataclasses import replace
 from typing import Any
 
@@ -10,6 +12,8 @@ from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
 
 logger = logging.getLogger(__name__)
+_managed_definitions_cache_lock = threading.RLock()
+_managed_definitions_cache: dict[Hashable, tuple[Hashable, tuple[ManagedSubagentDefinition, ...]]] = {}
 
 
 def _resolve_subagents_app_config(app_config: Any | None = None):
@@ -48,10 +52,27 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
     )
 
 
-def _managed_definitions(*, app_config: Any | None = None) -> list[ManagedSubagentDefinition]:
-    """Load deployment-managed definitions from the selected persistence backend."""
+def _clear_managed_definitions_cache() -> None:
+    """Clear process-local registry snapshots (primarily for tests)."""
+    with _managed_definitions_cache_lock:
+        _managed_definitions_cache.clear()
+
+
+def _managed_definitions(*, app_config: Any | None = None) -> tuple[ManagedSubagentDefinition, ...]:
+    """Load and cache deployment-managed definitions until their signature changes."""
     store_config = app_config if hasattr(app_config, "agent_storage") else None
-    return get_managed_subagent_store(store_config).list()
+    store = get_managed_subagent_store(store_config)
+    cache_key = store.cache_identity()
+
+    with _managed_definitions_cache_lock:
+        signature = store.signature()
+        cached = _managed_definitions_cache.get(cache_key)
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        definitions = tuple(store.list())
+        _managed_definitions_cache[cache_key] = (signature, definitions)
+        return definitions
 
 
 def _build_managed_subagent_config(name: str, *, app_config: Any | None = None) -> SubagentConfig | None:

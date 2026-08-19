@@ -83,6 +83,14 @@ class ManagedSubagentExistsError(Exception):
 
 
 class ManagedSubagentStore(abc.ABC):
+    def cache_identity(self) -> Hashable:
+        """Return the process-local identity of the backing catalog.
+
+        Stateless store instances that point at the same backing data should
+        override this so registry snapshots can be reused across instances.
+        """
+        return id(self)
+
     @abc.abstractmethod
     def get(self, name: str) -> ManagedSubagentDefinition:
         """Return one definition or raise ``FileNotFoundError``."""

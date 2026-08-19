@@ -269,6 +269,17 @@ async def task_tool(
     else:
         available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
+    # Preserve the dedicated sandbox-policy guidance before the generic
+    # registry/policy membership gate filters bash from the visible catalog.
+    if subagent_type == "bash":
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if not host_bash_allowed:
+            return _task_result_command(
+                tool_call_id=tool_call_id,
+                status="failed",
+                error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
+            )
+
     # Get subagent configuration
     config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
     if config is None or subagent_type not in available_subagent_names:
@@ -284,15 +295,6 @@ async def task_tool(
             status="failed",
             error=error,
         )
-    if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
-        if not host_bash_allowed:
-            return _task_result_command(
-                tool_call_id=tool_call_id,
-                status="failed",
-                error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
-            )
-
     # Build config overrides
     overrides: dict = {}
 

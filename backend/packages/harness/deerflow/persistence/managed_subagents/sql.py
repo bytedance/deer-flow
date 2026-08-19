@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import uuid
 from collections.abc import Hashable
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.agents.sql import get_sync_sessionmaker
@@ -26,7 +24,11 @@ def _normalized_name(name: str) -> str:
 
 class SqlManagedSubagentStore(ManagedSubagentStore):
     def __init__(self, url: str) -> None:
+        self._url = url
         self._Session = get_sync_sessionmaker(url)
+
+    def cache_identity(self) -> Hashable:
+        return ("db", self._url)
 
     def get(self, name: str) -> ManagedSubagentDefinition:
         normalized = _normalized_name(name)
@@ -70,6 +72,6 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
         return result.rowcount > 0
 
     def signature(self) -> Hashable:
-        payload = [item.model_dump(mode="json") for item in self.list()]
-        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+        with self._Session() as session:
+            count, latest_update = session.execute(select(func.count(ManagedSubagentRow.id), func.max(ManagedSubagentRow.updated_at))).one()
+        return (count, latest_update)

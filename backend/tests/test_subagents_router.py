@@ -93,6 +93,34 @@ async def test_ordinary_user_can_list_but_cannot_read_prompts_or_write():
     assert excinfo.value.status_code == 403
 
 
+async def test_read_redaction_and_write_authorization_share_admin_fallback(monkeypatch):
+    await router.create_managed_subagent(
+        _request("admin"),
+        router.ManagedSubagentCreateRequest(
+            name="writer",
+            description="Writes copy",
+            system_prompt="Admin-visible worker prompt.",
+        ),
+    )
+    request_without_middleware_user = SimpleNamespace(state=SimpleNamespace())
+
+    async def resolve_admin(_request):
+        return SimpleNamespace(system_role="admin")
+
+    monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", resolve_admin)
+
+    catalog = await router.list_subagents(request_without_middleware_user)
+    writer = next(item for item in catalog.subagents if item.name == "writer")
+    assert writer.system_prompt == "Admin-visible worker prompt."
+
+    updated = await router.update_managed_subagent(
+        "writer",
+        request_without_middleware_user,
+        router.ManagedSubagentUpdateRequest(enabled=False),
+    )
+    assert updated.enabled is False
+
+
 async def test_builtin_name_is_rejected_at_create():
     with pytest.raises(HTTPException) as excinfo:
         await router.create_managed_subagent(

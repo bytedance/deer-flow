@@ -52,14 +52,18 @@ def test_crud_and_signature(request, store_fixture):
     store.create(definition)
     assert store.get("RESEARCHER") == definition
     assert [item.name for item in store.list()] == ["researcher"]
-    assert store.signature() != empty_signature
+    created_signature = store.signature()
+    assert created_signature != empty_signature
 
     updated = definition.model_copy(update={"enabled": False, "max_turns": 75})
     store.update(updated)
     assert store.get("researcher").enabled is False
     assert store.get("researcher").max_turns == 75
+    updated_signature = store.signature()
+    assert updated_signature != created_signature
 
     assert store.delete("researcher") is True
+    assert store.signature() != updated_signature
     assert store.delete("researcher") is False
     with pytest.raises(FileNotFoundError):
         store.get("researcher")
