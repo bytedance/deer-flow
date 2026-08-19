@@ -27,7 +27,10 @@ async function sha256OfText(content: string): Promise<string> {
     // reconciliation when that header is absent.
     return fnv1aHash(content);
   }
-  const digest = await subtle.digest("SHA-256", new TextEncoder().encode(content));
+  const digest = await subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(content),
+  );
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
