@@ -46,6 +46,7 @@ from deerflow.config.authorization_config import AuthorizationConfig
 
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
+    from deerflow.config.app_config import AppConfig
 
 P = ParamSpec("P")
 T = TypeVar("T")
@@ -299,23 +300,121 @@ def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[Autho
         logger.warning("Failed to resolve authorization provider for model routes", exc_info=True)
         raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
 
+    principal = build_principal_from_context(
+        _route_authz_context(user, is_internal=is_internal),
+        default_role=config.default_role,
+    )
+    return provider, principal
+
+
+def _route_authz_context(user: User, *, is_internal: bool) -> dict:
+    """Build the shared Principal context dict for a request-scoped user.
+
+    Applies the ``INTERNAL_SYSTEM_ROLE → None`` pop so internal callers fall
+    under ``default_role`` (mirrors ``inject_authenticated_user_context``).
+    Used by ``resolve_model_authorization`` and ``authorize_sandbox_for_request``
+    so every route-level authorization path builds the identity the same way.
+    """
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 
     user_role = getattr(user, "system_role", None)
     if user_role == INTERNAL_SYSTEM_ROLE:
         user_role = None
+    return {
+        "user_id": str(user.id),
+        "user_role": user_role,
+        "oauth_provider": getattr(user, "oauth_provider", None),
+        "oauth_id": getattr(user, "oauth_id", None),
+        "is_internal": is_internal,
+    }
 
-    principal = build_principal_from_context(
-        {
-            "user_id": str(user.id),
-            "user_role": user_role,
-            "oauth_provider": getattr(user, "oauth_provider", None),
-            "oauth_id": getattr(user, "oauth_id", None),
-            "is_internal": is_internal,
-        },
-        default_role=config.default_role,
-    )
-    return provider, principal
+
+def authorize_sandbox_for_request(
+    user: User,
+    *,
+    is_internal: bool,
+    app_config: AppConfig | None,
+) -> None:
+    """Check ``sandbox:execute`` for a Gateway request before sandbox acquisition.
+
+    Thin wrapper over the harness-level ``authorize_sandbox_execution`` that
+    builds the Principal from the request-scoped ``user`` — the same identity
+    construction as ``resolve_model_authorization`` (including the
+    ``INTERNAL_SYSTEM_ROLE → None`` pop). Raises
+    :class:`~deerflow.sandbox.exceptions.SandboxAuthorizationError` on deny or
+    on provider-resolution failure under ``fail_closed``; callers translate
+    that into skipping the sandbox sync (not an HTTP error, since the primary
+    operation — e.g. file upload — can proceed without it).
+
+    No-op when ``authorization.enabled`` is false.
+    """
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    config = _get_route_authorization_config()
+    if config.enabled is not True:
+        return
+
+    context = _route_authz_context(user, is_internal=is_internal)
+
+    try:
+        authorize_sandbox_execution(
+            context=context,
+            app_config=app_config,
+        )
+    except SandboxAuthorizationError:
+        raise
+    except Exception:
+        # Defense-in-depth: provider resolution and authorize() errors are
+        # already converted to SandboxAuthorizationError (or allowed under
+        # fail-open) one layer down inside authorize_sandbox_execution, so this
+        # normally only catches config-read failures here (e.g. get_config()
+        # raising in a config-less environment). Those must not 500 the
+        # upload/artifact route — degrade per fail_closed instead.
+        logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
+        if config.fail_closed:
+            raise SandboxAuthorizationError(role=context.get("user_role")) from None
+
+
+async def try_acquire_sandbox_for_request(
+    request: Request,
+    sandbox_provider,
+    thread_id: str,
+    *,
+    user_id: str,
+    app_config: AppConfig | None,
+) -> tuple[object, str | None, bool]:
+    """Gate + acquire the thread sandbox for a Gateway sync path.
+
+    Single entry point for the uploads/artifacts sandbox-sync paths so the
+    deny/skip semantics live in one place: runs the ``sandbox:execute`` gate
+    for the request's user, then acquires the sandbox. Returns
+    ``(sandbox, sandbox_id, denied)``:
+
+    - denied role → ``(None, None, True)``: acquisition was skipped by policy;
+      the primary operation (upload / artifact edit) proceeds without the
+      sandbox copy.
+    - allowed → ``(sandbox, sandbox_id, False)``: ``sandbox`` is the acquired
+      instance (``sandbox_id`` for later release), or ``sandbox is None`` when
+      the provider lost it right after acquiring (infrastructure error —
+      callers surface it as 500 / RuntimeError respectively, since that is
+      not a policy decision).
+    - ``request is None`` (direct-call tests) and unresolvable users skip the
+      gate — same fail-open semantics as the models routes' anonymous bypass.
+    """
+    from deerflow.sandbox.exceptions import SandboxAuthorizationError
+
+    try:
+        from app.gateway.deps import get_optional_user_from_request
+
+        user = await get_optional_user_from_request(request) if request is not None else None
+        if user is not None:
+            authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
+    except SandboxAuthorizationError:
+        logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
+        return None, None, True
+    sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=user_id)
+    return sandbox_provider.get(sandbox_id), sandbox_id, False
 
 
 async def _authenticate(request: Request) -> AuthContext:
