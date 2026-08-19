@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # chat.sh — Send a message to DeerFlow and collect the streaming response.
+# Host-agnostic helper shared by the claude/zcode/dsh -to-deerflow skills.
 #
 # Usage:
 #   bash chat.sh "Your question here"

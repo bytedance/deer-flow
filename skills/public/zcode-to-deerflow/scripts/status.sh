@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # status.sh — Check DeerFlow status and list available resources.
+# Host-agnostic helper shared by the claude/zcode/dsh -to-deerflow skills.
 #
 # Usage:
 #   bash status.sh                  # health + summary
