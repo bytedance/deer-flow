@@ -1415,7 +1415,7 @@ class DeerFlowClient:
         manager = get_memory_manager()
         memory_data, fact_id = manager.create_fact(content=content, category=category, confidence=confidence, user_id=get_effective_user_id())
         if fact_id is None:
-            raise ValueError("Fact was not stored because memory.max_facts kept higher-confidence facts")
+            raise ValueError("Fact was not stored because the configured memory.max_facts capacity policy evicted it")
         return memory_data
 
     def delete_memory_fact(self, fact_id: str) -> dict:

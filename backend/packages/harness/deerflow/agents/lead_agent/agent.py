@@ -841,6 +841,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 build_middlewares(
                     config,
                     model_name=model_name,
+                    agent_name=agent_name,
                     available_skills=set(_BOOTSTRAP_SKILL_NAMES),
                     app_config=resolved_app_config,
                     deferred_setup=setup,

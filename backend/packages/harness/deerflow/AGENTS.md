@@ -25,6 +25,15 @@ same helper for the embedded gate.
 trace id and not a DeerFlow `run_id`. Keep the existing subagent `trace_id` field
 separate: that short id is still only for subagent execution logs/status.
 
+### Browser Progress Screenshots (`community/browser_automation/`)
+
+Hidden per-action browser progress frames use JPEG at quality 80 to keep their
+storage and transfer cost bounded relative to lossless PNG. The explicit
+`browser_screenshot` tool remains PNG because it creates a user-requested
+artifact. New automatic capture entry points must reuse the shared progress
+encoding definition in `tools.py` so the byte encoding and `.jpg` suffix cannot
+drift.
+
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
 `DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
@@ -67,3 +76,28 @@ files. It is marked `live`, excluded from `make test`, and skipped in default
 CI.
 
 **Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
+
+### E2B Mount Uploads
+
+The E2B provider uploads host mounts during sandbox creation. It passes binary file objects to the E2B SDK.
+
+Each mount has these fixed limits:
+
+- 100 MiB for one file.
+- 512 MiB for all files.
+- 2,000 files.
+
+The full sandbox creation pass also allows 512 MiB and 2,000 files. Skill
+projections and configured mounts share this budget.
+
+The pass has a cooperative 120-second deadline. The provider checks it before
+each mount, during directory preflight, and before each SDK write. The deadline
+does not interrupt active filesystem or E2B SDK calls.
+
+The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
+
+An invalid mount does not block later mounts.
+
+Each successful upload logs its source, destination, file count, byte count, and elapsed time.
+
+A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.

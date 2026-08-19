@@ -330,8 +330,8 @@ async def create_memory_fact_endpoint(request: FactCreateRequest, http_request: 
         raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
 
     if fact_id is None:
-        # max_facts cap evicted the new (lower-confidence) fact; it was not stored.
-        raise HTTPException(status_code=409, detail="Fact was not stored because memory.max_facts kept higher-confidence facts")
+        # The configured max_facts policy evicted the new fact; it was not stored.
+        raise HTTPException(status_code=409, detail="Fact was not stored because the configured memory.max_facts capacity policy evicted it")
     return MemoryResponse(**memory_data)
 
 

@@ -152,10 +152,14 @@ from deerflow.config import get_app_config
 ```
 
 Package import hygiene: the `deerflow.agents` and `deerflow.subagents` package
-roots expose heavyweight graph/executor entrypoints lazily. Internal modules
-that only need lightweight types, config, or registries should import the
-concrete submodule instead of adding eager package-root imports that pull in the
-tool graph or subagent executor during state/schema imports.
+roots expose heavyweight graph/executor entrypoints lazily. The
+`deerflow.agents:make_lead_agent` LangGraph Server entrypoint is a concrete thin
+module-level function because the server resolves graph factories directly from
+the module dictionary; the wrapper keeps the lead-agent and skill-cache imports
+inside the function so importing the package remains lightweight. Internal
+modules that only need lightweight types, config, or registries should import
+the concrete submodule instead of adding eager package-root imports that pull in
+the tool graph or subagent executor during state/schema imports.
 
 ## Development Workflow
 

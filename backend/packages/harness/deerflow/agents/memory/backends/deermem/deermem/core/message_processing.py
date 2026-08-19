@@ -270,8 +270,8 @@ def detect_signals(
 ) -> set[str]:
     """Detect signal classes in the recent conversation turns.
 
-    Returns the set of signal names whose patterns match any of the last 6
-    human turns. This generalizes :func:`detect_correction` /
+    Returns the set of signal names whose patterns match a human message among
+    the last 6 filtered messages. This generalizes :func:`detect_correction` /
     :func:`detect_reinforcement` (which remain for backward compatibility) to
     the full signal set. The window stays ``messages[-6:]``.
     """

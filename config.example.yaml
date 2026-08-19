@@ -1494,6 +1494,15 @@ sandbox:
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
 
 # acp_agents:
+#   mcode:
+#     # MiniMax Code speaks ACP directly; no adapter package is required.
+#     # Install with `npm install --global @minimax-ai/code`, then run `mcode login`.
+#     command: mcode
+#     args: ["acp"]
+#     description: MiniMax Code for implementation, refactoring, debugging, and repository tasks
+#     # auto_approve_permissions: false  # Enable only for trusted tasks that need MCode to edit files or run commands
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
+#
 #   claude_code:
 #     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
 #     # speak ACP directly. Install `claude-agent-acp` separately or use:
@@ -1760,6 +1769,26 @@ memory:
       # temperature:            # optional
     max_facts: 100 # Maximum number of facts to store
     fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    # Capacity eviction defaults to the historical confidence-only ranking.
+    # Opt in to hybrid-v1 to score confidence (65%), explicit-confirmation
+    # freshness (25%, 90-day half-life), and query-driven access heat (10%,
+    # 30-day half-life). Actual memory_search hits count; default injection does
+    # not. A bounded 10% correction reserve aligns storage with guaranteed
+    # correction injection. Confirmation detection is batch-level: it checks
+    # human messages among the last six filtered messages, while the LLM binds
+    # that signal to a factsToReinforce ID without a second correspondence
+    # check. Shadow mode audits hybrid disagreements without changing which
+    # facts confidence-only keeps.
+    fact_eviction_policy: confidence # confidence | hybrid-v1
+    fact_eviction_shadow_enabled: false
+    eviction_confidence_weight: 0.65
+    eviction_confirmation_weight: 0.25
+    eviction_access_weight: 0.10
+    eviction_confirmation_half_life_days: 90
+    eviction_access_half_life_days: 30
+    eviction_correction_reserved_fraction: 0.10
+    eviction_correction_reserved_max: 10
+    eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection
     # Token counting strategy for memory-injection budgeting:
     #   tiktoken (default) - accurate, but the encoding BPE data may be
