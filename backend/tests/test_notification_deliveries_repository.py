@@ -11,9 +11,10 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from deerflow.persistence.notification_deliveries import (
-    NotificationDeliveryRepository,
-    NotificationDeliveryRow,
+from deerflow.persistence.notification_deliveries import NotificationDeliveryRepository, NotificationDeliveryRow
+from deerflow.persistence.notification_deliveries.sql import (
+    _CHANNEL_PARK_MAX_AGE,
+    _CHANNEL_PARK_MAX_ATTEMPTS,
 )
 
 
@@ -240,10 +241,9 @@ class TestNotificationDeliveryRepository:
         assert await repo.claim_due_deliveries(now=datetime.now(UTC) + timedelta(days=1), limit=1) == []
 
     @pytest.mark.anyio
-    async def test_mark_failed_without_counting_attempt_never_exhausts_budget(self, repo):
+    async def test_mark_failed_without_counting_attempt_preserves_budget_until_park_cap(self, repo):
         """Channel-down failures are parked, not counted: the row keeps its
-        full retry budget and returns on a flat long backoff, so a channel
-        that stays down for hours cannot silently drop the notification."""
+        full retry budget until parking expires, then settles to failed."""
         delivery = await repo.enqueue(**_enqueue_kwargs())
         before = datetime.now(UTC)
 
@@ -251,16 +251,33 @@ class TestNotificationDeliveryRepository:
 
         assert updated["status"] == "pending"
         assert updated["attempts"] == 0
+        assert updated["parked_attempts"] == 1
         retry_at = updated["available_at"]
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=UTC)
         assert retry_at >= before + timedelta(minutes=10)
 
-        # Twenty consecutive channel-down failures later the budget is intact.
-        for _ in range(20):
+        for _ in range(_CHANNEL_PARK_MAX_ATTEMPTS - 1):
             updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
+            assert updated["status"] == "pending"
+            assert updated["attempts"] == 0
+
+        updated = await repo.mark_failed(updated["id"], error="channel still down", count_attempt=False)
+        assert updated["status"] == "failed"
         assert updated["attempts"] == 0
-        assert updated["status"] == "pending"
+
+    @pytest.mark.anyio
+    async def test_mark_failed_parking_expires_by_row_age(self, repo):
+        delivery = await repo.enqueue(**_enqueue_kwargs())
+        async with repo.session_factory() as session:
+            row = await session.get(NotificationDeliveryRow, delivery["id"])
+            row.created_at = datetime.now(UTC) - _CHANNEL_PARK_MAX_AGE - timedelta(minutes=1)
+            await session.commit()
+
+        updated = await repo.mark_failed(delivery["id"], error="channel 'wecom' is not running", count_attempt=False)
+
+        assert updated["status"] == "failed"
+        assert updated["attempts"] == 0
 
     @pytest.mark.anyio
     async def test_unique_constraint_rejects_manual_duplicate(self, repo):

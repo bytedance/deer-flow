@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -50,6 +51,32 @@ def _truncate(text: str, *, limit: int = _ERROR_TEXT_LIMIT) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "\u2026"
 
 
+_EGRESS_REDACTION = "[redacted]"
+# Best-effort scrub before run content leaves for a third-party IM platform.
+# Patterns mirror the high-confidence secret detectors in skillscan.
+_EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
+    re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
+    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
+    re.compile(r"\bsk-[A-Za-z0-9]{20,}\b"),
+    re.compile(r"(?im)\b(token|password|passwd|api[_-]?key|secret|credential)s?\b\s*[:=]\s*[\"']?([^\"'\s#]+)"),
+)
+
+
+def redact_egress_text(text: str) -> str:
+    """Scrub likely secrets from text before it is pushed to external IM."""
+    if not text:
+        return text
+    redacted = text
+    for pattern in _EGRESS_SECRET_PATTERNS:
+        if pattern.groups:
+            redacted = pattern.sub(lambda match: f"{match.group(1)}={_EGRESS_REDACTION}", redacted)
+        else:
+            redacted = pattern.sub(_EGRESS_REDACTION, redacted)
+    return redacted
+
+
 def render_notification_text(delivery: dict[str, Any]) -> str:
     """Render a bounded markdown summary of the run outcome for IM push."""
     payload = delivery.get("payload") or {}
@@ -57,9 +84,10 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
     task_label = payload.get("task_title") or payload.get("task_id") or delivery.get("task_id")
     if event == "run_failed":
         lines = ["**Scheduled task failed**", f"Task: `{task_label}`"]
-        error = payload.get("error")
-        if error:
-            lines.append(f"Error: {_truncate(str(error))}")
+        # Do not forward raw error text to external IM: scheduled runs can
+        # surface hostnames, paths, and token fragments in tracebacks. Users
+        # can open the workspace for the full detail.
+        lines.append("See the DeerFlow workspace for error details.")
     else:
         lines = ["**Scheduled task completed**", f"Task: `{task_label}`"]
         # The result summary belongs to a successful outcome only: on failed
@@ -67,7 +95,8 @@ def render_notification_text(delivery: dict[str, Any]) -> str:
         # stays the sole detail.
         summary = payload.get("result_summary")
         if isinstance(summary, str) and summary.strip():
-            lines.append(f"Result: {_truncate(summary.strip(), limit=_SUMMARY_TEXT_LIMIT)}")
+            safe_summary = redact_egress_text(summary.strip())
+            lines.append(f"Result: {_truncate(safe_summary, limit=_SUMMARY_TEXT_LIMIT)}")
     if delivery.get("run_id"):
         lines.append(f"Run: `{delivery['run_id']}`")
     return "\n".join(lines)

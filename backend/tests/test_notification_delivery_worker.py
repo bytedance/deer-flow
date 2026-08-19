@@ -15,7 +15,7 @@ import pytest
 from app.channels.base import ChannelUnavailable
 from app.channels.message_bus import MessageBus
 from app.channels.wecom import WeComChannel
-from app.scheduler.notification_delivery import NotificationDeliveryWorker, render_notification_text
+from app.scheduler.notification_delivery import NotificationDeliveryWorker, redact_egress_text, render_notification_text
 
 
 class FakeDeliveryRepo:
@@ -103,25 +103,26 @@ def test_render_run_completed_text_includes_task_and_run():
 
 
 def test_render_prefers_task_title_over_id():
-    text = render_notification_text(
-        _delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"})
-    )
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "task_title": "Daily digest"}))
 
     assert "Daily digest" in text
     task_line = next(line for line in text.splitlines() if line.startswith("Task:"))
     assert "task-1" not in task_line
 
 
-def test_render_run_failed_text_includes_error():
+def test_render_run_failed_text_does_not_forward_raw_error():
+    secret = "sk-" + ("x" * 40)
     text = render_notification_text(
         _delivery_row(
             event="run_failed",
-            payload={"run_status": "failed", "error": "boom", "task_id": "task-1"},
+            payload={"run_status": "failed", "error": secret, "task_id": "task-1"},
         )
     )
 
     assert "failed" in text.lower()
-    assert "boom" in text
+    assert secret not in text
+    assert "workspace" in text.lower()
+    assert "Error:" not in text
 
 
 def test_render_truncates_unbounded_error_text():
@@ -132,8 +133,24 @@ def test_render_truncates_unbounded_error_text():
         )
     )
 
-    # The payload snapshot must stay bounded on the wire too.
     assert len(text) < 1000
+    assert "Error:" not in text
+
+
+def test_redact_egress_text_scrubs_seeded_secret():
+    secret = "sk-" + ("S" * 40)
+    redacted = redact_egress_text(f"answer used {secret} here")
+
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_render_redacts_secret_in_result_summary():
+    secret = "ghp_" + ("a" * 36)
+    text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": f"token={secret}"}))
+
+    assert secret not in text
+    assert "[redacted]" in text
 
 
 @pytest.mark.asyncio
@@ -490,3 +507,15 @@ async def test_wecom_send_notification_wraps_transport_errors_as_unavailable():
         await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")
 
     assert channel._ws_transport_up is False
+
+
+@pytest.mark.asyncio
+async def test_wecom_send_notification_propagates_deterministic_errors():
+    class InvalidTargetWsClient:
+        async def send_message(self, chatid, body):
+            raise ValueError("invalid target")
+
+    channel = _wecom_channel(InvalidTargetWsClient())
+
+    with pytest.raises(ValueError, match="invalid target"):
+        await channel.send_notification(target="GaoZhiChao", text_markdown="**done**")

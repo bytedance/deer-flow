@@ -235,7 +235,7 @@ class WeComChannel(Channel):
                 ack = await _send_once()
         except ChannelUnavailable:
             raise
-        except Exception as exc:
+        except (ConnectionError, TimeoutError, OSError) as exc:
             # Dead/flapping transport: not the delivery's fault. Park the
             # outbox row until the SDK reconnects instead of burning retries.
             self._ws_transport_up = False

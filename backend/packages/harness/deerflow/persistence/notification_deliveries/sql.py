@@ -33,6 +33,14 @@ _RETRY_MAX_SECONDS = 900
 # wait out an hours-long channel outage and still deliver once it returns.
 _CHANNEL_DOWN_RETRY_SECONDS = 900
 
+# Parking is unbounded in count by default; cap it so a permanently absent
+# provider (removed from config, never starts) settles to ``failed`` instead
+# of retrying every 15 minutes for the life of the deployment. Age and
+# parked-attempt limits are both checked — whichever trips first wins.
+_CHANNEL_PARK_MAX_AGE = timedelta(days=2)
+# 96 × 15min ≈ 24h of parking at the flat backoff interval.
+_CHANNEL_PARK_MAX_ATTEMPTS = 96
+
 
 class NotificationDeliveryRepository:
     """Persistence facade for the notification delivery outbox."""
@@ -206,7 +214,9 @@ class NotificationDeliveryRepository:
         With ``count_attempt=False`` the failure is parked instead: the retry
         budget stays intact and the row returns on a flat long backoff. Used
         when the owning channel is not running -- an outage is not the
-        delivery's fault and must not be able to exhaust its retries.
+        delivery's fault and must not be able to exhaust its retries. Parking
+        is capped by row age and ``parked_attempts`` so permanently absent
+        channels eventually settle to ``failed``.
         """
         async with self.session_factory() as session:
             row = await session.get(NotificationDeliveryRow, delivery_id)
@@ -214,8 +224,18 @@ class NotificationDeliveryRepository:
                 raise LookupError(f"notification delivery {delivery_id} not found")
             row.last_error = error
             if not count_attempt:
-                row.status = "pending"
-                row.available_at = datetime.now(UTC) + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
+                now = datetime.now(UTC)
+                created_at = row.created_at
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=UTC)
+                park_expired = (now - created_at) >= _CHANNEL_PARK_MAX_AGE or row.parked_attempts >= _CHANNEL_PARK_MAX_ATTEMPTS
+                if park_expired:
+                    row.status = "failed"
+                    row.last_error = error or "channel did not return before parking limit"
+                else:
+                    row.parked_attempts += 1
+                    row.status = "pending"
+                    row.available_at = now + timedelta(seconds=_CHANNEL_DOWN_RETRY_SECONDS)
             else:
                 row.attempts += 1
                 if row.attempts >= row.max_attempts:

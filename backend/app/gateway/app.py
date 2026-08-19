@@ -338,10 +338,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
                 delivery_channel_service = get_channel_service()
                 if notification_repo is not None and delivery_channel_service is None:
-                    logger.warning(
-                        "channel_connections.enabled but no channel service is running; "
-                        "disabling scheduled-task IM notification enqueue to avoid a write-only outbox"
-                    )
+                    logger.warning("channel_connections.enabled but no channel service is running; disabling scheduled-task IM notification enqueue to avoid a write-only outbox")
                     notification_connection_repo = None
                     notification_repo = None
                 scheduled_task_service = ScheduledTaskService(

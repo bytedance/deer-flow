@@ -38,6 +38,10 @@ class NotificationDeliveryRow(Base):
     # returns the row to pending with a backoff ``available_at``.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Incremented on channel-down / transport parking (``count_attempt=False``)
+    # so permanently absent channels eventually reach a terminal ``failed``
+    # state instead of retrying forever.
+    parked_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
 
     # Bounded result snapshot written at enqueue time (summary text, run
