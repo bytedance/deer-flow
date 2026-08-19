@@ -400,10 +400,12 @@ class BatchFactUpdateRequest(BaseModel):
     category: str | None = Field(default=None, description="Fact category")
     confidence: float | None = Field(default=None, ge=0.0, le=1.0, description="Confidence score (0-1)")
 
+
 class BatchDeleteRequest(BaseModel):
     """Request model for batch fact deletion."""
 
     fact_ids: list[str] = Field(..., min_length=1, max_length=100, description="List of fact IDs to delete (max 100)")
+
 
 class BatchUpdateRequest(BaseModel):
     """Request model for batch fact update."""

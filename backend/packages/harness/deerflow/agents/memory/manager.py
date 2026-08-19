@@ -454,7 +454,6 @@ class MemoryManager(BaseModel):
         Default: unsupported (raise NotImplementedError)."""
         raise NotImplementedError(f"batch_update_facts not supported by {type(self).__name__}")
 
-
     # B-class: no agent-side caller yet -- signatures only, for future scenarios.
     # Default no-op so callers can invoke unconditionally without gating. (The
     # self-serving hooks on_delegation / on_session_end / on_memory_write are
