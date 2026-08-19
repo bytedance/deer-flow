@@ -16,7 +16,7 @@ from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_DIRNAME
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
@@ -51,7 +51,7 @@ _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 # tools that write to ``os.tmpdir()`` / ``tempfile.gettempdir()`` land inside
 # the mounted user-data tree, where their output is resolvable by the
 # sandbox/artifact API — instead of on an unreachable host temp path.
-_MCP_TMP_SUBDIR = ".mcp/tmp"
+_MCP_TMP_SUBDIR = f"{MCP_TMP_DIRNAME}/tmp"
 
 # Matches local-file references embedded in free text returned by an MCP server.
 # Some servers (notably Playwright's ``browser_take_screenshot``) report saved

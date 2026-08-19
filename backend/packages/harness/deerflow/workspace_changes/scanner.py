@@ -6,7 +6,7 @@ import os
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
-from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_TMP_DIRNAME, TOOL_RESULTS_DIRNAME
 
 from .types import (
     DiffUnavailableReason,
@@ -35,6 +35,11 @@ EXCLUDED_DIR_NAMES = {
     # and fail as an error. Custom storage_subdir values are passed through
     # ``extra_excluded_dir_names`` instead.
     TOOL_RESULTS_DIRNAME,
+    # MCP stdio subprocess temp dir (``deerflow.mcp.tools`` pins the process
+    # tmpdir here): the MCP server's internal scratch/debug files, not
+    # workspace deliverables — same intent as the browser frames exclusion
+    # above. Shared constant with the MCP runtime so the name cannot drift.
+    MCP_TMP_DIRNAME,
     "__pycache__",
     "build",
     "dist",

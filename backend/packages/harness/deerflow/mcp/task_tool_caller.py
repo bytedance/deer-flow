@@ -10,6 +10,7 @@ from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import get_paths
+from deerflow.constants import MCP_TMP_DIRNAME
 from deerflow.mcp.client import build_server_params
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
@@ -17,7 +18,7 @@ from deerflow.mcp.session_pool import get_session_pool
 
 logger = logging.getLogger(__name__)
 
-_MCP_TASK_TMP_SUBDIR = ".mcp/tmp"
+_MCP_TASK_TMP_SUBDIR = f"{MCP_TMP_DIRNAME}/tmp"
 
 
 def mcp_task_session_scope_key(*, user_id: str, thread_id: str) -> str:

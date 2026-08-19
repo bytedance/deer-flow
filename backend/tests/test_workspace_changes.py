@@ -275,6 +275,23 @@ def test_scan_workspace_roots_skips_externalized_tool_results(tmp_path):
     assert "/mnt/user-data/outputs/.tool-results/bash-abcdef123456.log" not in snapshot.files
 
 
+def test_scan_workspace_roots_skips_mcp_tmp(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    (workspace / "paper.md").write_text("deliverable", encoding="utf-8")
+    mcp_tmp = workspace / ".mcp" / "tmp"
+    mcp_tmp.mkdir(parents=True)
+    (mcp_tmp / "semantic-scholar-debug.json").write_text(
+        "mcp server scratch file",
+        encoding="utf-8",
+    )
+
+    snapshot = scan_workspace_roots(roots)
+
+    assert "/mnt/user-data/workspace/paper.md" in snapshot.files
+    assert "/mnt/user-data/workspace/.mcp/tmp/semantic-scholar-debug.json" not in snapshot.files
+
+
 def test_scan_workspace_roots_skips_extra_excluded_dir_names(tmp_path):
     roots = _roots(tmp_path)
     outputs = roots[1].host_path

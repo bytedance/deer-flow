@@ -20,6 +20,15 @@ BROWSER_FRAMES_DIRNAME = ".browser-frames"
 # snapshot capture as an extra excluded dir name.
 TOOL_RESULTS_DIRNAME = ".tool-results"
 
+# Hidden subdirectory (under a thread's workspace) that MCP stdio subprocesses
+# use as their temp dir (``_MCP_TMP_SUBDIR`` in ``deerflow.mcp.tools``). The
+# stdio server process's own scratch files land here — process feedback, not
+# deliverables — so the workspace-changes scanner excludes this directory and
+# it never shows up as an "edited N files" workspace change. Both the MCP
+# runtime (which writes here) and the scanner (which ignores it) import this
+# single source of truth so the name cannot drift between them.
+MCP_TMP_DIRNAME = ".mcp"
+
 # Default timeout (seconds) for MCP server bring-up: tool discovery (subprocess
 # spawn + initialize + tools/list) and persistent-session initialization. A hung
 # stdio server (e.g. npx blocked on a package download or a server that never
