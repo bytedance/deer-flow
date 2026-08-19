@@ -7,6 +7,9 @@ import { CommandPalette } from "@/components/workspace/command-palette";
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
 import { ModelLoadErrorBanner } from "@/components/workspace/model-load-error-banner";
 import { SettingsDialogHost } from "@/components/workspace/settings";
+import { ObservatoryOverlays } from "@/components/workspace/skins/observatory-overlays";
+import { PageEnter } from "@/components/workspace/skins/page-enter";
+import { WorkspaceIntro } from "@/components/workspace/skins/workspace-intro";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
 
@@ -37,12 +40,14 @@ export async function WorkspaceContent({
         <SidebarInset className="min-w-0">
           <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
           <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-          {children}
+          <PageEnter>{children}</PageEnter>
         </SidebarInset>
       </SidebarProvider>
+      <WorkspaceIntro />
       <CommandPalette />
       <SettingsDialogHost />
       <WorkspaceSettingsDeepLink />
+      <ObservatoryOverlays />
       <Toaster position="top-center" />
     </QueryClientProvider>
   );

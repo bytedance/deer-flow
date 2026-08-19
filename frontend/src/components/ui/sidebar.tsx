@@ -5,6 +5,8 @@ import { Slot } from "@radix-ui/react-slot";
 import { cva, type VariantProps } from "class-variance-authority";
 import { PanelLeftCloseIcon, PanelLeftOpenIcon } from "lucide-react";
 
+import { TelescopeCollapseIcon } from "@/components/workspace/skins/telescope-collapse-icon";
+import { useSkin } from "@/core/skins";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -259,6 +261,7 @@ function SidebarTrigger({
   ...props
 }: React.ComponentProps<typeof Button>) {
   const { open, toggleSidebar } = useSidebar();
+  const { skin } = useSkin();
 
   return (
     <Button
@@ -273,7 +276,15 @@ function SidebarTrigger({
       }}
       {...props}
     >
-      {open ? <PanelLeftCloseIcon /> : <PanelLeftOpenIcon />}
+      {open ? (
+        skin === "observatory" ? (
+          <TelescopeCollapseIcon className="size-4" />
+        ) : (
+          <PanelLeftCloseIcon />
+        )
+      ) : (
+        <PanelLeftOpenIcon />
+      )}
       <span className="sr-only">Toggle Sidebar</span>
     </Button>
   );

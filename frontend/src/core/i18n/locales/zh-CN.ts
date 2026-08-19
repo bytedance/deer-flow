@@ -820,6 +820,8 @@ export const zhCN: Translations = {
       darkDescription: "更暗的配色，减少眩光方便专注。",
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
+      skinTitle: "皮肤",
+      skinDescription: "选择界面外观。浅色和深色可单独切换。",
     },
     tools: {
       title: "工具",
@@ -1077,6 +1079,20 @@ export const zhCN: Translations = {
     acknowledge: {
       emptyTitle: "致谢",
       emptyDescription: "相关的致谢信息会展示在这里。",
+    },
+  },
+
+  skins: {
+    classic: {
+      name: "经典",
+      tagline: "当前 DeerFlow 默认外观。",
+    },
+    observatory: {
+      name: "观星台",
+      tagline: "深蓝星空外观。",
+      toggleSky: "切换浅色 / 深色",
+      nightLabel: "深色",
+      dawnLabel: "浅色",
     },
   },
   login: {

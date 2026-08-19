@@ -11,6 +11,7 @@ import {
   SidebarTrigger,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { SkyToggle } from "@/components/workspace/skins/sky-toggle";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -45,7 +46,10 @@ export function WorkspaceHeader({ className }: { className?: string }) {
                 DeerFlow
               </div>
             )}
-            <SidebarTrigger />
+            <div className="flex items-center gap-2">
+              <SkyToggle />
+              <SidebarTrigger />
+            </div>
           </div>
         )}
       </div>

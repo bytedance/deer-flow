@@ -21,6 +21,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { SettingsNavPulse } from "@/components/workspace/skins/settings-ornament";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -173,7 +174,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       onOpenChange={(open) => props.onOpenChange?.(open)}
     >
       <DialogContent
-        className="flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-5xl md:max-w-6xl"
+        className="obs-settings-shell flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-5xl md:max-w-6xl"
         aria-describedby={undefined}
       >
         <DialogHeader className="gap-1">
@@ -183,7 +184,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </p>
         </DialogHeader>
         <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
-          <nav className="bg-sidebar min-h-0 overflow-y-auto rounded-lg border p-2">
+          <nav className="obs-settings-nav bg-sidebar min-h-0 overflow-y-auto rounded-lg border p-2">
             <ul className="space-y-1 pr-1">
               {sections.map(({ id, label, icon: Icon }) => {
                 const active = activeSection === id;
@@ -201,13 +202,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
                     >
                       <Icon className="size-4" />
                       <span>{label}</span>
+                      <SettingsNavPulse active={active} />
                     </button>
                   </li>
                 );
               })}
             </ul>
           </nav>
-          <ScrollArea className="h-full min-h-0 rounded-lg border">
+          <ScrollArea className="obs-settings-panel h-full min-h-0 rounded-lg border">
             <div className="space-y-6 p-5">
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}

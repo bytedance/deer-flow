@@ -721,6 +721,8 @@ export interface Translations {
       darkDescription: string;
       languageTitle: string;
       languageDescription: string;
+      skinTitle: string;
+      skinDescription: string;
     };
     tools: {
       title: string;
@@ -888,6 +890,20 @@ export interface Translations {
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
+    };
+  };
+
+  skins: {
+    classic: {
+      name: string;
+      tagline: string;
+    };
+    observatory: {
+      name: string;
+      tagline: string;
+      toggleSky: string;
+      nightLabel: string;
+      dawnLabel: string;
     };
   };
 
