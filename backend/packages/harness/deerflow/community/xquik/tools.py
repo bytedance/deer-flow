@@ -19,7 +19,6 @@ _X_SEARCH_ENDPOINT = "https://xquik.com/api/v1/x/tweets/search"
 _DEFAULT_MAX_RESULTS = 5
 _MAX_RESULTS = 100
 _MAX_QUERY_LENGTH = 500
-_MAX_CURSOR_LENGTH = 4096
 _MAX_POST_TEXT_LENGTH = 4096
 _MAX_URL_LENGTH = 2048
 _REQUEST_TIMEOUT_SECONDS = 30.0
@@ -44,6 +43,8 @@ def _get_api_key(options: Mapping[str, object] | None = None) -> str | None:
 
 
 def _coerce_max_results(value: object) -> int:
+    if isinstance(value, bool):
+        return _DEFAULT_MAX_RESULTS
     try:
         result = int(value)
     except (TypeError, ValueError):
@@ -66,7 +67,13 @@ def _first(mapping: Mapping[str, object], *keys: str) -> object:
 
 def _metric(mapping: Mapping[str, object], *keys: str) -> int:
     value = _first(mapping, *keys)
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return 0
+    try:
+        result = int(value)
+    except ValueError:
+        return 0
+    return result if result >= 0 else 0
 
 
 def _safe_post_url(value: object) -> str:
@@ -174,7 +181,7 @@ def x_search_tool(query: str, query_type: Literal["Latest", "Top"] = "Latest", c
 
     max_results = _coerce_max_results(options.get("max_results"))
     params: dict[str, object] = {"q": cleaned_query, "queryType": query_type, "limit": max_results}
-    cleaned_cursor = cursor.strip()[:_MAX_CURSOR_LENGTH] if isinstance(cursor, str) else ""
+    cleaned_cursor = cursor.strip() if isinstance(cursor, str) else ""
     if cleaned_cursor:
         params["cursor"] = cleaned_cursor
 
@@ -208,7 +215,8 @@ def x_search_tool(query: str, query_type: Literal["Latest", "Top"] = "Latest", c
             break
 
     has_next_page = _first(payload, "has_next_page", "has_more")
-    next_cursor = _clean_text(payload.get("next_cursor"), _MAX_CURSOR_LENGTH)
+    raw_next_cursor = payload.get("next_cursor")
+    next_cursor = raw_next_cursor.strip() if isinstance(raw_next_cursor, str) else ""
     result = {
         "posts": posts,
         "count": len(posts),

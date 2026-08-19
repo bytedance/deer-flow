@@ -106,4 +106,6 @@ A stopped pass logs its limit reason and elapsed time. It reports attempted and 
 
 The optional `x_search` provider uses a fixed HTTPS endpoint, caps each response
 at 100 posts, disables redirects, sanitizes failures, and never logs
-`XQUIK_API_KEY`. It stays separate from general `web_search` providers.
+`XQUIK_API_KEY`. It accepts integer metrics serialized as strings and preserves
+opaque pagination cursors without truncation. It stays separate from general
+`web_search` providers.

@@ -65,7 +65,7 @@ class TestConfiguration:
 
     @pytest.mark.parametrize(
         ("value", "expected"),
-        [(None, 5), ("bad", 5), (0, 5), (-2, 5), ("7", 7), (250, 100)],
+        [(None, 5), ("bad", 5), (False, 5), (True, 5), (0, 5), (-2, 5), ("7", 7), (250, 100)],
     )
     def test_result_limit_is_bounded(self, value, expected):
         from deerflow.community.xquik.tools import _coerce_max_results
@@ -171,16 +171,18 @@ class TestXSearchTool:
         assert sum("XQUIK_API_KEY" in record.getMessage() for record in caplog.records) == 1
         http_get.assert_not_called()
 
-    def test_query_and_cursor_lengths_are_bounded(self, configured_tool):
-        payload = {"tweets": [], "has_next_page": False, "next_cursor": ""}
+    def test_query_length_is_bounded_and_cursor_is_lossless(self, configured_tool):
+        cursor = "c" * 5000
+        payload = {"tweets": [], "has_next_page": True, "next_cursor": cursor}
         with patch("deerflow.community.xquik.tools.httpx.get", return_value=_response(payload)) as http_get:
             from deerflow.community.xquik.tools import x_search_tool
 
-            x_search_tool.invoke({"query": f"  {'q' * 700}  ", "cursor": "c" * 5000})
+            result = json.loads(x_search_tool.invoke({"query": f"  {'q' * 700}  ", "cursor": cursor}))
 
         params = http_get.call_args.kwargs["params"]
         assert params["q"] == "q" * 500
-        assert params["cursor"] == "c" * 4096
+        assert params["cursor"] == cursor
+        assert result["next_cursor"] == cursor
 
     def test_response_is_capped_even_if_provider_returns_extra_posts(self, configured_tool):
         configured_tool.return_value.get_tool_config.return_value.model_extra["max_results"] = 2
@@ -227,6 +229,38 @@ class TestXSearchTool:
         assert post["metrics"] == {"likes": 8, "reposts": 7, "replies": 6, "quotes": 5, "views": 4, "bookmarks": 3}
         assert result["has_next_page"] is False
 
+    def test_normalizes_nonnegative_numeric_string_metrics(self, configured_tool):
+        payload = {
+            "tweets": [
+                {
+                    "id": "321",
+                    "text": "string metrics",
+                    "likeCount": " 8 ",
+                    "retweetCount": "0",
+                    "replyCount": "-1",
+                    "quoteCount": "not-a-number",
+                    "viewCount": True,
+                    "bookmarkCount": "3",
+                    "author": {"username": "bob"},
+                }
+            ],
+            "has_next_page": False,
+            "next_cursor": "",
+        }
+        with patch("deerflow.community.xquik.tools.httpx.get", return_value=_response(payload)):
+            from deerflow.community.xquik.tools import x_search_tool
+
+            result = json.loads(x_search_tool.invoke({"query": "updates"}))
+
+        assert result["posts"][0]["metrics"] == {
+            "likes": 8,
+            "reposts": 0,
+            "replies": 0,
+            "quotes": 0,
+            "views": 0,
+            "bookmarks": 3,
+        }
+
     def test_discards_malformed_posts_and_untrusted_urls(self, configured_tool):
         payload = {
             "tweets": [
@@ -272,7 +306,7 @@ class TestXSearchTool:
         assert len(post["author"]["id"]) == 64
         assert len(post["author"]["username"]) == 64
         assert len(post["author"]["name"]) == 256
-        assert len(result["next_cursor"]) == 4096
+        assert len(result["next_cursor"]) == 5000
 
     @pytest.mark.parametrize(
         ("failure", "expected"),
