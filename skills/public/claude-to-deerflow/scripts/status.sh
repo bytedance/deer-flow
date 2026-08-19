@@ -26,7 +26,7 @@ ARG="${2:-}"
 case "$CMD" in
   health)
     echo "Checking DeerFlow at ${GATEWAY_URL}..."
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
+    HTTP_CODE=$(curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
 HTTP_CODE="${HTTP_CODE:-000}"
     if [ "$HTTP_CODE" = "000" ]; then
       echo "UNREACHABLE — DeerFlow is not running at ${GATEWAY_URL}"

@@ -50,6 +50,7 @@ SKILL_DIR=""
 for d in ".agents/skills/zcode-to-deerflow" "$HOME/.agents/skills/zcode-to-deerflow"; do
   [ -f "$d/scripts/chat.sh" ] && SKILL_DIR="$d" && break
 done
+[ -n "$SKILL_DIR" ] || { echo "zcode-to-deerflow skill dir not found" >&2; exit 1; }
 ```
 
 ### 2. Check health first

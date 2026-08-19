@@ -24,7 +24,7 @@ THREAD_ID="${2:-}"
 MODE="${3:-pro}"
 
 # --- Health check ---
-HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
+HTTP_CODE=$(curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
 HTTP_CODE="${HTTP_CODE:-000}"
 if [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" -ge 400 ]; then
   echo "ERROR: DeerFlow is not reachable at ${GATEWAY_URL} (HTTP ${HTTP_CODE})" >&2
@@ -93,11 +93,14 @@ ENDJSON
 # --- Stream the run and extract final response ---
 # We collect the full SSE output, then parse the last values event to get the AI response.
 TMPFILE=$(mktemp)
-trap "rm -f '$TMPFILE'" EXIT
+trap 'rm -f "$TMPFILE"' EXIT
 
-curl -s -N -X POST "${LANGGRAPH_URL}/threads/${THREAD_ID}/runs/stream" \
+if ! curl -s -N --connect-timeout 10 -X POST "${LANGGRAPH_URL}/threads/${THREAD_ID}/runs/stream" \
   -H "Content-Type: application/json" \
-  -d "$BODY" > "$TMPFILE"
+  -d "$BODY" > "$TMPFILE"; then
+  echo "ERROR: Stream request to DeerFlow failed (connection error or timeout)." >&2
+  exit 1
+fi
 
 # Parse the SSE output: extract the last "event: values" data block and get the final AI message
 python3 - "$TMPFILE" "$GATEWAY_URL" "$THREAD_ID" << 'PYEOF'
@@ -194,6 +197,12 @@ def format_artifact_text(artifacts):
         return f"Created File: {urls[0]}"
     return "Created Files:\n" + "\n".join(urls)
 
+def first_error_event():
+    for event_type, data_str in events:
+        if event_type == "error":
+            return data_str
+    return None
+
 # Find the last "values" event with messages
 result_messages = None
 for event_type, data_str in reversed(events):
@@ -216,14 +225,17 @@ if result_messages is not None:
     if response_text:
         print(response_text)
     else:
+        err = first_error_event()
+        if err is not None:
+            print(f"ERROR from DeerFlow: {err}", file=sys.stderr)
+            sys.exit(1)
         print("(No response from agent)", file=sys.stderr)
         sys.exit(1)
 else:
-    # Check for error events
-    for event_type, data_str in events:
-        if event_type == "error":
-            print(f"ERROR from DeerFlow: {data_str}", file=sys.stderr)
-            sys.exit(1)
+    err = first_error_event()
+    if err is not None:
+        print(f"ERROR from DeerFlow: {err}", file=sys.stderr)
+        sys.exit(1)
     print("No AI response found in the stream.", file=sys.stderr)
     if len(raw) < 2000:
         print(f"Raw SSE output:\n{raw}", file=sys.stderr)
