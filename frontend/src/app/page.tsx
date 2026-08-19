@@ -9,12 +9,15 @@ import { SandboxSection } from "@/components/landing/sections/sandbox-section";
 import { SkillsSection } from "@/components/landing/sections/skills-section";
 import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
 import { getServerSideUser } from "@/core/auth/server";
+import { assertNever } from "@/core/auth/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
 
 // Auth/setup state must be resolved per-request, never statically cached,
 // otherwise first-boot installs would always render the landing page.
-export const dynamic = "force-dynamic";
+// In static-website mode there is no auth check, so the landing stays a
+// prerendered static page instead of per-request SSR.
+export const dynamic = isStaticWebsiteOnly() ? "auto" : "force-dynamic";
 
 export default async function LandingPage() {
   // The marketing landing page is intended for the official static website
@@ -34,9 +37,11 @@ export default async function LandingPage() {
         redirect("/login");
       case "config_error":
         // Render the landing as a safe fallback when configuration is broken.
+        // Log the message so a broken gateway config is diagnosable.
+        console.error(result.message);
         break;
       default:
-        break;
+        assertNever(result);
     }
   }
 
