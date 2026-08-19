@@ -70,6 +70,8 @@ def ask_clarification_tool(
     - If a skill provides a predefined field template, pass it through `fields`
       unchanged instead of redesigning it
     - After calling this tool, execution will be interrupted automatically
+    - Do not call any other tool in the same turn as this one; sibling tool
+      calls are dropped so they cannot run before the user answers
 
     Args:
         question: The clarification question to ask the user. Be specific and clear.
