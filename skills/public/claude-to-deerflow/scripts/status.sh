@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # status.sh — Check DeerFlow status and list available resources.
+# Host-agnostic helper shared by the claude/zcode/dsh -to-deerflow skills.
+# Keep in sync with the other *-to-deerflow copies when changing behavior.
 #
 # Usage:
 #   bash status.sh                  # health + summary
@@ -20,14 +22,21 @@ set -euo pipefail
 DEERFLOW_URL="${DEERFLOW_URL:-http://localhost:2026}"
 GATEWAY_URL="${DEERFLOW_GATEWAY_URL:-$DEERFLOW_URL}"
 LANGGRAPH_URL="${DEERFLOW_LANGGRAPH_URL:-$DEERFLOW_URL/api/langgraph}"
+GATEWAY_URL="${GATEWAY_URL%/}"
+GATEWAY_URL="${GATEWAY_URL%/}"
+LANGGRAPH_URL="${LANGGRAPH_URL%/}"
+COOKIE_ARGS=()
+if [ -n "${DEERFLOW_COOKIE:-}" ]; then
+  COOKIE_ARGS=(-b "$DEERFLOW_COOKIE")
+fi
 CMD="${1:-health}"
 ARG="${2:-}"
 
 case "$CMD" in
   health)
     echo "Checking DeerFlow at ${GATEWAY_URL}..."
-    HTTP_CODE=$(curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
-HTTP_CODE="${HTTP_CODE:-000}"
+    HTTP_CODE=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
+    HTTP_CODE="${HTTP_CODE:-000}"
     if [ "$HTTP_CODE" = "000" ]; then
       echo "UNREACHABLE — DeerFlow is not running at ${GATEWAY_URL}"
       exit 1
@@ -39,25 +48,48 @@ HTTP_CODE="${HTTP_CODE:-000}"
     fi
     ;;
   models)
-    curl -s "${GATEWAY_URL}/api/models" | python3 -m json.tool
+    RESP=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" "${GATEWAY_URL}/api/models" || true)
+    printf '%s' "$RESP" | python3 -m json.tool 2>/dev/null || {
+      echo "ERROR: non-JSON or failed response from ${GATEWAY_URL}/api/models:" >&2
+      printf '%s' "$RESP" | head -c 200 >&2
+      echo >&2
+      exit 1
+    }
     ;;
   skills)
-    curl -s "${GATEWAY_URL}/api/skills" | python3 -m json.tool
+    RESP=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" "${GATEWAY_URL}/api/skills" || true)
+    printf '%s' "$RESP" | python3 -m json.tool 2>/dev/null || {
+      echo "ERROR: non-JSON or failed response from ${GATEWAY_URL}/api/skills:" >&2
+      printf '%s' "$RESP" | head -c 200 >&2
+      echo >&2
+      exit 1
+    }
     ;;
   agents)
-    curl -s "${GATEWAY_URL}/api/agents" | python3 -m json.tool
+    RESP=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" "${GATEWAY_URL}/api/agents" || true)
+    printf '%s' "$RESP" | python3 -m json.tool 2>/dev/null || {
+      echo "ERROR: non-JSON or failed response from ${GATEWAY_URL}/api/agents:" >&2
+      printf '%s' "$RESP" | head -c 200 >&2
+      echo >&2
+      exit 1
+    }
     ;;
   threads)
-    curl -s -X POST "${LANGGRAPH_URL}/threads/search" \
+    curl -s "${COOKIE_ARGS[@]}" -X POST "${LANGGRAPH_URL}/threads/search" \
       -H "Content-Type: application/json" \
-      -d '{"limit": 20, "sort_by": "updated_at", "sort_order": "desc", "select": ["thread_id", "updated_at", "values"]}' \
+      -d '{"limit": 20}' \
       | python3 -c "
 import json, sys
 threads = json.load(sys.stdin)
+if not isinstance(threads, list):
+    print(f'Unexpected response (not a thread list): {str(threads)[:200]}')
+    sys.exit(1)
 if not threads:
     print('No threads found.')
     sys.exit(0)
 for t in threads:
+    if not isinstance(t, dict):
+        continue
     tid = t.get('thread_id', '?')
     updated = t.get('updated_at', '?')
     title = (t.get('values') or {}).get('title', '(untitled)')
@@ -65,14 +97,22 @@ for t in threads:
 "
     ;;
   memory)
-    curl -s "${GATEWAY_URL}/api/memory" | python3 -m json.tool
+    RESP=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" "${GATEWAY_URL}/api/memory" || true)
+    printf '%s' "$RESP" | python3 -m json.tool 2>/dev/null || {
+      echo "ERROR: non-JSON or failed response from ${GATEWAY_URL}/api/memory:" >&2
+      printf '%s' "$RESP" | head -c 200 >&2
+      echo >&2
+      exit 1
+    }
     ;;
   thread)
     if [ -z "$ARG" ]; then
       echo "Usage: status.sh thread <thread_id>" >&2
       exit 1
     fi
-    curl -s "${LANGGRAPH_URL}/threads/${ARG}/history" | python3 -c "
+    curl -s "${COOKIE_ARGS[@]}" -X POST "${LANGGRAPH_URL}/threads/${ARG}/history" \
+      -H "Content-Type: application/json" \
+      -d '{"limit": 10}' | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 if isinstance(data, list):
@@ -80,6 +120,8 @@ if isinstance(data, list):
         values = state.get('values', {})
         msgs = values.get('messages', [])
         for m in msgs[-5:]:
+            if not isinstance(m, dict):
+                continue
             role = m.get('type', '?')
             content = m.get('content', '')
             if isinstance(content, list):

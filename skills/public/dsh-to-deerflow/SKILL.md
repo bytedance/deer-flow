@@ -1,6 +1,6 @@
 ---
 name: dsh-to-deerflow
-description: "Interact with DeerFlow AI agent platform via its HTTP API from a DeepSeek Harness (dsh) agent. Use this skill when a dsh headless task needs to delegate deep research or analysis to DeerFlow, start or continue a DeerFlow conversation thread, check DeerFlow status or health, or list DeerFlow models/skills/agents. Also use when the user mentions deerflow, deer flow, deepseek-harness, dsh, or wants a dsh-driven agent to run a deep research task that DeerFlow can handle."
+description: "Interact with DeerFlow AI agent platform via its HTTP API from a DeepSeek Harness (dsh) agent. Use this skill when a dsh headless task needs to delegate deep research or analysis to DeerFlow, start or continue a DeerFlow conversation thread, check DeerFlow status or health, or list DeerFlow models/skills/agents. Also use when the user mentions deerflow, deer flow, deepseek-harness, or dsh. Use only inside a DeepSeek Harness (dsh) run; from a ZCode session use zcode-to-deerflow instead."
 ---
 
 # DeerFlow Skill (DeepSeek Harness host)
@@ -9,11 +9,11 @@ Communicate with a running DeerFlow instance via its HTTP API from inside a Deep
 agent. DeerFlow is an AI agent platform built on LangGraph that orchestrates sub-agents for
 research, code execution, web browsing, and more. dsh (github.com/deepseek-ai/deepseek-harness)
 is a plugin-based agent harness; its `bash` tool is the bridge to DeerFlow — everything here runs
-as plain `curl` / helper-script shell commands.
+as plain `curl` calls and the bundled helper scripts.
 
 ## Architecture
 
-DeerFlow exposes two API surfaces behind an Nginx reverse proxy:
+DeerFlow exposes two URL prefixes on one gateway service behind an Nginx reverse proxy:
 
 | Service        | Direct Port | Via Proxy                        | Purpose                          |
 |----------------|-------------|----------------------------------|----------------------------------|
@@ -39,24 +39,34 @@ DEERFLOW_GATEWAY_URL="${DEERFLOW_GATEWAY_URL:-$DEERFLOW_URL}"
 DEERFLOW_LANGGRAPH_URL="${DEERFLOW_LANGGRAPH_URL:-$DEERFLOW_URL/api/langgraph}"
 ```
 
+**Authentication prerequisite**: a default DeerFlow deployment requires authentication. Either start
+DeerFlow with `DEER_FLOW_AUTH_DISABLED=1` (local no-auth mode), or export
+`DEERFLOW_COOKIE="access_token=<jwt>"` (or a full `Cookie:` header value) — both scripts forward it
+to every request. The scripts require `curl` and `python3` on `PATH`.
+
 dsh note: the bash tool inherits the environment of the dsh process, so export
 `DEERFLOW_URL` (and overrides) **before launching the dsh run** — exporting them inside a bash
 tool call only affects that single call.
 
 ## dsh Workflow
 
-### 1. Install this skill into the task workspace
+### 1. Install this skill into the task workspace (for the orchestrator, before the dsh run)
 
-dsh discovers project skills from the task working directory. Copy the skill there (and make sure
-the workdir is a git repository — dsh resolves the project root by walking up to `.git`, so run
-`git init` in a fresh workdir first):
+dsh discovers project skills from the task working directory (recent dsh versions resolve the
+project root by walking up to the nearest `.git` — verify against current dsh docs). Copy this
+skill into the workdir's `.agents/skills/` before launching the dsh task, and make sure the
+workdir is a git repository (`git init` in a fresh workdir):
 
 ```bash
 cd <task-workdir>
 git init -q 2>/dev/null || true
 mkdir -p .agents/skills
-cp -r <source-of-this-skill>/dsh-to-deerflow .agents/skills/
+cp -r <deer-flow-checkout>/skills/public/dsh-to-deerflow .agents/skills/
 ```
+
+Source: the `skills/public/dsh-to-deerflow/` directory of the deer-flow repository
+(https://github.com/bytedance/deer-flow). Steps 2+ are for the dsh agent that already has this
+skill installed.
 
 ### 2. Check health first
 
@@ -74,14 +84,14 @@ retrying in a loop.
 bash .agents/skills/dsh-to-deerflow/scripts/chat.sh "Your question here"
 ```
 
-The script prints the final AI response to stdout and `Thread: <thread_id>` to stderr.
+The script prints the final AI response to stdout and `Thread: <thread_id>` to stderr (echoed again as `Thread ID:` when the run finishes).
 The response may also end with `Created File: <url>` artifact links (DeerFlow-generated files) —
 include both the text and the artifact URLs in the task result.
 
 ### 4. Handle long research runs
 
 Deep research in pro/ultra mode can take minutes and may exceed a single bash tool call budget
-(`timeoutMs`). Run the chat script in the background, then poll across tool calls:
+(`timeoutMs` in recent dsh versions — verify against current dsh docs). Run the chat script in the background, then poll across tool calls:
 
 ```bash
 nohup bash .agents/skills/dsh-to-deerflow/scripts/chat.sh "Research question" \
@@ -157,15 +167,15 @@ event: <event_type>
 data: <json_data>
 ```
 
-Key event types:
+Key event types (the request parameter is named `messages-tuple`, but the SSE event it produces is named `messages`):
 - `metadata` — run metadata including `run_id`
 - `values` — full state snapshot with `messages` array
-- `messages-tuple` — incremental message updates (AI text chunks, tool calls, tool results)
+- `messages` — incremental message updates (AI text chunks, tool calls, tool results)
 - `end` — stream is complete
 
 **Context modes** (set via `context`):
 - Flash mode: `thinking_enabled: false, is_plan_mode: false, subagent_enabled: false`
-- Standard mode: `thinking_enabled: true, is_plan_mode: false, subagent_enabled: false`
+- Standard mode (shown as "thinking" in the web UI): `thinking_enabled: true, is_plan_mode: false, subagent_enabled: false`
 - Pro mode: `thinking_enabled: true, is_plan_mode: true, subagent_enabled: false`
 - Ultra mode: `thinking_enabled: true, is_plan_mode: true, subagent_enabled: true`
 
@@ -179,7 +189,7 @@ Reuse the same `thread_id` from step 2 and POST another run with the new message
 curl -s "$DEERFLOW_GATEWAY_URL/api/models"
 ```
 
-Returns: `{"models": [{"name": "...", "provider": "...", ...}, ...]}`
+Returns: `{"models": [{"name": "...", "model": "...", "display_name": "...", ...}, ...]}`
 
 ### 5. List Skills
 
@@ -194,13 +204,13 @@ Returns: `{"skills": [{"name": "...", "enabled": true, ...}, ...]}`
 ```bash
 curl -s -X PUT "$DEERFLOW_GATEWAY_URL/api/skills/<skill_name>" \
   -H "Content-Type: application/json" \
-  -d '{"enabled": true}'
+  -d '{"enabled": true}'   # requires an admin user
 ```
 
 ### 7. List Agents
 
 ```bash
-curl -s "$DEERFLOW_GATEWAY_URL/api/agents"
+curl -s "$DEERFLOW_GATEWAY_URL/api/agents"   # needs agents_api.enabled=true (403 by default)
 ```
 
 Returns: `{"agents": [{"name": "...", ...}, ...]}`
@@ -220,7 +230,8 @@ curl -s -X POST "$DEERFLOW_GATEWAY_URL/api/threads/<thread_id>/uploads" \
   -F "files=@/path/to/file.pdf"
 ```
 
-Supports PDF, PPTX, XLSX, DOCX — automatically converts to Markdown.
+Supports PDF, PPTX, XLSX, DOCX (plus legacy PPT/XLS/DOC). Markdown conversion happens only when
+the server-side `uploads.auto_convert_documents` option is enabled (off by default).
 
 ### 10. List Uploaded Files
 
@@ -231,15 +242,18 @@ curl -s "$DEERFLOW_GATEWAY_URL/api/threads/<thread_id>/uploads/list"
 ### 11. Get Thread History
 
 ```bash
-curl -s "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/history"
+curl -s -X POST "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/history" \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 10}'
 ```
 
 ### 12. List Threads
 
 ```bash
+# ordered pinned-first, then most recently updated; sorting parameters are not supported
 curl -s -X POST "$DEERFLOW_LANGGRAPH_URL/threads/search" \
   -H "Content-Type: application/json" \
-  -d '{"limit": 20, "sort_by": "updated_at", "sort_order": "desc"}'
+  -d '{"limit": 20}'
 ```
 
 ## Status Helper

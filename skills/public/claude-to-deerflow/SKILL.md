@@ -98,7 +98,7 @@ data: <json_data>
 Key event types:
 - `metadata` — run metadata including `run_id`
 - `values` — full state snapshot with `messages` array
-- `messages-tuple` — incremental message updates (AI text chunks, tool calls, tool results)
+- `messages` — incremental message updates (AI text chunks, tool calls, tool results; produced when the `messages-tuple` stream mode is requested)
 - `end` — stream is complete
 
 **Context modes** (set via `context`):
@@ -170,7 +170,9 @@ curl -s "$DEERFLOW_GATEWAY_URL/api/threads/<thread_id>/uploads/list"
 ### 11. Get Thread History
 
 ```bash
-curl -s "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/history"
+curl -s -X POST "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/history" \
+  -H "Content-Type: application/json" \
+  -d '{"limit": 10}'
 ```
 
 ### 12. List Threads
@@ -178,7 +180,7 @@ curl -s "$DEERFLOW_LANGGRAPH_URL/threads/<thread_id>/history"
 ```bash
 curl -s -X POST "$DEERFLOW_LANGGRAPH_URL/threads/search" \
   -H "Content-Type: application/json" \
-  -d '{"limit": 20, "sort_by": "updated_at", "sort_order": "desc"}'
+  -d '{"limit": 20}'
 ```
 
 ## Usage Script

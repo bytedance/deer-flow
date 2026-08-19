@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # chat.sh — Send a message to DeerFlow and collect the streaming response.
+# Host-agnostic helper shared by the claude/zcode/dsh -to-deerflow skills.
+# Keep in sync with the other *-to-deerflow copies when changing behavior.
 #
 # Usage:
 #   bash chat.sh "Your question here"
@@ -19,12 +21,19 @@ set -euo pipefail
 DEERFLOW_URL="${DEERFLOW_URL:-http://localhost:2026}"
 GATEWAY_URL="${DEERFLOW_GATEWAY_URL:-$DEERFLOW_URL}"
 LANGGRAPH_URL="${DEERFLOW_LANGGRAPH_URL:-$DEERFLOW_URL/api/langgraph}"
+GATEWAY_URL="${GATEWAY_URL%/}"
+GATEWAY_URL="${GATEWAY_URL%/}"
+LANGGRAPH_URL="${LANGGRAPH_URL%/}"
+COOKIE_ARGS=()
+if [ -n "${DEERFLOW_COOKIE:-}" ]; then
+  COOKIE_ARGS=(-b "$DEERFLOW_COOKIE")
+fi
 MESSAGE="${1:?Usage: chat.sh <message> [thread_id] [mode]}"
 THREAD_ID="${2:-}"
 MODE="${3:-pro}"
 
 # --- Health check ---
-HTTP_CODE=$(curl -s --connect-timeout 10 -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
+HTTP_CODE=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" -o /dev/null -w "%{http_code}" "${GATEWAY_URL}/health" 2>/dev/null || true)
 HTTP_CODE="${HTTP_CODE:-000}"
 if [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" -ge 400 ]; then
   echo "ERROR: DeerFlow is not reachable at ${GATEWAY_URL} (HTTP ${HTTP_CODE})" >&2
@@ -34,10 +43,10 @@ fi
 
 # --- Create or reuse thread ---
 if [ -z "$THREAD_ID" ]; then
-  THREAD_RESP=$(curl -s -X POST "${LANGGRAPH_URL}/threads" \
+  THREAD_RESP=$(curl -s --connect-timeout 10 "${COOKIE_ARGS[@]}" -X POST "${LANGGRAPH_URL}/threads" \
     -H "Content-Type: application/json" \
-    -d '{}')
-  THREAD_ID=$(echo "$THREAD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_id'])" 2>/dev/null)
+    -d '{}' || true)
+  THREAD_ID=$(echo "$THREAD_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['thread_id'])" 2>/dev/null || true)
   if [ -z "$THREAD_ID" ]; then
     echo "ERROR: Failed to create thread. Response: ${THREAD_RESP}" >&2
     exit 1
@@ -45,25 +54,26 @@ if [ -z "$THREAD_ID" ]; then
   echo "Thread: ${THREAD_ID}" >&2
 fi
 
-# --- Build context based on mode ---
+# --- Build context based on mode (json.dumps: safe for any thread_id) ---
 case "$MODE" in
-  flash)
-    CONTEXT='{"thinking_enabled":false,"is_plan_mode":false,"subagent_enabled":false,"thread_id":"'"$THREAD_ID"'"}'
-    ;;
-  standard)
-    CONTEXT='{"thinking_enabled":true,"is_plan_mode":false,"subagent_enabled":false,"thread_id":"'"$THREAD_ID"'"}'
-    ;;
-  pro)
-    CONTEXT='{"thinking_enabled":true,"is_plan_mode":true,"subagent_enabled":false,"thread_id":"'"$THREAD_ID"'"}'
-    ;;
-  ultra)
-    CONTEXT='{"thinking_enabled":true,"is_plan_mode":true,"subagent_enabled":true,"thread_id":"'"$THREAD_ID"'"}'
-    ;;
+  flash|standard|pro|ultra) ;;
   *)
     echo "ERROR: Unknown mode '${MODE}'. Use: flash, standard, pro, ultra" >&2
     exit 1
     ;;
 esac
+CONTEXT=$(python3 -c '
+import json, sys
+modes = {
+    "flash": (False, False, False),
+    "standard": (True, False, False),
+    "pro": (True, True, False),
+    "ultra": (True, True, True),
+}
+t, p, sg = modes[sys.argv[1]]
+print(json.dumps({"thinking_enabled": t, "is_plan_mode": p,
+                  "subagent_enabled": sg, "thread_id": sys.argv[2]}))
+' "$MODE" "$THREAD_ID")
 
 # --- Escape message for JSON ---
 ESCAPED_MSG=$(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$MESSAGE")
@@ -95,10 +105,19 @@ ENDJSON
 TMPFILE=$(mktemp)
 trap 'rm -f "$TMPFILE"' EXIT
 
-if ! curl -s -N --connect-timeout 10 -X POST "${LANGGRAPH_URL}/threads/${THREAD_ID}/runs/stream" \
+STREAM_STATUS=$(curl -s -N --connect-timeout 10 --max-time "${DEERFLOW_TIMEOUT:-3600}" "${COOKIE_ARGS[@]}" \
+  -X POST "${LANGGRAPH_URL}/threads/${THREAD_ID}/runs/stream" \
   -H "Content-Type: application/json" \
-  -d "$BODY" > "$TMPFILE"; then
+  -d "$BODY" -o "$TMPFILE" -w "%{http_code}" || true)
+STREAM_STATUS="${STREAM_STATUS:-000}"
+if [ "$STREAM_STATUS" = "000" ]; then
   echo "ERROR: Stream request to DeerFlow failed (connection error or timeout)." >&2
+  exit 1
+fi
+if [ "$STREAM_STATUS" -ge 400 ] 2>/dev/null; then
+  echo "ERROR: DeerFlow returned HTTP ${STREAM_STATUS} for the stream request:" >&2
+  head -c 400 "$TMPFILE" >&2
+  echo >&2
   exit 1
 fi
 
@@ -139,14 +158,15 @@ for line in raw.split("\n"):
 if current_event and current_data_lines:
     events.append((current_event, "\n".join(current_data_lines)))
 
-import posixpath
-
 def extract_response_text(messages):
     """Mirror manager.py _extract_response_text: handles ask_clarification interrupt + regular AI."""
     for msg in reversed(messages):
         if not isinstance(msg, dict):
             continue
         msg_type = msg.get("type")
+        # anything before the last human message is a previous turn
+        if msg_type == "human":
+            break
         # ask_clarification interrupt: tool message with name ask_clarification
         if msg_type == "tool" and msg.get("name") == "ask_clarification":
             content = msg.get("content", "")
@@ -180,7 +200,13 @@ def extract_artifacts(messages):
         if msg.get("type") == "ai":
             for tc in msg.get("tool_calls", []):
                 if isinstance(tc, dict) and tc.get("name") == "present_files":
-                    paths = tc.get("args", {}).get("filepaths", [])
+                    args = tc.get("args") or {}
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except ValueError:
+                            args = {}
+                    paths = args.get("filepaths", []) if isinstance(args, dict) else []
                     if isinstance(paths, list):
                         artifacts.extend(p for p in paths if isinstance(p, str))
     return artifacts
@@ -242,6 +268,6 @@ else:
     sys.exit(1)
 PYEOF
 
-echo ""
-echo "---"
+echo "" >&2
+echo "---" >&2
 echo "Thread ID: ${THREAD_ID}" >&2
