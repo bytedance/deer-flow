@@ -13,7 +13,9 @@ Pydantic's serialization expectations aligned with reality.
 
 from __future__ import annotations
 
+import inspect
 import warnings
+from unittest.mock import AsyncMock
 
 import pytest
 from langchain.tools import ToolRuntime
@@ -76,6 +78,50 @@ _SANDBOX_TOOL_CASES = [
     (str_replace_tool, {"path": "/tmp/x", "old_str": "a", "new_str": "b"}, {"path", "old_str", "new_str"}),
 ]
 
+_SANDBOX_TOOL_FORWARDING_CASES = [
+    (bash_tool, {"command": "command", "description": "description"}, ("command", "description")),
+    (ls_tool, {"path": "/path", "description": "description"}, ("/path", "description")),
+    (
+        glob_tool,
+        {"pattern": "*.py", "path": "/path", "description": "description", "include_dirs": True, "max_results": 7},
+        ("*.py", "/path", "description", True, 7),
+    ),
+    (
+        grep_tool,
+        {
+            "pattern": "needle",
+            "path": "/path",
+            "description": "description",
+            "glob": "*.py",
+            "literal": True,
+            "case_sensitive": True,
+            "max_results": 7,
+        },
+        ("needle", "/path", "description", "*.py", True, True, 7),
+    ),
+    (
+        read_file_tool,
+        {"path": "/path", "description": "description", "start_line": 2, "end_line": 3},
+        ("/path", "description", 2, 3),
+    ),
+    (
+        write_file_tool,
+        {"path": "/path", "content": "content", "description": "description", "append": True},
+        ("/path", "content", "description", True),
+    ),
+    (
+        str_replace_tool,
+        {
+            "path": "/path",
+            "old_str": "old",
+            "new_str": "new",
+            "description": "description",
+            "replace_all": True,
+        },
+        ("/path", "old", "new", "description", True),
+    ),
+]
+
 
 @pytest.mark.parametrize(
     ("tool_obj", "extra_args"),
@@ -127,6 +173,42 @@ def test_sandbox_tool_description_is_optional_but_discoverable(tool_obj, operati
     assert parameters["properties"]["description"]["description"]
 
     validated = tool_obj.tool_call_schema.model_validate(operational_args)
+    assert validated.description == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_obj", "call_args", "forwarded_args"),
+    _SANDBOX_TOOL_FORWARDING_CASES,
+    ids=[case[0].name for case in _SANDBOX_TOOL_FORWARDING_CASES],
+)
+async def test_sandbox_tool_sync_async_signatures_and_forwarding_stay_aligned(
+    monkeypatch,
+    tool_obj,
+    call_args,
+    forwarded_args,
+) -> None:
+    """Async wrappers must keep both their public signature and positional forwarding aligned."""
+    assert tool_obj.func is not None
+    assert tool_obj.coroutine is not None
+    assert list(inspect.signature(tool_obj.func).parameters) == list(inspect.signature(tool_obj.coroutine).parameters)
+
+    run_sync_tool = AsyncMock(return_value="forwarded")
+    monkeypatch.setattr("deerflow.sandbox.tools._run_sync_tool_after_async_sandbox_init", run_sync_tool)
+    runtime = object()
+
+    assert await tool_obj.coroutine(runtime=runtime, **call_args) == "forwarded"
+    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_args)
+
+
+def test_task_tool_description_is_optional_but_discoverable() -> None:
+    """Subagent execution may not depend on its UI-only progress label."""
+    parameters = convert_to_openai_tool(task_tool)["function"]["parameters"]
+
+    assert set(parameters["required"]) == {"prompt", "subagent_type"}
+    assert parameters["properties"]["description"]["description"]
+
+    validated = task_tool.tool_call_schema.model_validate({"prompt": "go", "subagent_type": "general-purpose"})
     assert validated.description == ""
 
 
