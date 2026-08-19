@@ -832,6 +832,8 @@ export const zhCN: Translations = {
       title: "子智能体",
       description:
         "可由 Lead Agent 和已授权 Custom Agent 派遣、执行边界明确任务的复用型工作智能体。",
+      executionNote:
+        "每次调用都使用全新的临时上下文，没有独立持久会话或记忆，也不能向用户追问。系统提示词只改变工作方式；工具和技能才提供实际能力。",
       adminNote:
         "你可以查看目录；只有管理员可以添加、编辑、启停或删除子智能体。",
       create: "添加子智能体",
@@ -844,6 +846,7 @@ export const zhCN: Translations = {
       createTitle: "添加子智能体",
       editTitle: "编辑子智能体",
       name: "名称",
+      nameHint: "仅可使用字母、数字和连字符。",
       displayName: "显示名称",
       descriptionLabel: "派遣说明",
       systemPrompt: "系统提示词",
@@ -851,12 +854,17 @@ export const zhCN: Translations = {
       inheritModel: "继承调用者模型",
       tools: "允许的工具（逗号分隔）",
       skills: "技能（逗号分隔）",
+      listModeAll: "继承全部可用项",
+      listModeNone: "全部禁用",
+      listModeSelected: "仅允许指定名称",
+      listNamesPlaceholder: "多个名称用逗号分隔",
       maxTurns: "最大轮次",
       timeout: "超时时间（秒）",
       created: "子智能体已创建",
       saved: "子智能体已保存",
       deleted: "子智能体已删除",
-      deleteConfirm: "确定删除这个子智能体吗？此操作无法撤销。",
+      deleteConfirm:
+        "确定删除这个子智能体吗？Custom Agent 可能仍保留对该名称的引用；以同名重建后，这些绑定会重新生效。此操作无法撤销。",
       bindingTitle: "子智能体权限",
       bindingDescription:
         "选择这个 Custom Agent 可以派遣哪些子智能体；服务端会强制执行该范围。",

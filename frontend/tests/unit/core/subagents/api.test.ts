@@ -84,4 +84,19 @@ describe("managed subagent API", () => {
       }),
     ).rejects.toThrow("Subagent name is reserved");
   });
+
+  test("formats FastAPI validation detail arrays", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(422, {
+        detail: [{ loc: ["body", "name"], msg: "String should match pattern" }],
+      }),
+    );
+    await expect(
+      createManagedSubagent({
+        name: "invalid_name",
+        description: "Invalid",
+        system_prompt: "Invalid",
+      }),
+    ).rejects.toThrow("String should match pattern");
+  });
 });

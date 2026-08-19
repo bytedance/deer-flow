@@ -10,6 +10,7 @@ from fastapi import HTTPException
 from app.gateway.routers import subagents as router
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
 from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
 
 pytestmark = pytest.mark.asyncio
@@ -56,6 +57,19 @@ async def test_admin_can_create_update_and_delete_managed_subagent():
 
 
 async def test_ordinary_user_can_list_but_cannot_read_prompts_or_write():
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            subagents=SubagentsAppConfig(
+                custom_agents={
+                    "config-worker": CustomSubagentConfig(
+                        description="Configured worker",
+                        system_prompt="Secret config prompt.",
+                    )
+                }
+            ),
+        )
+    )
     await router.create_managed_subagent(
         _request("admin"),
         router.ManagedSubagentCreateRequest(
@@ -66,8 +80,12 @@ async def test_ordinary_user_can_list_but_cannot_read_prompts_or_write():
     )
 
     catalog = await router.list_subagents(_request("user"))
-    writer = next(item for item in catalog.subagents if item.name == "writer")
-    assert writer.system_prompt is None
+    assert {item.source for item in catalog.subagents} == {
+        "builtin",
+        "config",
+        "managed",
+    }
+    assert all(item.system_prompt is None for item in catalog.subagents)
 
     with pytest.raises(HTTPException) as excinfo:
         await router.update_managed_subagent(
@@ -132,6 +150,57 @@ async def test_builtin_name_is_rejected_at_create():
             ),
         )
     assert excinfo.value.status_code == 409
+
+
+async def test_config_name_is_rejected_at_create():
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            subagents=SubagentsAppConfig(
+                custom_agents={
+                    "planner": CustomSubagentConfig(
+                        description="Config planner",
+                        system_prompt="Config owns this name.",
+                    )
+                }
+            ),
+        )
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        await router.create_managed_subagent(
+            _request("admin"),
+            router.ManagedSubagentCreateRequest(
+                name="planner",
+                description="Duplicate",
+                system_prompt="Duplicate.",
+            ),
+        )
+    assert excinfo.value.status_code == 409
+
+
+async def test_catalog_marks_config_definition_shadowed_by_builtin_as_conflict():
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+            subagents=SubagentsAppConfig(
+                custom_agents={
+                    "general-purpose": CustomSubagentConfig(
+                        description="Shadowed config worker",
+                        system_prompt="This definition must not win.",
+                    )
+                }
+            ),
+        )
+    )
+
+    catalog = await router.list_subagents(_request("admin"))
+    same_name = [item for item in catalog.subagents if item.name == "general-purpose"]
+
+    assert [(item.source, item.conflict) for item in same_name] == [
+        ("builtin", False),
+        ("config", True),
+    ]
 
 
 @pytest.mark.parametrize("operation", ["update", "delete"])

@@ -27,12 +27,15 @@ import { useModels } from "@/core/models/hooks";
 import { useSubagents } from "@/core/subagents";
 
 import {
+  allowedSubagentsToSelection,
   DEFAULT_MODEL_VALUE,
   INHERIT_VALUE,
   MAX_AGENT_OUTPUT_TOKENS,
   parseAgentModelSettingsDraft,
   resolveEffectiveModel,
+  selectionToAllowedSubagents,
   selectionToThinkingEnabled,
+  type SubagentAccessSelection,
   thinkingEnabledToSelection,
 } from "./agent-settings-dialog-helpers";
 
@@ -77,14 +80,8 @@ export function AgentSettingsDialog({
   const [reasoningEffort, setReasoningEffort] = useState(
     agent.reasoning_effort ?? INHERIT_VALUE,
   );
-  const [subagentAccess, setSubagentAccess] = useState<
-    "all" | "none" | "selected"
-  >(
-    agent.allowed_subagents == null
-      ? "all"
-      : agent.allowed_subagents.length === 0
-        ? "none"
-        : "selected",
+  const [subagentAccess, setSubagentAccess] = useState<SubagentAccessSelection>(
+    allowedSubagentsToSelection(agent.allowed_subagents),
   );
   const [selectedSubagents, setSelectedSubagents] = useState<string[]>(
     agent.allowed_subagents ?? [],
@@ -146,12 +143,10 @@ export function AgentSettingsDialog({
             supportsReasoningEffort && reasoningEffort !== INHERIT_VALUE
               ? (reasoningEffort as ReasoningEffort)
               : null,
-          allowed_subagents:
-            subagentAccess === "all"
-              ? null
-              : subagentAccess === "none"
-                ? []
-                : selectedSubagents,
+          allowed_subagents: selectionToAllowedSubagents(
+            subagentAccess,
+            selectedSubagents,
+          ),
         },
       });
       toast.success(t.agents.settingsSaved);
@@ -294,7 +289,7 @@ export function AgentSettingsDialog({
             <Select
               value={subagentAccess}
               onValueChange={(value) =>
-                setSubagentAccess(value as "all" | "none" | "selected")
+                setSubagentAccess(value as SubagentAccessSelection)
               }
             >
               <SelectTrigger className="w-full">

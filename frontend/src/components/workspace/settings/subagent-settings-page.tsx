@@ -43,6 +43,13 @@ import {
 import type { Subagent } from "@/core/subagents";
 
 import { SettingsSection } from "./settings-section";
+import {
+  isValidManagedSubagentName,
+  optionalNameListFromDraft,
+  optionalNameListToDraft,
+  positiveInteger,
+  type OptionalNameListMode,
+} from "./subagent-settings-helpers";
 
 type Draft = {
   name: string;
@@ -50,7 +57,9 @@ type Draft = {
   description: string;
   systemPrompt: string;
   model: string;
+  toolsMode: OptionalNameListMode;
   tools: string;
+  skillsMode: OptionalNameListMode;
   skills: string;
   maxTurns: string;
   timeoutSeconds: string;
@@ -62,24 +71,13 @@ const EMPTY_DRAFT: Draft = {
   description: "",
   systemPrompt: "",
   model: "inherit",
+  toolsMode: "all",
   tools: "",
+  skillsMode: "all",
   skills: "",
   maxTurns: "50",
   timeoutSeconds: "900",
 };
-
-function splitNames(value: string): string[] | null {
-  const values = value
-    .split(",")
-    .map((item) => item.trim())
-    .filter(Boolean);
-  return values.length ? Array.from(new Set(values)) : null;
-}
-
-function positiveInteger(value: string): number | null {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
-}
 
 function formatOverrideValue(value: unknown): string {
   if (Array.isArray(value)) return value.join(", ");
@@ -88,14 +86,18 @@ function formatOverrideValue(value: unknown): string {
 }
 
 function draftFrom(subagent: Subagent): Draft {
+  const tools = optionalNameListToDraft(subagent.tools);
+  const skills = optionalNameListToDraft(subagent.skills);
   return {
     name: subagent.name,
     displayName: subagent.display_name ?? "",
     description: subagent.description,
     systemPrompt: subagent.system_prompt ?? "",
     model: subagent.model,
-    tools: subagent.tools?.join(", ") ?? "",
-    skills: subagent.skills?.join(", ") ?? "",
+    toolsMode: tools.mode,
+    tools: tools.text,
+    skillsMode: skills.mode,
+    skills: skills.text,
     maxTurns: String(subagent.max_turns),
     timeoutSeconds: String(subagent.timeout_seconds),
   };
@@ -135,6 +137,9 @@ export function SubagentSettingsPage() {
       description={t.settings.subagents.description}
     >
       <div className="space-y-4">
+        <p className="text-muted-foreground text-sm">
+          {t.settings.subagents.executionNote}
+        </p>
         <div className="flex items-center justify-between gap-4">
           {!isAdmin && (
             <p className="text-muted-foreground text-sm">
@@ -267,15 +272,20 @@ function SubagentEditor({
   async function save() {
     const maxTurns = positiveInteger(draft.maxTurns);
     const timeoutSeconds = positiveInteger(draft.timeoutSeconds);
-    if (maxTurns === null || timeoutSeconds === null) return;
+    if (
+      maxTurns === null ||
+      timeoutSeconds === null ||
+      !isValidManagedSubagentName(draft.name)
+    )
+      return;
 
     const payload = {
       display_name: draft.displayName.trim() || null,
       description: draft.description.trim(),
       system_prompt: draft.systemPrompt.trim(),
       model: draft.model,
-      tools: splitNames(draft.tools),
-      skills: splitNames(draft.skills),
+      tools: optionalNameListFromDraft(draft.toolsMode, draft.tools),
+      skills: optionalNameListFromDraft(draft.skillsMode, draft.skills),
       max_turns: maxTurns,
       timeout_seconds: timeoutSeconds,
     };
@@ -313,6 +323,11 @@ function SubagentEditor({
               disabled={!isNew}
               onChange={(event) => set("name", event.target.value)}
             />
+            {isNew && (
+              <p className="text-muted-foreground text-xs">
+                {t.settings.subagents.nameHint}
+              </p>
+            )}
           </Field>
           <Field label={t.settings.subagents.displayName}>
             <Input
@@ -360,15 +375,19 @@ function SubagentEditor({
             </Select>
           </Field>
           <Field label={t.settings.subagents.tools}>
-            <Input
-              value={draft.tools}
-              onChange={(event) => set("tools", event.target.value)}
+            <OptionalNameListField
+              mode={draft.toolsMode}
+              text={draft.tools}
+              onModeChange={(mode) => set("toolsMode", mode)}
+              onTextChange={(text) => set("tools", text)}
             />
           </Field>
           <Field label={t.settings.subagents.skills}>
-            <Input
-              value={draft.skills}
-              onChange={(event) => set("skills", event.target.value)}
+            <OptionalNameListField
+              mode={draft.skillsMode}
+              text={draft.skills}
+              onModeChange={(mode) => set("skillsMode", mode)}
+              onTextChange={(text) => set("skills", text)}
             />
           </Field>
           <Field label={t.settings.subagents.maxTurns}>
@@ -402,7 +421,7 @@ function SubagentEditor({
             onClick={() => void save()}
             disabled={
               pending ||
-              !draft.name.trim() ||
+              !isValidManagedSubagentName(draft.name) ||
               !draft.description.trim() ||
               !draft.systemPrompt.trim() ||
               positiveInteger(draft.maxTurns) === null ||
@@ -414,6 +433,50 @@ function SubagentEditor({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function OptionalNameListField({
+  mode,
+  text,
+  onModeChange,
+  onTextChange,
+}: {
+  mode: OptionalNameListMode;
+  text: string;
+  onModeChange: (mode: OptionalNameListMode) => void;
+  onTextChange: (text: string) => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="space-y-2">
+      <Select
+        value={mode}
+        onValueChange={(value) => onModeChange(value as OptionalNameListMode)}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">
+            {t.settings.subagents.listModeAll}
+          </SelectItem>
+          <SelectItem value="none">
+            {t.settings.subagents.listModeNone}
+          </SelectItem>
+          <SelectItem value="selected">
+            {t.settings.subagents.listModeSelected}
+          </SelectItem>
+        </SelectContent>
+      </Select>
+      {mode === "selected" && (
+        <Input
+          value={text}
+          placeholder={t.settings.subagents.listNamesPlaceholder}
+          onChange={(event) => onTextChange(event.target.value)}
+        />
+      )}
+    </div>
   );
 }
 

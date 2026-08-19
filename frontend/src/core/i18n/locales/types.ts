@@ -732,6 +732,7 @@ export interface Translations {
     subagents: {
       title: string;
       description: string;
+      executionNote: string;
       adminNote: string;
       create: string;
       empty: string;
@@ -743,6 +744,7 @@ export interface Translations {
       createTitle: string;
       editTitle: string;
       name: string;
+      nameHint: string;
       displayName: string;
       descriptionLabel: string;
       systemPrompt: string;
@@ -750,6 +752,10 @@ export interface Translations {
       inheritModel: string;
       tools: string;
       skills: string;
+      listModeAll: string;
+      listModeNone: string;
+      listModeSelected: string;
+      listNamesPlaceholder: string;
       maxTurns: string;
       timeout: string;
       created: string;

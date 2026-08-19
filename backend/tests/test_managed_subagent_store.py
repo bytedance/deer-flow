@@ -90,6 +90,14 @@ def test_file_store_uses_one_atomic_file_per_definition(file_store, tmp_path):
     assert not list(root.glob("*.tmp"))
 
 
+def test_file_store_skips_one_corrupt_definition_without_hiding_valid_entries(file_store, tmp_path):
+    file_store.create(_definition("planner"))
+    root = tmp_path / "managed-subagents"
+    (root / "broken.json").write_text("{not-json", encoding="utf-8")
+
+    assert [item.name for item in file_store.list()] == ["planner"]
+
+
 def test_store_factory_follows_agent_storage_backend(tmp_path):
     file_config = SimpleNamespace(agent_storage=SimpleNamespace(backend="file"))
     assert isinstance(make_managed_subagent_store(file_config), FileManagedSubagentStore)

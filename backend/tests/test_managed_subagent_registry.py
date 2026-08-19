@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentOverrideConfig, SubagentsAppConfig
 from deerflow.persistence.managed_subagents import ManagedSubagentDefinition
 from deerflow.subagents import registry
@@ -90,3 +92,30 @@ def test_managed_definitions_cache_reuses_and_invalidates_store_snapshot(monkeyp
     assert "writer" in registry.get_subagent_names(app_config=config)
     assert "planner" not in registry.get_subagent_names(app_config=config)
     assert store.list_calls == 2
+
+
+def test_managed_definitions_cache_serializes_concurrent_first_load(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.list_calls = 0
+
+        def signature(self):
+            return 1
+
+        def cache_identity(self):
+            return "concurrent-managed-subagent-store"
+
+        def list(self):
+            self.list_calls += 1
+            return [_managed("planner")]
+
+    store = FakeStore()
+    config = SubagentsAppConfig()
+    registry._clear_managed_definitions_cache()
+    monkeypatch.setattr(registry, "get_managed_subagent_store", lambda *_: store)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(lambda _: registry.get_subagent_names(app_config=config), range(16)))
+
+    assert all("planner" in names for names in results)
+    assert store.list_calls == 1

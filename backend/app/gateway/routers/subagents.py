@@ -138,6 +138,7 @@ def _catalog(include_system_prompt: bool) -> SubagentsListResponse:
                 max_turns=definition.max_turns,
                 timeout_seconds=definition.timeout_seconds,
                 source="config",
+                conflict=name in BUILTIN_SUBAGENTS,
                 config_overrides=_explicit_overrides(name, app_config),
             )
         )
@@ -209,7 +210,13 @@ async def update_managed_subagent(name: str, request: Request, body: ManagedSuba
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors()) from exc
     _validate_model(updated.model, app_config)
-    await asyncio.to_thread(store.update, updated)
+    try:
+        await asyncio.to_thread(store.update, updated)
+    except FileNotFoundError:
+        # The definition may be deleted by another administrator after the
+        # read above. Preserve the endpoint's not-found contract instead of
+        # leaking that race as a 500.
+        raise HTTPException(status_code=404, detail=f"Managed subagent '{name}' not found")
     conflict = updated.name in BUILTIN_SUBAGENTS or updated.name in app_config.subagents.custom_agents
     return SubagentResponse(
         **updated.model_dump(exclude={"system_prompt"}),

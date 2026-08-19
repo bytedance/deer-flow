@@ -866,6 +866,8 @@ export const enUS: Translations = {
       title: "Subagents",
       description:
         "Reusable workers that the Lead Agent and permitted Custom Agents can delegate bounded tasks to.",
+      executionNote:
+        "Each invocation starts a fresh temporary context with no persistent chat or memory and cannot ask the user follow-up questions. A system prompt changes behavior; tools and skills grant actual capabilities.",
       adminNote:
         "You can view the catalog. Only administrators can add, edit, enable, or delete subagents.",
       create: "Add subagent",
@@ -878,6 +880,7 @@ export const enUS: Translations = {
       createTitle: "Add managed subagent",
       editTitle: "Edit managed subagent",
       name: "Name",
+      nameHint: "Use letters, numbers, and hyphens only.",
       displayName: "Display name",
       descriptionLabel: "Delegation description",
       systemPrompt: "System prompt",
@@ -885,12 +888,17 @@ export const enUS: Translations = {
       inheritModel: "Inherit from caller",
       tools: "Allowed tools (comma-separated)",
       skills: "Skills (comma-separated)",
+      listModeAll: "Inherit all available",
+      listModeNone: "Allow none",
+      listModeSelected: "Allow selected names",
+      listNamesPlaceholder: "Comma-separated names",
       maxTurns: "Maximum turns",
       timeout: "Timeout (seconds)",
       created: "Subagent created",
       saved: "Subagent saved",
       deleted: "Subagent deleted",
-      deleteConfirm: "Delete this managed subagent? This cannot be undone.",
+      deleteConfirm:
+        "Delete this managed subagent? Custom Agents may keep referencing its name, and recreating the same name will reconnect those bindings. This cannot be undone.",
       bindingTitle: "Subagent access",
       bindingDescription:
         "Choose which subagents this Custom Agent may invoke. This is enforced by the server.",

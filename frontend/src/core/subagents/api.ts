@@ -8,8 +8,19 @@ import type {
 } from "./types";
 
 async function errorDetail(res: Response, fallback: string): Promise<string> {
-  const body = (await res.json().catch(() => ({}))) as { detail?: string };
-  return body.detail ?? fallback;
+  const body = (await res.json().catch(() => ({}))) as { detail?: unknown };
+  if (typeof body.detail === "string") return body.detail;
+  if (Array.isArray(body.detail)) {
+    const messages = body.detail
+      .map((item) =>
+        item && typeof item === "object" && "msg" in item
+          ? String(item.msg)
+          : null,
+      )
+      .filter((message): message is string => message !== null);
+    if (messages.length > 0) return messages.join("; ");
+  }
+  return fallback;
 }
 
 export async function listSubagents(): Promise<Subagent[]> {
