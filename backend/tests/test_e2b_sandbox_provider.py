@@ -18,12 +18,15 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from dataclasses import FrozenInstanceError
+
 from deerflow.community.e2b_sandbox.capacity import (
     CapacityBackendError,
     ReserveStatus,
 )
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.community.e2b_sandbox.e2b_sandbox_provider import MountUploadResult
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -4445,3 +4448,127 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
     assert client.closed
     assert p._sandboxes == {}
     assert p._reserved_slots == 0
+
+
+# ── _mount_results lifecycle tests ─────────────────────────────────────────
+
+
+def test_reuse_evicts_dead_sandbox_cleans_mount_result():
+    """Dead-sandbox eviction in _reuse_in_process_sandbox drops the mount entry."""
+    p = _make_provider()
+    client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
+    sb = _make_sandbox(client, sandbox_id="sb-dead")
+    sb._dead = True
+    p._sandboxes["sb-dead"] = sb
+    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    p._mount_results["sb-dead"] = MountUploadResult(
+        truncated=True,
+        reason="time budget 120s",
+        attempted_files=5,
+        attempted_bytes=1000,
+        completed_files=3,
+        completed_bytes=600,
+    )
+
+    p._reuse_in_process_sandbox("t1", user_id="u1")
+
+    assert "sb-dead" not in p._mount_results
+
+
+def test_reclaim_warm_pool_cleans_mount_result_on_reconnect_failure(monkeypatch):
+    """Reconnect failure in _reclaim_warm_pool_sandbox drops the mount entry."""
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+
+    def boom(sid, **kw):
+        raise RuntimeError("404 Not Found")
+
+    fake_cls.connect_factory = boom
+    seed = p._stable_seed("t1", "u1")
+    p._warm_pool["sb-broken"] = (seed, 12345.0)
+    p._mount_results["sb-broken"] = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=2,
+        attempted_bytes=200,
+        completed_files=2,
+        completed_bytes=200,
+    )
+
+    p._reclaim_warm_pool_sandbox("t1", user_id="u1")
+
+    assert "sb-broken" not in p._mount_results
+
+
+def test_reclaim_warm_pool_cleans_mount_result_on_dead_entry(monkeypatch):
+    """Dead warm entry in _reclaim_warm_pool_sandbox drops the mount entry."""
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(
+        sandbox_id="sb-zombie",
+        commands=FakeCommandsAPI([FakeCommandsAPI.GONE]),
+    )
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    seed = p._stable_seed("t1", "u1")
+    p._warm_pool["sb-zombie"] = (seed, 12345.0)
+    p._mount_results["sb-zombie"] = MountUploadResult(
+        truncated=True,
+        reason="file count cap",
+        attempted_files=10,
+        attempted_bytes=5000,
+        completed_files=7,
+        completed_bytes=3500,
+    )
+
+    p._reclaim_warm_pool_sandbox("t1", user_id="u1")
+
+    assert "sb-zombie" not in p._mount_results
+
+
+def test_forget_local_sandbox_cleans_mount_result():
+    """_forget_local_sandbox drops the mount entry."""
+    p = _make_provider()
+    client = FakeClient()
+    sb = _make_sandbox(client, sandbox_id="sb-peer")
+    p._sandboxes["sb-peer"] = sb
+    p._mount_results["sb-peer"] = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=1,
+        attempted_bytes=100,
+        completed_files=1,
+        completed_bytes=100,
+    )
+
+    p._forget_local_sandbox("sb-peer")
+
+    assert "sb-peer" not in p._mount_results
+    assert "sb-peer" not in p._sandboxes
+
+
+def test_mount_upload_deadline_none_returns_default(monkeypatch):
+    """Explicitly null mount_upload_deadline_seconds returns the default."""
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    default = mod._MOUNT_PASS_DEADLINE_SECONDS
+
+    def _opt_none(name, default_val=None):
+        if name == "mount_upload_deadline_seconds":
+            return None
+        return default_val
+
+    result = mod.E2BSandboxProvider._resolve_mount_upload_deadline(_opt_none)
+    assert result == default
+
+
+def test_mount_upload_result_is_frozen():
+    """MountUploadResult is immutable — mutation raises FrozenInstanceError."""
+    result = MountUploadResult(
+        truncated=False,
+        reason=None,
+        attempted_files=0,
+        attempted_bytes=0,
+        completed_files=0,
+        completed_bytes=0,
+    )
+    with pytest.raises(FrozenInstanceError):
+        result.truncated = True  # type: ignore[misc]
