@@ -408,7 +408,7 @@ export function ArtifactFileDetail({
                   }
                 }}
               >
-                <SelectTrigger className="bg-transparent! select-none border-none shadow-none focus:outline-0 active:outline-0">
+                <SelectTrigger className="border-none bg-transparent! shadow-none select-none focus:outline-0 active:outline-0">
                   <SelectValue placeholder="Select a file" />
                 </SelectTrigger>
                 <SelectContent className="select-none">
@@ -683,7 +683,7 @@ export function ArtifactFileDetail({
             !error &&
             truncated &&
             effectiveViewMode === "code" && (
-              <pre className="size-full overflow-auto whitespace-pre-wrap p-4 font-mono text-sm">
+              <pre className="size-full overflow-auto p-4 font-mono text-sm whitespace-pre-wrap">
                 {visibleContent}
               </pre>
             )}
@@ -770,7 +770,7 @@ function ArtifactDownloadFallback({
           {getFileIcon(filepath, "size-12")}
         </div>
         <div className="space-y-1">
-          <div className="break-all font-medium">{filename}</div>
+          <div className="font-medium break-all">{filename}</div>
           <div className="text-muted-foreground text-sm">{fileType} file</div>
         </div>
         <p className="text-muted-foreground text-sm">
