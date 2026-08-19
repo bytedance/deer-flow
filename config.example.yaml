@@ -2437,14 +2437,21 @@ run_ownership:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         guest:
-#           tools: {allow: ["web_search", "read_file"]}
+#           # web-only role: sandbox-dependent tools (read_file, bash, glob,
+#           # grep, write_file, ...) are omitted — with sandbox:execute denied
+#           # they could only ever return the deny error, so allow just the
+#           # non-sandbox tools.
+#           tools: {allow: ["web_search"]}
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
+#           sandbox: {allow: false}  # deny sandbox execution
 authorization:
   enabled: false
 
