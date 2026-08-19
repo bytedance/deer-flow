@@ -1276,7 +1276,7 @@ class MemoryUpdater:
         updated_memory = dict(memory_data)
         updated_memory["facts"] = updated_facts
         if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
-            raise OSError(f"Failed to save memory data after batch deleting facts")
+            raise OSError("Failed to save memory data after batch deleting facts")
         return updated_memory
 
     def batch_update_memory_facts(self, updates: list[dict[str, Any]], agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
@@ -1294,7 +1294,7 @@ class MemoryUpdater:
         for update in updates:
             fact_id = update.get("fact_id")
             if not fact_id:
-                raise ValueError(f"Empty fact_id in update")
+                raise ValueError("Empty fact_id in update")
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes and hasattr(self._storage, "get_fact"):
             upsert_revisions: dict[str, int] = {}
             upsert_facts: list[dict[str, Any]] = []
@@ -1353,7 +1353,7 @@ class MemoryUpdater:
         updated_memory = dict(memory_data)
         updated_memory["facts"] = updated_facts
         if not self._save_memory_to_file(updated_memory, agent_name, user_id=user_id, expected_revision=int(memory_data.get("revision") or 0)):
-            raise OSError(f"Failed to save memory data after batch updating facts")
+            raise OSError("Failed to save memory data after batch updating facts")
         return updated_memory
 
     def _build_signal_hints(self, signals: frozenset[str]) -> str:

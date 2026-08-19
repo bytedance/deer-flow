@@ -81,10 +81,9 @@ export function useUpdateMemoryFact() {
       factId: string;
       input: MemoryFactPatchInput;
     }) => updateMemoryFact(factId, input),
-    onSuccess: (memory) => {
-      queryClient.setQueryData<UserMemory>(["memory"], memory);
     },
   });
+}
 
 export function useBatchDeleteMemoryFacts() {
   const queryClient = useQueryClient();

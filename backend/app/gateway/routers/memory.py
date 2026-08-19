@@ -467,6 +467,8 @@ async def batch_delete_facts_endpoint(request: BatchDeleteRequest, http_request:
     except OSError as exc:
         raise HTTPException(status_code=500, detail="Failed to batch delete memory facts.") from exc
 
+    return MemoryResponse(**memory_data)
+
 
 @router.get(
     "/memory/export",
