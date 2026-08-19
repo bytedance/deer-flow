@@ -599,13 +599,14 @@ export function mergeMessages(
 
 /**
  * Collect live run ids that were not part of the pre-submit checkpoint.
- * An empty result intentionally lets restoreLocalTurnMessageOrder fall back to
- * the pending human's run_id when interrupt/stop has already flushed the live
- * steps into canonical history.
+ * An empty result is safe because restoreLocalTurnMessageOrder independently
+ * anchors the current turn from the pending human's run_id when interrupt/stop
+ * has already flushed the live steps into canonical history.
  */
 export function getCurrentTurnRunIds(
   messages: Message[],
   baselineMessageIdentities: ReadonlySet<string> | null,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
 ): Set<string> {
   const runIds = new Set<string>();
   if (baselineMessageIdentities === null) {
@@ -621,7 +622,12 @@ export function getCurrentTurnRunIds(
     }
     const identity = messageIdentity(message);
     const runId = getMessageRunId(message);
-    if (runId && (!identity || !baselineMessageIdentities.has(identity))) {
+    if (
+      runId &&
+      (!identity ||
+        (!baselineMessageIdentities.has(identity) &&
+          !confirmedHistoryIdentities.has(identity)))
+    ) {
       runIds.add(runId);
     }
   }
@@ -654,7 +660,7 @@ export function restoreLocalTurnMessageOrder(
       !baselineMessageIdentities.has(identity)
     );
   });
-  if (pendingHumanIndex <= 0) {
+  if (pendingHumanIndex < 0) {
     return messages;
   }
 
@@ -671,13 +677,11 @@ export function restoreLocalTurnMessageOrder(
   // The pending human message itself carries the current run_id, so it is the
   // most reliable anchor even when the live checkpoint no longer holds the
   // current turn's steps (stop/interrupt can flush them to history).
-  const effectiveCurrentTurnRunIds =
-    currentTurnRunIds.size > 0
-      ? currentTurnRunIds
-      : (() => {
-          const runId = getMessageRunId(messages[pendingHumanIndex]!);
-          return runId ? new Set([runId]) : EMPTY_MESSAGE_IDENTITIES_SET;
-        })();
+  const effectiveCurrentTurnRunIds = new Set(currentTurnRunIds);
+  const pendingHumanRunId = getMessageRunId(messages[pendingHumanIndex]!);
+  if (pendingHumanRunId) {
+    effectiveCurrentTurnRunIds.add(pendingHumanRunId);
+  }
   const isCurrentTurnStep = (message: Message) => {
     const runId = getMessageRunId(message);
     return runId !== undefined && effectiveCurrentTurnRunIds.has(runId);
@@ -692,7 +696,7 @@ export function restoreLocalTurnMessageOrder(
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
       !baselineMessageIdentities.has(identity) &&
-      !isConfirmedHistoryMessage(identity);
+      (!isConfirmedHistoryMessage(identity) || isCurrentTurnStep(message));
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
@@ -2630,6 +2634,7 @@ export function useThreadStream({
     const currentTurnRunIds = getCurrentTurnRunIds(
       renderMessages,
       localTurnOrderBaseline,
+      confirmedHistoryIdentities,
     );
     const restored =
       localTurnOrderBaseline === null
