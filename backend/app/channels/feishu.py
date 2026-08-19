@@ -26,6 +26,12 @@ from app.channels.message_bus import (
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.uploads.manager import (
+    UnsafeUploadPathError,
+    claim_unique_filename,
+    normalize_filename,
+    write_upload_file_no_symlink,
+)
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
@@ -441,30 +447,27 @@ class FeishuChannel(Channel):
         effective_user_id = user_id or get_effective_user_id()
         paths = await asyncio.to_thread(get_paths)
 
-        ext = "png" if type == "image" else "bin"
-        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
-
-        # Sanitize filename: preserve extension, replace path chars in name part
-        if "." in raw_filename:
-            name_part, ext = raw_filename.rsplit(".", 1)
-            name_part = re.sub(r"[./\\]", "_", name_part)
-            filename = f"{name_part}.{ext}"
-        else:
-            filename = re.sub(r"[./\\]", "_", raw_filename)
+        default_ext = "png" if type == "image" else "bin"
+        key_token = re.sub(r"[^A-Za-z0-9_-]", "", file_key)[-12:] or "attachment"
+        fallback_name = f"feishu_{key_token}.{default_ext}"
+        raw_filename = getattr(response, "file_name", "") or fallback_name
+        try:
+            safe_filename = normalize_filename(raw_filename)
+        except (TypeError, ValueError):
+            safe_filename = fallback_name
 
         def _persist():
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
-            resolved_target = uploads_dir / filename
-            # Use thread_lock to avoid filename conflicts when writing.
             with self._thread_lock:
-                resolved_target.write_bytes(content)
-            return resolved_target
+                seen = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                unique_name = claim_unique_filename(safe_filename, seen)
+                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
-        except Exception:
-            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", filename, type)
+        except (OSError, UnsafeUploadPathError):
+            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", safe_filename, type)
             return f"Failed to obtain the [{type}]"
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"

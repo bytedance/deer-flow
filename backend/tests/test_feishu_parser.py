@@ -44,6 +44,28 @@ def _run(coro):
         loop.close()
 
 
+def _feishu_file_response(filename: str, content: bytes):
+    response = MagicMock()
+    response.success.return_value = True
+    response.file = BytesIO(content)
+    response.file_name = filename
+    return response
+
+
+def _feishu_file_channel(*responses):
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    channel._GetMessageResourceRequest = MagicMock()
+    builder = MagicMock()
+    builder.message_id.return_value = builder
+    builder.file_key.return_value = builder
+    builder.type.return_value = builder
+    builder.build.return_value = object()
+    channel._GetMessageResourceRequest.builder.return_value = builder
+    channel._api_client = MagicMock()
+    channel._api_client.im.v1.message_resource.get.side_effect = responses
+    return channel
+
+
 def test_feishu_on_message_plain_text():
     bus = MessageBus()
     config = {"app_id": "test", "app_secret": "test"}
@@ -159,22 +181,7 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
     async def go():
         from deerflow.config.paths import Paths
 
-        bus = MessageBus()
-        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
-        channel._GetMessageResourceRequest = MagicMock()
-        builder = MagicMock()
-        builder.message_id.return_value = builder
-        builder.file_key.return_value = builder
-        builder.type.return_value = builder
-        builder.build.return_value = object()
-        channel._GetMessageResourceRequest.builder.return_value = builder
-
-        response = MagicMock()
-        response.success.return_value = True
-        response.file = BytesIO(b"file-bytes")
-        response.file_name = "report.md"
-        channel._api_client = MagicMock()
-        channel._api_client.im.v1.message_resource.get.return_value = response
+        channel = _feishu_file_channel(_feishu_file_response("report.md", b"file-bytes"))
 
         provider = MagicMock()
         provider.uses_thread_data_mounts = False
@@ -193,6 +200,86 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
         assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
         provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
         sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
+
+    _run(go())
+
+
+def test_feishu_receive_file_preserves_duplicate_filenames(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(
+            _feishu_file_response("report.txt", b"FIRST"),
+            _feishu_file_response("report.txt", b"SECOND"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        first = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+        second = await channel._receive_single_file("message-2", "file-2", "file", "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert first == "/mnt/user-data/uploads/report.txt"
+        assert second == "/mnt/user-data/uploads/report_1.txt"
+        assert (uploads / "report.txt").read_bytes() == b"FIRST"
+        assert (uploads / "report_1.txt").read_bytes() == b"SECOND"
+
+    _run(go())
+
+
+def test_feishu_receive_file_does_not_follow_planted_symlink(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        victim = tmp_path / "victim.txt"
+        victim.write_bytes(b"SAFE")
+        (uploads / "report.txt").symlink_to(victim)
+
+        channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.txt"
+        assert victim.read_bytes() == b"SAFE"
+        assert (uploads / "report_1.txt").read_bytes() == b"PAYLOAD"
+
+    _run(go())
+
+
+def test_feishu_receive_file_syncs_unique_path_to_remote_sandbox(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        (uploads / "report.md").write_bytes(b"OLDER")
+
+        channel = _feishu_file_channel(_feishu_file_response("report.md", b"NEWER"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = MagicMock()
+        provider.get.return_value = sandbox
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.md"
+        assert (uploads / "report.md").read_bytes() == b"OLDER"
+        assert (uploads / "report_1.md").read_bytes() == b"NEWER"
+        provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report_1.md", b"NEWER")
 
     _run(go())
 
