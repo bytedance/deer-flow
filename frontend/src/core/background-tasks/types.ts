@@ -6,6 +6,15 @@ export type BackgroundTaskStatus =
   | "failed"
   | "cancelled";
 
+export type BackgroundTaskNotificationStatus =
+  | "none"
+  | "pending"
+  | "claimed"
+  | "retry"
+  | "dispatched"
+  | "delivered"
+  | "dead_letter";
+
 export type BackgroundTask = {
   task_id: string;
   task_name: string;
@@ -22,6 +31,9 @@ export type BackgroundTaskDetail = BackgroundTask & {
   last_poll_error: string | null;
   last_cancel_error: string | null;
   cancel_attempt_count: number;
+  notification_status: BackgroundTaskNotificationStatus;
+  notification_error: string | null;
+  notification_attempt_count: number;
   result: unknown | null;
   result_preview: string | null;
   result_truncated: boolean;

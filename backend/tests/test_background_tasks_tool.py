@@ -47,6 +47,7 @@ async def test_list_background_tasks_returns_only_safe_local_fields():
     result = await _list_background_tasks_impl(_runtime())
 
     assert result["count"] == 1
+    assert result["tasks"][0]["cancel_requested"] is False
     assert "<system>" not in result["tasks"][0]["task_name"]
     assert "remote_task_id" not in result["tasks"][0]
     manager.list_tasks.assert_awaited_once_with(
@@ -64,10 +65,11 @@ async def test_cancel_background_task_uses_current_user_and_thread():
             return_value={
                 "id": "task-1",
                 "task_name": "report",
-                "status": "cancelled",
+                "status": "working",
                 "created_at": "2026-08-08T00:00:00+00:00",
                 "updated_at": "2026-08-08T00:00:01+00:00",
                 "error": None,
+                "cancel_requested_at": "2026-08-08T00:00:01+00:00",
             }
         )
     )
@@ -75,7 +77,9 @@ async def test_cancel_background_task_uses_current_user_and_thread():
 
     result = await cancel_background_task.coroutine(runtime=_runtime(), task="report")
 
-    assert result["cancelled"] is True
+    assert result["cancelled"] is False
+    assert result["task"]["cancel_requested"] is True
+    assert result["message"].startswith("Cancellation requested.")
     manager.cancel_matching_task.assert_awaited_once_with(
         thread_id="thread-1",
         user_id="user-1",

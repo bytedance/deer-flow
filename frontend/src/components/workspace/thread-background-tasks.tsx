@@ -354,6 +354,21 @@ function BackgroundTaskDetails({
           </div>
         </div>
       )}
+      {task.notification_error && (
+        <div className="flex gap-2 rounded-md bg-amber-500/10 px-2 py-2 text-xs text-amber-700 dark:text-amber-300">
+          <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
+          <div className="min-w-0">
+            <p className="font-medium">
+              {task.notification_status === "dead_letter"
+                ? t.backgroundTasks.notificationStopped
+                : t.backgroundTasks.notificationRetrying(
+                    task.notification_attempt_count,
+                  )}
+            </p>
+            <p className="mt-1 break-words">{task.notification_error}</p>
+          </div>
+        </div>
+      )}
       <TaskDetailField
         label={t.backgroundTasks.result}
         value={task.result_preview ?? task.result}

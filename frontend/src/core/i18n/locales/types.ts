@@ -244,6 +244,8 @@ export interface Translations {
     cancelling: string;
     cancelFailed: string;
     cancellationRetrying: (attempt: number) => string;
+    notificationRetrying: (attempt: number) => string;
+    notificationStopped: string;
     trackingDegraded: string;
     viewDetails: string;
     hideDetails: string;

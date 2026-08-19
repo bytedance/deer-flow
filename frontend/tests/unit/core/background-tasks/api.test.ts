@@ -60,6 +60,9 @@ describe("background task API", () => {
       input_required: null,
       last_poll_error: null,
       last_polled_at: "2026-08-08T00:02:00+00:00",
+      notification_status: "delivered" as const,
+      notification_error: null,
+      notification_attempt_count: 0,
     };
     mockedFetch.mockResolvedValueOnce(jsonResponse(detail));
 
@@ -73,12 +76,15 @@ describe("background task API", () => {
 
   it("posts cancellation through the local task id route", async () => {
     mockedFetch.mockResolvedValueOnce(
-      jsonResponse({ ...TASK, status: "cancelled" }),
+      jsonResponse({ ...TASK, cancel_requested: true }),
     );
 
     await expect(
       cancelBackgroundTask("thread / 1", "task / 1"),
-    ).resolves.toMatchObject({ status: "cancelled" });
+    ).resolves.toMatchObject({
+      status: "working",
+      cancel_requested: true,
+    });
     expect(mockedFetch).toHaveBeenCalledWith(
       "/api/threads/thread%20%2F%201/mcp-tasks/task%20%2F%201/cancel",
       { method: "POST" },

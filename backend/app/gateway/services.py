@@ -31,6 +31,7 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
@@ -1054,6 +1055,7 @@ async def start_run(
     request: Request,
     *,
     idempotency_key: str | None = None,
+    require_existing_thread: bool = False,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1065,6 +1067,9 @@ async def start_run(
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
+    require_existing_thread : bool
+        Reject a missing thread instead of auto-creating metadata. Internal
+        notification runs use this so a deleted chat cannot be resurrected.
     """
     try:
         validate_thread_id(thread_id)
@@ -1117,12 +1122,20 @@ async def start_run(
     # thread access.
     user = getattr(request.state, "user", None)
     if user is not None:
-        allowed = await run_ctx.thread_store.check_access(thread_id, str(user.id))
+        allowed = await run_ctx.thread_store.check_access(
+            thread_id,
+            str(user.id),
+            require_existing=require_existing_thread,
+        )
         if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
             # Channel workers may also act for the connection owner named in
             # the trusted header (e.g. claiming a legacy default-owned channel
             # thread for its real owner).
-            allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
+            allowed = await run_ctx.thread_store.check_access(
+                thread_id,
+                owner_user_id,
+                require_existing=require_existing_thread,
+            )
         if not allowed:
             raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
@@ -1398,11 +1411,19 @@ async def launch_mcp_task_notification_run(
     )
     idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
     try:
-        record = await start_run(body, thread_id, request, idempotency_key=idempotency_key)
+        record = await start_run(
+            body,
+            thread_id,
+            request,
+            idempotency_key=idempotency_key,
+            require_existing_thread=True,
+        )
     except HTTPException as exc:
-        if exc.status_code != 409:
-            raise
-        raise ConflictError(str(exc.detail)) from exc
+        if exc.status_code == 409:
+            raise ConflictError(str(exc.detail)) from exc
+        if exc.status_code == 404:
+            raise PermanentNotificationError(str(exc.detail)) from exc
+        raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

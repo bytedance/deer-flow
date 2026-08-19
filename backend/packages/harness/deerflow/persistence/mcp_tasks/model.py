@@ -43,6 +43,7 @@ class McpTaskRow(Base):
     dispatch_event: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     notification_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     notification_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    notification_attempt_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     next_notification_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notification_lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True)
     notification_lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

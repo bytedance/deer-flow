@@ -68,6 +68,11 @@ def _record_event_if_changed(row: McpTaskRow, *, tracking_degraded: bool, now: d
         row.notification_status = "pending"
         row.next_notification_at = now
         row.notification_error = None
+        row.notification_attempt_count = 0
+        row.dispatch_version = None
+        row.dispatch_attempt = 0
+        row.dispatch_event = None
+        row.notification_run_id = None
     return True
 
 
@@ -465,9 +470,12 @@ class McpTaskRepository:
             for row in rows:
                 row.notification_lease_owner = lease_owner
                 row.notification_lease_expires_at = expires_at
-                if row.notification_status in ("pending", "claimed"):
+                rebuild_snapshot = row.notification_status in ("pending", "claimed") or (row.notification_status == "retry" and row.dispatch_version != row.event_version)
+                if rebuild_snapshot:
+                    if row.dispatch_version != row.event_version:
+                        row.dispatch_attempt = 0
+                        row.notification_attempt_count = 0
                     row.dispatch_version = row.event_version
-                    row.dispatch_attempt = 0
                     row.dispatch_event = _notification_event(
                         row,
                         tracking_degraded=int(row.consecutive_poll_error_count or 0) >= tracking_degraded_after_errors,
@@ -519,6 +527,7 @@ class McpTaskRepository:
         next_notification_at: datetime,
         error: str,
         replace_with_latest: bool,
+        count_failure: bool = False,
     ) -> bool:
         values: dict[str, Any] = {
             "notification_status": "pending" if replace_with_latest else "retry",
@@ -530,11 +539,11 @@ class McpTaskRepository:
         }
         if replace_with_latest:
             values.update(
-                dispatch_version=None,
-                dispatch_attempt=0,
                 dispatch_event=None,
                 notification_run_id=None,
             )
+        if count_failure:
+            values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
         stmt = update(McpTaskRow).where(McpTaskRow.id == task_id, McpTaskRow.notification_lease_owner == lease_owner).values(**values)
         async with self._sf() as session:
             result = await session.execute(stmt)
@@ -575,10 +584,12 @@ class McpTaskRepository:
                 row.dispatch_event = None
                 row.notification_run_id = None
                 row.notification_error = None
+                row.notification_attempt_count = 0
                 row.next_notification_at = now if row.event_version > dispatch_version else None
             else:
                 row.notification_status = "retry"
                 row.dispatch_attempt = int(row.dispatch_attempt or 0) + 1
+                row.notification_attempt_count = int(row.notification_attempt_count or 0) + 1
                 row.notification_run_id = None
                 row.notification_error = error
                 row.next_notification_at = next_notification_at
@@ -595,21 +606,66 @@ class McpTaskRepository:
         lease_owner: str,
         next_notification_at: datetime,
         error: str,
+        count_failure: bool = False,
     ) -> bool:
         """Release unexpected notification work without changing its phase."""
+        values: dict[str, Any] = {
+            "notification_error": error,
+            "next_notification_at": next_notification_at,
+            "notification_lease_owner": None,
+            "notification_lease_expires_at": None,
+            "updated_at": datetime.now(UTC),
+        }
+        if count_failure:
+            values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
         stmt = (
             update(McpTaskRow)
             .where(
                 McpTaskRow.id == task_id,
                 McpTaskRow.notification_lease_owner == lease_owner,
             )
-            .values(
-                notification_error=error,
-                next_notification_at=next_notification_at,
-                notification_lease_owner=None,
-                notification_lease_expires_at=None,
-                updated_at=datetime.now(UTC),
+            .values(**values)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def dead_letter_notification(
+        self,
+        task_id: str,
+        *,
+        lease_owner: str,
+        dispatch_version: int,
+        error: str,
+        count_failure: bool,
+        now: datetime,
+    ) -> bool:
+        """Stop retrying one permanently undeliverable event snapshot."""
+        values: dict[str, Any] = {
+            "notification_status": "dead_letter",
+            "notification_error": error,
+            "next_notification_at": None,
+            "notification_lease_owner": None,
+            "notification_lease_expires_at": None,
+            "dispatch_version": None,
+            "dispatch_attempt": 0,
+            "dispatch_event": None,
+            "notification_run_id": None,
+            "updated_at": now,
+        }
+        if count_failure:
+            values["notification_attempt_count"] = McpTaskRow.notification_attempt_count + 1
+        stmt = (
+            update(McpTaskRow)
+            .where(
+                McpTaskRow.id == task_id,
+                McpTaskRow.notification_lease_owner == lease_owner,
+                McpTaskRow.notification_lease_expires_at >= now,
+                McpTaskRow.dispatch_version == dispatch_version,
+                McpTaskRow.notification_status.in_(("claimed", "retry")),
             )
+            .values(**values)
         )
         async with self._sf() as session:
             result = await session.execute(stmt)

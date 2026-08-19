@@ -2255,11 +2255,19 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request, *, idempotency_key=None):
+        async def fake_start_run(
+            body,
+            thread_id,
+            request,
+            *,
+            idempotency_key=None,
+            require_existing_thread=False,
+        ):
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["request"] = request
             captured["idempotency_key"] = idempotency_key
+            captured["require_existing_thread"] = require_existing_thread
             return SimpleNamespace(run_id="run-notification", thread_id=thread_id)
 
         with patch("app.gateway.services.start_run", side_effect=fake_start_run):
@@ -2281,6 +2289,7 @@ def test_launch_mcp_task_notification_run_hides_internal_prompt(_stub_app_config
     assert body.input["messages"][0]["additional_kwargs"] == {"hide_from_ui": True}
     assert captured["thread_id"] == "thread-notification"
     assert captured["idempotency_key"] == "mcp-task:task-1:2:3"
+    assert captured["require_existing_thread"] is True
     assert body.metadata == {
         "mcp_task_notification": {
             "task_id": "task-1",
@@ -2319,6 +2328,66 @@ def test_launch_mcp_task_notification_run_restores_busy_thread_conflict(_stub_ap
                 dispatch_attempt=3,
                 event={"status": "completed", "result": "done"},
             )
+
+    asyncio.run(_scenario())
+
+
+def test_launch_mcp_task_notification_run_dead_letters_missing_thread(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import launch_mcp_task_notification_run
+    from app.mcp_tasks.errors import PermanentNotificationError
+
+    async def _scenario():
+        with (
+            patch(
+                "app.gateway.services.start_run",
+                side_effect=HTTPException(status_code=404, detail="Thread thread-notification not found"),
+            ),
+            pytest.raises(PermanentNotificationError, match="not found"),
+        ):
+            await launch_mcp_task_notification_run(
+                app=SimpleNamespace(state=SimpleNamespace()),
+                thread_id="thread-notification",
+                assistant_id="lead_agent",
+                owner_user_id="user-1",
+                task_id="task-1",
+                dispatch_version=2,
+                dispatch_attempt=3,
+                event={"status": "completed", "result": "done"},
+            )
+
+    asyncio.run(_scenario())
+
+
+def test_start_run_strict_mode_rejects_missing_thread(_stub_app_config):
+    import asyncio
+    from types import SimpleNamespace
+
+    from fastapi import HTTPException
+
+    from app.gateway.services import start_run
+
+    async def _scenario():
+        request, run_store, thread_store = _make_start_run_persistence_context()
+        request.state = SimpleNamespace(
+            auth_source="session",
+            user=SimpleNamespace(id="user-1", system_role="user"),
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await start_run(
+                _run_create_request(),
+                "deleted-thread",
+                request,
+                require_existing_thread=True,
+            )
+        assert exc_info.value.status_code == 404
+        assert await thread_store.get("deleted-thread", user_id=None) is None
+        assert await run_store.list_by_thread("deleted-thread", user_id="user-1") == []
 
     asyncio.run(_scenario())
 

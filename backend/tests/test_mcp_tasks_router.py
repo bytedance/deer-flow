@@ -103,6 +103,9 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
                 result_artifact={"uri": "s3://reports/1.json", "mime_type": "application/json"},
                 last_cancel_error="c" * 600,
                 cancel_attempt_count=4,
+                notification_status="retry",
+                notification_error="n" * 600,
+                notification_attempt_count=3,
             )
         ]
     )
@@ -118,6 +121,9 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
     assert response["result_artifact"]["uri"] == "s3://reports/1.json"
     assert response["last_cancel_error"] == "c" * 500
     assert response["cancel_attempt_count"] == 4
+    assert response["notification_status"] == "retry"
+    assert response["notification_error"] == "n" * 500
+    assert response["notification_attempt_count"] == 3
     assert "remote_task_id" not in response
     assert "driver_data" not in response
     assert "server_name" not in response
@@ -152,7 +158,7 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
     repo = FakeRepository([_record()])
     service = AsyncMock()
     service.tracking_degraded_after_errors = 3
-    service.cancel_task.return_value = _record(status="cancelled", cancel_requested_at="2026-08-05T00:00:06+00:00")
+    service.cancel_task.return_value = _record(status="working", cancel_requested_at="2026-08-05T00:00:06+00:00")
     request = _request(repo)
     request.app.state.mcp_task_service = service
     monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
@@ -168,5 +174,5 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
         thread_id="thread-1",
         user_id="user-1",
     )
-    assert response["status"] == "cancelled"
+    assert response["status"] == "working"
     assert response["cancel_requested"] is True

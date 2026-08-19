@@ -319,6 +319,10 @@ export const enUS: Translations = {
     cancelFailed: "Failed to cancel task",
     cancellationRetrying: (attempt) =>
       `Cancellation attempt ${attempt} failed; DeerFlow will keep retrying.`,
+    notificationRetrying: (attempt) =>
+      `Chat notification attempt ${attempt} failed; DeerFlow will retry with backoff.`,
+    notificationStopped:
+      "Chat notification delivery stopped after repeated or permanent failures.",
     trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
     viewDetails: "View details",
     hideDetails: "Hide details",

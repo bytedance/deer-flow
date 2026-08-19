@@ -303,6 +303,9 @@ export const zhCN: Translations = {
     cancelFailed: "取消任务失败",
     cancellationRetrying: (attempt) =>
       `第 ${attempt} 次取消失败；DeerFlow 将继续重试。`,
+    notificationRetrying: (attempt) =>
+      `第 ${attempt} 次聊天通知失败；DeerFlow 将退避后重试。`,
+    notificationStopped: "聊天通知因反复失败或永久拒绝，已停止重试。",
     trackingDegraded: "状态检查有所延迟，DeerFlow 仍在重试。",
     viewDetails: "查看详情",
     hideDetails: "收起详情",

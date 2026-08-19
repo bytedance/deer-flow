@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.mcp_tasks.errors import PermanentNotificationError
 from app.mcp_tasks.service import McpTaskService
 from deerflow.mcp.tasks import (
     McpTaskDriverRegistry,
@@ -298,8 +299,8 @@ async def test_duplicate_remote_handle_is_rejected_without_cancelling_existing_t
 
 
 @pytest.mark.asyncio
-async def test_cancel_task_calls_remote_once_and_persists_terminal_snapshot():
-    record = _claimed_row()
+async def test_cancel_task_persists_request_without_calling_remote():
+    record = {**_claimed_row(), "cancel_requested_at": datetime.now(UTC).isoformat()}
     repo = SimpleNamespace(
         request_cancel=AsyncMock(return_value=record),
         claim_cancel_requests=AsyncMock(return_value=[{**record, "cancel_attempt_count": 1}]),
@@ -324,10 +325,12 @@ async def test_cancel_task_calls_remote_once_and_persists_terminal_snapshot():
         user_id="user-1",
     )
 
-    assert result["status"] == "cancelled"
-    assert len(driver.cancel_calls) == 1
-    repo.apply_cancel_snapshot.assert_awaited_once()
+    assert result == record
+    assert driver.cancel_calls == []
+    repo.claim_cancel_requests.assert_not_awaited()
+    repo.apply_cancel_snapshot.assert_not_awaited()
     repo.release_cancel_claim.assert_not_awaited()
+    repo.get.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -465,6 +468,7 @@ async def test_missing_dispatched_notification_run_retries_delivery():
             "notification_status": "dispatched",
             "notification_run_id": "missing-run",
             "dispatch_version": 2,
+            "notification_attempt_count": 2,
         },
         now=now,
     )
@@ -473,7 +477,7 @@ async def test_missing_dispatched_notification_run_retries_delivery():
     repo.finish_notification_run.assert_awaited_once()
     finished = repo.finish_notification_run.await_args.kwargs
     assert finished["delivered"] is False
-    assert finished["next_notification_at"] == now + timedelta(seconds=5)
+    assert finished["next_notification_at"] == now + timedelta(seconds=20)
     assert "missing-run" in finished["error"]
 
 
@@ -561,6 +565,117 @@ async def test_notification_busy_thread_replaces_claim_with_latest_event():
     released = repo.release_notification_claim.await_args.kwargs
     assert released["replace_with_latest"] is True
     assert released["next_notification_at"] == now + timedelta(seconds=5)
+
+
+@pytest.mark.asyncio
+async def test_notification_launch_failure_backs_off_and_replaces_with_latest_event():
+    repo = SimpleNamespace(
+        release_notification_claim=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        max_poll_backoff_seconds=300,
+        launch_notification=AsyncMock(side_effect=RuntimeError("run store unavailable")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    now = datetime.now(UTC)
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "claimed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "notification_attempt_count": 3,
+            "dispatch_event": {"status": "input_required"},
+        },
+        now=now,
+    )
+
+    released = repo.release_notification_claim.await_args.kwargs
+    assert released["replace_with_latest"] is True
+    assert released["count_failure"] is True
+    assert released["next_notification_at"] == now + timedelta(seconds=40)
+
+
+@pytest.mark.asyncio
+async def test_permanently_rejected_notification_is_dead_lettered():
+    repo = SimpleNamespace(
+        dead_letter_notification=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(side_effect=PermanentNotificationError("Thread thread-1 not found")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+    now = datetime.now(UTC)
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "claimed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "notification_attempt_count": 0,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=now,
+    )
+
+    repo.dead_letter_notification.assert_awaited_once()
+    dead_lettered = repo.dead_letter_notification.await_args.kwargs
+    assert dead_lettered["dispatch_version"] == 2
+    assert "not found" in dead_lettered["error"]
+    assert dead_lettered["count_failure"] is True
+    repo.release_notification_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_notification_retry_budget_dead_letters_before_creating_another_run():
+    repo = SimpleNamespace(
+        dead_letter_notification=AsyncMock(return_value=True),
+    )
+    launch_notification = AsyncMock()
+    get_run = AsyncMock()
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=launch_notification,
+        get_run=get_run,
+    )
+    now = datetime.now(UTC)
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "retry",
+            "notification_error": "Agent run failed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 5,
+            "notification_attempt_count": 5,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=now,
+    )
+
+    launch_notification.assert_not_awaited()
+    get_run.assert_not_awaited()
+    dead_lettered = repo.dead_letter_notification.await_args.kwargs
+    assert dead_lettered["dispatch_version"] == 2
+    assert dead_lettered["count_failure"] is False
+    assert "5 failed attempts" in dead_lettered["error"]
 
 
 @pytest.mark.asyncio

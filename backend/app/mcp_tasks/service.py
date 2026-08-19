@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.constants import (
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
     MCP_TASK_REMOTE_ID_MAX_LENGTH,
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_PERSISTED_ERROR_CHARS = 4_000
 _MAX_INPUT_REQUIRED_BYTES = 65_536
+_MAX_NOTIFICATION_ATTEMPTS = 5
 
 
 def _bound_error(error: str | None) -> str | None:
@@ -195,25 +197,12 @@ class McpTaskService:
         user_id: str,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
-        requested_at = now or datetime.now(UTC)
-        record = await self._repository.request_cancel(
+        return await self._repository.request_cancel(
             task_id,
             user_id=user_id,
             thread_id=thread_id,
-            requested_at=requested_at,
+            requested_at=now or datetime.now(UTC),
         )
-        if record is None or record.get("status") in {status.value for status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED)}:
-            return record
-        claimed = await self._repository.claim_cancel_requests(
-            now=requested_at,
-            lease_owner=self._lease_owner,
-            lease_seconds=self._lease_seconds,
-            limit=1,
-            task_id=task_id,
-        )
-        if claimed:
-            await self._cancel_one(claimed[0])
-        return await self._repository.get(task_id, user_id=user_id)
 
     async def cancel_matching_task(
         self,
@@ -325,8 +314,9 @@ class McpTaskService:
                     await self._repository.release_notification_lease(
                         record["id"],
                         lease_owner=self._lease_owner,
-                        next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                        next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
                         error=error,
+                        count_failure=True,
                     )
                 except Exception:  # noqa: BLE001 - retain the original task-scoped failure
                     logger.exception(
@@ -347,7 +337,7 @@ class McpTaskService:
                     lease_owner=self._lease_owner,
                     dispatch_version=dispatch_version,
                     delivered=False,
-                    next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                    next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
                     error=_bound_error(f"Notification run {run_id!r} was not found"),
                     now=now,
                 )
@@ -367,7 +357,7 @@ class McpTaskService:
                     lease_owner=self._lease_owner,
                     dispatch_version=dispatch_version,
                     delivered=False,
-                    next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                    next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
                     error=_bound_error(getattr(run, "error", None) or f"Notification run ended with {status}"),
                     now=now,
                 )
@@ -381,6 +371,19 @@ class McpTaskService:
                 )
             return
 
+        notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
+        if notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
+            previous_error = record.get("notification_error") or "delivery failed"
+            await self._repository.dead_letter_notification(
+                task_id,
+                lease_owner=self._lease_owner,
+                dispatch_version=dispatch_version,
+                error=_bound_error(f"Notification delivery stopped after {notification_attempts} failed attempts: {previous_error}"),
+                count_failure=False,
+                now=now,
+            )
+            return
+
         source_run = await self._get_run(record.get("run_id"), user_id=record["user_id"]) if record.get("run_id") else None
         try:
             result = await self._launch_notification(
@@ -392,6 +395,16 @@ class McpTaskService:
                 dispatch_attempt=int(record.get("dispatch_attempt") or 0),
                 event=dict(record.get("dispatch_event") or {}),
             )
+        except PermanentNotificationError as exc:
+            await self._repository.dead_letter_notification(
+                task_id,
+                lease_owner=self._lease_owner,
+                dispatch_version=dispatch_version,
+                error=_bound_error(str(exc) or type(exc).__name__),
+                count_failure=True,
+                now=now,
+            )
+            return
         except ConflictError as exc:
             await self._repository.release_notification_claim(
                 task_id,
@@ -405,9 +418,10 @@ class McpTaskService:
             await self._repository.release_notification_claim(
                 task_id,
                 lease_owner=self._lease_owner,
-                next_notification_at=now + timedelta(seconds=self._poll_interval_seconds),
+                next_notification_at=now + timedelta(seconds=self._notification_retry_seconds(record)),
                 error=_bound_error(str(exc) or type(exc).__name__),
-                replace_with_latest=False,
+                replace_with_latest=True,
+                count_failure=True,
             )
             return
         await self._repository.mark_notification_dispatched(
@@ -416,6 +430,13 @@ class McpTaskService:
             dispatch_version=dispatch_version,
             run_id=result["run_id"],
             now=now,
+        )
+
+    def _notification_retry_seconds(self, record: dict[str, Any]) -> int:
+        failures = max(0, int(record.get("notification_attempt_count") or 0))
+        return min(
+            self._poll_interval_seconds * (2 ** min(failures, 16)),
+            self._max_poll_backoff_seconds,
         )
 
     async def _poll_one(self, record: dict, *, now: datetime) -> None:

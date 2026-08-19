@@ -34,18 +34,18 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
   });
 
   let getCalls = 0;
-  let reportCancelled = false;
+  let reportCancelRequested = false;
   await page.route(
     `**/api/threads/${MOCK_THREAD_ID}/mcp-tasks/*/cancel`,
     (route) => {
-      reportCancelled = true;
+      reportCancelRequested = true;
       return route.fulfill({
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
           task_id: "task-report",
           task_name: "Generate quarterly report",
-          status: "cancelled",
+          status: "working",
           created_at: "2026-08-08T00:00:00+00:00",
           updated_at: "2026-08-08T00:02:00+00:00",
           error: null,
@@ -78,6 +78,9 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
           input_required: null,
           last_poll_error: "Remote worker disconnected",
           last_polled_at: "2026-08-07T23:01:00+00:00",
+          notification_status: "retry",
+          notification_error: "Agent notification failed",
+          notification_attempt_count: 2,
         }),
       }),
   );
@@ -145,12 +148,12 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
         {
           task_id: "task-report",
           task_name: "Generate quarterly report",
-          status: reportCancelled ? "cancelled" : "working",
+          status: "working",
           created_at: "2026-08-08T00:00:00+00:00",
           updated_at: "2026-08-08T00:01:00+00:00",
           error: null,
           tracking_degraded: false,
-          cancel_requested: reportCancelled,
+          cancel_requested: reportCancelRequested,
           remote_task_id: "must-not-be-rendered",
         },
         {
@@ -206,6 +209,12 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
     .click();
   await expect(page.getByText("Partial export details")).toBeVisible();
   await expect(page.getByText("Remote worker disconnected")).toBeVisible();
+  await expect(page.getByText("Agent notification failed")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Chat notification attempt 2 failed; DeerFlow will retry with backoff.",
+    ),
+  ).toBeVisible();
   await expect(
     page.getByText("/mnt/user-data/outputs/export.zip"),
   ).toBeVisible();
@@ -238,7 +247,11 @@ test("shows, refreshes, and cancels current-chat background tasks", async ({
     .getByTestId("background-task-task-report")
     .getByRole("button", { name: "Cancel task" })
     .click();
-  await expect(page.getByText("Cancelled", { exact: true })).toBeVisible();
+  await expect(
+    page
+      .getByTestId("background-task-task-report")
+      .getByRole("button", { name: "Cancelling…" }),
+  ).toBeDisabled();
   await expect(
     page.getByTestId("background-task-task-report").getByRole("button", {
       name: "Cancel task",

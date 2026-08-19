@@ -48,6 +48,7 @@ def upgrade() -> None:
     safe_add_column("mcp_tasks", sa.Column("dispatch_event", sa.JSON(), nullable=True))
     safe_add_column("mcp_tasks", sa.Column("notification_run_id", sa.String(length=64), nullable=True))
     safe_add_column("mcp_tasks", sa.Column("notification_error", sa.Text(), nullable=True))
+    safe_add_column("mcp_tasks", sa.Column("notification_attempt_count", sa.Integer(), nullable=False, server_default="0"))
     safe_add_column("mcp_tasks", sa.Column("next_notification_at", sa.DateTime(timezone=True), nullable=True))
     safe_add_column("mcp_tasks", sa.Column("notification_lease_owner", sa.String(length=128), nullable=True))
     safe_add_column("mcp_tasks", sa.Column("notification_lease_expires_at", sa.DateTime(timezone=True), nullable=True))
@@ -79,6 +80,7 @@ def downgrade() -> None:
         "notification_lease_expires_at",
         "notification_lease_owner",
         "next_notification_at",
+        "notification_attempt_count",
         "notification_error",
         "notification_run_id",
         "dispatch_event",

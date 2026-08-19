@@ -20,6 +20,7 @@ def _public_task(record: dict[str, Any]) -> dict[str, Any]:
         "created_at": record.get("created_at"),
         "updated_at": record.get("updated_at"),
         "error": neutralize_untrusted_tags(str(record["error"])) if record.get("error") else None,
+        "cancel_requested": bool(record.get("cancel_requested_at")),
     }
 
 

@@ -2,7 +2,7 @@
 
 FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
 
-Durable MCP task notifications are internal Agent runs: keep the trusted delivery instruction outside the user-input boundary and frame the serialized remote event payload as untrusted text before model invocation.
+Durable MCP task notifications are internal Agent runs: keep the trusted delivery instruction outside the user-input boundary and frame the serialized remote event payload as untrusted text before model invocation. These runs use strict thread existence/ownership admission so an event from a task that outlives its deleted chat is dead-lettered rather than recreating the thread.
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed. The LangGraph SDK resolves run metadata from that header alone — withhold it and `useStream`'s `onCreated` never fires, a new thread keeps its placeholder route, and every action gated on an established thread (edit, regenerate, branch) stays hidden until the page is reloaded. Same-origin nginx deployments never hit this because CORS does not apply.
 
