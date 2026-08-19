@@ -50,6 +50,7 @@ export const MessageContent = ({
       "group-[.is-user]:bg-primary group-[.is-user]:text-primary-foreground group-[.is-user]:ml-auto group-[.is-user]:rounded-2xl group-[.is-user]:rounded-tr-md group-[.is-user]:px-4 group-[.is-user]:py-3",
       "group-[.is-assistant]:text-foreground group-[.is-assistant]:px-4 group-[.is-assistant]:py-3",
       "group-[.is-assistant]:bg-secondary group-[.is-assistant]:rounded-2xl group-[.is-assistant]:rounded-tl-md",
+      "[[data-skin=observatory]_&]:group-[.is-assistant]:border-primary [[data-skin=observatory]_&]:group-[.is-assistant]:rounded-none [[data-skin=observatory]_&]:group-[.is-assistant]:border-l-2 [[data-skin=observatory]_&]:group-[.is-assistant]:bg-transparent [[data-skin=observatory]_&]:group-[.is-assistant]:pl-3",
       className,
     )}
     {...props}

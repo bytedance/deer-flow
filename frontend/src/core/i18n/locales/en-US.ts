@@ -900,6 +900,9 @@ export const enUS: Translations = {
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
+      skinTitle: "Skin",
+      skinDescription:
+        "Choose the interface look. Light and dark can be switched separately.",
     },
     tools: {
       title: "Tools",
@@ -1221,6 +1224,20 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+
+  skins: {
+    classic: {
+      name: "Classic",
+      tagline: "The current DeerFlow look.",
+    },
+    observatory: {
+      name: "Observatory",
+      tagline: "Deep-blue night-sky look.",
+      toggleSky: "Toggle light / dark",
+      nightLabel: "Dark",
+      dawnLabel: "Light",
     },
   },
   login: {
