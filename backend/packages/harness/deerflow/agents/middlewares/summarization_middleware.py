@@ -790,7 +790,10 @@ def _drop_unusable_fraction_clauses(
             new_keep,
         )
     if not kept:
-        return None, new_keep, False
+        # No trigger clause survived, but only treat that as "nothing usable" when
+        # clauses were configured at all: a trigger of None keeps constructing the
+        # never-firing middleware, exactly as it does outside this degradation path.
+        return None, new_keep, not clauses
     return (kept if isinstance(trigger, list) else kept[0]), new_keep, True
 
 

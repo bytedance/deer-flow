@@ -1204,6 +1204,23 @@ def test_factory_keep_fraction_falls_back_to_messages_default(monkeypatch, caplo
     assert middleware.keep == ("messages", 20)  # SummarizationConfig's documented default
 
 
+def test_factory_null_trigger_with_fraction_keep_still_constructs(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """``trigger: null`` + fraction ``keep``: the long-standing "enabled but never
+    auto-triggers" setup must keep constructing — with the keep degraded to the
+    messages default — rather than disabling compaction. On main this exact config
+    crashes the agent build (fraction keep needs a profile)."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(("models0",), summarization_kwargs={"keep": ContextSize(type="fraction", value=0.3)})
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0")
+
+    assert middleware is not None  # never-firing but constructed, same as any trigger: null setup
+    assert middleware.keep == ("messages", 20)
+    assert "context_window" in caplog.text
+
+
 def test_factory_fraction_trigger_survives_when_anchor_has_profile(monkeypatch) -> None:
     """With a usable profile on the anchor (the factory attaches one from
     ``context_window``), the fraction clause is kept as configured — construction
