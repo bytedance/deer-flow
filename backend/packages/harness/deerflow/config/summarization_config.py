@@ -6,6 +6,10 @@ from pydantic import BaseModel, Field
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
+#: Documented default retention policy after summarization. Shared with the
+#: summarization middleware's fraction-keep degradation fallback so the two
+#: cannot drift apart.
+DEFAULT_KEEP: tuple[ContextSizeType, int] = ("messages", 20)
 
 
 class ContextSize(BaseModel):
@@ -41,7 +45,7 @@ class SummarizationConfig(BaseModel):
         "{'type': 'fraction', 'value': 0.8} triggers at 80% of model's max input tokens",
     )
     keep: ContextSize = Field(
-        default_factory=lambda: ContextSize(type="messages", value=20),
+        default_factory=lambda: ContextSize(type=DEFAULT_KEEP[0], value=DEFAULT_KEEP[1]),
         description="Context retention policy after summarization. Specifies how much history to preserve. "
         "Examples: {'type': 'messages', 'value': 20} keeps 20 messages, "
         "{'type': 'tokens', 'value': 3000} keeps 3000 tokens, "

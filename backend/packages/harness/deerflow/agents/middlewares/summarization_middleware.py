@@ -18,6 +18,7 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.config.summarization_config import DEFAULT_KEEP
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
@@ -780,8 +781,9 @@ def _drop_unusable_fraction_clauses(
         )
     new_keep = keep
     if keep_is_fraction:
-        # SummarizationConfig's documented default keep.
-        new_keep = ("messages", 20)
+        # The shared constant keeps this fallback identical to SummarizationConfig's
+        # documented default keep.
+        new_keep = DEFAULT_KEEP
         logger.warning(
             "Summarization keep %s is unusable without a model context window; falling back to %s. Declare `context_window` on the model in config.yaml to use fraction retention.",
             keep,
