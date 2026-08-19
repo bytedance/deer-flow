@@ -170,6 +170,7 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
+const EMPTY_MESSAGE_IDENTITIES_SET: ReadonlySet<string> = new Set<string>();
 const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
@@ -610,6 +611,8 @@ export function mergeMessages(
 export function restoreLocalTurnMessageOrder(
   messages: Message[],
   baselineMessageIdentities: ReadonlySet<string>,
+  confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
+  currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
 ): Message[] {
   const pendingHumanIndex = messages.findIndex((message) => {
     const identity = messageIdentity(message);
@@ -624,6 +627,31 @@ export function restoreLocalTurnMessageOrder(
     return messages;
   }
 
+  // A message that canonical history (the REST /messages page) has already
+  // committed is an established part of a previous turn, no matter whether it
+  // also reached the live checkpoint baseline. Only a visible ai/tool step that
+  // is absent from BOTH sources is genuinely new output from the in-flight
+  // submit, and only that belongs after the new human input.
+  const isConfirmedHistoryMessage = (identity: string | undefined) =>
+    identity !== undefined && confirmedHistoryIdentities.has(identity);
+  // Steps of the CURRENT run must never be treated as displaced history: after
+  // an interrupt/stop the current turn's already-executed steps are persisted
+  // into canonical history, but they still belong AFTER the new human input.
+  // The pending human message itself carries the current run_id, so it is the
+  // most reliable anchor even when the live checkpoint no longer holds the
+  // current turn's steps (stop/interrupt can flush them to history).
+  const effectiveCurrentTurnRunIds =
+    currentTurnRunIds.size > 0
+      ? currentTurnRunIds
+      : (() => {
+          const runId = getMessageRunId(messages[pendingHumanIndex]!);
+          return runId ? new Set([runId]) : EMPTY_MESSAGE_IDENTITIES_SET;
+        })();
+  const isCurrentTurnStep = (message: Message) => {
+    const runId = getMessageRunId(message);
+    return runId !== undefined && effectiveCurrentTurnRunIds.has(runId);
+  };
+
   const stablePrefix: Message[] = [];
   const earlyPendingSteps: Message[] = [];
   for (const message of messages.slice(0, pendingHumanIndex)) {
@@ -632,7 +660,8 @@ export function restoreLocalTurnMessageOrder(
       (message.type === "ai" || message.type === "tool") &&
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
-      !baselineMessageIdentities.has(identity);
+      !baselineMessageIdentities.has(identity) &&
+      !isConfirmedHistoryMessage(identity);
     if (isVisiblePendingStep) {
       earlyPendingSteps.push(message);
     } else {
@@ -640,18 +669,27 @@ export function restoreLocalTurnMessageOrder(
     }
   }
   const displacedBaselineMessages: Message[] = [];
+  const displacedHistoryMessages: Message[] = [];
   const stableSuffix: Message[] = [];
   for (const message of messages.slice(pendingHumanIndex + 1)) {
     const identity = messageIdentity(message);
     if (identity && baselineMessageIdentities.has(identity)) {
       displacedBaselineMessages.push(message);
+    } else if (
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      isConfirmedHistoryMessage(identity) &&
+      !isCurrentTurnStep(message)
+    ) {
+      displacedHistoryMessages.push(message);
     } else {
       stableSuffix.push(message);
     }
   }
   if (
     earlyPendingSteps.length === 0 &&
-    displacedBaselineMessages.length === 0
+    displacedBaselineMessages.length === 0 &&
+    displacedHistoryMessages.length === 0
   ) {
     return messages;
   }
@@ -659,6 +697,7 @@ export function restoreLocalTurnMessageOrder(
   return [
     ...stablePrefix,
     ...displacedBaselineMessages,
+    ...displacedHistoryMessages,
     messages[pendingHumanIndex]!,
     ...earlyPendingSteps,
     ...stableSuffix,
@@ -2552,10 +2591,42 @@ export function useThreadStream({
       renderMessages,
       visibleOptimisticMessages,
     );
+    // Canonical history identities are established messages from previous
+    // turns; they must be treated as confirmed regardless of whether the live
+    // checkpoint baseline captured them (e.g. an ask_clarification card that
+    // reached the REST history page but not the checkpoint `messages` value).
+    const confirmedHistoryIdentities = new Set(
+      effectiveHistory.map(messageIdentity).filter(isNonEmptyString),
+    );
     const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
-    return localTurnOrderBaseline === null
-      ? restoreReconnectedTurnMessageOrder(merged)
-      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
+    // The current turn's run(s): visible ai/tool steps that appear in the live
+    // checkpoint but are NOT part of the pre-submit baseline. These are output
+    // from the in-flight submit and must never be moved before their human.
+    const currentTurnRunIds = new Set<string>();
+    if (localTurnOrderBaseline !== null) {
+      for (const m of renderMessages) {
+        if (
+          (m.type === "ai" || m.type === "tool") &&
+          !isHiddenFromUIMessage(m)
+        ) {
+          const identity = messageIdentity(m);
+          const runId = getMessageRunId(m);
+          if (runId && (!identity || !localTurnOrderBaseline.has(identity))) {
+            currentTurnRunIds.add(runId);
+          }
+        }
+      }
+    }
+    const restored =
+      localTurnOrderBaseline === null
+        ? restoreReconnectedTurnMessageOrder(merged)
+        : restoreLocalTurnMessageOrder(
+            merged,
+            localTurnOrderBaseline,
+            confirmedHistoryIdentities,
+            currentTurnRunIds,
+          );
+    return restored;
   }, [
     previouslyRenderedOrder,
     renderMessages,
