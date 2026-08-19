@@ -1,7 +1,6 @@
 """Configuration for the subagent system loaded from config.yaml."""
 
 import logging
-
 from typing import Literal
 
 from pydantic import BaseModel, Field

@@ -299,6 +299,8 @@ async def task_tool(
     user_id = None
     deerflow_trace_id = None
     metadata: dict = {}
+    parent_thinking_enabled = None
+    parent_reasoning_effort = None
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")

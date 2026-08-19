@@ -9,10 +9,6 @@ Covers:
 - Executor: thinking_enabled and reasoning_effort resolution
 """
 
-from types import SimpleNamespace
-
-import pytest
-
 from deerflow.config.subagents_config import (
     CustomSubagentConfig,
     SubagentOverrideConfig,
@@ -20,8 +16,7 @@ from deerflow.config.subagents_config import (
     get_subagents_app_config,
     load_subagents_config_from_dict,
 )
-from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
-
+from deerflow.subagents.config import SubagentConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -136,9 +131,7 @@ class TestCustomSubagentConfigThinking:
 
 class TestSubagentsAppConfigThinkingGetters:
     def test_get_thinking_enabled_for_returns_override(self):
-        sac = SubagentsAppConfig(
-            agents={"test": SubagentOverrideConfig(thinking_enabled=True)}
-        )
+        sac = SubagentsAppConfig(agents={"test": SubagentOverrideConfig(thinking_enabled=True)})
         assert sac.get_thinking_enabled_for("test") is True
 
     def test_get_thinking_enabled_for_nonexistent(self):
@@ -146,15 +139,11 @@ class TestSubagentsAppConfigThinkingGetters:
         assert sac.get_thinking_enabled_for("nonexistent") is None
 
     def test_get_thinking_enabled_for_no_override(self):
-        sac = SubagentsAppConfig(
-            agents={"test": SubagentOverrideConfig()}
-        )
+        sac = SubagentsAppConfig(agents={"test": SubagentOverrideConfig()})
         assert sac.get_thinking_enabled_for("test") is None
 
     def test_get_reasoning_effort_for_returns_override(self):
-        sac = SubagentsAppConfig(
-            agents={"test": SubagentOverrideConfig(reasoning_effort="high")}
-        )
+        sac = SubagentsAppConfig(agents={"test": SubagentOverrideConfig(reasoning_effort="high")})
         assert sac.get_reasoning_effort_for("test") == "high"
 
     def test_get_reasoning_effort_for_nonexistent(self):
