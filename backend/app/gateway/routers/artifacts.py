@@ -135,6 +135,10 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, actual_path)
+        # Invalidate the SHA-256 cache after a successful edit so the next
+        # preview request computes the new digest. Edits are rare, so
+        # clearing the whole 256-entry LRU costs nothing (see PR review).
+        _sha256_of_file_cached.cache_clear()
     finally:
         if temp_fd >= 0:
             os.close(temp_fd)
