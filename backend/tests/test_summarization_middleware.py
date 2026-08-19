@@ -16,7 +16,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONT
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, SummaryGenerationError, create_summarization_middleware
 from deerflow.agents.thread_state import ThreadState
 from deerflow.config.memory_config import MemoryConfig
-from deerflow.config.summarization_config import SummarizationConfig
+from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 
 
 def _messages() -> list:
@@ -1077,11 +1077,11 @@ def test_before_summarization_hook_not_fired_when_summary_fails(monkeypatch: pyt
     assert captured == []
 
 
-def _factory_app_config(model_names, *, summary_model_name=None):
+def _factory_app_config(model_names, *, summary_model_name=None, summarization_kwargs=None):
     """AppConfig-shaped stub for the factory: summarization enabled + ordered models."""
     models = [SimpleNamespace(name=name) for name in model_names]
     return SimpleNamespace(
-        summarization=SummarizationConfig(enabled=True, model_name=summary_model_name),
+        summarization=SummarizationConfig(enabled=True, model_name=summary_model_name, **(summarization_kwargs or {})),
         memory=MemoryConfig(enabled=False),
         models=models,
         get_model_config=lambda name: next((model for model in models if model.name == name), None),
@@ -1139,6 +1139,86 @@ def test_factory_configured_constructor_failure_falls_back_to_run_model(monkeypa
     result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
     assert result is not None
     assert result.summary_text == "from-run-model"
+
+
+def _profileless_anchor_stub() -> MagicMock:
+    """Anchor stub whose ``.profile`` is unusable (not a Mapping), like any
+    third-party OpenAI-compatible client constructed without a profile."""
+    model = MagicMock()
+    model.with_config.return_value = model
+    model.invoke.return_value = SimpleNamespace(text="summary")
+    model.ainvoke = AsyncMock(return_value=SimpleNamespace(text="summary"))
+    return model
+
+
+def test_factory_fraction_trigger_without_profile_degrades_to_disabled(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """#3103 mechanism (b): a fraction trigger whose anchor exposes no usable profile
+    must not raise out of ``create_summarization_middleware`` (which used to fail the
+    whole agent build). With no absolute clause to keep, compaction is disabled and
+    the warning names the config fix."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(("models0",), summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)})
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0")
+
+    assert middleware is None  # degraded, not raised
+    assert "context_window" in caplog.text  # the warning names the fix
+
+
+def test_factory_drops_only_fraction_clauses_and_keeps_absolute_ones(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """Mixed [fraction, messages] triggers degrade to the messages clause alone:
+    construction succeeds and message-count compaction still fires."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(
+        ("models0",),
+        summarization_kwargs={"trigger": [ContextSize(type="fraction", value=0.8), ContextSize(type="messages", value=3)]},
+    )
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0", keep=("messages", 2))
+
+    assert middleware is not None  # the absolute clause kept the middleware alive
+    assert "context_window" in caplog.text
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "summary"
+
+
+def test_factory_keep_fraction_falls_back_to_messages_default(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A fraction ``keep`` against a profile-less anchor falls back to the
+    messages default instead of failing construction."""
+    fake_model = _profileless_anchor_stub()
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
+    cfg = _factory_app_config(
+        ("models0",),
+        summarization_kwargs={"trigger": ContextSize(type="messages", value=3), "keep": ContextSize(type="fraction", value=0.3)},
+    )
+
+    with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0")
+
+    assert middleware is not None
+    assert middleware.keep == ("messages", 20)  # SummarizationConfig's documented default
+
+
+def test_factory_fraction_trigger_survives_when_anchor_has_profile(monkeypatch) -> None:
+    """With a usable profile on the anchor (the factory attaches one from
+    ``context_window``), the fraction clause is kept as configured — construction
+    succeeding is itself the regression pin (#3103: it used to raise)."""
+    model = _StaticChatModel(profile={"max_input_tokens": 65536})
+    assert model.profile == {"max_input_tokens": 65536}
+    monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: model)
+    cfg = _factory_app_config(("models0",), summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)})
+
+    middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0", keep=("messages", 2))
+
+    assert middleware is not None
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None
+    assert result.summary_text == "ok"
 
 
 class _RaisingTextResponse:

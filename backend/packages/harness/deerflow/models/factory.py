@@ -308,6 +308,16 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
         if "stream_usage" in getattr(model_class, "model_fields", {}):
             model_settings_from_config["stream_usage"] = True
 
+    # Translate the declared context window into the langchain profile so
+    # profile-dependent features (e.g. SummarizationMiddleware fraction triggers,
+    # which resolve thresholds from profile["max_input_tokens"]) work for
+    # third-party OpenAI-compatible models whose SDK ships no profile of its
+    # own (#3103). ``profile`` is a metadata-only BaseChatModel field
+    # (exclude=True) and never reaches the provider request payload. An
+    # explicit profile from a caller or model_overrides is never clobbered.
+    if model_config.context_window and "profile" not in kwargs and "profile" not in model_settings_from_config:
+        model_settings_from_config["profile"] = {"max_input_tokens": model_config.context_window}
+
     _warn_unknown_model_settings(model_class, name, model_settings_from_config)
 
     model_instance = model_class(**kwargs, **model_settings_from_config)

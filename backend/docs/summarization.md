@@ -95,6 +95,12 @@ summarization:
      value: 0.8  # 80% of max input tokens
    ```
 
+   The percentage resolves from the model's declared `context_window` (models
+   entry in `config.yaml`). Third-party OpenAI-compatible models carry no
+   built-in capacity profile, so without a declared `context_window` the
+   fraction clause is dropped with a warning at agent build — any remaining
+   absolute clauses (`tokens` / `messages`) keep working.
+
 **Multiple Triggers:**
 ```yaml
 trigger:

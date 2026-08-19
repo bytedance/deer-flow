@@ -154,6 +154,48 @@ def test_context_window_never_reaches_the_provider_client(monkeypatch):
     assert "context_window" not in FakeChatModel.captured_kwargs
 
 
+def test_context_window_attaches_langchain_profile(monkeypatch):
+    """The declared context window is translated into the langchain ``profile``
+    so profile-dependent features (e.g. SummarizationMiddleware fraction triggers,
+    which resolve thresholds from ``profile["max_input_tokens"]``) work for
+    third-party OpenAI-compatible models whose SDK ships no profile of its own
+    (#3103: `trigger: fraction` used to crash the whole agent build)."""
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="windowed")
+
+    assert FakeChatModel.captured_kwargs.get("profile") == {"max_input_tokens": 200_000}
+
+
+def test_unset_context_window_leaves_profile_unset(monkeypatch):
+    """No declared window -> no invented profile; fraction triggers degrade
+    with a warning instead of silently assuming a capacity."""
+    cfg = _make_app_config([_make_model("opaque")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="opaque")
+
+    assert "profile" not in FakeChatModel.captured_kwargs
+
+
+def test_context_window_does_not_clobber_explicit_profile(monkeypatch):
+    """A caller-supplied profile wins over the context_window translation."""
+    model = _make_model("windowed")
+    model.context_window = 200_000
+    cfg = _make_app_config([model])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="windowed", profile={"max_input_tokens": 100})
+
+    assert FakeChatModel.captured_kwargs.get("profile") == {"max_input_tokens": 100}
+
+
 def test_appends_all_tracing_callbacks(monkeypatch):
     cfg = _make_app_config([_make_model("alpha")])
     _patch_factory(monkeypatch, cfg)
