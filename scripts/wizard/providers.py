@@ -614,6 +614,17 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         env_var="GROUNDROUTE_API_KEY",
         extra_config={"max_results": 5},
     ),
+    SearchProvider(
+        name="youcom",
+        display_name="You.com",
+        description="Own index with extracted page snippets, free tier needs no key",
+        use="deerflow.community.youcom.tools:web_search_tool",
+        # No env_var: the provider falls back to You.com's keyless endpoint, so the
+        # wizard should not demand a key. Operators who have one set YDC_API_KEY in
+        # .env (or api_key in config.yaml) and the provider switches endpoints.
+        env_var=None,
+        extra_config={"max_results": 5},
+    ),
 ]
 
 WEB_FETCH_PROVIDERS: list[WebProvider] = [

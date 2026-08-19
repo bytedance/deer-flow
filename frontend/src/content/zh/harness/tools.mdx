@@ -110,7 +110,7 @@ tools:
 
 ### 网络搜索
 
-<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
+<Tabs items={["DuckDuckGo（默认）", "Tavily", "Brave", "Exa", "InfoQuest", "Firecrawl", "GroundRoute", "You.com"]}>
   <Tabs.Tab>
 ```yaml
 tools:
@@ -178,6 +178,19 @@ GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper
 需要 [GroundRoute](https://groundroute.ai) API Key。同时支持 `web_fetch`。
 
 安装：`cd backend && uv add 'deerflow-harness[groundroute]'`
+
+  </Tabs.Tab>
+  <Tabs.Tab>
+```yaml
+tools:
+  - use: deerflow.community.youcom.tools:web_search_tool
+    # api_key: $YDC_API_KEY # 可选；不填则使用免密钥的免费额度
+```
+返回 You.com 自有索引的结果，每条结果附带从页面提取的片段，而不只是一段元描述。未配置 Key 时使用免密钥端点（免费额度，目前为每天 100 次搜索）；配置 `YDC_API_KEY` 后自动切换到额度更高的完整 Search API。`max_results` 上限为 100。
+
+API Key 可选，可在 [You.com](https://you.com/platform?utm_source=bytedance-deer-flow&utm_medium=oss_integration&utm_campaign=2026-08-oss-integrations&utm_content=docs) 获取。
+
+无需额外依赖。
 
   </Tabs.Tab>
 </Tabs>
