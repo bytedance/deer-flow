@@ -36,6 +36,9 @@ export default defineConfig({
         env: {
           SKIP_ENV_VALIDATION: "1",
           DEER_FLOW_AUTH_DISABLED: "1",
+          // Render / as the marketing landing so landing.spec.ts keeps working
+          // now that the route redirects authenticated users into /workspace.
+          NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true",
         },
       },
 });
