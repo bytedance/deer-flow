@@ -258,10 +258,10 @@ def _task_result_command(
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: Runtime,
-    description: str,
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    description: str = "",
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -306,9 +306,9 @@ async def task_tool(
     - Any task the parent can complete more cheaply with direct tools
 
     Args:
-        description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        prompt: The task description for the subagent. Be specific and clear about what needs to be done.
+        subagent_type: The type of subagent to use.
+        description: Optional short (3-5 word) description of the task for logging/display.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
@@ -481,7 +481,7 @@ async def task_tool(
         {
             "type": "task_started",
             "task_id": tool_call_id,
-            "description": description,
+            "description": description or prompt,
             "model_name": effective_model,
         },
         writer=writer,
