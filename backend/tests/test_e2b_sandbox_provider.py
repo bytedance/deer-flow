@@ -815,10 +815,17 @@ def test_apply_mounts_deadline_uses_configured_value(monkeypatch, tmp_path, capl
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [(0, 1), (-5, 1), (-100, 1)],
-    ids=["zero", "negative", "large_negative"],
+    [
+        (0, 1),
+        (-5, 1),
+        (-100, 1),
+        (None, 120),
+        ("120s", 120),
+        ("abc", 120),
+    ],
+    ids=["zero", "negative", "large_negative", "none", "suffix", "alpha"],
 )
-def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, raw, expected):
+def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, caplog, raw, expected):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
 
     class FakeConfig:
@@ -842,8 +849,13 @@ def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, raw, expe
 
     monkeypatch.setattr(mod, "get_app_config", lambda: FakeConfig())
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
-    config = provider._load_config()
+    with caplog.at_level("WARNING"):
+        config = provider._load_config()
     assert config["mount_upload_deadline_seconds"] == expected
+    if raw is None:
+        assert "clamping" not in caplog.text
+    else:
+        assert "mount_upload_deadline_seconds" in caplog.text
 
 
 def test_load_config_custom_mount_upload_deadline_flows_to_apply_mounts(monkeypatch, tmp_path, caplog):

@@ -348,7 +348,17 @@ class E2BSandboxProvider(SandboxProvider):
     @staticmethod
     def _resolve_mount_upload_deadline(_opt: Callable[[str, Any], Any]) -> int:
         raw = _opt("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
-        value = int(raw)
+        if raw is None:
+            return _MOUNT_PASS_DEADLINE_SECONDS
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            logger.warning(
+                "E2BSandboxProvider: non-numeric mount_upload_deadline_seconds=%r; falling back to %ds",
+                raw,
+                _MOUNT_PASS_DEADLINE_SECONDS,
+            )
+            return _MOUNT_PASS_DEADLINE_SECONDS
         if value < 1:
             logger.warning(
                 "E2BSandboxProvider: invalid mount_upload_deadline_seconds=%d; clamping to 1",
