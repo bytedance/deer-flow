@@ -1624,6 +1624,188 @@ test("local turn order keeps early streamed steps behind the user message", () =
   ]);
 });
 
+test("local turn order keeps an existing clarification card with its original turn", () => {
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "clarification-call",
+    content: "Which market should I research?",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+    "tool:clarification-call",
+  ]);
+
+  // A live checkpoint tail can be woven after the newly persisted human
+  // message even though the card was already visible before submission.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        clarificationCard,
+        currentStep,
+      ],
+      baselineIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAnswer,
+    clarificationCard,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
+test("local turn order keeps the current run's persisted steps after the new human", () => {
+  // After an interrupt/stop, the current turn's already-executed steps are
+  // flushed into canonical history. They belong AFTER the new human input even
+  // though history now confirms them — treating them as displaced old message
+  // would move the current run's own progress above the message that owns it.
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Continue tracking the robot sector",
+    run_id: "run-current",
+  } as Message;
+  const currentAnsweredStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Searching for catalysts",
+    run_id: "run-current",
+  } as Message;
+  const currentToolStep = {
+    id: "current-tool",
+    type: "tool",
+    content: "results",
+    tool_call_id: "call-current",
+    run_id: "run-current",
+  } as Message;
+  const baselineIdentities = new Set(["message:previous-human"]);
+  const historyIdentities = new Set([
+    "message:previous-human",
+    "message:current-human",
+    "message:current-step",
+    "tool:call-current",
+  ]);
+
+  // The human already at its correct position, followed by its own steps.
+  expect(
+    restoreLocalTurnMessageOrder(
+      [currentHuman, currentAnsweredStep, currentToolStep],
+      baselineIdentities,
+      historyIdentities,
+      new Set(["run-current"]),
+    ),
+  ).toEqual([currentHuman, currentAnsweredStep, currentToolStep]);
+
+  // Even when the current turn's human is missing its run_id (fallback path),
+  // explicit current-turn run ids keep its steps in place below the human.
+  const humanWithoutRun = {
+    id: "current-human",
+    type: "human",
+    content: "Continue tracking the robot sector",
+  } as Message;
+  expect(
+    restoreLocalTurnMessageOrder(
+      [humanWithoutRun, currentAnsweredStep, currentToolStep],
+      baselineIdentities,
+      historyIdentities,
+      new Set(["run-current"]),
+    ),
+  ).toEqual([humanWithoutRun, currentAnsweredStep, currentToolStep]);
+});
+
+test("local turn order restores a clarification card that only canonical history confirmed", () => {
+  // The card can reach the merged list through the REST history page without
+  // ever entering the live checkpoint `messages` value, so it is not in the
+  // pre-submit baseline. It must still be treated as an established-past-turn
+  // message (not an in-flight pending step) and stay above the new human.
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "Research today's market",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "Here is the completed report",
+  } as Message;
+  const clarificationCard = {
+    id: "clarification-card",
+    type: "tool",
+    name: "ask_clarification",
+    tool_call_id: "clarification-call",
+    content: "Which market should I research?",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "Summarize the report",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Reading the report",
+  } as Message;
+  // Baseline captured at submit time: the previous turn is there, but the
+  // card has not reached the live checkpoint yet, so it is absent.
+  const baselineIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+  ]);
+  // Canonical history has already committed the card identity.
+  const historyIdentities = new Set([
+    "message:previous-human",
+    "message:previous-answer",
+    "tool:clarification-call",
+  ]);
+
+  // The merged list has the card woven after the new human (from history).
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        clarificationCard,
+        currentStep,
+      ],
+      baselineIdentities,
+      historyIdentities,
+    ),
+  ).toEqual([
+    previousHuman,
+    previousAnswer,
+    clarificationCard,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
 test("reconnected turn order moves same-run steps back behind the user message", () => {
   // Reload mid-run: replayed `messages-tuple` steps reach the merged list
   // before the turn's human message (the retained replay buffer may have
