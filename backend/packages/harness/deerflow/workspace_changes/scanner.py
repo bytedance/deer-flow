@@ -6,7 +6,7 @@ import os
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
-from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOOL_RESULTS_DIRNAME
 
 from .types import (
     DiffUnavailableReason,
@@ -21,6 +21,10 @@ EXCLUDED_DIR_NAMES = {
     ".hg",
     ".svn",
     ".cache",
+    # Stdio MCP subprocess temp/debug files live below this server-owned
+    # namespace. They remain addressable when a tool returns their path, but
+    # they are not user-authored workspace deliverables or workspace changes.
+    MCP_INTERNAL_DIRNAME,
     ".next",
     ".venv",
     # Transient per-step browser screenshots: live progress feedback surfaced in
