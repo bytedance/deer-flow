@@ -27,6 +27,12 @@ TOOL_RESULTS_DIRNAME = ".tool-results"
 # paths and the scanner share this name so writes and filtering cannot drift.
 MCP_INTERNAL_DIRNAME = ".mcp"
 
+# Default subprocess temp subdirectory pinned into stdio MCP environments
+# (``TMPDIR``/``TMP``/``TEMP``). Both stdio launch paths (persistent sessions
+# and background task calls) import this instead of composing the suffix
+# themselves.
+MCP_TMP_SUBDIR = f"{MCP_INTERNAL_DIRNAME}/tmp"
+
 # Default timeout (seconds) for MCP server bring-up: tool discovery (subprocess
 # spawn + initialize + tools/list) and persistent-session initialization. A hung
 # stdio server (e.g. npx blocked on a package download or a server that never

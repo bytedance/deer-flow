@@ -254,11 +254,18 @@ def test_scan_workspace_roots_skips_stdio_mcp_temp_files(tmp_path):
     mcp_tmp = workspace / ".mcp" / "tmp"
     mcp_tmp.mkdir(parents=True)
     (mcp_tmp / "debug.json").write_text("internal", encoding="utf-8")
+    # `.mcp` is excluded by directory name at any depth, matching the other
+    # entries in EXCLUDED_DIR_NAMES (subagent work dirs may sit below the
+    # workspace root, so their `.mcp/tmp` must be pruned too).
+    nested_mcp = workspace / "project" / ".mcp"
+    nested_mcp.mkdir(parents=True)
+    (nested_mcp / "nested.json").write_text("internal", encoding="utf-8")
 
     snapshot = scan_workspace_roots(roots)
 
     assert "/mnt/user-data/workspace/report.md" in snapshot.files
     assert "/mnt/user-data/workspace/.mcp/tmp/debug.json" not in snapshot.files
+    assert "/mnt/user-data/workspace/project/.mcp/nested.json" not in snapshot.files
 
 
 def test_scan_workspace_roots_skips_browser_frames(tmp_path):
