@@ -367,9 +367,7 @@ def test_get_artifact_inline_text_returns_sha256_etag(tmp_path, monkeypatch) -> 
     app = make_authed_test_app()
     app.include_router(artifacts_router.router)
     with TestClient(app) as client:
-        response = client.get(
-            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt"
-        )
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt")
 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
@@ -415,9 +413,7 @@ def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> 
     app = make_authed_test_app()
     app.include_router(artifacts_router.router)
     with TestClient(app) as client:
-        response = client.get(
-            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md"
-        )
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md")
 
     assert response.status_code == 200
     expected = hashlib.sha256(payload).hexdigest()
