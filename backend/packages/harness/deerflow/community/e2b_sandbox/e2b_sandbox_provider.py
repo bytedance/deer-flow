@@ -2347,6 +2347,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+            self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
 
@@ -2356,6 +2357,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     self._eviction_tombstones.discard(evict_id)
                     self._end_transition_locked()
+            self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             logger.info("Evicted warm-pool e2b sandbox %s was already gone", evict_id)
             return evict_id
@@ -2368,6 +2370,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._evictions_in_progress.discard(evict_id)
                     if not self._shutdown_called:
                         self._eviction_tombstones.add(evict_id)
+            self._forget_mount_result(evict_id)
             self._release_ownership(evict_id)
             return None
 
@@ -2377,6 +2380,7 @@ class E2BSandboxProvider(SandboxProvider):
                 self._evictions_in_progress.discard(evict_id)
                 self._eviction_tombstones.discard(evict_id)
                 self._end_transition_locked()
+        self._forget_mount_result(evict_id)
         self._release_ownership(evict_id)
         logger.info("Evicted warm-pool e2b sandbox %s", evict_id)
         return evict_id

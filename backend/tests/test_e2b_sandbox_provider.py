@@ -2186,6 +2186,27 @@ def test_evict_oldest_warm_uses_kill_helper_and_closes_client(monkeypatch):
     assert client.closed is True
 
 
+def test_evict_oldest_warm_cleans_mount_result(monkeypatch):
+    """_evict_oldest_warm drops the mount entry on all terminal branches."""
+    p = _make_provider()
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    client = FakeClient(sandbox_id="sb-warm")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    p._warm_pool["sb-warm"] = ("seed", 12345.0)
+    p._mount_results["sb-warm"] = MountUploadResult(
+        truncated=True,
+        reason="byte budget",
+        attempted_files=8,
+        attempted_bytes=4000,
+        completed_files=5,
+        completed_bytes=2500,
+    )
+    p._kill_client = MagicMock(return_value=None)
+
+    assert p._evict_oldest_warm() == "sb-warm"
+    assert "sb-warm" not in p._mount_results
+
+
 def test_discover_remote_sandbox_returns_none_when_list_raises(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
