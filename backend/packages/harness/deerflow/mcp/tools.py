@@ -46,11 +46,6 @@ logger = logging.getLogger(__name__)
 # the load-time validation skill names get (skills/storage/skill_storage.py).
 _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# Pinning the process temp dir to MCP_TMP_SUBDIR (alongside its cwd) makes
-# tools that write to ``os.tmpdir()`` / ``tempfile.gettempdir()`` land inside
-# the mounted user-data tree, where their output is resolvable by the
-# sandbox/artifact API — instead of on an unreachable host temp path.
-
 # Matches local-file references embedded in free text returned by an MCP server.
 # Some servers (notably Playwright's ``browser_take_screenshot``) report saved
 # files only as text/markdown links rather than ``ResourceLink`` blocks. Those
