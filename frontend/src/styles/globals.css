@@ -797,12 +797,12 @@ html[data-skin="observatory"].obs-theme-fading [data-slot="sidebar-inset"] {
   stroke-dasharray: 180;
   stroke-dashoffset: 180;
 }
-html[data-skin="observatory"].ws-intro-opening [data-slot="sidebar"],
+html[data-skin="observatory"]:not(.ws-intro-ready) [data-slot="sidebar"],
 html.obs-is-opening [data-slot="sidebar"] {
   transform: translateX(-110%);
 }
 html[data-skin="observatory"].ws-intro-ready [data-slot="sidebar"] {
-  animation: obs-dock-in 0.45s 0.05s both;
+  animation: obs-dock-in 0.7s both;
 }
 html.obs-is-opening .obs-welcome-copy,
 html.obs-is-opening .obs-welcome-kicker {
@@ -893,7 +893,7 @@ html.obs-is-ready .obs-welcome-kicker {
 }
 [data-skin="observatory"] .obs-page-enter {
   overflow: hidden;
-  opacity: 1;
+  opacity: 0;
 }
 [data-skin="observatory"] .obs-page-enter.is-on {
   animation: obs-rise 0.7s ease both;
@@ -1142,6 +1142,10 @@ html[data-skin="observatory"] body {
   perspective: 900px;
 }
 @media (prefers-reduced-motion: reduce) {
+  [data-skin="observatory"] [data-slot="sidebar"] {
+    animation: none !important;
+    transform: none !important;
+  }
   html.obs-is-opening [data-slot="sidebar"],
   html.obs-is-opening .obs-welcome-copy {
     transform: none;
@@ -1158,6 +1162,9 @@ html[data-skin="observatory"] body {
   .obs-horizon,
   .obs-pointer-layer {
     display: none;
+  }
+  [data-skin="observatory"] .obs-page-enter {
+    opacity: 1 !important;
   }
   [data-skin="observatory"] .obs-page-enter.is-on,
   [data-skin="observatory"] .obs-nav-pulse.is-active,
