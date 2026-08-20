@@ -883,6 +883,29 @@ class TestDropParallelSiblingTools:
             {"type": "tool_use", "id": "c1", "name": "ask_clarification", "input": {"question": "q?"}},
         ]
 
+    def test_strips_idless_gemini_function_call_content_blocks(self, middleware):
+        # Gemini-style function_call blocks have no id; langchain synthesizes
+        # ids onto tool_calls only. Matching by id would leave the dropped
+        # sibling's content block in the transcript.
+        content = [
+            {"type": "text", "text": "asking"},
+            {"type": "function_call", "name": "ask_clarification", "args": {"question": "q?"}},
+            {"type": "function_call", "name": "bash", "args": {"command": "rm -rf /"}},
+        ]
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "rm -rf /"}},
+            ],
+            content=content,
+        )
+        patched = middleware.after_model({"messages": [msg]}, self._runtime())["messages"][0]
+        assert patched.content == [
+            {"type": "text", "text": "asking"},
+            {"type": "function_call", "name": "ask_clarification", "args": {"question": "q?"}},
+        ]
+        assert [tc["name"] for tc in patched.tool_calls] == ["ask_clarification"]
+
     def test_aafter_model_matches_sync(self, middleware):
         import asyncio
 
