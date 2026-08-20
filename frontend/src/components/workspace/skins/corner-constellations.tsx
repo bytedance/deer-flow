@@ -79,19 +79,23 @@ export function CornerConstellations({
     }
     let frame = 0;
     const tick = () => {
+      let moved = false;
       const next = HOMES.map((home, index) => {
         const current = placedRef.current[index] ?? home;
         const goal = goalOf(home, localRef.current.x, localRef.current.y);
-        return {
-          ...home,
-          x: current.x + (goal.x - current.x) * 0.06,
-          y: current.y + (goal.y - current.y) * 0.06,
-        };
+        const x = current.x + (goal.x - current.x) * 0.06;
+        const y = current.y + (goal.y - current.y) * 0.06;
+        if (Math.abs(x - current.x) > 0.05 || Math.abs(y - current.y) > 0.05) {
+          moved = true;
+        }
+        return { ...home, x, y };
       });
-      placedRef.current = next;
-      setPlaced(next);
-      const box = svgRef.current?.getBoundingClientRect();
-      if (box) onStars?.(next.map((star) => toScreen(star, box)));
+      if (moved) {
+        placedRef.current = next;
+        setPlaced(next);
+        const box = svgRef.current?.getBoundingClientRect();
+        if (box) onStars?.(next.map((star) => toScreen(star, box)));
+      }
       frame = window.requestAnimationFrame(tick);
     };
     frame = window.requestAnimationFrame(tick);

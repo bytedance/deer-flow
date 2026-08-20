@@ -797,12 +797,12 @@ html[data-skin="observatory"].obs-theme-fading [data-slot="sidebar-inset"] {
   stroke-dasharray: 180;
   stroke-dashoffset: 180;
 }
-html[data-skin="observatory"]:not(.ws-intro-ready) [data-slot="sidebar"],
-html.obs-is-opening [data-slot="sidebar"] {
-  transform: translateX(-110%);
-}
-html[data-skin="observatory"].ws-intro-ready [data-slot="sidebar"] {
+html[data-skin="observatory"] [data-slot="sidebar"] {
   animation: obs-dock-in 0.7s both;
+}
+html.obs-is-opening [data-slot="sidebar"] {
+  animation: none;
+  transform: translateX(-110%);
 }
 html.obs-is-opening .obs-welcome-copy,
 html.obs-is-opening .obs-welcome-kicker {
