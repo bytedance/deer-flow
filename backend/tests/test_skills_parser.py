@@ -108,8 +108,15 @@ def test_parse_empty_allowed_tools_list(tmp_path):
     assert skill.allowed_tools == ()
 
 
+def test_parse_allowed_tools_string(tmp_path):
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: bash read_file")
+    skill = parse_skill_file(skill_file, category="custom")
+    assert skill is not None
+    assert skill.allowed_tools == ("bash", "read_file")
+
+
 def test_parse_invalid_allowed_tools_returns_none(tmp_path):
-    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: bash")
+    skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: {bash: true}")
     skill = parse_skill_file(skill_file, category="custom")
     assert skill is None
 

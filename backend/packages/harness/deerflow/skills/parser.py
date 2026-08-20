@@ -41,14 +41,16 @@ def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> st
 def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None:
     """Parse the optional allowed-tools frontmatter field.
 
-    Returns None when the field is omitted. Returns a tuple when the field is a
-    YAML sequence of strings, including an empty tuple for explicit no-tool
-    skills. Raises ValueError for malformed values.
+    Returns None when the field is omitted. Accepts the Agent Skills standard
+    space-separated string or a YAML sequence of strings. Returns an empty tuple
+    for an explicit empty value. Raises ValueError for malformed values.
     """
     if raw is None:
         return None
-    if not isinstance(raw, list):
-        raise ValueError(f"allowed-tools in {skill_file} must be a list of strings")
+    if isinstance(raw, str):
+        raw = raw.split()
+    elif not isinstance(raw, list):
+        raise ValueError(f"allowed-tools in {skill_file} must be a space-separated string or list of strings")
 
     allowed_tools: list[str] = []
     for item in raw:
