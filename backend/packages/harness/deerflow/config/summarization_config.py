@@ -1,5 +1,6 @@
 """Configuration for conversation summarization."""
 
+import math
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -24,11 +25,16 @@ class ContextSize(BaseModel):
 
         A fraction written percent-style (``value: 80`` instead of ``0.8``) resolves
         to ``int(max_input_tokens * 80)`` — a threshold the context can never reach,
-        so the trigger silently never fires. Failing at config load turns that
-        foot-gun into an actionable error, consistent with how fraction clauses
-        degrade (loudly) elsewhere. Absolute ``tokens`` / ``messages`` values must
-        simply be positive to describe a usable threshold.
+        so the trigger silently never fires. Non-finite floats (YAML ``.nan`` /
+        ``.inf`` pass pydantic's float parsing) are dead thresholds the same way
+        (``count >= nan`` is always False), and ``nan <= 0`` is False so the
+        positivity check alone would not catch them. Failing at config load turns
+        these foot-guns into actionable errors, consistent with how fraction
+        clauses degrade (loudly) elsewhere. Absolute ``tokens`` / ``messages``
+        values must simply be positive to describe a usable threshold.
         """
+        if not math.isfinite(self.value):
+            raise ValueError(f"ContextSize value must be finite (got {self.value!r})")
         if self.type == "fraction":
             if not 0 < self.value <= 1:
                 raise ValueError(f"fraction ContextSize value must be in (0, 1] (got {self.value!r}) — write 0.8 for 80%, not 80")

@@ -1262,6 +1262,16 @@ def test_context_size_rejects_non_positive_absolute_values() -> None:
         ContextSize(type="messages", value=-5)
 
 
+def test_context_size_rejects_non_finite_values() -> None:
+    """YAML .nan / .inf pass pydantic's float parsing but never describe a usable
+    threshold (``count >= nan`` is always False, and ``nan <= 0`` is False so the
+    positivity check alone would not catch them) — they must fail at config load."""
+    with pytest.raises(ValidationError, match="ContextSize value must be finite"):
+        ContextSize(type="tokens", value=float("nan"))
+    with pytest.raises(ValidationError, match="ContextSize value must be finite"):
+        ContextSize(type="fraction", value=float("inf"))
+
+
 def test_context_size_accepts_boundary_values() -> None:
     assert ContextSize(type="fraction", value=1).to_tuple() == ("fraction", 1)
     assert ContextSize(type="fraction", value=0.8).to_tuple() == ("fraction", 0.8)
