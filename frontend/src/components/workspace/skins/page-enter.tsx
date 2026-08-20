@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 
 import { useSkin } from "@/core/skins";
 
@@ -10,7 +10,7 @@ export function PageEnter({ children }: { children: React.ReactNode }) {
   const { skin } = useSkin();
   const [on, setOn] = useState(true);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (skin !== "observatory") {
       setOn(true);
       return;

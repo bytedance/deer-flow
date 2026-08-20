@@ -7,7 +7,7 @@ import { prefersReducedMotion } from "@/core/skins/storage";
 
 import { WORKSPACE_INTRO_EVENT } from "./workspace-intro-event";
 
-const INTRO_MS = 520;
+const INTRO_MS = 0;
 
 export function WorkspaceIntro() {
   const { skin } = useSkin();
