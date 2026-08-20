@@ -19,6 +19,7 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import {
   useCallback,
@@ -80,6 +81,7 @@ import {
   type SidecarContext,
 } from "@/core/sidecar";
 import { useSkills } from "@/core/skills/hooks";
+import { useSkin } from "@/core/skins";
 import { DEFAULT_MAX_SUGGESTIONS } from "@/core/suggestions/api";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
@@ -155,6 +157,13 @@ import {
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
+const ObservatoryOpening = dynamic(
+  () =>
+    import("./skins/observatory-opening").then((m) => ({
+      default: m.ObservatoryOpening,
+    })),
+  { ssr: false },
+);
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
@@ -353,6 +362,7 @@ export function InputBox({
   const { models } = useModels();
   const { user } = useAuth();
   const { thread, isMock } = useThread();
+  const { skin } = useSkin();
   const { attachments, textInput } = usePromptInputController();
   const setTextInput = textInput.setInput;
   const sidecar = useMaybeSidecar();
@@ -2174,9 +2184,13 @@ export function InputBox({
         </div>
       )}
       <div className="relative">
+        {isWelcomeMode && skin === "observatory" ? (
+          <ObservatoryOpening active />
+        ) : null}
         <PromptInput
           className={cn(
             "bg-background/85 relative z-10 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
+            skin === "observatory" && "obs-input-shell",
             polishingInput &&
               "shadow-primary/10 ring-primary/25 shadow-lg ring-1",
             className,
