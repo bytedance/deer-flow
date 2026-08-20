@@ -33,7 +33,9 @@ export function ToolSettingsPage() {
           {t.settings.tools.adminRequired}
         </div>
       ) : error ? (
-        <div>Error: {error.message}</div>
+        <div className="text-destructive text-sm">
+          {t.settings.tools.loadError}: {error.message}
+        </div>
       ) : (
         config && <MCPServerList servers={config.mcp_servers} />
       )}

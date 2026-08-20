@@ -5,13 +5,9 @@ import { useEffect } from "react";
 import { useSkin } from "@/core/skins";
 import { prefersReducedMotion } from "@/core/skins/storage";
 
-const INTRO_MS = 520;
-const REPLAY_EVENT = "deerflow:workspace-intro";
+import { WORKSPACE_INTRO_EVENT } from "./workspace-intro-event";
 
-export function playWorkspaceIntro() {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(REPLAY_EVENT));
-}
+const INTRO_MS = 520;
 
 export function WorkspaceIntro() {
   const { skin } = useSkin();
@@ -38,10 +34,10 @@ export function WorkspaceIntro() {
     };
 
     play();
-    window.addEventListener(REPLAY_EVENT, play);
+    window.addEventListener(WORKSPACE_INTRO_EVENT, play);
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener(REPLAY_EVENT, play);
+      window.removeEventListener(WORKSPACE_INTRO_EVENT, play);
       root.classList.remove("ws-intro-opening", "ws-intro-ready");
     };
   }, [skin]);

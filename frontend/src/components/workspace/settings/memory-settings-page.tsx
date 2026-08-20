@@ -22,7 +22,6 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useI18n } from "@/core/i18n/hooks";
 import { exportMemory } from "@/core/memory/api";
 import {
@@ -38,26 +37,12 @@ import type {
   MemoryFactPatchInput,
   UserMemory,
 } from "@/core/memory/types";
-import { SafeStreamdown } from "@/core/streamdown/components";
-import { streamdownPlugins } from "@/core/streamdown/plugins";
 import { pathOfThread } from "@/core/threads/utils";
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
 
-type MemoryViewFilter = "all" | "facts" | "summaries";
 type MemoryFact = UserMemory["facts"][number];
-
-type MemorySection = {
-  title: string;
-  summary: string;
-  updatedAt?: string;
-};
-
-type MemorySectionGroup = {
-  title: string;
-  sections: MemorySection[];
-};
 
 type PendingImport = {
   fileName: string;
@@ -66,17 +51,6 @@ type PendingImport = {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
-}
-
-function isMemorySection(value: unknown): value is {
-  summary: string;
-  updatedAt: string;
-} {
-  return (
-    isRecord(value) &&
-    typeof value.summary === "string" &&
-    typeof value.updatedAt === "string"
-  );
 }
 
 function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
@@ -107,15 +81,7 @@ function isImportedMemory(value: unknown): value is UserMemory {
     return false;
   }
 
-  return (
-    isMemorySection(value.user.workContext) &&
-    isMemorySection(value.user.personalContext) &&
-    isMemorySection(value.user.topOfMind) &&
-    isMemorySection(value.history.recentMonths) &&
-    isMemorySection(value.history.earlierContext) &&
-    isMemorySection(value.history.longTermBackground) &&
-    value.facts.every(isMemoryFact)
-  );
+  return value.facts.every(isMemoryFact);
 }
 
 type FactFormState = {
@@ -142,119 +108,6 @@ function confidenceToLevelKey(confidence: unknown): {
   if (value >= 0.85) return { key: "veryHigh", value };
   if (value >= 0.65) return { key: "high", value };
   return { key: "normal", value };
-}
-
-function formatMemorySection(
-  section: MemorySection,
-  t: ReturnType<typeof useI18n>["t"],
-): string {
-  const content =
-    section.summary.trim() ||
-    `<span class="text-muted-foreground">${t.settings.memory.markdown.empty}</span>`;
-  return [
-    `### ${section.title}`,
-    content,
-    "",
-    section.updatedAt &&
-      `> ${t.settings.memory.markdown.updatedAt}: \`${formatTimeAgo(section.updatedAt)}\``,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
-function buildMemorySectionGroups(
-  memory: UserMemory,
-  t: ReturnType<typeof useI18n>["t"],
-): MemorySectionGroup[] {
-  return [
-    {
-      title: t.settings.memory.markdown.userContext,
-      sections: [
-        {
-          title: t.settings.memory.markdown.work,
-          summary: memory.user.workContext.summary,
-          updatedAt: memory.user.workContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.personal,
-          summary: memory.user.personalContext.summary,
-          updatedAt: memory.user.personalContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.topOfMind,
-          summary: memory.user.topOfMind.summary,
-          updatedAt: memory.user.topOfMind.updatedAt,
-        },
-      ],
-    },
-    {
-      title: t.settings.memory.markdown.historyBackground,
-      sections: [
-        {
-          title: t.settings.memory.markdown.recentMonths,
-          summary: memory.history.recentMonths.summary,
-          updatedAt: memory.history.recentMonths.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.earlierContext,
-          summary: memory.history.earlierContext.summary,
-          updatedAt: memory.history.earlierContext.updatedAt,
-        },
-        {
-          title: t.settings.memory.markdown.longTermBackground,
-          summary: memory.history.longTermBackground.summary,
-          updatedAt: memory.history.longTermBackground.updatedAt,
-        },
-      ],
-    },
-  ];
-}
-
-function summariesToMarkdown(
-  memory: UserMemory,
-  sectionGroups: MemorySectionGroup[],
-  t: ReturnType<typeof useI18n>["t"],
-) {
-  const parts: string[] = [];
-
-  parts.push(`## ${t.settings.memory.markdown.overview}`);
-  parts.push(
-    `- **${t.common.lastUpdated}**: \`${formatTimeAgo(memory.lastUpdated)}\``,
-  );
-
-  for (const group of sectionGroups) {
-    parts.push(`\n## ${group.title}`);
-    for (const section of group.sections) {
-      parts.push(formatMemorySection(section, t));
-    }
-  }
-
-  const markdown = parts.join("\n\n");
-  const lines = markdown.split("\n");
-  const out: string[] = [];
-  let i = 0;
-  for (const line of lines) {
-    i++;
-    if (i !== 1 && line.startsWith("## ")) {
-      if (out.length === 0 || out[out.length - 1] !== "---") {
-        out.push("---");
-      }
-    }
-    out.push(line);
-  }
-
-  return out.join("\n");
-}
-
-function isMemorySummaryEmpty(memory: UserMemory) {
-  return (
-    memory.user.workContext.summary.trim() === "" &&
-    memory.user.personalContext.summary.trim() === "" &&
-    memory.user.topOfMind.summary.trim() === "" &&
-    memory.history.recentMonths.summary.trim() === "" &&
-    memory.history.earlierContext.summary.trim() === "" &&
-    memory.history.longTermBackground.summary.trim() === ""
-  );
 }
 
 function truncateFactPreview(content: string, maxLength = 140) {
@@ -290,7 +143,6 @@ export function MemorySettingsPage() {
     DEFAULT_FACT_FORM_STATE,
   );
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<MemoryViewFilter>("all");
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(
     null,
   );
@@ -332,36 +184,18 @@ export function MemorySettingsPage() {
   const factValidationContent = t.settings.memory.factValidationContent;
   const factValidationConfidence = t.settings.memory.factValidationConfidence;
   const noFacts = t.settings.memory.noFacts ?? "No saved facts yet.";
-  const summaryReadOnly = t.settings.memory.summaryReadOnly;
   const memoryFullyEmpty =
     t.settings.memory.memoryFullyEmpty ?? "No memory saved yet.";
   const factPreviewLabel =
     t.settings.memory.factPreviewLabel ?? "Fact to delete";
   const searchPlaceholder =
     t.settings.memory.searchPlaceholder ?? "Search memory";
-  const filterAll = t.settings.memory.filterAll ?? "All";
-  const filterFacts = t.settings.memory.filterFacts ?? "Facts";
-  const filterSummaries = t.settings.memory.filterSummaries ?? "Summaries";
   const noMatches = t.settings.memory.noMatches ?? "No matching memory found";
   const exportButton = t.settings.memory.exportButton ?? t.common.export;
   const exportSuccess =
     t.settings.memory.exportSuccess ?? t.common.exportSuccess;
   const importButton = t.settings.memory.importButton ?? t.common.import;
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
-
-  const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
-  const filteredSectionGroups = sectionGroups
-    .map((group) => ({
-      ...group,
-      sections: group.sections.filter((section) =>
-        normalizedQuery
-          ? `${section.title} ${section.summary}`
-              .toLowerCase()
-              .includes(normalizedQuery)
-          : true,
-      ),
-    }))
-    .filter((group) => group.sections.length > 0);
 
   const filteredFacts = memory
     ? memory.facts.filter((fact) =>
@@ -372,18 +206,6 @@ export function MemorySettingsPage() {
           : true,
       )
     : [];
-
-  const showSummaries = filter !== "facts";
-  const showFacts = filter !== "summaries";
-  const shouldRenderSummariesBlock =
-    showSummaries && (filteredSectionGroups.length > 0 || !normalizedQuery);
-  const shouldRenderFactsBlock =
-    showFacts &&
-    (filteredFacts.length > 0 || !normalizedQuery || filter === "facts");
-  const hasMatchingVisibleContent =
-    !memory ||
-    (showSummaries && filteredSectionGroups.length > 0) ||
-    (showFacts && filteredFacts.length > 0);
 
   async function handleExportMemory() {
     try {
@@ -542,54 +364,30 @@ export function MemorySettingsPage() {
             {t.common.loading}
           </div>
         ) : error ? (
-          <div>Error: {error.message}</div>
+          <div className="text-destructive text-sm">
+            {t.settings.memory.loadError}: {error.message}
+          </div>
         ) : !memory ? (
           <div className="text-muted-foreground text-sm">
             {t.settings.memory.empty}
           </div>
         ) : (
           <div className="space-y-4">
-            {isMemorySummaryEmpty(memory) && memory.facts.length === 0 ? (
+            {memory.facts.length === 0 ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
             ) : null}
 
-            <div className="flex flex-col gap-3">
-              {/* Row 1: search + filter tabs */}
-              <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
-                <Input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder={searchPlaceholder}
-                  className="min-w-0 flex-1 sm:max-w-md"
-                />
-                <ToggleGroup
-                  type="single"
-                  value={filter}
-                  onValueChange={(value) => {
-                    if (value) setFilter(value as MemoryViewFilter);
-                  }}
-                  variant="outline"
-                  className="shrink-0 self-start sm:ml-auto sm:self-auto"
-                >
-                  <ToggleGroupItem value="all" className="whitespace-nowrap">
-                    {filterAll}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="facts" className="whitespace-nowrap">
-                    {filterFacts}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem
-                    value="summaries"
-                    className="whitespace-nowrap"
-                  >
-                    {filterSummaries}
-                  </ToggleGroupItem>
-                </ToggleGroup>
-              </div>
-
-              {/* Row 2: actions — constructive group on the left, destructive separated to the right */}
-              <div className="flex flex-wrap items-center gap-2">
+            {/* Toolbar: search + constructive actions, destructive separated */}
+            <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center">
+              <Input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={searchPlaceholder}
+                className="min-w-0 flex-1 sm:max-w-md"
+              />
+              <div className="flex flex-wrap items-center gap-2 self-start sm:ml-auto sm:self-auto">
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -599,27 +397,33 @@ export function MemorySettingsPage() {
                 />
                 <Button
                   variant="outline"
+                  size="sm"
                   onClick={() => fileInputRef.current?.click()}
                   disabled={importMemoryMutation.isPending}
                 >
-                  <UploadIcon className="mr-2 h-4 w-4" />
+                  <UploadIcon className="mr-1.5 h-4 w-4" />
                   {importButton}
                 </Button>
                 <Button
                   variant="outline"
+                  size="sm"
                   onClick={() => void handleExportMemory()}
                   disabled={isExporting}
                 >
-                  <DownloadIcon className="mr-2 h-4 w-4" />
+                  <DownloadIcon className="mr-1.5 h-4 w-4" />
                   {isExporting ? t.common.loading : exportButton}
                 </Button>
-                <Button variant="outline" onClick={openCreateFactDialog}>
-                  <PlusIcon className="mr-2 h-4 w-4" />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={openCreateFactDialog}
+                >
+                  <PlusIcon className="mr-1.5 h-4 w-4" />
                   {addFactLabel}
                 </Button>
                 <Button
                   variant="destructive"
-                  className="ml-auto"
+                  size="sm"
                   onClick={() => setClearDialogOpen(true)}
                   disabled={clearMemory.isPending}
                 >
@@ -628,123 +432,96 @@ export function MemorySettingsPage() {
               </div>
             </div>
 
-            {!hasMatchingVisibleContent && normalizedQuery ? (
-              <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                {noMatches}
-              </div>
-            ) : null}
-
-            {shouldRenderSummariesBlock ? (
-              <div className="min-w-0 rounded-lg border p-4">
-                <div className="text-muted-foreground mb-4 text-sm">
-                  {summaryReadOnly}
+            {/* Facts list */}
+            <div>
+              {filteredFacts.length === 0 ? (
+                <div className="text-muted-foreground text-sm">
+                  {normalizedQuery ? noMatches : noFacts}
                 </div>
-                <SafeStreamdown
-                  className="size-full min-w-0 [overflow-wrap:anywhere] [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
-                  {...streamdownPlugins}
-                >
-                  {summariesToMarkdown(memory, filteredSectionGroups, t)}
-                </SafeStreamdown>
-              </div>
-            ) : null}
+              ) : (
+                <div className="space-y-3">
+                  {filteredFacts.map((fact) => {
+                    const { key } = confidenceToLevelKey(fact.confidence);
+                    const confidenceText =
+                      t.settings.memory.markdown.table.confidenceLevel[key];
 
-            {shouldRenderFactsBlock ? (
-              <div className="min-w-0 rounded-lg border p-4">
-                <div className="mb-4">
-                  <h3 className="text-base font-medium">
-                    {t.settings.memory.markdown.facts}
-                  </h3>
-                </div>
-
-                {filteredFacts.length === 0 ? (
-                  <div className="text-muted-foreground text-sm">
-                    {normalizedQuery ? noMatches : noFacts}
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    {filteredFacts.map((fact) => {
-                      const { key } = confidenceToLevelKey(fact.confidence);
-                      const confidenceText =
-                        t.settings.memory.markdown.table.confidenceLevel[key];
-
-                      return (
-                        <div
-                          key={fact.id}
-                          className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
-                        >
-                          <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
-                            <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.category}:
-                                </span>{" "}
-                                {upperFirst(fact.category)}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.confidence}:
-                                </span>{" "}
-                                {confidenceText}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.createdAt}:
-                                </span>{" "}
-                                {formatTimeAgo(fact.createdAt)}
-                              </span>
-                              <span>
-                                <span className="text-muted-foreground">
-                                  {t.settings.memory.markdown.table.source}:
-                                </span>{" "}
-                                {fact.source === "manual" ? (
-                                  t.settings.memory.manualFactSource
-                                ) : (
-                                  <Link
-                                    href={pathOfThread(fact.source)}
-                                    className="text-primary underline-offset-4 hover:underline"
-                                  >
-                                    {t.settings.memory.markdown.table.view}
-                                  </Link>
-                                )}
-                              </span>
-                            </div>
-                            <p className="text-sm [overflow-wrap:anywhere]">
-                              {fact.content}
-                            </p>
+                    return (
+                      <div
+                        key={fact.id}
+                        className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-start sm:justify-between"
+                      >
+                        <div className="min-w-0 space-y-2 [overflow-wrap:anywhere]">
+                          <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.category}:
+                              </span>{" "}
+                              {upperFirst(fact.category)}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.confidence}:
+                              </span>{" "}
+                              {confidenceText}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.createdAt}:
+                              </span>{" "}
+                              {formatTimeAgo(fact.createdAt)}
+                            </span>
+                            <span>
+                              <span className="text-muted-foreground">
+                                {t.settings.memory.markdown.table.source}:
+                              </span>{" "}
+                              {fact.source === "manual" ? (
+                                t.settings.memory.manualFactSource
+                              ) : (
+                                <Link
+                                  href={pathOfThread(fact.source)}
+                                  className="text-primary underline-offset-4 hover:underline"
+                                >
+                                  {t.settings.memory.markdown.table.view}
+                                </Link>
+                              )}
+                            </span>
                           </div>
-
-                          <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="shrink-0"
-                              onClick={() => openEditFactDialog(fact)}
-                              disabled={deleteMemoryFact.isPending}
-                              title={t.common.edit}
-                              aria-label={t.common.edit}
-                            >
-                              <PenLineIcon className="h-4 w-4" />
-                            </Button>
-
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="text-destructive hover:text-destructive shrink-0"
-                              onClick={() => setFactToDelete(fact)}
-                              disabled={deleteMemoryFact.isPending}
-                              title={t.common.delete}
-                              aria-label={t.common.delete}
-                            >
-                              <Trash2Icon className="h-4 w-4" />
-                            </Button>
-                          </div>
+                          <p className="text-sm [overflow-wrap:anywhere]">
+                            {fact.content}
+                          </p>
                         </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            ) : null}
+
+                        <div className="flex shrink-0 items-center gap-1 self-start sm:ml-3">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="shrink-0"
+                            onClick={() => openEditFactDialog(fact)}
+                            disabled={deleteMemoryFact.isPending}
+                            title={t.common.edit}
+                            aria-label={t.common.edit}
+                          >
+                            <PenLineIcon className="h-4 w-4" />
+                          </Button>
+
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="text-destructive hover:text-destructive shrink-0"
+                            onClick={() => setFactToDelete(fact)}
+                            disabled={deleteMemoryFact.isPending}
+                            title={t.common.delete}
+                            aria-label={t.common.delete}
+                          >
+                            <Trash2Icon className="h-4 w-4" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         )}
       </SettingsSection>

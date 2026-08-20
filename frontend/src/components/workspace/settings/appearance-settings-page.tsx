@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { AsterismMark } from "@/components/workspace/skins/asterism-mark";
-import { playWorkspaceIntro } from "@/components/workspace/skins/workspace-intro";
+import { playWorkspaceIntro } from "@/components/workspace/skins/workspace-intro-event";
 import { enUS, isLocale, zhCN, type Locale } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
 import { useSkin, type SkinId } from "@/core/skins";

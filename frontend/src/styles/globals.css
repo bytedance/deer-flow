@@ -916,7 +916,7 @@ html.obs-is-ready .obs-welcome-kicker {
   opacity: 1;
 }
 [data-skin="observatory"] .obs-page-enter.is-on {
-  animation: obs-rise 0.35s ease both;
+  animation: obs-rise 0.7s ease both;
 }
 [data-skin="observatory"] [data-slot="sidebar-inset"] {
   overflow: hidden !important;

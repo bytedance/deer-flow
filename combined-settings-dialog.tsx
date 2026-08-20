@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import {
   BellIcon,
@@ -7,12 +7,10 @@ import {
   BrainIcon,
   MessagesSquare,
   PaletteIcon,
-  PlugZapIcon,
   SparklesIcon,
   UserIcon,
   WrenchIcon,
 } from "lucide-react";
-import dynamic from "next/dynamic";
 import { useEffect, useMemo, useState } from "react";
 
 import {
@@ -22,86 +20,23 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { AboutSettingsPage } from "@/components/workspace/settings/about-settings-page";
+import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
+import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
+import { ChannelsSettingsPage } from "@/components/workspace/settings/channels-settings-page";
+import { ChatsSettingsPage } from "@/components/workspace/settings/chats-settings-page";
+import { MemorySettingsPage } from "@/components/workspace/settings/memory-settings-page";
+import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
+import { SkillSettingsPage } from "@/components/workspace/settings/skill-settings-page";
+import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
-function SettingsPageLoading() {
-  const { t } = useI18n();
-  return (
-    <p role="status" className="text-muted-foreground py-8 text-center text-sm">
-      {t.common.loading}
-    </p>
-  );
-}
-
-const AccountSettingsPage = dynamic(
-  () =>
-    import("./account-settings-page").then(
-      (module) => module.AccountSettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
-const AppearanceSettingsPage = dynamic(
-  () =>
-    import("./appearance-settings-page").then(
-      (module) => module.AppearanceSettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
-const ChannelsSettingsPage = dynamic(
-  () =>
-    import("./channels-settings-page").then(
-      (module) => module.ChannelsSettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
-const IntegrationsSettingsPage = dynamic(
-  () =>
-    import("./integrations-settings-page").then(
-      (module) => module.IntegrationsSettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
-const MemorySettingsPage = dynamic(
-  () =>
-    import("./memory-settings-page").then(
-      (module) => module.MemorySettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
-const NotificationSettingsPage = dynamic(
-  () =>
-    import("./notification-settings-page").then(
-      (module) => module.NotificationSettingsPage,
-    ),
-  { loading: SettingsPageLoading },
-);
-const SkillSettingsPage = dynamic(
-  () =>
-    import("./skill-settings-page").then((module) => module.SkillSettingsPage),
-  { loading: SettingsPageLoading },
-);
-const ToolSettingsPage = dynamic(
-  () =>
-    import("./tool-settings-page").then((module) => module.ToolSettingsPage),
-  { loading: SettingsPageLoading },
-);
-const ChatsSettingsPage = dynamic(
-  () => import("./chats-settings-page").then((m) => m.ChatsSettingsPage),
-  { loading: SettingsPageLoading },
-);
-const AboutSettingsPage = dynamic(
-  () =>
-    import("./about-settings-page").then((module) => module.AboutSettingsPage),
-  { loading: SettingsPageLoading },
-);
-
-export type SettingsSection =
+type SettingsSection =
   | "chats"
   | "account"
   | "appearance"
   | "channels"
-  | "integrations"
   | "memory"
   | "tools"
   | "skills"
@@ -149,11 +84,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
         icon: CableIcon,
       },
       {
-        id: "integrations",
-        label: t.settings.sections.integrations,
-        icon: PlugZapIcon,
-      },
-      {
         id: "memory",
         label: t.settings.sections.memory,
         icon: BrainIcon,
@@ -168,15 +98,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
+      t.settings.sections.chats,
       t.settings.sections.account,
       t.settings.sections.appearance,
       t.settings.sections.channels,
-      t.settings.sections.integrations,
       t.settings.sections.memory,
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
-      t.settings.sections.chats,
       t.settings.sections.about,
     ],
   );
@@ -220,8 +149,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
               })}
             </ul>
           </nav>
-          <ScrollArea className="obs-settings-panel h-full min-h-0 rounded-lg border">
+          <ScrollArea className="obs-settings-panel h-full min-h-0 rounded-lg border bg-background">
             <div className="space-y-6 p-5">
+              {activeSection === "chats" && <ChatsSettingsPage />}
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
@@ -231,10 +161,8 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   onClose={() => props.onOpenChange?.(false)}
                 />
               )}
-              {activeSection === "chats" && <ChatsSettingsPage />}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
-              {activeSection === "integrations" && <IntegrationsSettingsPage />}
               {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>

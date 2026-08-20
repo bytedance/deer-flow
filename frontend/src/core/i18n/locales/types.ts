@@ -231,6 +231,8 @@ export interface Translations {
 
   // Scheduled tasks
   scheduledTasks: {
+    title: string;
+    description: string;
     scheduleType: { cron: string; once: string };
     preset: {
       label: string;
@@ -243,6 +245,9 @@ export interface Translations {
     fields: {
       minute: string;
       time: string;
+      year: string;
+      month: string;
+      day: string;
       weekday: string;
       dayOfMonth: string;
       cron: string;
@@ -295,7 +300,9 @@ export interface Translations {
       runsCount: string;
       runsCountOne: string;
       noRuns: string;
-      noSelection: string;
+      noTasks: string;
+      noTasksTitle: string;
+      noTasksDescription: string;
       filteredByThread: string;
       loadFailed: string;
     };
@@ -416,6 +423,7 @@ export interface Translations {
     settingsAndMore: string;
     visitGithub: string;
     reportIssue: string;
+    github: string;
     contactUs: string;
     about: string;
     logout: string;
@@ -437,6 +445,10 @@ export interface Translations {
 
   // Chats
   chats: {
+    description: string;
+    noMatches: string;
+    emptyTitle: string;
+    emptyDescription: string;
     searchChats: string;
     loadMoreToSearch: string;
     loadingMore: string;
@@ -627,6 +639,7 @@ export interface Translations {
     title: string;
     description: string;
     sections: {
+      chats: string;
       account: string;
       appearance: string;
       channels: string;
@@ -641,6 +654,7 @@ export interface Translations {
       title: string;
       description: string;
       empty: string;
+      loadError: string;
       rawJson: string;
       exportButton: string;
       exportSuccess: string;
@@ -729,6 +743,7 @@ export interface Translations {
       description: string;
       adminRequired: string;
       empty: string;
+      loadError: string;
     };
     channels: {
       title: string;
@@ -855,6 +870,7 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      loadError: string;
     };
     notification: {
       title: string;

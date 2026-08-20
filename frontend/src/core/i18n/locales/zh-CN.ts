@@ -290,6 +290,8 @@ export const zhCN: Translations = {
 
   // 定时任务
   scheduledTasks: {
+    title: "定时任务",
+    description: "配置和管理自动化任务，让 DeerFlow 按计划执行工作流。",
     scheduleType: {
       cron: "重复",
       once: "单次",
@@ -305,6 +307,9 @@ export const zhCN: Translations = {
     fields: {
       minute: "分钟",
       time: "时间",
+      year: "年",
+      month: "月",
+      day: "日",
       weekday: "在",
       dayOfMonth: "几号",
       cron: "cron 表达式",
@@ -324,10 +329,10 @@ export const zhCN: Translations = {
     preview: "预览",
     cronHelp: "打开 crontab.guru",
     create: {
-      title: "创建定时任务",
+      title: "新建定时任务",
       taskTitle: "任务标题",
       prompt: "提示词",
-      submit: "创建",
+      submit: "新建",
       fillRequired: "请填写所有必填项",
     },
     context: {
@@ -357,7 +362,9 @@ export const zhCN: Translations = {
       runsCount: "{count} 次运行",
       runsCountOne: "{count} 次运行",
       noRuns: "暂无运行",
-      noSelection: "未选择定时任务",
+      noTasks: "暂无定时任务",
+      noTasksTitle: "还没有定时任务",
+      noTasksDescription: "创建一个定时任务，让 DeerFlow 按计划自动执行。",
       filteredByThread: "按线程筛选：{id}",
       loadFailed: "加载定时任务失败",
     },
@@ -371,7 +378,7 @@ export const zhCN: Translations = {
     },
     deleteConfirm: "确定要删除该定时任务吗？此操作不可撤销。",
     errors: {
-      create: "创建定时任务失败",
+      create: "新建定时任务失败",
       update: "更新定时任务失败",
       pause: "暂停定时任务失败",
       resume: "恢复定时任务失败",
@@ -498,6 +505,7 @@ export const zhCN: Translations = {
     settingsAndMore: "设置和更多",
     visitGithub: "在 GitHub 上查看 DeerFlow",
     reportIssue: "报告问题",
+    github: "GitHub",
     contactUs: "联系我们",
     about: "关于 DeerFlow",
     logout: "退出登录",
@@ -520,6 +528,10 @@ export const zhCN: Translations = {
 
   // Chats
   chats: {
+    description: "管理你的所有对话。",
+    noMatches: "没有找到匹配的对话",
+    emptyTitle: "暂无对话",
+    emptyDescription: "开始一段新对话，你的记录会出现在这里。",
     searchChats: "搜索对话",
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
@@ -722,6 +734,7 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     sections: {
+      chats: "对话",
       account: "账号",
       appearance: "外观",
       channels: "渠道",
@@ -737,6 +750,7 @@ export const zhCN: Translations = {
       description:
         "DeerFlow 会在后台不断从你的对话中自动学习。这些记忆能帮助 DeerFlow 更好地理解你，并提供更个性化的体验。",
       empty: "暂无可展示的记忆数据。",
+      loadError: "加载记忆数据失败",
       rawJson: "原始 JSON",
       exportButton: "导出记忆",
       exportSuccess: "记忆已导出",
@@ -821,13 +835,14 @@ export const zhCN: Translations = {
       languageTitle: "语言",
       languageDescription: "在不同语言之间切换。",
       skinTitle: "皮肤",
-      skinDescription: "选择界面外观。浅色和深色可单独切换。",
+      skinDescription: "选择界面外观。",
     },
     tools: {
       title: "工具",
       description: "管理 MCP 工具的配置和启用状态。",
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
       empty: "暂无 MCP 工具。",
+      loadError: "加载工具配置失败",
     },
     channels: {
       title: "渠道",
@@ -1040,6 +1055,7 @@ export const zhCN: Translations = {
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
+      loadError: "加载技能失败",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
     },
     notification: {
