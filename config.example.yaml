@@ -1454,8 +1454,8 @@ sandbox:
 #       # token_budget:        # per-agent override of the global token_budget above
 #       #   max_tokens: 3000000  # raise the ceiling for deep-research tasks
 #       # model: qwen3:32b     # Use a specific model (default: inherit from lead agent)
-#       # thinking_enabled: true  # Enable thinking/reasoning for this subagent (default: inherit)
-#       # reasoning_effort: medium # Reasoning effort level: 'low', 'medium', or 'high' (default: inherit)
+#       # thinking_enabled: true  # Enable thinking/reasoning for this subagent (default: false)
+#       # reasoning_effort: medium # Reasoning effort level: 'low', 'medium', or 'high' (default: none)
 #       # skills:               # Skill discovery/activation allowlist (default: all enabled)
 #       #   - web-search
 #       #   - data-analysis
@@ -1483,14 +1483,14 @@ sandbox:
 #   #       - data-analysis
 #   #       - visualization
 #   #     model: inherit          # 'inherit' uses parent's model
-#   #     thinking_enabled: true   # Enable thinking/reasoning (default: inherit from parent)
-#   #     reasoning_effort: medium  # Reasoning effort level - 'low', 'medium', or 'high' (default: inherit)
+#   #     thinking_enabled: true   # Enable thinking/reasoning (default: false)
+#   #     reasoning_effort: medium  # Reasoning effort level - 'low', 'medium', or 'high' (default: none)
 #   #     max_turns: 80
 #   #     timeout_seconds: 600
 #
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
-#   # `thinking_enabled` and `reasoning_effort` also inherit from the lead agent.
+#   # `thinking_enabled` and `reasoning_effort` are unset by default (disabled).
 #   # The model name must match a name defined in the `models:` section above.
 
 # ============================================================================
