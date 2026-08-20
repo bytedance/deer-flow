@@ -113,11 +113,116 @@ class ScheduledTaskRepository:
                 return None
             return self._row_to_dict(row)
 
+    async def get_internal(self, task_id: str) -> dict[str, Any] | None:
+        """Load a task for the internal queue worker without an auth boundary."""
+        async with self._sf() as session:
+            row = await session.get(ScheduledTaskRow, task_id)
+            return self._row_to_dict(row) if row is not None else None
+
     async def list_by_user(self, user_id: str) -> list[dict[str, Any]]:
         stmt = select(ScheduledTaskRow).where(ScheduledTaskRow.user_id == user_id).order_by(ScheduledTaskRow.created_at.desc(), ScheduledTaskRow.id.desc())
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
+
+    async def get_active_run_status(self, task_id: str) -> str | None:
+        stmt = (
+            select(ScheduledTaskRunRow.status)
+            .where(
+                ScheduledTaskRunRow.task_id == task_id,
+                ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+            )
+            .limit(1)
+        )
+        async with self._sf() as session:
+            return (await session.execute(stmt)).scalars().first()
+
+    async def pause_with_queue_cancellation(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        error: str,
+        now: datetime,
+    ) -> str:
+        """Pause a task and cancel its waiting occurrence in one transaction."""
+        async with self._sf() as session:
+            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            if task is None or task.user_id != user_id:
+                await session.rollback()
+                return "not_found"
+            run = (
+                (
+                    await session.execute(
+                        select(ScheduledTaskRunRow)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task_id,
+                            ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                        )
+                        .limit(1)
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if run is not None and run.status in {"launching", "running"}:
+                await session.rollback()
+                return "executing"
+            if run is not None:
+                run.status = "interrupted"
+                run.error = error
+                run.finished_at = now
+                run.lease_owner = None
+                run.lease_expires_at = None
+            task.status = "paused"
+            task.lease_owner = None
+            task.lease_expires_at = None
+            task.updated_at = now
+            await session.commit()
+            return "paused"
+
+    async def delete_with_queue_cancellation(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        error: str,
+        now: datetime,
+    ) -> str:
+        """Delete a task only before queue execution begins."""
+        async with self._sf() as session:
+            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            if task is None or task.user_id != user_id:
+                await session.rollback()
+                return "not_found"
+            run = (
+                (
+                    await session.execute(
+                        select(ScheduledTaskRunRow)
+                        .where(
+                            ScheduledTaskRunRow.task_id == task_id,
+                            ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                        )
+                        .limit(1)
+                        .with_for_update()
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if run is not None and run.status in {"launching", "running"}:
+                await session.rollback()
+                return "executing"
+            if run is not None:
+                run.status = "interrupted"
+                run.error = error
+                run.finished_at = now
+                run.lease_owner = None
+                run.lease_expires_at = None
+            await session.delete(task)
+            await session.commit()
+            return "deleted"
 
     async def update(
         self,
@@ -158,16 +263,16 @@ class ScheduledTaskRepository:
     ) -> list[dict[str, Any]]:
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         async with self._sf() as session:
+            active_run_for_task = exists(
+                select(ScheduledTaskRunRow.id).where(
+                    ScheduledTaskRunRow.task_id == ScheduledTaskRow.id,
+                    ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                )
+            )
             if global_max_concurrent_runs is not None:
                 if session.get_bind().dialect.name == "postgresql":
                     await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _SCHEDULER_BUDGET_LOCK_KEY})
-                active_runs = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(("queued", "running"))))
-                active_run_for_task = exists(
-                    select(ScheduledTaskRunRow.id).where(
-                        ScheduledTaskRunRow.task_id == ScheduledTaskRow.id,
-                        ScheduledTaskRunRow.status.in_(("queued", "running")),
-                    )
-                )
+                active_runs = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(("launching", "running"))))
                 dispatch_reservations = await session.scalar(
                     select(func.count())
                     .select_from(ScheduledTaskRow)
@@ -186,6 +291,7 @@ class ScheduledTaskRepository:
                 .where(
                     ScheduledTaskRow.next_run_at.is_not(None),
                     ScheduledTaskRow.next_run_at <= now,
+                    ~active_run_for_task,
                     or_(
                         and_(
                             ScheduledTaskRow.status == "enabled",
@@ -218,6 +324,51 @@ class ScheduledTaskRepository:
             await session.commit()
             return [self._row_to_dict(row) for row in rows]
 
+    async def release_dispatch_lease(
+        self,
+        task_id: str,
+        *,
+        expected_lease_owner: str | None,
+        status: str,
+    ) -> bool:
+        """Release the short due-task claim after its occurrence is queued."""
+        async with self._sf() as session:
+            row = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            if row is None:
+                return False
+            if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
+                await session.rollback()
+                return False
+            row.status = status
+            row.lease_owner = None
+            row.lease_expires_at = None
+            row.updated_at = datetime.now(UTC)
+            await session.commit()
+            return True
+
+    async def release_queued_admission_lease(self, task_id: str) -> bool:
+        """Recover a crash after queue insert but before parent-lease release."""
+        async with self._sf() as session:
+            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            if task is None or task.status != "running" or task.lease_owner is None:
+                await session.rollback()
+                return False
+            queued = await session.scalar(
+                select(ScheduledTaskRunRow.id).where(
+                    ScheduledTaskRunRow.task_id == task_id,
+                    ScheduledTaskRunRow.status == "queued",
+                )
+            )
+            if queued is None:
+                await session.rollback()
+                return False
+            task.status = "enabled"
+            task.lease_owner = None
+            task.lease_expires_at = None
+            task.updated_at = datetime.now(UTC)
+            await session.commit()
+            return True
+
     async def update_after_launch(
         self,
         task_id: str,
@@ -230,6 +381,7 @@ class ScheduledTaskRepository:
         last_error: str | None,
         increment_run_count: bool,
         protect_terminal: bool = False,
+        protect_paused: bool = False,
         expected_lease_owner: str | None = None,
     ) -> bool:
         async with self._sf() as session:
@@ -245,6 +397,12 @@ class ScheduledTaskRepository:
                 )
                 await session.rollback()
                 return False
+            if protect_paused and row.status == "paused":
+                row.lease_owner = None
+                row.lease_expires_at = None
+                row.updated_at = datetime.now(UTC)
+                await session.commit()
+                return True
             if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
                 # A fast-failing run can reach handle_run_completion (which
                 # finalizes a `once` task) before this launch-path write
@@ -254,11 +412,12 @@ class ScheduledTaskRepository:
             else:
                 row.status = status
                 row.last_error = last_error
+            should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
             row.next_run_at = next_run_at
             row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id
-            if increment_run_count:
+            if should_increment_run_count:
                 row.run_count += 1
             row.lease_owner = None
             row.lease_expires_at = None
@@ -363,7 +522,7 @@ class ScheduledTaskRepository:
                     select(ScheduledTaskRunRow)
                     .where(
                         ScheduledTaskRunRow.task_id == task.id,
-                        ScheduledTaskRunRow.status.in_(("queued", "running")),
+                        ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
                     )
                     .order_by(ScheduledTaskRunRow.created_at.desc())
                     .limit(1)

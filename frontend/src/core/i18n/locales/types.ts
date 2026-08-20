@@ -334,6 +334,7 @@ export interface Translations {
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
       queued: string;
+      launching: string;
       running: string;
       success: string;
       failed: string;

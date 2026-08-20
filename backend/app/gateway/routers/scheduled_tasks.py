@@ -28,11 +28,17 @@ from deerflow.utils.thread_id import ThreadId
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
 
-def _ensure_task_mutable(task: dict[str, Any]) -> None:
+async def _ensure_task_mutable(task: dict[str, Any], repo) -> None:
     if task.get("status") == "running":
         raise HTTPException(
             status_code=409,
             detail="Scheduled task is currently running; retry after the active execution finishes",
+        )
+    active_status = await repo.get_active_run_status(task["id"])
+    if active_status is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scheduled task has an active {active_status} occurrence; retry after it finishes or cancel the queued occurrence by pausing the task",
         )
 
 
@@ -148,7 +154,7 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     existing = await repo.get(task_id, user_id=str(user.id))
     if existing is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    _ensure_task_mutable(existing)
+    await _ensure_task_mutable(existing, repo)
 
     updates = body.model_dump(exclude_none=True)
     if "context_mode" in updates:
@@ -226,11 +232,25 @@ async def pause_scheduled_task(task_id: str, request: Request):
     existing = await repo.get(task_id, user_id=str(user.id))
     if existing is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    _ensure_task_mutable(existing)
-    updated = await repo.update(task_id, user_id=str(user.id), updates={"status": "paused"})
-    if updated is None:
+    if existing.get("status") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail="Scheduled task is currently running; retry after the active execution finishes",
+        )
+    result = await repo.pause_with_queue_cancellation(
+        task_id,
+        user_id=str(user.id),
+        error="scheduled task was paused while queued",
+        now=datetime.now(UTC),
+    )
+    if result == "not_found":
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    return updated
+    if result == "executing":
+        raise HTTPException(
+            status_code=409,
+            detail="Scheduled task is already launching or running; retry after the active execution finishes",
+        )
+    return await repo.get(task_id, user_id=str(user.id))
 
 
 @router.post("/scheduled-tasks/{task_id}/resume")
@@ -243,7 +263,7 @@ async def resume_scheduled_task(task_id: str, request: Request):
     existing = await repo.get(task_id, user_id=str(user.id))
     if existing is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    _ensure_task_mutable(existing)
+    await _ensure_task_mutable(existing, repo)
     updated = await repo.update(task_id, user_id=str(user.id), updates={"status": "enabled"})
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
@@ -276,10 +296,20 @@ async def delete_scheduled_task(task_id: str, request: Request):
     user = await get_optional_user_from_request(request)
     if user is None:
         raise HTTPException(status_code=401, detail="Authentication required")
-    deleted = await repo.delete(task_id, user_id=str(user.id))
-    if not deleted:
+    result = await repo.delete_with_queue_cancellation(
+        task_id,
+        user_id=str(user.id),
+        error="scheduled task was deleted while queued",
+        now=datetime.now(UTC),
+    )
+    if result == "not_found":
         raise HTTPException(status_code=404, detail="Scheduled task not found")
-    return {"id": task_id, "deleted": deleted}
+    if result == "executing":
+        raise HTTPException(
+            status_code=409,
+            detail="Scheduled task is already launching or running; retry after the active execution finishes",
+        )
+    return {"id": task_id, "deleted": True}
 
 
 @router.get("/scheduled-tasks/{task_id}/runs")

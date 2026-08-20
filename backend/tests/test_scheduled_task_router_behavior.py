@@ -36,6 +36,8 @@ class _Repo:
     def __init__(self) -> None:
         self.created = []
         self.items = {}
+        self.active_status = None
+        self.cancelled_queue = False
 
     async def list_by_user(self, user_id: str):
         return [item for item in self.items.values() if item["user_id"] == user_id]
@@ -73,6 +75,33 @@ class _Repo:
             return None
         item.update(updates)
         return item
+
+    async def get_active_run_status(self, task_id: str):
+        return self.active_status
+
+    async def pause_with_queue_cancellation(self, task_id: str, *, user_id: str, **_kwargs):
+        item = await self.get(task_id, user_id=user_id)
+        if item is None:
+            return "not_found"
+        if self.active_status in {"launching", "running"}:
+            return "executing"
+        if self.active_status == "queued":
+            self.cancelled_queue = True
+            self.active_status = None
+        item["status"] = "paused"
+        return "paused"
+
+    async def delete_with_queue_cancellation(self, task_id: str, *, user_id: str, **_kwargs):
+        item = await self.get(task_id, user_id=user_id)
+        if item is None:
+            return "not_found"
+        if self.active_status in {"launching", "running"}:
+            return "executing"
+        if self.active_status == "queued":
+            self.cancelled_queue = True
+            self.active_status = None
+        self.items.pop(task_id, None)
+        return "deleted"
 
     async def delete(self, task_id: str, *, user_id: str):
         item = await self.get(task_id, user_id=user_id)
@@ -401,6 +430,81 @@ async def test_pause_and_resume_scheduled_task_update_status():
 
     assert paused_status == "paused"
     assert resumed["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_pause_cancels_waiting_occurrence_before_pausing_task():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-queued",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Queued task",
+        prompt="Prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    repo.active_status = "queued"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        result = await scheduled_tasks.pause_scheduled_task.__wrapped__(
+            task_id=task["id"],
+            request=request,
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert result["status"] == "paused"
+    assert repo.cancelled_queue is True
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_occurrence_that_has_started_launching():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-launching",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Launching task",
+        prompt="Prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    repo.active_status = "launching"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.delete_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "launching or running" in str(exc_info.value)
+    assert task["id"] in repo.items
 
 
 @pytest.mark.asyncio

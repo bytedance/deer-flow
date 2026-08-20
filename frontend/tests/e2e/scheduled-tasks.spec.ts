@@ -94,7 +94,7 @@ test("user can create a scheduled task from the page", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("reuse-thread tasks explain their context and busy-thread skip behavior", async ({
+test("reuse-thread tasks explain their context and busy-thread queue behavior", async ({
   page,
 }) => {
   mockLangGraphAPI(page, {
@@ -129,7 +129,9 @@ test("reuse-thread tasks explain their context and busy-thread skip behavior", a
   await expect(detailNotice).toContainText(
     "Uses this thread's conversation history",
   );
-  await expect(detailNotice).toContainText("It is not queued or retried");
+  await expect(detailNotice).toContainText(
+    "queues this occurrence and starts it when the thread is available",
+  );
 
   const createForm = page.getByTestId("scheduled-task-create-form");
   await expect(createForm.getByRole("alert")).toHaveCount(0);
@@ -140,7 +142,7 @@ test("reuse-thread tasks explain their context and busy-thread skip behavior", a
     "Uses this thread's conversation history",
   );
   await expect(createNotice).toContainText(
-    "skips that occurrence. It is not queued or retried",
+    "It fails if the configured queue wait limit is exceeded",
   );
 
   await createForm.getByRole("button", { name: "Fresh thread" }).click();

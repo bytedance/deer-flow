@@ -61,8 +61,7 @@ async def test_scheduled_task_run_repository_records_history(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_mark_stale_active_runs_fails_orphaned_runs(tmp_path):
-    """Runs stuck in queued/running after a process crash are swept to interrupted."""
+async def test_mark_stale_active_runs_preserves_queue_and_interrupts_live_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     sf = get_session_factory()
     assert sf is not None
@@ -100,11 +99,11 @@ async def test_mark_stale_active_runs_fails_orphaned_runs(tmp_path):
     )
 
     swept = await repo.mark_stale_active_runs(error="interrupted: gateway restarted")
-    assert swept == 2
+    assert swept == 1
 
     by_id = {entry["id"]: entry for entry in await repo.list_by_task("task-1")}
     by_id.update({entry["id"]: entry for entry in await repo.list_by_task("task-2")})
-    assert by_id["task-run-queued"]["status"] == "interrupted"
+    assert by_id["task-run-queued"]["status"] == "queued"
     assert by_id["task-run-running"]["status"] == "interrupted"
     assert by_id["task-run-success"]["status"] == "success"
 
@@ -219,8 +218,8 @@ async def test_lease_aware_recovery_preserves_queued_dispatch_until_lease_expire
 
         assert await task_run_repo.reconcile_active_runs(error="restart", now=now) == 0
         assert (await task_run_repo.list_by_task("task-queued"))[0]["status"] == "queued"
-        assert await task_run_repo.reconcile_active_runs(error="restart", now=now + timedelta(seconds=121)) == 1
-        assert (await task_run_repo.list_by_task("task-queued"))[0]["status"] == "interrupted"
+        assert await task_run_repo.reconcile_active_runs(error="restart", now=now + timedelta(seconds=121)) == 0
+        assert (await task_run_repo.list_by_task("task-queued"))[0]["status"] == "queued"
     finally:
         await close_engine()
 
@@ -303,7 +302,7 @@ async def test_update_status_protect_terminal_keeps_completion_result(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_has_active_runs_sees_only_queued_and_running(tmp_path):
+async def test_has_active_runs_sees_all_nonterminal_queue_states(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     sf = get_session_factory()
     assert sf is not None
@@ -318,6 +317,8 @@ async def test_has_active_runs_sees_only_queued_and_running(tmp_path):
         trigger="scheduled",
         status="running",
     )
+    assert await repo.has_active_runs("task-1") is True
+    await repo.update_status("task-run-active", status="launching")
     assert await repo.has_active_runs("task-1") is True
     await repo.update_status("task-run-active", status="success", run_id="run-1")
     assert await repo.has_active_runs("task-1") is False

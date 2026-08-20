@@ -726,7 +726,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
 - 支持 `once` 和 `cron` 两种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
-- 当到期执行所复用的 thread 上已有活跃 run 时，本次执行会记录为 `skipped`，不会排队或补跑
+- 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
 

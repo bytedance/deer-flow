@@ -352,7 +352,7 @@ export const enUS: Translations = {
       threadIdPlaceholder: "Thread ID",
       reuseNoticeTitle: "Uses this thread's conversation history",
       reuseNoticeDescription:
-        "If this thread has an active run at the scheduled time, DeerFlow skips that occurrence. It is not queued or retried.",
+        "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
     filters: {
       allStatuses: "All statuses",
@@ -414,6 +414,7 @@ export const enUS: Translations = {
     runTrigger: { scheduled: "scheduled", manual: "manual" },
     runStatus: {
       queued: "Queued",
+      launching: "Launching",
       running: "Running",
       success: "Success",
       failed: "Failed",
