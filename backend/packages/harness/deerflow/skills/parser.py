@@ -10,6 +10,22 @@ logger = logging.getLogger(__name__)
 
 # Valid POSIX environment-variable name.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ACRONYM_BOUNDARY_RE = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
+_CAMEL_CASE_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_PORTABLE_TOOL_ALIASES = {
+    "edit": "str_replace",
+    "read": "read_file",
+    "write": "write_file",
+}
+
+
+def _normalize_unscoped_allowed_tool(tool_name: str) -> str:
+    """Map unscoped portable names to DeerFlow runtime tool names."""
+    if "(" in tool_name or ")" in tool_name:
+        return tool_name
+    snake_case = _ACRONYM_BOUNDARY_RE.sub("_", tool_name)
+    snake_case = _CAMEL_CASE_BOUNDARY_RE.sub("_", snake_case).casefold()
+    return _PORTABLE_TOOL_ALIASES.get(snake_case, snake_case)
 
 
 def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> str:
@@ -42,8 +58,10 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None
     """Parse the optional allowed-tools frontmatter field.
 
     Returns None when the field is omitted. Accepts the Agent Skills standard
-    space-separated string or a YAML sequence of strings. Returns an empty tuple
-    for an explicit empty value. Raises ValueError for malformed values.
+    space-separated string or a YAML sequence of strings. Unscoped client names
+    normalize to DeerFlow runtime names. Command-scoped patterns remain literal
+    because DeerFlow does not inspect tool arguments. Returns an empty tuple for
+    an explicit empty value. Raises ValueError for malformed values.
     """
     if raw is None:
         return None
@@ -59,7 +77,7 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None
         tool_name = item.strip()
         if not tool_name:
             raise ValueError(f"allowed-tools in {skill_file} cannot contain empty tool names")
-        allowed_tools.append(tool_name)
+        allowed_tools.append(_normalize_unscoped_allowed_tool(tool_name))
     return tuple(allowed_tools)
 
 
