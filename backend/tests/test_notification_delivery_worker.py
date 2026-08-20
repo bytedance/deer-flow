@@ -145,6 +145,29 @@ def test_redact_egress_text_scrubs_seeded_secret():
     assert "[redacted]" in redacted
 
 
+def test_redact_egress_text_scrubs_entire_pem_block():
+    pem_body = "ABCDEFSECRETKEYBODY"
+    pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"
+    redacted = redact_egress_text(f"key follows\n{pem}\nend")
+
+    assert pem_body not in redacted
+    assert "BEGIN PRIVATE KEY" not in redacted
+    assert "END PRIVATE KEY" not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_render_redacts_entire_pem_block_in_result_summary():
+    pem_body = "ABCDEFSECRETKEYBODY"
+    pem = "-----BEGIN PRIVATE KEY-----\n" + pem_body + "\n-----END PRIVATE KEY-----"
+    text = render_notification_text(
+        _delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": pem})
+    )
+
+    assert pem_body not in text
+    assert "END PRIVATE KEY" not in text
+    assert "[redacted]" in text
+
+
 def test_render_redacts_secret_in_result_summary():
     secret = "ghp_" + ("a" * 36)
     text = render_notification_text(_delivery_row(payload={"run_status": "success", "error": None, "task_id": "task-1", "result_summary": f"token={secret}"}))

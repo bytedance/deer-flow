@@ -55,7 +55,10 @@ _EGRESS_REDACTION = "[redacted]"
 # Best-effort scrub before run content leaves for a third-party IM platform.
 # Patterns mirror the high-confidence secret detectors in skillscan.
 _EGRESS_SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"),
+    re.compile(
+        r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
+        re.DOTALL,
+    ),
     re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b"),
