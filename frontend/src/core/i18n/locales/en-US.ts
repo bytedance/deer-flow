@@ -1158,13 +1158,6 @@ export const enUS: Translations = {
       name: "Classic",
       tagline: "The current DeerFlow look.",
     },
-    observatory: {
-      name: "Observatory",
-      tagline: "Deep-blue night-sky look.",
-      toggleSky: "Toggle light / dark",
-      nightLabel: "Dark",
-      dawnLabel: "Light",
-    },
   },
   login: {
     signInTitle: "Sign in to your account",
