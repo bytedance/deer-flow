@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { useSettingsDialog } from "@/components/workspace/settings/settings-dialog-store";
 import { useSkin } from "@/core/skins";
 import { prefersReducedMotion } from "@/core/skins/storage";
 
@@ -66,6 +67,7 @@ export function PointerPlay({
   extraStars?: Array<{ id: string; x: number; y: number }>;
 }) {
   const { skin } = useSkin();
+  const { open: settingsOpen } = useSettingsDialog();
   const [mouse, setMouse] = useState({ x: -400, y: -400 });
   const [size, setSize] = useState({ w: 1440, h: 900 });
   const [gutter, setGutter] = useState(280);
@@ -105,7 +107,8 @@ export function PointerPlay({
   }, [mouse]);
 
   useEffect(() => {
-    if (skin !== "observatory" || prefersReducedMotion()) return;
+    if (skin !== "observatory" || prefersReducedMotion() || settingsOpen)
+      return;
     let frame = 0;
     const tick = () => {
       const next = homesRef.current.map((home, index) => {
@@ -129,7 +132,7 @@ export function PointerPlay({
     };
     frame = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(frame);
-  }, [gutter, size.h, size.w, skin]);
+  }, [gutter, settingsOpen, size.h, size.w, skin]);
 
   const visible = stars.length ? stars : homes;
   const LINK_PX = 91;
@@ -187,7 +190,7 @@ export function PointerPlay({
     return () => window.removeEventListener("pointermove", onMove);
   }, [skin]);
 
-  if (skin !== "observatory") return null;
+  if (skin !== "observatory" || settingsOpen) return null;
 
   return (
     <div className="obs-pointer-layer" aria-hidden="true">

@@ -347,6 +347,8 @@ export const enUS: Translations = {
 
   // Scheduled tasks
   scheduledTasks: {
+    title: "Scheduled tasks",
+    description: "Manage when and how often automated tasks run.",
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
@@ -362,6 +364,9 @@ export const enUS: Translations = {
     fields: {
       minute: "Minute",
       time: "Time",
+      year: "Year",
+      month: "Month",
+      day: "Day",
       weekday: "On",
       dayOfMonth: "Day of month",
       cron: "Cron expression",
@@ -417,7 +422,10 @@ export const enUS: Translations = {
       runsCount: "{count} runs",
       runsCountOne: "{count} run",
       noRuns: "No runs yet",
-      noSelection: "No scheduled task selected",
+      noTasks: "No scheduled tasks yet",
+      noTasksTitle: "No scheduled tasks yet",
+      noTasksDescription:
+        "Create a scheduled task to let DeerFlow run workflows on a schedule.",
       filteredByThread: "Filtered by thread: {id}",
       loadFailed: "Failed to load scheduled tasks",
     },
@@ -568,6 +576,7 @@ export const enUS: Translations = {
     settingsAndMore: "Settings and more",
     visitGithub: "DeerFlow on GitHub",
     reportIssue: "Report an issue",
+    github: "GitHub",
     contactUs: "Contact us",
     about: "About DeerFlow",
     logout: "Log out",
@@ -591,6 +600,10 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
+    description: "Manage all of your conversations.",
+    noMatches: "No matching conversations",
+    emptyTitle: "No conversations yet",
+    emptyDescription: "Start a new conversation and it will show up here.",
     searchChats: "Search chats",
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
@@ -798,6 +811,7 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      chats: "Chats",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -814,6 +828,7 @@ export const enUS: Translations = {
       description:
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
+      loadError: "Failed to load memory data",
       rawJson: "Raw JSON",
       exportButton: "Export memory",
       exportSuccess: "Memory exported",
@@ -909,6 +924,7 @@ export const enUS: Translations = {
       description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+      loadError: "Failed to load tool configuration",
     },
     subagents: {
       title: "Subagents",
@@ -1186,6 +1202,7 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      loadError: "Failed to load skills",
     },
     notification: {
       title: "Notification",

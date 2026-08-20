@@ -19,6 +19,7 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import { useSearchParams } from "next/navigation";
 import {
   useCallback,
@@ -156,7 +157,13 @@ import {
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
-import { ObservatoryOpening } from "./skins/observatory-opening";
+const ObservatoryOpening = dynamic(
+  () =>
+    import("./skins/observatory-opening").then((m) => ({
+      default: m.ObservatoryOpening,
+    })),
+  { ssr: false },
+);
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
 
