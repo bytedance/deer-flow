@@ -205,9 +205,11 @@ describe("loadArtifactContent", () => {
       full: true,
     });
 
-    // FNV-1a fallback keeps preview working and returns a string; because it
-    // is not a 64-hex digest the UI treats it as non-editable (no 422 on save).
+    // The pure-JS fallback must produce the same real SHA-256 digest as
+    // Web Crypto, so preview and inline editing retain the backend contract.
     expect(typeof loaded.sha256).toBe("string");
-    expect(loaded.sha256).toHaveLength(8);
+    expect(loaded.sha256).toBe(
+      "eebbf6457e46a7f63acdf9b97390f790ba443d60cfa44b607da7e5c40aa1cc1d",
+    );
   });
 });
