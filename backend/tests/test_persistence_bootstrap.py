@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0013_notification_deliveries"
+HEAD = "0014_notification_delivery_parked_attempts"
 BASELINE = "0001_baseline"
 
 
