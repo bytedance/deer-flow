@@ -103,7 +103,7 @@ Skill quality review note:
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
-- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle with `run_interaction_mode: scheduled`, so the lead-agent toolset and prompt both prohibit waiting for a human, make minimal-risk reversible assumptions, and report irreversible ambiguity as blocked. Legacy `context.non_interactive=true` remains supported and is honored only for internally-authenticated scheduler callers; client-supplied autonomous context is dropped.
+- Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle with `run_interaction_mode: scheduled`, so the lead-agent toolset and prompt both prohibit waiting for a human, make minimal-risk reversible assumptions, and report irreversible ambiguity as blocked. Legacy `context.non_interactive=true` and `context.disable_clarification=true` remain supported only for internally-authenticated callers; client-supplied interaction-policy flags are dropped.
 
 ## Commands: Root vs. Module
 

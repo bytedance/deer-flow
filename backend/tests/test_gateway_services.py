@@ -874,6 +874,32 @@ def test_run_interaction_mode_is_internal_runtime_only():
     assert "run_interaction_mode" not in smuggled.get("context", {})
 
 
+def test_disable_clarification_is_internal_runtime_only():
+    """Clients must not select the legacy webhook policy through any config section."""
+    from app.gateway.services import build_run_config, merge_run_context_overrides, strip_internal_context_keys
+
+    via_context = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(via_context, {"disable_clarification": True})
+    strip_internal_context_keys(via_context)
+    assert "disable_clarification" not in via_context.get("context", {})
+    assert "disable_clarification" not in via_context.get("configurable", {})
+
+    via_config_context = build_run_config("thread-1", {"context": {"disable_clarification": True}}, None)
+    strip_internal_context_keys(via_config_context)
+    assert "disable_clarification" not in via_config_context.get("context", {})
+    assert "disable_clarification" not in via_config_context.get("configurable", {})
+
+    via_configurable = build_run_config("thread-1", {"configurable": {"disable_clarification": True}}, None)
+    strip_internal_context_keys(via_configurable)
+    assert "disable_clarification" not in via_configurable.get("context", {})
+    assert "disable_clarification" not in via_configurable.get("configurable", {})
+
+    internal = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(internal, {"disable_clarification": True}, internal=True)
+    assert internal["context"]["disable_clarification"] is True
+    assert "disable_clarification" not in internal.get("configurable", {})
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -1484,6 +1510,7 @@ def test_merge_run_context_overrides_forwards_context_only_keys():
             "disable_clarification": True,
             "agent_name": "coding-llm-gateway",
         },
+        internal=True,
     )
 
     # Forwarded into runtime context — what tools/middlewares read.
