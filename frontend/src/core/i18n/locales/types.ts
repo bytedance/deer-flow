@@ -996,13 +996,6 @@ export interface Translations {
       name: string;
       tagline: string;
     };
-    observatory: {
-      name: string;
-      tagline: string;
-      toggleSky: string;
-      nightLabel: string;
-      dawnLabel: string;
-    };
   };
 
   // Login / Auth
