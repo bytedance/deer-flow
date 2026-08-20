@@ -1101,8 +1101,7 @@ html.obs-is-ready .obs-welcome-kicker {
       color-mix(in srgb, var(--primary-foreground) 18%, transparent);
   }
 }
-html[data-skin="observatory"],
-html[data-skin="observatory"] body {
+html[data-skin="observatory"] body.obs-lock-scroll {
   overflow: hidden;
 }
 .obs-pointer-layer {
@@ -1154,14 +1153,19 @@ html[data-skin="observatory"] body {
   }
   .obs-opening-star,
   .obs-opening-line,
-  .obs-welcome-title,
   .obs-horizon,
   .obs-horizon-orbit,
   .obs-meter b,
   .obs-idle-sky,
-  .obs-horizon,
   .obs-pointer-layer {
     display: none;
+  }
+  html.obs-is-ready .obs-welcome-title,
+  html.obs-is-ready .obs-welcome-copy,
+  html.obs-is-ready .obs-welcome-kicker {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
   }
   [data-skin="observatory"] .obs-page-enter {
     opacity: 1 !important;
