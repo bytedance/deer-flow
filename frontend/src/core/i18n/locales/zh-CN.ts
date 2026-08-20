@@ -334,6 +334,9 @@ export const zhCN: Translations = {
       fresh: "新线程",
       reuse: "复用线程",
       threadIdPlaceholder: "线程 ID",
+      reuseNoticeTitle: "使用该线程的历史对话",
+      reuseNoticeDescription:
+        "如果触发时该线程正在运行，DeerFlow 会跳过本次执行，不会排队或补跑。",
     },
     filters: {
       allStatuses: "全部状态",

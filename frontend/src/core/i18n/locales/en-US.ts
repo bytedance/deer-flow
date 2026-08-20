@@ -350,6 +350,9 @@ export const enUS: Translations = {
       fresh: "Fresh thread",
       reuse: "Reuse thread",
       threadIdPlaceholder: "Thread ID",
+      reuseNoticeTitle: "Uses this thread's conversation history",
+      reuseNoticeDescription:
+        "If this thread has an active run at the scheduled time, DeerFlow skips that occurrence. It is not queued or retried.",
     },
     filters: {
       allStatuses: "All statuses",
