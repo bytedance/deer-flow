@@ -172,6 +172,10 @@ defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
 a server that never answers `initialize`) cannot block agent construction or
 the task poller indefinitely. Set it to `null` to disable:
 
+Both timeout settings accept `null` or a finite number greater than zero. Zero,
+negative, NaN, and infinite values are rejected when the extensions file or
+Gateway request is validated.
+
 ```json
 {
    "mcpServers": {

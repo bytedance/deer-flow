@@ -10,12 +10,17 @@ on both stages and the per-server independence of the discovery timeout.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from langchain_core.tools import StructuredTool
-from pydantic import BaseModel, Field
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from pydantic import BaseModel, Field, ValidationError
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
@@ -41,6 +46,75 @@ def _tool(name: str) -> StructuredTool:
 def test_session_init_timeout_defaults_to_shared_constant() -> None:
     assert McpServerConfig().session_init_timeout == DEFAULT_MCP_SESSION_INIT_TIMEOUT
     assert McpServerConfig(session_init_timeout=None).session_init_timeout is None
+
+
+@pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
+@pytest.mark.parametrize("invalid_timeout", [0, -1, float("inf"), float("-inf"), float("nan")])
+def test_runtime_mcp_timeout_must_be_finite_and_positive(field_name: str, invalid_timeout: float) -> None:
+    with pytest.raises(ValidationError):
+        McpServerConfig.model_validate({field_name: invalid_timeout})
+
+
+@pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
+def test_runtime_mcp_timeout_accepts_none_and_coerces_positive_numeric_strings(field_name: str) -> None:
+    assert getattr(McpServerConfig.model_validate({field_name: None}), field_name) is None
+    assert getattr(McpServerConfig.model_validate({field_name: "0.25"}), field_name) == 0.25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
+async def test_invalid_timeout_cannot_reach_mcp_tool_assembly(tmp_path, monkeypatch, field_name: str) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "healthy": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        field_name: 0,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    responsive_discovery = AsyncMock(return_value=[_tool("healthy_healthy_search")])
+    monkeypatch.setattr(MultiServerMCPClient, "get_tools", responsive_discovery)
+
+    with pytest.raises(RuntimeError, match=field_name):
+        await get_mcp_tools()
+
+    responsive_discovery.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_init_timeout", [0.01, None])
+async def test_valid_session_timeout_preserves_real_mcp_tool_assembly(tmp_path, monkeypatch, session_init_timeout: float | None) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "healthy": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        "session_init_timeout": session_init_timeout,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    responsive_discovery = AsyncMock(return_value=[_tool("healthy_healthy_search")])
+    monkeypatch.setattr(MultiServerMCPClient, "get_tools", responsive_discovery)
+
+    tools = await get_mcp_tools()
+
+    assert [tool.name for tool in tools] == ["healthy_healthy_search"]
+    responsive_discovery.assert_awaited_once_with(server_name="healthy")
 
 
 @pytest.mark.asyncio
@@ -216,6 +290,54 @@ def test_gateway_response_model_session_init_timeout_default_matches_runtime_con
     assert McpServerConfigResponse.model_validate({"session_init_timeout": None}).session_init_timeout is None
 
 
+@pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
+@pytest.mark.parametrize("invalid_timeout", [0, -1, float("inf"), float("-inf"), float("nan")])
+def test_gateway_mcp_timeout_must_be_finite_and_positive(field_name: str, invalid_timeout: float) -> None:
+    from app.gateway.routers.mcp import McpServerConfigResponse
+
+    with pytest.raises(ValidationError):
+        McpServerConfigResponse.model_validate({field_name: invalid_timeout})
+
+
+@pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
+def test_gateway_mcp_timeout_accepts_none_and_coerces_positive_numeric_strings(field_name: str) -> None:
+    from app.gateway.routers.mcp import McpServerConfigResponse
+
+    assert getattr(McpServerConfigResponse.model_validate({field_name: None}), field_name) is None
+    assert getattr(McpServerConfigResponse.model_validate({field_name: "0.25"}), field_name) == 0.25
+
+
+@pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
+@pytest.mark.parametrize("invalid_timeout", [0, -1])
+@pytest.mark.asyncio
+async def test_put_mcp_config_rejects_invalid_timeout_without_persisting(tmp_path, monkeypatch, field_name: str, invalid_timeout: int) -> None:
+    from app.gateway.routers import mcp as mcp_router
+
+    config_path = tmp_path / "extensions_config.json"
+    original = b'{"mcpServers":{"sentinel":{"type":"http","url":"https://example.invalid/old"}},"skills":{}}\n'
+    config_path.write_bytes(original)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+
+    app = FastAPI()
+    app.include_router(mcp_router.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            "/api/mcp/config",
+            json={
+                "mcp_servers": {
+                    "healthy": {
+                        "type": "http",
+                        "url": "https://example.invalid/mcp",
+                        field_name: invalid_timeout,
+                    }
+                }
+            },
+        )
+
+    assert response.status_code == 422
+    assert config_path.read_bytes() == original
+
+
 @pytest.mark.asyncio
 async def test_session_init_timeout_does_not_block_fast_session(tmp_path) -> None:
     """A promptly-initialized session still completes the tool call."""
@@ -242,3 +364,35 @@ async def test_session_init_timeout_does_not_block_fast_session(tmp_path) -> Non
         await wrapped.coroutine(query="repositories")
 
     mock_session.call_tool.assert_awaited_once_with("github_search", {"query": "repositories"})
+
+
+@pytest.mark.asyncio
+async def test_positive_tool_call_timeout_reaches_stdio_call(tmp_path) -> None:
+    mock_session = AsyncMock()
+    mock_session.call_tool = AsyncMock(return_value=MagicMock(content=[], isError=False, structuredContent=None))
+    mock_pool = MagicMock()
+    mock_pool.get_session = AsyncMock(return_value=mock_session)
+
+    with (
+        patch("deerflow.mcp.tools.get_session_pool", return_value=mock_pool),
+        patch("deerflow.mcp.tools.get_paths", return_value=MagicMock()),
+        patch(
+            "deerflow.mcp.tools._prepare_stdio_workspace",
+            return_value=(tmp_path, tmp_path / "tmp", {}),
+        ),
+    ):
+        wrapped = _make_session_pool_tool(
+            _tool("github_search"),
+            "github",
+            {"transport": "stdio", "command": "mcp-server", "args": []},
+            tool_call_timeout=0.25,
+            session_init_timeout=5.0,
+            tool_name_prefix=False,
+        )
+        await wrapped.coroutine(query="repositories")
+
+    mock_session.call_tool.assert_awaited_once_with(
+        "github_search",
+        {"query": "repositories"},
+        read_timeout_seconds=timedelta(seconds=0.25),
+    )

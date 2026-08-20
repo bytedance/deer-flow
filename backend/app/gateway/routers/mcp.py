@@ -382,6 +382,8 @@ class McpServerConfigResponse(BaseModel):
     tool_name_prefix: bool = Field(default=True, description="Whether to prefix discovered tool names with the MCP server name")
     tool_call_timeout: float | None = Field(
         default=None,
+        gt=0,
+        allow_inf_nan=False,
         description="Timeout in seconds for individual stdio MCP calls and durable-task calls on every transport",
     )
     # Default matches McpServerConfig: this model's defaults feed model_dump()
@@ -389,6 +391,8 @@ class McpServerConfigResponse(BaseModel):
     # omits the field must get the same bring-up timeout as a file-created one.
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        gt=0,
+        allow_inf_nan=False,
         description="Timeout in seconds for MCP server bring-up and durable HTTP/SSE task-session initialization; null means no timeout",
     )
     task_toolsets: list[McpTaskToolsetConfig] = Field(
