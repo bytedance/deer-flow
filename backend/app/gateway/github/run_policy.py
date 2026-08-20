@@ -104,6 +104,7 @@ def register_policy() -> None:
         # GitHub webhooks have no synchronous human — ask_clarification
         # would dead-end the run.
         is_interactive=False,
+        interaction_mode="webhook",
         # Autonomous coder runs (clone -> edit -> test -> push -> PR)
         # routinely need more than the 100 super-step interactive ceiling.
         # Per-agent overrides via GitHubAgentConfig.recursion_limit still

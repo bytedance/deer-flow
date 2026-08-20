@@ -856,6 +856,24 @@ def test_non_interactive_context_override_honored_for_internal_caller():
     assert config["configurable"]["model_name"] == "gpt"
 
 
+def test_run_interaction_mode_is_internal_runtime_only():
+    from app.gateway.services import build_run_config, merge_run_context_overrides, strip_internal_context_keys
+
+    external = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(external, {"run_interaction_mode": "scheduled"})
+    assert "run_interaction_mode" not in external.get("context", {})
+    assert "run_interaction_mode" not in external.get("configurable", {})
+
+    internal = build_run_config("thread-1", None, None)
+    merge_run_context_overrides(internal, {"run_interaction_mode": "scheduled"}, internal=True)
+    assert internal["context"]["run_interaction_mode"] == "scheduled"
+    assert "run_interaction_mode" not in internal.get("configurable", {})
+
+    smuggled = build_run_config("thread-1", {"context": {"run_interaction_mode": "scheduled"}}, None)
+    strip_internal_context_keys(smuggled)
+    assert "run_interaction_mode" not in smuggled.get("context", {})
+
+
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
@@ -2199,7 +2217,11 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
 
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["context"] == {
+        "run_interaction_mode": "scheduled",
+        "non_interactive": True,
+        "user_id": "user-1",
+    }
     assert captured["metadata"] == {"scheduled_task_id": "task-1"}
     assert captured["if_not_exists"] == "create"
     assert captured["on_completion"] is None

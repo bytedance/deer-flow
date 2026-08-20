@@ -524,6 +524,7 @@ def test_github_policy_is_registered_on_import() -> None:
     policy = CHANNEL_RUN_POLICY.get("github")
     assert policy is not None
     assert policy.is_interactive is False
+    assert policy.interaction_mode == "webhook"
     assert policy.default_recursion_limit == 250
     assert policy.credentials_provider is not None
 
@@ -548,6 +549,7 @@ async def test_apply_channel_policy_installs_token_for_github(monkeypatch: pytes
     assert run_context["github_token"] == "ghs_unified"
     # Non-interactive flag is set in the same call — one method, one place.
     assert run_context["disable_clarification"] is True
+    assert run_context["run_interaction_mode"] == "webhook"
 
 
 @pytest.mark.asyncio

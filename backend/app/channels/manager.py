@@ -1497,10 +1497,11 @@ class ChannelManager:
         Run AFTER ``_resolve_run_params`` (which produced ``run_context``)
         and BEFORE the agent runs. Covers:
 
-        * ``disable_clarification`` for non-interactive channels —
-          ``ClarificationMiddleware`` would otherwise dead-end a webhook
-          run waiting for a synchronous reply that only arrives as a
-          later, separate webhook delivery.
+        * ``run_interaction_mode`` plus the legacy
+          ``disable_clarification`` defense-in-depth flag for
+          non-interactive channels. The mode selects matching lead-agent
+          tools and prompt guidance, while the legacy middleware flag keeps
+          old callers from dead-ending if a stale model attempts the tool.
         * Channel-specific credentials provider — e.g. the GitHub channel
           installs a token-mint callable so ``bash_tool`` can resolve a
           fresh installation token on every invocation (longer than the
@@ -1518,6 +1519,8 @@ class ChannelManager:
         policy = CHANNEL_RUN_POLICY.get(msg.channel_name)
         if policy is None:
             return None
+        if policy.interaction_mode != "interactive":
+            run_context["run_interaction_mode"] = policy.interaction_mode
         if not policy.is_interactive:
             run_context["disable_clarification"] = True
         if policy.credentials_provider is not None:

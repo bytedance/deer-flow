@@ -45,6 +45,10 @@ class ChannelRunPolicy:
             judgment" ToolMessage instead of interrupting via
             ``Command(goto=END)``. Defaults to True (the safe default
             for an IM channel).
+        interaction_mode: Trusted mode forwarded to the lead agent so its
+            toolset and prompt use the same interaction policy. Webhook
+            channels should use ``"webhook"``; unattended scheduler runs
+            use ``"scheduled"`` directly. Defaults to ``"interactive"``.
         default_recursion_limit: When set, the manager raises
             ``run_config["recursion_limit"]`` to ``max(existing,
             limit)``. None leaves the global default (100) untouched —
@@ -102,6 +106,7 @@ class ChannelRunPolicy:
     """
 
     is_interactive: bool = True
+    interaction_mode: str = "interactive"
     default_recursion_limit: int | None = None
     credentials_provider: Callable[[InboundMessage, dict[str, Any]], Awaitable[None]] | None = None
     requires_bound_identity: bool = True
