@@ -12,12 +12,8 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
-import { AsterismMark } from "@/components/workspace/skins/asterism-mark";
-import { playWorkspaceIntro } from "@/components/workspace/skins/workspace-intro-event";
 import { enUS, isLocale, zhCN, type Locale } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
-import { useSkin, type SkinId } from "@/core/skins";
-import { applyObservatoryTheme } from "@/core/skins/theme-transition";
 import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
@@ -29,8 +25,7 @@ const languageOptions: { value: Locale; label: string }[] = [
 
 export function AppearanceSettingsPage() {
   const { t, locale, changeLocale } = useI18n();
-  const { theme, setTheme, systemTheme, resolvedTheme } = useTheme();
-  const { skin, setSkin } = useSkin();
+  const { theme, setTheme, systemTheme } = useTheme();
   const currentTheme = (theme ?? "system") as "system" | "light" | "dark";
 
   const themeOptions = useMemo(
@@ -65,30 +60,15 @@ export function AppearanceSettingsPage() {
   );
 
   return (
-    <div className="obs-appearance space-y-8">
+    <div className="space-y-8">
       <SettingsSection
         title={t.settings.appearance.skinTitle}
         description={t.settings.appearance.skinDescription}
       >
-        <div className="grid gap-3 lg:grid-cols-2">
+        <div className="grid gap-3">
           <SkinCard
-            id="classic"
-            active={skin === "classic"}
             name={t.skins.classic.name}
             tagline={t.skins.classic.tagline}
-            preview="classic"
-            onSelect={setSkin}
-          />
-          <SkinCard
-            id="observatory"
-            active={skin === "observatory"}
-            name={t.skins.observatory.name}
-            tagline={t.skins.observatory.tagline}
-            preview="observatory"
-            onSelect={(id) => {
-              setSkin(id);
-              playWorkspaceIntro();
-            }}
           />
         </div>
       </SettingsSection>
@@ -109,18 +89,7 @@ export function AppearanceSettingsPage() {
               active={currentTheme === option.id}
               mode={option.id as "system" | "light" | "dark"}
               systemTheme={systemTheme}
-              onSelect={(value) => {
-                if (skin === "observatory") {
-                  applyObservatoryTheme(
-                    value,
-                    resolvedTheme,
-                    setTheme,
-                    systemTheme,
-                  );
-                  return;
-                }
-                setTheme(value);
-              }}
+              onSelect={setTheme}
             />
           ))}
         </div>
@@ -180,7 +149,7 @@ function ThemePreviewCard({
       type="button"
       onClick={() => onSelect(mode)}
       className={cn(
-        "obs-theme-card group flex h-full flex-col gap-3 rounded-lg border p-4 text-left transition-all",
+        "group flex h-full flex-col gap-3 rounded-lg border p-4 text-left transition-all",
         active
           ? "border-primary ring-primary/30 shadow-sm ring-2"
           : "hover:border-border hover:shadow-sm",
@@ -240,69 +209,17 @@ function ThemePreviewCard({
   );
 }
 
-function SkinCard({
-  id,
-  active,
-  name,
-  tagline,
-  preview,
-  onSelect,
-}: {
-  id: SkinId;
-  active: boolean;
-  name: string;
-  tagline: string;
-  preview: "classic" | "observatory";
-  onSelect: (id: SkinId) => void;
-}) {
-  const observatory = preview === "observatory";
+function SkinCard({ name, tagline }: { name: string; tagline: string }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(id)}
-      className={cn(
-        "obs-skin-card relative flex h-full flex-col gap-3 overflow-hidden rounded-lg border p-4 text-left transition-all",
-        observatory && "obs-skin-card--observatory",
-        active
-          ? "border-primary ring-primary/30 shadow-sm ring-2"
-          : "hover:border-border hover:shadow-sm",
-      )}
-    >
-      {active && observatory ? (
-        <AsterismMark className="text-primary absolute top-3 right-3 size-5" />
-      ) : null}
-      <div
-        className={cn(
-          "relative h-20 overflow-hidden rounded-md border",
-          observatory ? "bg-[#0b1020]" : "bg-[#f6f1e7]",
-        )}
-      >
-        {observatory ? (
-          <div
-            className="absolute inset-0 opacity-80"
-            style={{
-              backgroundImage:
-                "radial-gradient(1.4px 1.4px at 18% 30%, rgba(231,236,246,.55) 50%, transparent 51%), radial-gradient(1px 1px at 42% 70%, rgba(126,182,255,.7) 50%, transparent 51%), radial-gradient(1.6px 1.6px at 76% 24%, rgba(231,236,246,.45) 50%, transparent 51%)",
-            }}
-          />
-        ) : null}
-        <div
-          className={cn(
-            "absolute top-2 bottom-2 left-2 w-10 rounded-sm",
-            observatory ? "bg-[#10182c]" : "bg-[#efe6d6]",
-          )}
-        />
-        <div
-          className={cn(
-            "absolute top-5 right-3 h-6 w-16 rounded-sm",
-            observatory ? "bg-[#7eb6ff]" : "bg-[#3a352d]",
-          )}
-        />
+    <div className="relative flex h-full flex-col gap-3 overflow-hidden rounded-lg border p-4 text-left">
+      <div className="relative h-20 overflow-hidden rounded-md border bg-[#f6f1e7]">
+        <div className="absolute top-2 bottom-2 left-2 w-10 rounded-sm bg-[#efe6d6]" />
+        <div className="absolute top-5 right-3 h-6 w-16 rounded-sm bg-[#3a352d]" />
       </div>
       <div className="space-y-1">
         <div className="text-sm font-semibold">{name}</div>
         <p className="text-muted-foreground text-xs leading-snug">{tagline}</p>
       </div>
-    </button>
+    </div>
   );
 }
