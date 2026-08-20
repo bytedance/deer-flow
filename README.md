@@ -1137,6 +1137,12 @@ creates while Redis or initial inventory is unavailable. Run Redis with persiste
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.
 
+Each E2B mount upload pass accepts at most 512 MiB and 2,000 files. The pass
+also has a cooperative 120-second deadline. Skill projections and configured
+mounts share these limits. The provider checks the deadline before each mount
+and during directory preflight. The deadline stops new file uploads after it
+expires. It does not interrupt active filesystem or E2B SDK calls.
+
 An E2B VM keeps its slot until E2B confirms destruction. This rule covers
 create and reclaim operations. Discovery can find a VM from another Gateway.
 Shutdown closes an unowned discovery client without destroying its VM.
@@ -1153,7 +1159,7 @@ The built-in `grep` tool searches either one text file or all matching text file
 
 Image bytes loaded for a vision-model call are transient: DeerFlow removes the hidden base64 message after the model consumes it so later checkpoints do not keep duplicating that payload.
 
-After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes. Large, binary, or sensitive-looking files are shown as metadata only.
+After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
 
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
 
@@ -1475,4 +1481,4 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
+[![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
