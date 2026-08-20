@@ -542,7 +542,16 @@ def test_make_lead_agent_reads_runtime_options_from_context(monkeypatch):
     assert result["model"] is not None
 
 
-def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch):
+@pytest.mark.parametrize(
+    "interaction_context",
+    [
+        {"non_interactive": True},
+        {"run_interaction_mode": "webhook"},
+        {"run_interaction_mode": "scheduled"},
+        {"run_interaction_mode": "autonomous"},
+    ],
+)
+def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(monkeypatch, interaction_context):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
 
     import deerflow.tools as tools_module
@@ -568,7 +577,7 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
                 "model_name": "safe-model",
                 "thinking_enabled": False,
                 "subagent_enabled": False,
-                "non_interactive": True,
+                **interaction_context,
             }
         }
     )

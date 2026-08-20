@@ -2279,7 +2279,11 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["body"].config == {"recursion_limit": 1000}
-    assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
+    assert captured["context"] == {
+        "run_interaction_mode": "scheduled",
+        "non_interactive": True,
+        "user_id": "user-1",
+    }
     assert captured["metadata"] == {
         "scheduled_task_id": "task-1",
         "scheduled_task_run_id": "task-run-1",
