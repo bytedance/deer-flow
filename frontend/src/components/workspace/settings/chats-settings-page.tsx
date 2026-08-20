@@ -28,6 +28,7 @@ export function ChatsSettingsPage() {
     isFetchingNextPage,
     isLoading,
     error,
+    refetch,
   } = useInfiniteThreads();
   const threads = useMemo(
     () => infiniteThreads?.pages.flat() ?? [],
@@ -63,7 +64,8 @@ export function ChatsSettingsPage() {
     return () => observer.disconnect();
   }, [fetchNextPage, hasNextPage, isFetchingNextPage, isSearching]);
 
-  const showSkeleton = isLoading || (error && threads.length === 0);
+  const showError = Boolean(error && threads.length === 0);
+  const showSkeleton = isLoading && !showError;
 
   return (
     <SettingsSection
@@ -86,7 +88,19 @@ export function ChatsSettingsPage() {
       </div>
 
       {/* List */}
-      {showSkeleton ? (
+      {showError ? (
+        <div
+          role="alert"
+          className="flex flex-col items-center justify-center gap-3 rounded-lg border py-12 text-center"
+        >
+          <div className="text-destructive text-sm font-medium">
+            {t.chats.loadError}: {error?.message}
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void refetch()}>
+            {t.chats.retry}
+          </Button>
+        </div>
+      ) : showSkeleton ? (
         <div className="overflow-hidden rounded-lg border">
           {[0, 1, 2, 3, 4].map((item) => (
             <div

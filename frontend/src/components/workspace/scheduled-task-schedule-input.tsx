@@ -161,12 +161,25 @@ export function ScheduledTaskScheduleInput({
   // value always matches what the user sees in the form.
   useEffect(() => {
     if (scheduleType === "once") {
-      const runAtLocal =
-        onceYear && onceMonth && onceDay
-          ? `${onceYear}-${pad2(Number(onceMonth))}-${pad2(
-              Number(onceDay),
-            )}${onceTime ? `T${onceTime}` : ""}`
-          : "";
+      const year = Number(onceYear);
+      const month = Number(onceMonth);
+      const day = Number(onceDay);
+      const validDate =
+        onceYear &&
+        onceMonth &&
+        onceDay &&
+        Number.isInteger(year) &&
+        Number.isInteger(month) &&
+        Number.isInteger(day) &&
+        year >= 1970 &&
+        month >= 1 &&
+        month <= 12 &&
+        day >= 1 &&
+        day <= 31 &&
+        new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+      const runAtLocal = validDate
+        ? `${onceYear}-${pad2(month)}-${pad2(day)}${onceTime ? `T${onceTime}` : ""}`
+        : "";
       const runAt = runAtLocal ? zonedLocalToUtcIso(runAtLocal, timezone) : "";
       onChangeRef.current({
         schedule_type: "once",

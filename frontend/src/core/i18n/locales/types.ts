@@ -494,6 +494,8 @@ export interface Translations {
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
+    loadError: string;
+    retry: string;
     pinChat: string;
     unpinChat: string;
     pinChatFailed: string;
