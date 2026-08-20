@@ -29,12 +29,18 @@ export function ObservatoryOverlays() {
 
   useEffect(() => {
     if (skin !== "observatory") return;
-    return subscribeObservatoryHorizon((dir) => {
+    let timer = 0;
+    const unsubscribe = subscribeObservatoryHorizon((dir) => {
       setHorizonDir(dir);
       setOrbitKey((value) => value + 1);
       setHorizonOn(true);
-      window.setTimeout(() => setHorizonOn(false), HORIZON_MS);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setHorizonOn(false), HORIZON_MS);
     });
+    return () => {
+      window.clearTimeout(timer);
+      unsubscribe();
+    };
   }, [skin]);
 
   if (skin !== "observatory") return null;

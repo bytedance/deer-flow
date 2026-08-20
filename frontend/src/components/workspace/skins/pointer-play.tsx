@@ -111,6 +111,7 @@ export function PointerPlay({
       return;
     let frame = 0;
     const tick = () => {
+      let moved = false;
       const next = homesRef.current.map((home, index) => {
         const current = starsRef.current[index] ?? home;
         const goal = targetOf(
@@ -120,14 +121,18 @@ export function PointerPlay({
           size.w - 14,
           size.h - 14,
         );
-        return {
-          ...home,
-          x: current.x + (goal.x - current.x) * 0.06,
-          y: current.y + (goal.y - current.y) * 0.06,
-        };
+        const x = current.x + (goal.x - current.x) * 0.06;
+        const y = current.y + (goal.y - current.y) * 0.06;
+        if (Math.abs(x - current.x) > 0.05 || Math.abs(y - current.y) > 0.05) {
+          moved = true;
+        }
+        return { ...home, x, y };
       });
-      starsRef.current = next;
-      setStars(next);
+      if (moved) {
+        starsRef.current = next;
+        setStars(next);
+        setMouse(mouseRef.current);
+      }
       frame = window.requestAnimationFrame(tick);
     };
     frame = window.requestAnimationFrame(tick);
@@ -184,7 +189,7 @@ export function PointerPlay({
   useEffect(() => {
     if (skin !== "observatory") return;
     const onMove = (event: PointerEvent) => {
-      setMouse({ x: event.clientX, y: event.clientY });
+      mouseRef.current = { x: event.clientX, y: event.clientY };
     };
     window.addEventListener("pointermove", onMove, { passive: true });
     return () => window.removeEventListener("pointermove", onMove);

@@ -8,7 +8,7 @@ import { useSkin } from "@/core/skins";
 export function PageEnter({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { skin } = useSkin();
-  const [on, setOn] = useState(true);
+  const [on, setOn] = useState(false);
 
   useLayoutEffect(() => {
     if (skin !== "observatory") {
