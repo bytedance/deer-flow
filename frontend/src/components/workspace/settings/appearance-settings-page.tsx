@@ -65,7 +65,7 @@ export function AppearanceSettingsPage() {
         title={t.settings.appearance.skinTitle}
         description={t.settings.appearance.skinDescription}
       >
-        <div className="grid gap-3">
+        <div className="grid gap-3 sm:max-w-sm">
           <SkinCard
             name={t.skins.classic.name}
             tagline={t.skins.classic.tagline}
