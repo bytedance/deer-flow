@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 ContextSizeType = Literal["fraction", "tokens", "messages"]
 DEFAULT_SKILL_FILE_READ_TOOL_NAMES: tuple[str, ...] = ("read_file", "read", "view", "cat")
@@ -17,6 +17,24 @@ class ContextSize(BaseModel):
 
     type: ContextSizeType = Field(description="Type of context size specification")
     value: int | float = Field(description="Value for the context size specification")
+
+    @model_validator(mode="after")
+    def _validate_value_range(self) -> "ContextSize":
+        """Reject value ranges that would silently produce a dead threshold.
+
+        A fraction written percent-style (``value: 80`` instead of ``0.8``) resolves
+        to ``int(max_input_tokens * 80)`` — a threshold the context can never reach,
+        so the trigger silently never fires. Failing at config load turns that
+        foot-gun into an actionable error, consistent with how fraction clauses
+        degrade (loudly) elsewhere. Absolute ``tokens`` / ``messages`` values must
+        simply be positive to describe a usable threshold.
+        """
+        if self.type == "fraction":
+            if not 0 < self.value <= 1:
+                raise ValueError(f"fraction ContextSize value must be in (0, 1] (got {self.value!r}) — write 0.8 for 80%, not 80")
+        elif self.value <= 0:
+            raise ValueError(f"{self.type} ContextSize value must be positive (got {self.value!r})")
+        return self
 
     def to_tuple(self) -> tuple[ContextSizeType, int | float]:
         """Convert to tuple format expected by SummarizationMiddleware."""

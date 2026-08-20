@@ -1611,11 +1611,13 @@ summarization:
     # - type: messages
     #   value: 50
     # Uncomment to trigger when 80% of model's max input tokens is reached.
-    # Requires the model's `context_window` to be declared above: fraction
-    # thresholds resolve from that declared capacity (third-party
-    # OpenAI-compatible models carry no built-in profile). Without it the
-    # fraction clause is dropped with a warning and any remaining absolute
-    # clauses keep working.
+    # The percentage resolves from the SUMMARY model's declared `context_window`
+    # (summarization.model_name when set, else the run's own model): declare it
+    # on that models entry — third-party OpenAI-compatible models carry no
+    # built-in profile. Without it the fraction clause is dropped with a warning
+    # and any remaining absolute clauses keep working. If a separate summary
+    # model with a larger window is configured, prefer absolute `tokens`
+    # thresholds sized for the run model instead.
     # - type: fraction
     #   value: 0.8
 

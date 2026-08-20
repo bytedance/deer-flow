@@ -10,12 +10,16 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, SystemMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.constants import TAG_NOSTREAM
+from pydantic import ValidationError
 
 from deerflow.agents.memory.summarization_hook import memory_flush_hook
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, DynamicContextMiddleware, is_dynamic_context_reminder
 from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummarizationMiddleware, SummarizationEvent, SummaryGenerationError, create_summarization_middleware
 from deerflow.agents.thread_state import ThreadState
+from deerflow.config.app_config import AppConfig
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 
 
@@ -1151,20 +1155,25 @@ def _profileless_anchor_stub() -> MagicMock:
     return model
 
 
-def test_factory_fraction_trigger_without_profile_degrades_to_disabled(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
+def test_factory_fraction_only_trigger_degrades_to_manual_compaction_only(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
     """#3103 mechanism (b): a fraction trigger whose anchor exposes no usable profile
     must not raise out of ``create_summarization_middleware`` (which used to fail the
-    whole agent build). With no absolute clause to keep, compaction is disabled and
-    the warning names the config fix."""
+    whole agent build). With no absolute clause to keep, the middleware still
+    constructs as never-firing so manual compaction (/compact, force=True, never
+    consults trigger clauses) keeps working; the warning names the config fix."""
     fake_model = _profileless_anchor_stub()
     monkeypatch.setattr("deerflow.agents.middlewares.summarization_middleware.create_chat_model", lambda **kw: fake_model)
     cfg = _factory_app_config(("models0",), summarization_kwargs={"trigger": ContextSize(type="fraction", value=0.8)})
 
     with caplog.at_level("WARNING", logger="deerflow.agents.middlewares.summarization_middleware"):
-        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0")
+        middleware = create_summarization_middleware(app_config=cfg, run_model_name="models0", keep=("messages", 2))
 
-    assert middleware is None  # degraded, not raised
+    assert middleware is not None  # degraded, not raised — and not disabled either
     assert "context_window" in caplog.text  # the warning names the fix
+    assert "Manual compaction" in caplog.text  # and says manual /compact still works
+    result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
+    assert result is not None  # forced compaction never consults trigger clauses
+    assert result.summary_text == "summary"
 
 
 def test_factory_drops_only_fraction_clauses_and_keeps_absolute_ones(monkeypatch, caplog: pytest.LogCaptureFixture) -> None:
@@ -1236,6 +1245,61 @@ def test_factory_fraction_trigger_survives_when_anchor_has_profile(monkeypatch) 
     result = middleware.compact_state({"messages": _messages()}, _runtime(), force=True)
     assert result is not None
     assert result.summary_text == "ok"
+
+
+def test_context_size_rejects_percent_style_fraction_value() -> None:
+    """A fraction written percent-style (80 instead of 0.8) would resolve to
+    int(capacity * 80) — a threshold the context can never reach, so the trigger
+    silently never fires. Config load is the failure point, not a dead trigger."""
+    with pytest.raises(ValidationError, match="fraction ContextSize value must be in"):
+        ContextSize(type="fraction", value=80)
+
+
+def test_context_size_rejects_non_positive_absolute_values() -> None:
+    with pytest.raises(ValidationError, match="tokens ContextSize value must be positive"):
+        ContextSize(type="tokens", value=0)
+    with pytest.raises(ValidationError, match="messages ContextSize value must be positive"):
+        ContextSize(type="messages", value=-5)
+
+
+def test_context_size_accepts_boundary_values() -> None:
+    assert ContextSize(type="fraction", value=1).to_tuple() == ("fraction", 1)
+    assert ContextSize(type="fraction", value=0.8).to_tuple() == ("fraction", 0.8)
+    assert ContextSize(type="messages", value=20).to_tuple() == ("messages", 20)
+
+
+def test_factory_wiring_context_window_to_fraction_trigger_end_to_end() -> None:
+    """Pins the two halves of the fix together without monkeypatching
+    ``create_chat_model``: a ``context_window``-declared model gets a profile from
+    the real model factory, the fraction clause survives
+    ``_drop_unusable_fraction_clauses``, and the middleware constructs with the
+    trigger intact. The middleware-side tests stub the factory and the
+    factory-side tests stop at captured kwargs — this is the automated pin of the
+    shipped contract (the manual E2E in the PR body was the only wiring proof)."""
+    model = ModelConfig(
+        name="gw-64k",
+        display_name="gw-64k",
+        description=None,
+        use="langchain_openai:ChatOpenAI",
+        model="some-64k-model",
+        base_url="https://third-party-gateway.example.com/v1",
+        api_key="sk-test",
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+        context_window=65_536,
+    )
+    cfg = AppConfig(
+        models=[model],
+        sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        summarization=SummarizationConfig(enabled=True, trigger=ContextSize(type="fraction", value=0.8)),
+        memory=MemoryConfig(enabled=False),
+    )
+
+    middleware = create_summarization_middleware(app_config=cfg, run_model_name="gw-64k")
+
+    assert middleware is not None  # on main this raises: no profile without the factory translation
+    assert middleware.model.profile == {"max_input_tokens": 65_536}
 
 
 class _RaisingTextResponse:

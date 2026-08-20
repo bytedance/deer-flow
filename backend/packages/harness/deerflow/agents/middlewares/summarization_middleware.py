@@ -861,20 +861,23 @@ def create_summarization_middleware(
     # (``profile["max_input_tokens"]``) — the default for any third-party
     # OpenAI-compatible model whose ``context_window`` was not declared in
     # config.yaml (#3103: `trigger: fraction` used to fail the whole agent build).
-    # Degrade instead: drop the unusable fraction clauses (absolute ones survive),
-    # fall the keep policy back to its messages default, and disable compaction
-    # only when no usable trigger clause remains. The factory attaches a profile
-    # from a declared ``context_window``, so this path is reached only when the
-    # model's capacity is genuinely unknown.
+    # Degrade instead: drop the unusable fraction clauses (absolute ones survive)
+    # and fall the keep policy back to its messages default. When every configured
+    # trigger clause is dropped, construction continues with ``trigger=None`` —
+    # the never-firing shape — so manual compaction (``/compact``, which runs with
+    # ``force=True`` and never consults trigger clauses) keeps working for a
+    # profile-less model instead of reporting "compaction is disabled". The factory
+    # attaches a profile from a declared ``context_window``, so this path is
+    # reached only when the model's capacity is genuinely unknown.
     trigger, keep_tuple, has_usable_trigger = _drop_unusable_fraction_clauses(anchor_model, trigger, keep or config.keep.to_tuple())
     if not has_usable_trigger:
         logger.warning(
-            "Summarization is enabled but every configured trigger is fraction-based while anchor model %r "
+            "Every configured summarization trigger is fraction-based but anchor model %r "
             "exposes no context window (no `context_window` on the model in config.yaml, no provider profile); "
-            "compaction is unavailable for this build. Declare `context_window` on the model to enable fraction triggers.",
+            "auto-compaction will not fire for this build. Declare `context_window` on the model to enable fraction "
+            "triggers. Manual compaction (/compact) remains available.",
             anchor_name,
         )
-        return None
     kwargs: dict[str, Any] = {
         "model": anchor_model,
         "trigger": trigger,
