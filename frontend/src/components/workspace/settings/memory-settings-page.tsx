@@ -53,6 +53,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function hasAnyMemorySummary(memory: UserMemory): boolean {
+  return Boolean(
+    memory.user.workContext.summary ||
+    memory.user.personalContext.summary ||
+    memory.user.topOfMind.summary ||
+    memory.history.recentMonths.summary ||
+    memory.history.earlierContext.summary ||
+    memory.history.longTermBackground.summary,
+  );
+}
+
 function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
   return (
     isRecord(value) &&
@@ -373,7 +384,7 @@ export function MemorySettingsPage() {
           </div>
         ) : (
           <div className="space-y-4">
-            {memory.facts.length === 0 ? (
+            {memory.facts.length === 0 && !hasAnyMemorySummary(memory) ? (
               <div className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
                 {memoryFullyEmpty}
               </div>
