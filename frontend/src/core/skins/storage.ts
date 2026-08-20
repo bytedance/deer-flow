@@ -1,9 +1,4 @@
-import {
-  DEFAULT_SKIN,
-  SKIN_STORAGE_KEY,
-  isSkinId,
-  type SkinId,
-} from "./types";
+import { DEFAULT_SKIN, SKIN_STORAGE_KEY, isSkinId, type SkinId } from "./types";
 
 export function readStoredSkin(): SkinId {
   if (typeof window === "undefined") {
