@@ -20,6 +20,18 @@ export default function RootLayout({
       suppressHydrationWarning
     >
       <body>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `(function () {
+              try {
+                var s = localStorage.getItem("deerflow.skin");
+                if (s === "observatory") {
+                  document.documentElement.setAttribute("data-skin", "observatory");
+                }
+              } catch (e) {}
+            })();`,
+          }}
+        />
         <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
           {children}
         </ThemeProvider>
