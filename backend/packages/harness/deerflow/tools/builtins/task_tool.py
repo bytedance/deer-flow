@@ -927,8 +927,6 @@ async def task_tool(
     trace_id = None
     user_id = None
     deerflow_trace_id = None
-    parent_thinking_enabled = None
-    parent_reasoning_effort = None
 
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
@@ -948,8 +946,6 @@ async def task_tool(
 
         # Try to get parent model from configurable
         parent_model = metadata.get("model_name")
-        parent_thinking_enabled = metadata.get("thinking_enabled")
-        parent_reasoning_effort = metadata.get("reasoning_effort")
 
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
@@ -1051,8 +1047,6 @@ async def task_tool(
         "config": config,
         "tools": tools,
         "parent_model": parent_model,
-        "parent_thinking_enabled": parent_thinking_enabled,
-        "parent_reasoning_effort": parent_reasoning_effort,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "uploaded_files": uploaded_files,

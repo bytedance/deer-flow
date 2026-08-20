@@ -1,7 +1,7 @@
 """Subagent configuration definitions."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from deerflow.config.prompt_overlay import PromptOverlay
 
@@ -26,7 +26,7 @@ class SubagentConfig:
                 this subagent's tools.
         model: Model to use - 'inherit' uses parent's model.
         thinking_enabled: Whether to enable thinking/reasoning for this subagent.
-                None means inherit from parent or use runtime default.
+                None means use default (False).
         reasoning_effort: Reasoning effort level ('low', 'medium', 'high') or None.
         max_turns: Maximum agent turns — model call plus the tools it runs —
             before stopping. Built-in agents use the value set here
@@ -50,7 +50,7 @@ class SubagentConfig:
     skills: list[str] | None = None
     model: str = "inherit"
     thinking_enabled: bool | None = None
-    reasoning_effort: str | None = None
+    reasoning_effort: Literal["low", "medium", "high"] | None = None
     max_turns: int = 50
     timeout_seconds: int = 900
     prompt_overlay: PromptOverlay = field(default_factory=PromptOverlay)

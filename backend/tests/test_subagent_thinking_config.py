@@ -28,22 +28,11 @@ def _reset_subagents_config(**kwargs) -> None:
     load_subagents_config_from_dict(kwargs)
 
 
-def make_executor(thinking_enabled=None, reasoning_effort=None, parent_thinking=None, parent_reasoning=None):
-    """Simulate SubagentExecutor's thinking resolution logic."""
-    if thinking_enabled is not None:
-        result_thinking = thinking_enabled
-    elif parent_thinking is not None:
-        result_thinking = parent_thinking
-    else:
-        result_thinking = False
-
-    if reasoning_effort is not None:
-        result_reasoning = reasoning_effort
-    elif parent_reasoning is not None:
-        result_reasoning = parent_reasoning
-    else:
-        result_reasoning = None
-
+def make_executor(thinking_enabled=None, reasoning_effort=None):
+    """Simulate SubagentExecutor's thinking resolution logic.
+    Config-only: no parent inheritance."""
+    result_thinking = thinking_enabled if thinking_enabled is not None else False
+    result_reasoning = reasoning_effort
     return result_thinking, result_reasoning
 
 
@@ -157,38 +146,27 @@ class TestSubagentsAppConfigThinkingGetters:
 
 
 class TestThinkingResolution:
-    """Test the resolution logic: config > parent > default (False)"""
+    """Test the resolution logic: config explicit > False (no parent inheritance)"""
 
-    def test_config_wins_over_parent(self):
-        t, r = make_executor(thinking_enabled=True, parent_thinking=False)
-        assert t is True
-
-    def test_config_wins_over_default(self):
+    def test_config_true_wins(self):
         t, r = make_executor(thinking_enabled=True)
         assert t is True
 
-    def test_parent_wins_when_config_is_none(self):
-        t, r = make_executor(parent_thinking=True)
-        assert t is True
-
-    def test_default_is_false_when_both_none(self):
+    def test_default_is_false(self):
         t, r = make_executor()
         assert t is False
+        assert r is None
 
     def test_reasoning_config_wins(self):
-        t, r = make_executor(reasoning_effort="high", parent_reasoning="low")
+        t, r = make_executor(reasoning_effort="high")
         assert r == "high"
-
-    def test_reasoning_parent_wins(self):
-        t, r = make_executor(parent_reasoning="medium")
-        assert r == "medium"
 
     def test_reasoning_default_is_none(self):
         t, r = make_executor()
         assert r is None
 
     def test_disabled_thinking_explicit(self):
-        t, r = make_executor(thinking_enabled=False, parent_thinking=True)
+        t, r = make_executor(thinking_enabled=False)
         assert t is False
 
     def test_reasoning_effort_with_thinking_enabled(self):

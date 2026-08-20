@@ -919,8 +919,6 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
-        parent_thinking_enabled: bool | None = None,
-        parent_reasoning_effort: str | None = None,
     ):
         """Initialize the executor.
 
@@ -979,8 +977,6 @@ class SubagentExecutor:
             context_snapshot: Optional immutable parent history captured by the
                 ordinary task tool at dispatch. Rendered as background data,
                 never as child execution evidence or inherited system authority.
-            parent_thinking_enabled: Parent's thinking_enabled setting for inheritance.
-            parent_reasoning_effort: Parent's reasoning_effort setting for inheritance.
         """
         self.config = config
         self.app_config = app_config
@@ -993,20 +989,11 @@ class SubagentExecutor:
             self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
-        # Resolve thinking_enabled: config > parent > default (False)
-        if config.thinking_enabled is not None:
-            self.thinking_enabled = config.thinking_enabled
-        elif parent_thinking_enabled is not None:
-            self.thinking_enabled = parent_thinking_enabled
-        else:
-            self.thinking_enabled = False
-        # Resolve reasoning_effort: config > parent > None
-        if config.reasoning_effort is not None:
-            self.reasoning_effort = config.reasoning_effort
-        elif parent_reasoning_effort is not None:
-            self.reasoning_effort = parent_reasoning_effort
-        else:
-            self.reasoning_effort = None
+        # Resolve thinking_enabled: config explicit > False
+        self.thinking_enabled = config.thinking_enabled if config.thinking_enabled is not None else False
+        # Resolve reasoning_effort: config explicit > None
+        self.reasoning_effort = config.reasoning_effort
+
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
@@ -1118,6 +1105,11 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
+        # Clamp thinking_enabled when the subagent's model does not support thinking
+        if self.thinking_enabled:
+            model_cfg = next((m for m in app_config.models if m.name == self.model_name), None)
+            if model_cfg is not None and not model_cfg.supports_thinking:
+                self.thinking_enabled = False
         model = create_chat_model(name=self.model_name, thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares

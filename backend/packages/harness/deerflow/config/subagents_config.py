@@ -109,11 +109,11 @@ class SubagentOverrideConfig(BaseModel):
     )
     thinking_enabled: bool | None = Field(
         default=None,
-        description="Whether to enable thinking/reasoning for this subagent (None = inherit)",
+        description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
     reasoning_effort: Literal["low", "medium", "high"] | None = Field(
         default=None,
-        description="Reasoning effort level - 'low', 'medium', or 'high' (None = inherit)",
+        description="Reasoning effort level - 'low', 'medium', or 'high' (None = no override)",
     )
     skills: list[str] | None = Field(
         default=None,
@@ -157,11 +157,11 @@ class CustomSubagentConfig(BaseModel):
     )
     thinking_enabled: bool | None = Field(
         default=None,
-        description="Whether to enable thinking/reasoning for this subagent (None = inherit)",
+        description="Whether to enable thinking/reasoning for this subagent (None = no override)",
     )
     reasoning_effort: Literal["low", "medium", "high"] | None = Field(
         default=None,
-        description="Reasoning effort level - 'low', 'medium', or 'high' (None = inherit)",
+        description="Reasoning effort level - 'low', 'medium', or 'high' (None = no override)",
     )
     max_turns: int = Field(
         default=50,
@@ -290,7 +290,7 @@ class SubagentsAppConfig(BaseModel):
             agent_name: The name of the subagent.
 
         Returns:
-            True/False if overridden, None otherwise (subagent will inherit from parent).
+            True/False if overridden, None otherwise (subagent uses default False).
         """
         override = self.agents.get(agent_name)
         if override is not None and override.thinking_enabled is not None:
@@ -304,7 +304,7 @@ class SubagentsAppConfig(BaseModel):
             agent_name: The name of the subagent.
 
         Returns:
-            Reasoning effort level if overridden, None otherwise (subagent will inherit from parent).
+            Reasoning effort level if overridden, None otherwise (subagent uses default None).
         """
         override = self.agents.get(agent_name)
         if override is not None and override.reasoning_effort is not None:
