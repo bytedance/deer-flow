@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Hashable
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from deerflow.persistence.agents.sql import get_sync_sessionmaker
@@ -73,5 +73,8 @@ class SqlManagedSubagentStore(ManagedSubagentStore):
 
     def signature(self) -> Hashable:
         with self._Session() as session:
-            count, latest_update = session.execute(select(func.count(ManagedSubagentRow.id), func.max(ManagedSubagentRow.updated_at))).one()
-        return (count, latest_update)
+            # COUNT + MAX(updated_at) misses an update from a node whose clock
+            # trails the current maximum. Preserve each row's timestamp so any
+            # definition change invalidates peer-process registry snapshots.
+            rows = session.execute(select(ManagedSubagentRow.id, ManagedSubagentRow.updated_at).order_by(ManagedSubagentRow.id.asc())).all()
+        return tuple((row_id, updated_at) for row_id, updated_at in rows)

@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 
 from deerflow.persistence.base import Base
 from deerflow.persistence.managed_subagents import (
@@ -67,6 +68,23 @@ def test_crud_and_signature(request, store_fixture):
     assert store.delete("researcher") is False
     with pytest.raises(FileNotFoundError):
         store.get("researcher")
+
+
+def test_sql_signature_detects_update_behind_existing_max_timestamp(sql_store):
+    sql_store.create(_definition("ahead"))
+    sql_store.create(_definition("writer"))
+
+    with sql_store._Session() as session:
+        ahead = session.execute(select(ManagedSubagentRow).where(ManagedSubagentRow.name == "ahead")).scalar_one()
+        ahead.updated_at = datetime.now(UTC) + timedelta(minutes=5)
+        session.commit()
+
+    before = sql_store.signature()
+    writer = sql_store.get("writer").model_copy(update={"description": "Updated by a trailing node"})
+    sql_store.update(writer)
+
+    assert sql_store.get("writer").description == "Updated by a trailing node"
+    assert sql_store.signature() != before
 
 
 @pytest.mark.parametrize("store_fixture", ["file_store", "sql_store"])

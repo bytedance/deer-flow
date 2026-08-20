@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentOverrideConfig, SubagentsAppConfig
@@ -65,9 +66,11 @@ def test_managed_definitions_cache_reuses_and_invalidates_store_snapshot(monkeyp
         def __init__(self):
             self.revision = 1
             self.definitions = [_managed("planner")]
+            self.signature_calls = 0
             self.list_calls = 0
 
         def signature(self):
+            self.signature_calls += 1
             return self.revision
 
         def cache_identity(self):
@@ -79,27 +82,65 @@ def test_managed_definitions_cache_reuses_and_invalidates_store_snapshot(monkeyp
 
     store = FakeStore()
     config = SubagentsAppConfig()
+    now = [100.0]
     registry._clear_managed_definitions_cache()
     monkeypatch.setattr(registry, "get_managed_subagent_store", lambda *_: store)
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
 
     assert "planner" in registry.get_subagent_names(app_config=config)
     assert registry.get_subagent_config("planner", app_config=config).description == "Managed planner"
+    assert store.signature_calls == 1
     assert store.list_calls == 1
 
     store.revision = 2
     store.definitions = [_managed("writer")]
+    now[0] += registry._MANAGED_SIGNATURE_TTL_SECONDS
 
     assert "writer" in registry.get_subagent_names(app_config=config)
     assert "planner" not in registry.get_subagent_names(app_config=config)
+    assert store.signature_calls == 2
     assert store.list_calls == 2
+
+
+def test_list_subagents_checks_managed_signature_once_per_ttl_window(monkeypatch):
+    class FakeStore:
+        def __init__(self):
+            self.signature_calls = 0
+            self.list_calls = 0
+            self.definitions = [_managed(f"worker-{index}") for index in range(25)]
+
+        def signature(self):
+            self.signature_calls += 1
+            return 1
+
+        def cache_identity(self):
+            return "signature-ttl-managed-subagent-store"
+
+        def list(self):
+            self.list_calls += 1
+            return self.definitions
+
+    store = FakeStore()
+    config = SubagentsAppConfig()
+    registry._clear_managed_definitions_cache()
+    monkeypatch.setattr(registry, "get_managed_subagent_store", lambda *_: store)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+
+    configs = registry.list_subagents(app_config=config)
+
+    assert len(configs) == 27
+    assert store.signature_calls == 1
+    assert store.list_calls == 1
 
 
 def test_managed_definitions_cache_serializes_concurrent_first_load(monkeypatch):
     class FakeStore:
         def __init__(self):
+            self.signature_calls = 0
             self.list_calls = 0
 
         def signature(self):
+            self.signature_calls += 1
             return 1
 
         def cache_identity(self):
@@ -113,9 +154,11 @@ def test_managed_definitions_cache_serializes_concurrent_first_load(monkeypatch)
     config = SubagentsAppConfig()
     registry._clear_managed_definitions_cache()
     monkeypatch.setattr(registry, "get_managed_subagent_store", lambda *_: store)
+    monkeypatch.setattr(time, "monotonic", lambda: 100.0)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: registry.get_subagent_names(app_config=config), range(16)))
 
     assert all("planner" in names for names in results)
+    assert store.signature_calls == 1
     assert store.list_calls == 1

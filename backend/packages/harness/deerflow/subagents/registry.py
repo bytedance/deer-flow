@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time
 from collections.abc import Hashable
 from dataclasses import replace
 from typing import Any
@@ -12,8 +13,9 @@ from deerflow.subagents.builtins import BUILTIN_SUBAGENTS
 from deerflow.subagents.config import SubagentConfig
 
 logger = logging.getLogger(__name__)
+_MANAGED_SIGNATURE_TTL_SECONDS = 1.0
 _managed_definitions_cache_lock = threading.RLock()
-_managed_definitions_cache: dict[Hashable, tuple[Hashable, tuple[ManagedSubagentDefinition, ...]]] = {}
+_managed_definitions_cache: dict[Hashable, tuple[float, Hashable, tuple[ManagedSubagentDefinition, ...]]] = {}
 
 
 def _resolve_subagents_app_config(app_config: Any | None = None):
@@ -65,13 +67,21 @@ def _managed_definitions(*, app_config: Any | None = None) -> tuple[ManagedSubag
     cache_key = store.cache_identity()
 
     with _managed_definitions_cache_lock:
-        signature = store.signature()
+        checked_at = time.monotonic()
         cached = _managed_definitions_cache.get(cache_key)
-        if cached is not None and cached[0] == signature:
-            return cached[1]
+        # A prompt/catalog pass can resolve every managed name separately.
+        # Avoid repeating the file stat sweep or SQL signature query for each
+        # lookup while keeping cross-process changes visible within one second.
+        if cached is not None and checked_at - cached[0] < _MANAGED_SIGNATURE_TTL_SECONDS:
+            return cached[2]
+
+        signature = store.signature()
+        if cached is not None and cached[1] == signature:
+            _managed_definitions_cache[cache_key] = (checked_at, signature, cached[2])
+            return cached[2]
 
         definitions = tuple(store.list())
-        _managed_definitions_cache[cache_key] = (signature, definitions)
+        _managed_definitions_cache[cache_key] = (checked_at, signature, definitions)
         return definitions
 
 
