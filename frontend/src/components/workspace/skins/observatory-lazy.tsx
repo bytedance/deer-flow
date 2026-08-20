@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useEffect } from "react";
 
 import { useSkin } from "@/core/skins";
 
@@ -16,6 +17,13 @@ const ObservatoryOverlays = dynamic(
 
 export function ObservatoryLazy() {
   const { skin } = useSkin();
+
+  useEffect(() => {
+    if (skin !== "observatory") return;
+    document.body.classList.add("obs-lock-scroll");
+    return () => document.body.classList.remove("obs-lock-scroll");
+  }, [skin]);
+
   if (skin !== "observatory") return null;
   return <ObservatoryOverlays />;
 }
