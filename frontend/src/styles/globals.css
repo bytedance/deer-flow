@@ -451,3 +451,15 @@ html.dark .shiki span {
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
 }
+
+:is(
+    button,
+    [role="button"],
+    [data-slot="dropdown-menu-item"],
+    [data-slot="dropdown-menu-checkbox-item"],
+    [data-slot="dropdown-menu-radio-item"],
+    [data-slot="dropdown-menu-sub-trigger"],
+    [data-slot="command-item"]
+  ):not(:disabled):not([aria-disabled="true"]) {
+  cursor: pointer;
+}
