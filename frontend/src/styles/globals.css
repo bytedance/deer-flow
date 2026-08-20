@@ -666,69 +666,6 @@ html.dark .shiki span {
   color: var(--muted-foreground);
   white-space: nowrap;
 }
-.obs-sky-toggle {
-  width: 52px;
-  height: 26px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--primary) 18%, var(--muted)),
-    var(--muted)
-  );
-  position: relative;
-  cursor: pointer;
-  padding: 0;
-  overflow: hidden;
-  flex: 0 0 auto;
-}
-.dark .obs-sky-toggle {
-  background: linear-gradient(180deg, var(--veil), var(--muted));
-}
-.obs-sky-toggle .orb {
-  position: absolute;
-  top: 3px;
-  left: 3px;
-  width: 18px;
-  height: 18px;
-  border-radius: 99px;
-  background: var(--sun);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--sun) 22%, transparent);
-  transition:
-    transform 0.7s cubic-bezier(0.7, 0, 0, 1),
-    background 0.5s ease,
-    box-shadow 0.5s ease;
-  z-index: 2;
-}
-.dark .obs-sky-toggle .orb {
-  transform: translateX(26px);
-  background: var(--moon-core);
-  box-shadow:
-    inset -4px -1px 0 var(--veil),
-    0 0 0 3px color-mix(in srgb, var(--primary) 22%, transparent);
-}
-.obs-sky-toggle .sky-dust {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background-image:
-    radial-gradient(
-      1.2px 1.2px at 72% 30%,
-      var(--star-bright) 50%,
-      transparent 51%
-    ),
-    radial-gradient(1px 1px at 84% 62%, var(--star) 50%, transparent 51%),
-    radial-gradient(
-      1.4px 1.4px at 64% 72%,
-      var(--star-bright) 50%,
-      transparent 51%
-    );
-  opacity: 0;
-  transition: opacity 0.5s ease;
-}
-.dark .obs-sky-toggle .sky-dust {
-  opacity: 1;
-}
 .obs-meter {
   display: flex;
   gap: 3px;
@@ -1237,13 +1174,6 @@ html[data-skin="observatory"] body {
   .obs-horizon,
   .obs-horizon-orbit,
   .obs-meter b,
-  .obs-sky-toggle .orb {
-    animation: none !important;
-    transition: none !important;
-    opacity: 1;
-    transform: none;
-    stroke-dashoffset: 0;
-  }
   .obs-idle-sky,
   .obs-horizon,
   .obs-pointer-layer {
