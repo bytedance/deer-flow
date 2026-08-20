@@ -36,4 +36,26 @@ describe("sha256Hex", () => {
     ).join("");
     expect(hexFromText(text)).toBe(expected);
   });
+
+  it("matches SHA-256 at the padding boundary (55 bytes)", () => {
+    // 55-byte input: the 8-byte length field lands exactly at the block boundary,
+    // the classic off-by-one spot for hand-rolled SHA-2 padding.
+    expect(hexFromText("a".repeat(55))).toBe(
+      "9f4390f8d30c2dd92ec9f095b65e2b9ae9b0a925a5258e241c9f1e910f734318",
+    );
+  });
+
+  it("matches SHA-256 at the padding boundary (56 bytes)", () => {
+    // 56-byte input: paddedLength flips from one to two blocks.
+    expect(hexFromText("a".repeat(56))).toBe(
+      "b35439a4ac6f0948b6d6f9e3c6af0f5f590ce20f1bde7090ef7970686ec6738a",
+    );
+  });
+
+  it("matches SHA-256 at the padding boundary (64 bytes)", () => {
+    // 64-byte input: exactly one full block, padding starts a second block.
+    expect(hexFromText("a".repeat(64))).toBe(
+      "ffe054fe7ae0cb6dc65c3af9b61d5209f439851db43d0ba5997337df154668eb",
+    );
+  });
 });
