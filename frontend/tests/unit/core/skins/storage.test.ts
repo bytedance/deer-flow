@@ -34,9 +34,9 @@ afterEach(() => {
 });
 
 describe("workspace skins", () => {
-  it("accepts classic and observatory", () => {
+  it("accepts classic and rejects the removed observatory skin", () => {
     expect(isSkinId("classic")).toBe(true);
-    expect(isSkinId("observatory")).toBe(true);
+    expect(isSkinId("observatory")).toBe(false);
     expect(isSkinId("glass")).toBe(false);
     expect(isSkinId(null)).toBe(false);
     expect(isSkinId("")).toBe(false);
@@ -68,7 +68,7 @@ describe("workspace skins", () => {
     expect(readStoredSkin()).toBe("classic");
   });
 
-  it("restores a stored observatory skin", () => {
+  it("falls back to classic when storage holds a removed skin", () => {
     Object.defineProperty(globalThis, "window", {
       configurable: true,
       value: {
@@ -78,7 +78,7 @@ describe("workspace skins", () => {
         },
       },
     });
-    expect(readStoredSkin()).toBe("observatory");
+    expect(readStoredSkin()).toBe("classic");
   });
 
   it("ignores write failures", () => {
@@ -92,10 +92,10 @@ describe("workspace skins", () => {
         },
       },
     });
-    expect(() => writeStoredSkin("observatory")).not.toThrow();
+    expect(() => writeStoredSkin("classic")).not.toThrow();
   });
 
-  it("omits data-skin for classic and sets it for other skins", () => {
+  it("omits data-skin for the default classic skin", () => {
     const dataset: Record<string, string | undefined> = { skin: "observatory" };
     Object.defineProperty(globalThis, "document", {
       configurable: true,
@@ -105,8 +105,6 @@ describe("workspace skins", () => {
     });
     applySkinToDocument("classic");
     expect(dataset.skin).toBeUndefined();
-    applySkinToDocument("observatory");
-    expect(dataset.skin).toBe("observatory");
   });
 
   it("treats missing window as reduced motion", () => {
