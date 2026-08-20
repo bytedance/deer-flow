@@ -20,7 +20,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
+from app.gateway.auth.repositories.base import AdminRoleTakenError, UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import UserRow
 
 
@@ -41,6 +41,32 @@ def _normalize_email(email: str) -> str:
     existing mixed-case rows keep resolving, without a destructive bulk rewrite.
     """
     return email.lower()
+
+
+def _is_admin_role_constraint_violation(exc: IntegrityError) -> bool:
+    """Return True when the integrity error came from ``uq_users_admin_role``.
+
+    The partial unique index enforces at most one admin row; distinguishing it
+    from the email unique constraint matters because both surface as
+    ``IntegrityError`` on insert. Constraint identification differs by backend:
+
+    - SQLite names the *column* for a single-column unique index violation
+      ("UNIQUE constraint failed: users.system_role"), and the *index* for a
+      multi-column one.
+    - Postgres exposes ``exc.orig.diag.constraint_name``.
+    """
+    orig = exc.orig
+    if orig is None:
+        return False
+    message = str(orig)
+    if "uq_users_admin_role" in message:
+        return True
+    if "UNIQUE constraint failed" in message and "system_role" in message:
+        return True
+    diag = getattr(orig, "diag", None)
+    if diag is not None and getattr(diag, "constraint_name", None) == "uq_users_admin_role":
+        return True
+    return False
 
 
 class SQLiteUserRepository(UserRepository):
@@ -103,6 +129,8 @@ class SQLiteUserRepository(UserRepository):
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
+                if _is_admin_role_constraint_violation(exc):
+                    raise AdminRoleTakenError(user.email) from exc
                 raise ValueError(f"Email already registered: {user.email}") from exc
         return user
 
