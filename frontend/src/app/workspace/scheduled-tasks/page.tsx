@@ -5,7 +5,6 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
 import {
   Dialog,
   DialogContent,
@@ -52,8 +51,6 @@ function formatTimestamp(value: string | null, locale: string): string {
   if (Number.isNaN(date.getTime())) {
     return value;
   }
-  // Use a locale-aware short format like "2026-07-03 09:00". Future timestamps
-  // (next_run_at) render as an absolute time, not a relative "ago" string.
   const intlLocale = locale === "zh-CN" ? "zh-CN" : "en-US";
   return new Intl.DateTimeFormat(intlLocale, {
     year: "numeric",
@@ -93,8 +90,9 @@ export default function ScheduledTasksPage() {
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
-  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [detailOpen, setDetailOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [statusFilter, setStatusFilter] = useState<
     "all" | "enabled" | "paused" | "running" | "completed" | "failed"
   >("all");
@@ -111,7 +109,7 @@ export default function ScheduledTasksPage() {
     return statusFilter === "all" || task.status === statusFilter;
   });
   const selectedTask =
-    filteredData.find((task) => task.id === selectedTaskId) ?? filteredData[0];
+    filteredData.find((task) => task.id === selectedTaskId) ?? null;
   const taskRunsQuery = useScheduledTaskRuns(selectedTask?.id);
   const updateTask = useUpdateScheduledTask(selectedTask?.id ?? "");
   const pauseTask = usePauseScheduledTask();
@@ -151,7 +149,8 @@ export default function ScheduledTasksPage() {
       (task) => task.id === selectedTaskId,
     );
     if (!stillVisible) {
-      setSelectedTaskId(filteredData[0]?.id ?? null);
+      setSelectedTaskId(null);
+      setDetailOpen(false);
       setEditing(false);
     }
   }, [filteredData, selectedTaskId]);
@@ -175,8 +174,6 @@ export default function ScheduledTasksPage() {
       },
       timezone: selectedTask.timezone || "UTC",
     });
-    // Depend on id only so a background refetch (same task, new object reference)
-    // does not wipe edits in progress.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTask?.id]);
 
@@ -184,6 +181,11 @@ export default function ScheduledTasksPage() {
     { id: "enabled" as const, label: st.filters.enabled },
     { id: "paused" as const, label: st.filters.paused },
   ];
+
+  const openDetail = (taskId: string) => {
+    setSelectedTaskId(taskId);
+    setDetailOpen(true);
+  };
 
   return (
     <WorkspaceContainer>
@@ -204,9 +206,9 @@ export default function ScheduledTasksPage() {
         </Button>
       </header>
       <WorkspaceBody>
-        <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-5 p-6">
+        <div className="mx-auto w-full max-w-(--container-width-md) p-6">
           {threadId && (
-            <div className="text-muted-foreground text-sm">
+            <div className="text-muted-foreground mb-4 text-sm">
               {st.detail.filteredByThread.replace("{id}", threadId)}
             </div>
           )}
@@ -219,7 +221,7 @@ export default function ScheduledTasksPage() {
             </div>
           ) : null}
           {hasTasks ? (
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="mb-4 flex flex-wrap items-center gap-2">
               <div className="bg-muted/40 flex items-center gap-1 rounded-lg border p-1">
                 {statusFilters.map((f) => (
                   <FilterChip
@@ -256,84 +258,66 @@ export default function ScheduledTasksPage() {
               </Button>
             </div>
           ) : (
-            <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-              <div
-                data-testid="scheduled-task-list"
-                className="flex flex-col gap-3"
-              >
-                {filteredData.map((task) => {
-                  const isSelected = selectedTask?.id === task.id;
-                  return (
-                    <button
-                      type="button"
-                      key={task.id}
-                      onClick={() => setSelectedTaskId(task.id)}
-                      data-testid={`scheduled-task-item-${task.id}`}
-                      className={cn(
-                        "bg-card flex flex-col gap-2 rounded-lg border p-4 text-left transition-colors",
-                        isSelected
-                          ? "border-foreground bg-card ring-foreground/10 ring-1"
-                          : "border-border hover:bg-secondary/40",
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="truncate font-medium">
-                          {task.title}
-                        </span>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <StatusBadge status={statusLabel(task.status)} />
-                        <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs">
-                          {scheduleTypeLabel(task.schedule_type)}
-                        </span>
-                        <span className="text-muted-foreground ml-auto inline-flex items-center gap-1 text-xs tabular-nums">
-                          <CalendarClock className="size-3.5" />
-                          {formatTimestamp(task.next_run_at, locale)}
-                        </span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-              {selectedTask ? (
-                <div
-                  className="bg-card rounded-xl border p-5"
-                  data-testid="scheduled-task-detail"
-                >
-                  <TaskDetail
-                    task={selectedTask}
-                    editing={editing}
-                    setEditing={setEditing}
-                    editTitle={editTitle}
-                    setEditTitle={setEditTitle}
-                    editPrompt={editPrompt}
-                    setEditPrompt={setEditPrompt}
-                    editSchedule={editSchedule}
-                    setEditSchedule={setEditSchedule}
-                    updateTask={updateTask}
-                    pauseTask={pauseTask}
-                    resumeTask={resumeTask}
-                    triggerTask={triggerTask}
-                    setDeleteOpen={setDeleteOpen}
-                    taskRunsQuery={taskRunsQuery}
-                    st={st}
-                    t={t}
-                    locale={locale}
-                    contextModeLabel={contextModeLabel}
-                    scheduleTypeLabel={scheduleTypeLabel}
-                    formatTimestamp={formatTimestamp}
-                    runSummary={runSummary}
-                    statusLabel={statusLabel}
-                    NONE={NONE}
-                  />
-                </div>
-              ) : null}
+            <div
+              data-testid="scheduled-task-list"
+              className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+            >
+              {filteredData.map((task) => (
+                <TaskCard
+                  key={task.id}
+                  task={task}
+                  onClick={() => openDetail(task.id)}
+                  statusLabel={statusLabel(task.status)}
+                  scheduleTypeLabel={scheduleTypeLabel(task.schedule_type)}
+                  nextRun={formatTimestamp(task.next_run_at, locale)}
+                />
+              ))}
             </div>
           )}
         </div>
       </WorkspaceBody>
 
-      {/* Delete confirm — follows the agent-card confirm pattern. */}
+      {/* Task detail dialog */}
+      <Dialog
+        open={detailOpen}
+        onOpenChange={(open) => {
+          setDetailOpen(open);
+          if (!open) setEditing(false);
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          {selectedTask ? (
+            <TaskDetail
+              task={selectedTask}
+              editing={editing}
+              setEditing={setEditing}
+              editTitle={editTitle}
+              setEditTitle={setEditTitle}
+              editPrompt={editPrompt}
+              setEditPrompt={setEditPrompt}
+              editSchedule={editSchedule}
+              setEditSchedule={setEditSchedule}
+              updateTask={updateTask}
+              pauseTask={pauseTask}
+              resumeTask={resumeTask}
+              triggerTask={triggerTask}
+              setDeleteOpen={setDeleteOpen}
+              taskRunsQuery={taskRunsQuery}
+              st={st}
+              t={t}
+              locale={locale}
+              contextModeLabel={contextModeLabel}
+              scheduleTypeLabel={scheduleTypeLabel}
+              formatTimestamp={formatTimestamp}
+              runSummary={runSummary}
+              statusLabel={statusLabel}
+              NONE={NONE}
+            />
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      {/* Delete confirm */}
       <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
         <DialogContent>
           <DialogHeader>
@@ -353,7 +337,10 @@ export default function ScheduledTasksPage() {
               onClick={() => {
                 if (selectedTask) {
                   deleteTask.mutate(selectedTask.id, {
-                    onSuccess: () => setDeleteOpen(false),
+                    onSuccess: () => {
+                      setDeleteOpen(false);
+                      setDetailOpen(false);
+                    },
                   });
                 }
               }}
@@ -389,6 +376,52 @@ function FilterChip({
       )}
     >
       {children}
+    </button>
+  );
+}
+
+function TaskCard({
+  task,
+  onClick,
+  statusLabel,
+  scheduleTypeLabel,
+  nextRun,
+}: {
+  task: ScheduledTask;
+  onClick: () => void;
+  statusLabel: string;
+  scheduleTypeLabel: string;
+  nextRun: string;
+}) {
+  const dot = STATUS_DOT[task.status] ?? "bg-zinc-400";
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      data-testid={`scheduled-task-item-${task.id}`}
+      className="bg-card hover:bg-secondary/40 flex flex-col gap-3 rounded-lg border p-4 text-left transition-colors"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <span className="line-clamp-2 text-sm leading-snug font-semibold">
+          {task.title}
+        </span>
+        <span
+          aria-hidden
+          className={cn("mt-1 size-2 shrink-0 rounded-full", dot)}
+        />
+      </div>
+      <div className="flex flex-col gap-1.5">
+        <span className="text-muted-foreground text-xs">
+          {scheduleTypeLabel}
+        </span>
+        <span className="text-muted-foreground inline-flex items-center gap-1.5 text-xs tabular-nums">
+          <CalendarClock className="size-3.5" />
+          {nextRun}
+        </span>
+      </div>
+      <div className="border-t pt-2">
+        <StatusBadge status={statusLabel} />
+      </div>
     </button>
   );
 }
@@ -445,180 +478,182 @@ function TaskDetail({
   NONE: string;
 }) {
   const stDetail = st.detail;
-  const rows: Array<{ label: string; value: string }> = [
-    {
-      label: stDetail.contextMode,
-      value: contextModeLabel(task.context_mode),
-    },
-    {
-      label:
-        task.context_mode === "reuse_thread"
-          ? stDetail.thread
-          : stDetail.lastThread,
-      value:
-        task.context_mode === "reuse_thread"
-          ? (task.thread_id ?? NONE)
-          : (task.last_thread_id ?? NONE),
-    },
-    { label: stDetail.schedule, value: scheduleTypeLabel(task.schedule_type) },
-    {
-      label: stDetail.nextRun,
-      value: formatTimestamp(task.next_run_at, locale),
-    },
-    {
-      label: stDetail.lastRun,
-      value: formatTimestamp(task.last_run_at, locale),
-    },
-    { label: stDetail.lastRunId, value: task.last_run_id ?? NONE },
-    ...(task.last_error
-      ? [{ label: stDetail.lastError, value: task.last_error }]
-      : []),
-  ];
 
   return (
-    <Card className="gap-4 border-0 bg-transparent py-0 shadow-none">
-      <CardContent className="flex flex-col gap-5 px-0">
-        <div className="flex items-start justify-between gap-3">
+    <>
+      <DialogHeader>
+        <div className="flex items-start justify-between gap-3 pr-8">
           <div className="flex min-w-0 flex-col gap-2">
-            <div className="text-base leading-snug font-semibold">
-              {task.title}
-            </div>
+            <DialogTitle className="leading-snug">
+              {editing ? editTitle || task.title : task.title}
+            </DialogTitle>
             <StatusBadge status={statusLabel(task.status)} />
           </div>
           <Button
-            variant="outline"
+            variant="ghost"
             size="sm"
             onClick={() => setEditing(!editing)}
           >
             {editing ? st.actions.cancelEdit : st.actions.edit}
           </Button>
         </div>
+      </DialogHeader>
 
-        {editing ? (
-          <div className="flex flex-col gap-3 rounded-lg border p-3">
-            <Input
-              value={editTitle}
-              onChange={(event) => setEditTitle(event.target.value)}
-              placeholder={st.edit.titlePlaceholder}
-            />
-            <Textarea
-              rows={4}
-              value={editPrompt}
-              onChange={(event) => setEditPrompt(event.target.value)}
-              placeholder={st.edit.promptPlaceholder}
-            />
-            <ScheduledTaskScheduleInput
-              key={task.id}
-              initial={editSchedule}
-              onChange={setEditSchedule}
-              scheduleTypeLocked
-            />
-            <Button
-              size="sm"
-              onClick={() =>
-                updateTask.mutate({
-                  title: editTitle,
-                  prompt: editPrompt,
-                  schedule_spec: editSchedule.schedule_spec,
-                  timezone: editSchedule.timezone || "UTC",
-                })
-              }
-              disabled={updateTask.isPending}
-            >
-              {updateTask.isPending ? t.common.loading : st.edit.submit}
-            </Button>
-          </div>
-        ) : (
-          <div className="text-sm leading-relaxed">{task.prompt}</div>
-        )}
-
-        <div className="bg-border grid gap-px overflow-hidden rounded-lg border">
-          {rows.map((row) => (
-            <div
-              key={row.label}
-              className="bg-card grid grid-cols-[120px_minmax(0,1fr)] items-center gap-3 px-3 py-2 text-sm"
-            >
-              <span className="text-muted-foreground text-xs">{row.label}</span>
-              <span className="truncate font-medium tabular-nums">
-                {row.value}
-              </span>
-            </div>
-          ))}
-        </div>
-
-        <div className="flex flex-wrap gap-2">
+      {editing ? (
+        <div className="flex flex-col gap-3 py-2">
+          <Input
+            value={editTitle}
+            onChange={(event) => setEditTitle(event.target.value)}
+            placeholder={st.edit.titlePlaceholder}
+          />
+          <Textarea
+            rows={4}
+            value={editPrompt}
+            onChange={(event) => setEditPrompt(event.target.value)}
+            placeholder={st.edit.promptPlaceholder}
+          />
+          <ScheduledTaskScheduleInput
+            key={task.id}
+            initial={editSchedule}
+            onChange={setEditSchedule}
+            scheduleTypeLocked
+          />
           <Button
-            variant="outline"
             size="sm"
             onClick={() =>
-              task.status === "paused"
-                ? resumeTask.mutate(task.id)
-                : pauseTask.mutate(task.id)
+              updateTask.mutate({
+                title: editTitle,
+                prompt: editPrompt,
+                schedule_spec: editSchedule.schedule_spec,
+                timezone: editSchedule.timezone || "UTC",
+              })
             }
+            disabled={updateTask.isPending}
           >
-            {task.status === "paused" ? st.actions.resume : st.actions.pause}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => triggerTask.mutate(task.id)}
-          >
-            {st.actions.trigger}
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="text-destructive hover:text-destructive"
-            onClick={() => setDeleteOpen(true)}
-          >
-            {st.actions.delete}
+            {updateTask.isPending ? t.common.loading : st.edit.submit}
           </Button>
         </div>
+      ) : (
+        <div className="text-muted-foreground py-2 text-sm leading-relaxed">
+          {task.prompt}
+        </div>
+      )}
 
-        <div>
+      {/* Key-value details */}
+      <div className="flex flex-col gap-px py-2">
+        {[
+          {
+            label: stDetail.contextMode,
+            value: contextModeLabel(task.context_mode),
+          },
+          {
+            label:
+              task.context_mode === "reuse_thread"
+                ? stDetail.thread
+                : stDetail.lastThread,
+            value:
+              task.context_mode === "reuse_thread"
+                ? (task.thread_id ?? NONE)
+                : (task.last_thread_id ?? NONE),
+          },
+          {
+            label: stDetail.schedule,
+            value: scheduleTypeLabel(task.schedule_type),
+          },
+          {
+            label: stDetail.nextRun,
+            value: formatTimestamp(task.next_run_at, locale),
+          },
+          {
+            label: stDetail.lastRun,
+            value: formatTimestamp(task.last_run_at, locale),
+          },
+        ].map((row) => (
           <div
-            className="text-muted-foreground mb-2 text-xs font-medium"
-            data-testid="scheduled-task-runs"
+            key={row.label}
+            className="flex items-baseline justify-between gap-3 py-1 text-sm"
           >
-            {(taskRunsQuery.data ?? []).length === 1
-              ? stDetail.runsCountOne.replace(
-                  "{count}",
-                  String((taskRunsQuery.data ?? []).length),
-                )
-              : stDetail.runsCount.replace(
-                  "{count}",
-                  String((taskRunsQuery.data ?? []).length),
-                )}
+            <span className="text-muted-foreground shrink-0 text-xs">
+              {row.label}
+            </span>
+            <span className="text-right font-medium tabular-nums">
+              {row.value}
+            </span>
           </div>
-          <div
-            className="flex flex-col gap-2"
-            data-testid="scheduled-task-run-list"
-          >
-            {(taskRunsQuery.data ?? []).length > 0 ? (
-              (taskRunsQuery.data ?? []).map((run) => (
-                <div key={run.id} className="rounded-md border p-3 text-sm">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium">{runSummary(run)}</span>
-                  </div>
-                  <div className="text-muted-foreground text-xs">
-                    {run.run_id ?? NONE}
-                  </div>
-                  <div className="text-muted-foreground text-xs tabular-nums">
-                    {formatTimestamp(run.scheduled_for, locale)}
-                  </div>
-                  {run.error && (
-                    <div className="text-destructive text-xs">{run.error}</div>
-                  )}
-                </div>
-              ))
-            ) : (
-              <div className="text-muted-foreground text-sm">
-                {stDetail.noRuns}
-              </div>
-            )}
-          </div>
+        ))}
+      </div>
+
+      {/* Actions */}
+      <div className="flex flex-wrap gap-2 py-2">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() =>
+            task.status === "paused"
+              ? resumeTask.mutate(task.id)
+              : pauseTask.mutate(task.id)
+          }
+        >
+          {task.status === "paused" ? st.actions.resume : st.actions.pause}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => triggerTask.mutate(task.id)}
+        >
+          {st.actions.trigger}
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-destructive hover:text-destructive"
+          onClick={() => setDeleteOpen(true)}
+        >
+          {st.actions.delete}
+        </Button>
+      </div>
+
+      {/* Run history */}
+      <div className="border-t pt-3" data-testid="scheduled-task-runs">
+        <div className="text-muted-foreground mb-2 text-xs font-medium">
+          {(taskRunsQuery.data ?? []).length === 1
+            ? stDetail.runsCountOne.replace(
+                "{count}",
+                String((taskRunsQuery.data ?? []).length),
+              )
+            : stDetail.runsCount.replace(
+                "{count}",
+                String((taskRunsQuery.data ?? []).length),
+              )}
         </div>
-      </CardContent>
-    </Card>
+        <div
+          className="flex flex-col gap-1.5"
+          data-testid="scheduled-task-run-list"
+        >
+          {(taskRunsQuery.data ?? []).length > 0 ? (
+            (taskRunsQuery.data ?? []).map((run) => (
+              <div
+                key={run.id}
+                className="text-muted-foreground bg-muted/40 rounded-md px-3 py-2 text-xs"
+              >
+                <div className="text-foreground font-medium">
+                  {runSummary(run)}
+                </div>
+                <div className="mt-0.5 tabular-nums">
+                  {formatTimestamp(run.scheduled_for, locale)}
+                </div>
+                {run.error && (
+                  <div className="text-destructive mt-0.5">{run.error}</div>
+                )}
+              </div>
+            ))
+          ) : (
+            <div className="text-muted-foreground text-sm">
+              {stDetail.noRuns}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
