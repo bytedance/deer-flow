@@ -805,7 +805,8 @@ class TestClarificationDisabled:
 class TestDropParallelSiblingTools:
     """after_model must drop sibling tools when ask_clarification is in the same turn.
 
-    langchain's return_direct router only inspects the last ToolMessage, so a
+    langchain's return_direct router inspects all client-side tool calls of the
+    last AIMessage and routes to END only when every one is return_direct, so a
     parallel bash/write_file would both execute and keep the agent loop alive.
     """
 

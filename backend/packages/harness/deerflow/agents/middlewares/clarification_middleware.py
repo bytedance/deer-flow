@@ -91,9 +91,10 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     When the model calls the `ask_clarification` tool, this middleware:
     1. Drops any sibling tool calls from the same AIMessage (``after_model``)
        so they cannot execute before the user answers. langchain's
-       ``return_direct`` router only inspects the last ToolMessage, so a
-       parallel ``bash`` / ``write_file`` would both run *and* keep the
-       agent loop alive.
+       ``return_direct`` router inspects all client-side tool calls of the
+       last AIMessage and routes to END only when every one is
+       ``return_direct``. A mixed ``[ask_clarification, bash]`` batch would
+       both run the siblings *and* loop back to the model.
     2. Intercepts the remaining ``ask_clarification`` call before execution
     3. Extracts the clarification question and metadata
     4. Formats a user-friendly message
@@ -406,9 +407,10 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         Providers routinely batch tool calls. If ``ask_clarification`` shares a
         turn with ``bash`` / ``write_file`` / ..., those siblings execute before
-        the user answers, and langchain's ``return_direct`` check (last
-        ToolMessage only) may fail to end the run. Rewrite the AIMessage so
-        the tools node never sees the siblings.
+        the user answers, and langchain's ``return_direct`` check (every
+        client-side tool call of the last AIMessage must be ``return_direct``)
+        routes back to the model. Rewrite the AIMessage so the tools node
+        never sees the siblings.
 
         ``disable_clarification`` skips this rewrite: those runs must keep the
         sibling actions, because the clarification itself is turned into a
