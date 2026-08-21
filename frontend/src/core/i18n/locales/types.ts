@@ -450,11 +450,8 @@ export interface Translations {
     officialWebsite: string;
     githubTooltip: string;
     settingsAndMore: string;
-    visitGithub: string;
-    reportIssue: string;
     github: string;
     contactUs: string;
-    about: string;
     logout: string;
     gatewayUnavailable: string;
     gatewayUnavailableRetrying: string;
@@ -712,27 +709,12 @@ export interface Translations {
       factValidationContent: string;
       factValidationConfidence: string;
       noFacts: string;
-      summaryReadOnly: string;
       memoryFullyEmpty: string;
       factPreviewLabel: string;
       searchPlaceholder: string;
-      filterAll: string;
-      filterFacts: string;
-      filterSummaries: string;
       noMatches: string;
       markdown: {
-        overview: string;
-        userContext: string;
-        work: string;
-        personal: string;
-        topOfMind: string;
-        historyBackground: string;
-        recentMonths: string;
-        earlierContext: string;
-        longTermBackground: string;
-        updatedAt: string;
         facts: string;
-        empty: string;
         table: {
           category: string;
           confidence: string;
