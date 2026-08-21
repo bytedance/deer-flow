@@ -29,6 +29,13 @@ from deerflow.utils.thread_id import ThreadId
 router = APIRouter(prefix="/api", tags=["scheduled-tasks"])
 
 
+def _active_occurrence_conflict_detail(status: str) -> str:
+    detail = f"Scheduled task has an active {status} occurrence; retry after it finishes"
+    if status == "queued":
+        detail += " or cancel the queued occurrence by pausing the task"
+    return detail
+
+
 async def _ensure_task_mutable(task: dict[str, Any], repo) -> None:
     if task.get("status") == "running":
         raise HTTPException(
@@ -39,7 +46,7 @@ async def _ensure_task_mutable(task: dict[str, Any], repo) -> None:
     if active_status is not None:
         raise HTTPException(
             status_code=409,
-            detail=f"Scheduled task has an active {active_status} occurrence; retry after it finishes or cancel the queued occurrence by pausing the task",
+            detail=_active_occurrence_conflict_detail(active_status),
         )
 
 
@@ -225,7 +232,7 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     except ActiveScheduledTaskMutationConflict as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"Scheduled task has an active {exc.status} occurrence; retry after it finishes or cancel the queued occurrence by pausing the task",
+            detail=_active_occurrence_conflict_detail(exc.status),
         ) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
@@ -284,7 +291,7 @@ async def resume_scheduled_task(task_id: str, request: Request):
     except ActiveScheduledTaskMutationConflict as exc:
         raise HTTPException(
             status_code=409,
-            detail=f"Scheduled task has an active {exc.status} occurrence; retry after it finishes or cancel the queued occurrence by pausing the task",
+            detail=_active_occurrence_conflict_detail(exc.status),
         ) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")

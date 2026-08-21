@@ -565,6 +565,60 @@ async def test_scheduled_queue_timeout_advances_cron_without_immediate_requeue(t
         await close_engine()
 
 
+async def test_manual_queue_timeout_preserves_serialized_next_run_at(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        admitted_at = datetime.now(UTC)
+        next_run_at = admitted_at + timedelta(days=1)
+        await task_repo.create(
+            task_id="task-manual-timeout",
+            user_id="user-1",
+            thread_id="thread-1",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Manual timeout",
+            prompt="Prompt",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 9 * * *"},
+            timezone="UTC",
+            next_run_at=next_run_at,
+        )
+        await run_repo.create(
+            run_record_id="task-run-manual-timeout",
+            task_id="task-manual-timeout",
+            thread_id="thread-1",
+            scheduled_for=admitted_at,
+            trigger="manual",
+            status="queued",
+        )
+
+        async def launch_run(**_kwargs):
+            raise AssertionError("an expired queue row must not launch")
+
+        service = _make_service(
+            task_repo,
+            run_repo,
+            launch_run,
+            queue_timeout_seconds=60,
+        )
+
+        await service.run_once(now=admitted_at + timedelta(seconds=61))
+
+        row = (await run_repo.list_by_task("task-manual-timeout"))[0]
+        assert row["status"] == "failed"
+        task = await task_repo.get("task-manual-timeout", user_id="user-1")
+        assert task is not None
+        assert task["status"] == "enabled"
+        assert task["next_run_at"] == next_run_at.isoformat()
+        assert task["last_error"] == "scheduled task queue wait timeout exceeded"
+    finally:
+        await close_engine()
+
+
 async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

@@ -406,7 +406,7 @@ class ScheduledTaskRepository:
         task_id: str,
         *,
         status: str,
-        next_run_at: datetime | None,
+        next_run_at: datetime | str | None,
         last_run_at: datetime | str | None,
         last_run_id: str | None,
         last_thread_id: str | None,
@@ -445,7 +445,7 @@ class ScheduledTaskRepository:
                 row.status = status
                 row.last_error = last_error
             should_increment_run_count = increment_run_count and (last_run_id is None or row.last_run_id != last_run_id)
-            row.next_run_at = next_run_at
+            row.next_run_at = _coerce_datetime(next_run_at)
             row.last_run_at = _coerce_datetime(last_run_at)
             row.last_run_id = last_run_id
             row.last_thread_id = last_thread_id

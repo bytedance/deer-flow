@@ -38,6 +38,21 @@ def test_scheduled_task_models_reject_invalid_thread_ids(model, thread_id):
         model(**kwargs)
 
 
+@pytest.mark.parametrize(
+    ("status", "offers_pause_cancellation"),
+    [
+        ("queued", True),
+        ("launching", False),
+        ("running", False),
+    ],
+)
+def test_active_occurrence_conflict_detail_only_offers_pause_for_queued(status, offers_pause_cancellation):
+    detail = scheduled_tasks._active_occurrence_conflict_detail(status)
+
+    assert f"active {status} occurrence" in detail
+    assert ("cancel the queued occurrence by pausing the task" in detail) is offers_pause_cancellation
+
+
 class _Repo:
     def __init__(self) -> None:
         self.created = []
