@@ -930,3 +930,38 @@ def test_from_backend_config_null_values_do_not_warn_as_unknown(caplog):
     with caplog.at_level("WARNING", logger=cfg_logger):
         DeerMemConfig.from_backend_config({"model": None})
     assert not any("Unknown backend_config keys" in r.message for r in caplog.records)
+
+
+def test_save_skips_when_agent_dir_missing_and_does_not_recreate(tmp_path) -> None:
+    """issue #3364: save must not resurrect a deleted agent's memory directory.
+
+    A per-agent memory scope lives at ``{root}/users/{uid}/agents/{agent}/``.
+    When the agent is deleted that directory is rmtree'd. A debounced / in-flight
+    save that lands afterwards must give up (return False) instead of taking the
+    lock — the lock path and the atomic writer call ``path.parent.mkdir(...)``,
+    which would resurrect the deleted directory and block recreating a
+    same-named agent."""
+    from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+
+    config = DeerMemConfig(storage_path=str(tmp_path))
+    storage = FileMemoryStorage(config=config)
+
+    memory = {
+        "version": "1.0",
+        "revision": 0,
+        "lastUpdated": "",
+        "user": {},
+        "history": {},
+        "facts": [{"id": "f1", "content": "x"}],
+    }
+
+    # The agent's memory scope (and therefore its user dir) does not exist.
+    user_dir = tmp_path / "users" / "alice"
+    assert not user_dir.exists()
+
+    ok = storage.save(memory, "agent-a", user_id="alice")
+
+    assert ok is False
+    # Neither the agent dir nor its parents may be recreated by save().
+    assert not (user_dir / "agents" / "agent-a").exists()
+    assert not user_dir.exists()

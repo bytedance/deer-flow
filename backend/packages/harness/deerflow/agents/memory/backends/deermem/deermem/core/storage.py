@@ -1361,6 +1361,16 @@ class FileMemoryStorage(MemoryStorage):
         notifications: list[RetrievalNotification] = []
         deleted_metadata_ids: list[str] = []
         try:
+            # issue #3364: a per-agent memory directory is created when the agent
+            # is created and removed (rmtree) when it is deleted. Never recreate
+            # it here — a debounced / in-flight memory write that lands after the
+            # agent was deleted must not resurrect the directory, otherwise a
+            # same-named agent can no longer be created. If the parent scope is
+            # already gone, give up the write entirely (the lock file lives in the
+            # same directory, so even taking the lock would recreate it).
+            if agent_name is not None and not path.parent.exists():
+                logger.info("Skipping memory save for missing agent directory %s", path.parent)
+                return False
             if not isinstance(memory_data, dict):
                 raise ValueError("memory_data must be an object")
             if agent_name is not None and "facts" not in memory_data:
