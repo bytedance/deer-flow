@@ -341,14 +341,8 @@ export const zhCN: Translations = {
       threadIdPlaceholder: "线程 ID",
     },
     filters: {
-      allStatuses: "全部状态",
       enabled: "已启用",
       paused: "已暂停",
-      completed: "已完成",
-      failed: "已失败",
-      allTypes: "全部类型",
-      cron: "定时",
-      once: "单次",
     },
     detail: {
       contextMode: "上下文模式",
@@ -364,6 +358,8 @@ export const zhCN: Translations = {
       noRuns: "暂无运行",
       noTasksTitle: "还没有定时任务",
       noTasksDescription: "创建一个定时任务，让 DeerFlow 按计划自动执行。",
+      noMatchesTitle: "没有符合该筛选条件的任务",
+      noMatchesDescription: "切换筛选条件以查看全部定时任务。",
       filteredByThread: "按线程筛选：{id}",
       loadFailed: "加载定时任务失败",
     },
@@ -405,25 +401,6 @@ export const zhCN: Translations = {
       failed: "失败",
       skipped: "跳过",
       interrupted: "已中断",
-    },
-    recipes: {
-      label: "快速创建",
-      trending: {
-        title: "GitHub Trending 日榜",
-        desc: "总结今日 Trending 前十仓库",
-      },
-      news: {
-        title: "每日科技新闻摘要",
-        desc: "收集并总结当日科技要闻",
-      },
-      issues: {
-        title: "GitHub Issue 分诊",
-        desc: "分诊某仓库的 open issues（填入 {{repo}}）",
-      },
-      weekly: {
-        title: "每周周报",
-        desc: "每周一汇总一周工作",
-      },
     },
   },
 

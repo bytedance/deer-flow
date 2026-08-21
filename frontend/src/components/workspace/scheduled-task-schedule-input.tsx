@@ -38,19 +38,31 @@ const PRESETS: CronPreset[] = [
   "custom",
 ];
 
-// 只保留最常用的几个时区，避免选项过多难以选择。
-const COMMON_TIMEZONES: Array<{ value: string; label: string }> = [
-  { value: "UTC", label: "世界标准时间 (UTC)" },
-  { value: "Asia/Shanghai", label: "中国标准时间 (上海)" },
-  { value: "Asia/Hong_Kong", label: "香港时间" },
-  { value: "Asia/Tokyo", label: "日本标准时间 (东京)" },
-  { value: "Asia/Singapore", label: "新加坡时间" },
-  { value: "Asia/Seoul", label: "韩国标准时间 (首尔)" },
-  { value: "Europe/London", label: "伦敦" },
-  { value: "Europe/Berlin", label: "柏林" },
-  { value: "America/New_York", label: "纽约" },
-  { value: "America/Los_Angeles", label: "洛杉矶" },
+const FALLBACK_TIMEZONES = [
+  "UTC",
+  "Asia/Shanghai",
+  "Asia/Tokyo",
+  "Asia/Singapore",
+  "Europe/London",
+  "Europe/Berlin",
+  "America/New_York",
+  "America/Chicago",
+  "America/Los_Angeles",
 ];
+
+function supportedTimeZones(): string[] {
+  const supported = (
+    Intl as unknown as {
+      supportedValuesOf?: (key: string) => string[] | undefined;
+    }
+  ).supportedValuesOf?.("timeZone");
+  if (Array.isArray(supported) && supported.length > 0) {
+    return supported;
+  }
+  return FALLBACK_TIMEZONES;
+}
+
+const TIMEZONE_OPTIONS = supportedTimeZones();
 
 function detectBrowserTimezone(): string {
   try {
@@ -119,9 +131,8 @@ export function ScheduledTaskScheduleInput({
   onChange: (value: ScheduleValue) => void;
   scheduleTypeLocked?: boolean;
 }) {
-  const { t, locale } = useI18n();
+  const { t } = useI18n();
   const labels = t.scheduledTasks;
-  const isZh = locale.startsWith("zh");
 
   const [scheduleType, setScheduleType] = useState<"once" | "cron">(
     initial.schedule_type,
@@ -207,15 +218,11 @@ export function ScheduledTaskScheduleInput({
   ]);
 
   const timezoneOptions = useMemo(() => {
-    const options = COMMON_TIMEZONES.map((tz) => ({
-      value: tz.value,
-      label: isZh ? tz.label : tz.value,
-    }));
-    if (!options.some((tz) => tz.value === timezone)) {
-      options.unshift({ value: timezone, label: timezone });
+    if (TIMEZONE_OPTIONS.includes(timezone)) {
+      return TIMEZONE_OPTIONS;
     }
-    return options;
-  }, [isZh, timezone]);
+    return [timezone, ...TIMEZONE_OPTIONS];
+  }, [timezone]);
 
   function updateParts(patch: Partial<CronParts>) {
     setParts((prev) => ({ ...prev, ...patch }));
@@ -411,8 +418,8 @@ export function ScheduledTaskScheduleInput({
         </SelectTrigger>
         <SelectContent>
           {timezoneOptions.map((tz) => (
-            <SelectItem key={tz.value} value={tz.value}>
-              {tz.label}
+            <SelectItem key={tz} value={tz}>
+              {tz}
             </SelectItem>
           ))}
         </SelectContent>
