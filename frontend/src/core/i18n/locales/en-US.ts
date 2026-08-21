@@ -1130,9 +1130,6 @@ export const enUS: Translations = {
     observatory: {
       name: "Observatory",
       tagline: "Deep-blue night-sky look.",
-      toggleSky: "Toggle light / dark",
-      nightLabel: "Dark",
-      dawnLabel: "Light",
     },
   },
   login: {

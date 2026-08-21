@@ -1075,9 +1075,6 @@ export const zhCN: Translations = {
     observatory: {
       name: "观星台",
       tagline: "深蓝星空外观。",
-      toggleSky: "切换浅色 / 深色",
-      nightLabel: "深色",
-      dawnLabel: "浅色",
     },
   },
   login: {
