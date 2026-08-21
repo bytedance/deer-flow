@@ -255,6 +255,24 @@ export interface Translations {
       runAt: string;
       timezone: string;
     };
+    timezone: {
+      more: string;
+      less: string;
+      common: {
+        UTC: string;
+        "Asia/Shanghai": string;
+        "Asia/Hong_Kong": string;
+        "Asia/Taipei": string;
+        "Asia/Tokyo": string;
+        "Asia/Seoul": string;
+        "Asia/Singapore": string;
+        "Europe/London": string;
+        "Europe/Berlin": string;
+        "America/New_York": string;
+        "America/Chicago": string;
+        "America/Los_Angeles": string;
+      };
+    };
     weekdays: {
       mon: string;
       tue: string;

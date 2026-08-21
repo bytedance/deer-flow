@@ -244,7 +244,7 @@ export default function ScheduledTasksPage() {
             </div>
           ) : null}
           {filteredData.length === 0 ? (
-            hasTasks ? (
+            queryError ? null : hasTasks ? (
               <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
                 <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
                   <CalendarClock className="text-muted-foreground h-7 w-7" />
