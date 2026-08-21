@@ -179,6 +179,7 @@ export function ScheduledTaskScheduleInput({
         onceYear &&
         onceMonth &&
         onceDay &&
+        onceTime &&
         Number.isInteger(year) &&
         Number.isInteger(month) &&
         Number.isInteger(day) &&
