@@ -86,6 +86,50 @@ async def test_busy_reuse_thread_is_queued_then_launched_on_a_later_poll(tmp_pat
         await close_engine()
 
 
+async def test_paused_task_manual_run_waits_for_busy_thread_and_stays_paused(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await _seed_reuse_task(task_repo, task_id="task-paused-manual", now=now)
+        await task_repo.update(
+            "task-paused-manual",
+            user_id="user-1",
+            updates={"status": "paused"},
+        )
+        task = await task_repo.get("task-paused-manual", user_id="user-1")
+        assert task is not None
+        attempts = 0
+
+        async def launch_run(**kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise ConflictError("Thread thread-1 already has an active run")
+            return {"run_id": "run-paused-manual", "thread_id": kwargs["thread_id"]}
+
+        service = _make_service(task_repo, run_repo, launch_run)
+
+        result = await service.dispatch_task(task, now=now, trigger="manual")
+
+        assert result["outcome"] == "queued"
+        assert (await run_repo.list_by_task(task["id"]))[0]["status"] == "queued"
+        assert (await task_repo.get(task["id"], user_id="user-1"))["status"] == "paused"
+
+        await service.run_once(now=now + timedelta(seconds=5))
+
+        row = (await run_repo.list_by_task(task["id"]))[0]
+        assert row["status"] == "running"
+        assert row["run_id"] == "run-paused-manual"
+        assert attempts == 2
+        assert (await task_repo.get(task["id"], user_id="user-1"))["status"] == "paused"
+    finally:
+        await close_engine()
+
+
 async def test_queued_run_survives_single_instance_restart_sweep(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -158,13 +202,14 @@ async def test_same_thread_queue_is_claimed_in_fifo_order(tmp_path):
     try:
         sf = get_session_factory()
         assert sf is not None
-        run_repo = ScheduledTaskRunRepository(sf)
+        run_repo_a = ScheduledTaskRunRepository(sf)
+        run_repo_b = ScheduledTaskRunRepository(sf)
         now = datetime.now(UTC)
         for run_id, task_id in (
             ("task-run-a", "task-a"),
             ("task-run-b", "task-b"),
         ):
-            await run_repo.create(
+            await run_repo_a.create(
                 run_record_id=run_id,
                 task_id=task_id,
                 thread_id="shared-thread",
@@ -173,14 +218,14 @@ async def test_same_thread_queue_is_claimed_in_fifo_order(tmp_path):
                 status="queued",
             )
 
-        newer = await run_repo.claim_queued_run(
+        newer = await run_repo_b.claim_queued_run(
             "task-run-b",
             lease_owner="worker-b",
             now=now,
             lease_seconds=120,
             global_max_concurrent_runs=3,
         )
-        older = await run_repo.claim_queued_run(
+        older = await run_repo_a.claim_queued_run(
             "task-run-a",
             lease_owner="worker-a",
             now=now,
@@ -190,6 +235,17 @@ async def test_same_thread_queue_is_claimed_in_fifo_order(tmp_path):
 
         assert newer is None
         assert older is not None
+        assert await run_repo_b.list_queued_runs(limit=10) == []
+        assert (
+            await run_repo_b.claim_queued_run(
+                "task-run-b",
+                lease_owner="worker-b",
+                now=now,
+                lease_seconds=120,
+                global_max_concurrent_runs=3,
+            )
+            is None
+        )
     finally:
         await close_engine()
 
@@ -390,6 +446,70 @@ async def test_manual_enqueue_cannot_unpause_a_task_that_cancels_its_waiting_run
         await close_engine()
 
 
+@pytest.mark.parametrize("action", ["pause", "delete"])
+async def test_pause_or_delete_before_manual_admission_prevents_launch(tmp_path, action):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+
+        class DelayedAdmissionRunRepository(ScheduledTaskRunRepository):
+            def __init__(self, session_factory):
+                super().__init__(session_factory)
+                self.before_insert = asyncio.Event()
+                self.resume_insert = asyncio.Event()
+
+            async def create(self, **kwargs):
+                self.before_insert.set()
+                await self.resume_insert.wait()
+                return await super().create(**kwargs)
+
+        run_repo = DelayedAdmissionRunRepository(sf)
+        now = datetime.now(UTC)
+        task = await _seed_reuse_task(task_repo, task_id=f"task-{action}-before-admission", now=now)
+        launches = []
+
+        async def launch_run(**kwargs):
+            launches.append(kwargs)
+            return {"run_id": f"run-{action}", "thread_id": kwargs["thread_id"]}
+
+        service = _make_service(task_repo, run_repo, launch_run)
+        dispatch = asyncio.create_task(service.dispatch_task(task, now=now, trigger="manual"))
+        await run_repo.before_insert.wait()
+
+        if action == "pause":
+            mutation = await task_repo.pause_with_queue_cancellation(
+                task["id"],
+                user_id="user-1",
+                error="paused before admission",
+                now=now + timedelta(seconds=1),
+            )
+            assert mutation == "paused"
+        else:
+            mutation = await task_repo.delete_with_queue_cancellation(
+                task["id"],
+                user_id="user-1",
+                error="deleted before admission",
+                now=now + timedelta(seconds=1),
+            )
+            assert mutation == "deleted"
+
+        run_repo.resume_insert.set()
+        result = await dispatch
+
+        assert launches == []
+        assert await run_repo.list_by_task(task["id"]) == []
+        if action == "pause":
+            assert result["outcome"] == "conflict"
+            assert (await task_repo.get(task["id"], user_id="user-1"))["status"] == "paused"
+        else:
+            assert result["outcome"] == "not_found"
+            assert await task_repo.get(task["id"], user_id="user-1") is None
+    finally:
+        await close_engine()
+
+
 async def test_scheduled_queue_timeout_advances_cron_without_immediate_requeue(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -454,6 +574,7 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
         run_repo = ScheduledTaskRunRepository(sf)
         durable_runs = RunRepository(sf)
         now = datetime.now(UTC)
+        launched_at = now + timedelta(seconds=1)
         await _seed_reuse_task(task_repo, task_id="task-attached", now=now)
         await run_repo.create(
             run_record_id="task-run-attached",
@@ -463,12 +584,30 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
             trigger="scheduled",
             status="queued",
         )
-        await run_repo.claim_queued_run(
+        assert (
+            await run_repo.claim_queued_run(
+                "task-run-attached",
+                lease_owner="worker-a",
+                now=now,
+                lease_seconds=5,
+                global_max_concurrent_runs=3,
+            )
+            is not None
+        )
+        assert await run_repo.requeue_claimed_run(
             "task-run-attached",
             lease_owner="worker-a",
-            now=now,
-            lease_seconds=5,
-            global_max_concurrent_runs=3,
+            error="earlier overlap",
+        )
+        assert (
+            await run_repo.claim_queued_run(
+                "task-run-attached",
+                lease_owner="worker-a",
+                now=now,
+                lease_seconds=5,
+                global_max_concurrent_runs=3,
+            )
+            is not None
         )
         await durable_runs.put(
             "run-attached",
@@ -479,6 +618,7 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
                 "scheduled_task_id": "task-attached",
                 "scheduled_task_run_id": "task-run-attached",
             },
+            created_at=launched_at.isoformat(),
         )
 
         recovered = await run_repo.recover_expired_launch_claims(
@@ -491,6 +631,8 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
         assert row["status"] == "running"
         assert row["run_id"] == "run-attached"
         assert row["lease_owner"] is None
+        assert row["started_at"] == launched_at.isoformat()
+        assert row["error"] is None
         task = await task_repo.get("task-attached", user_id="user-1")
         assert task is not None
         assert task["last_run_id"] == "run-attached"

@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, text
+from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
+
+
+class ActiveScheduledTaskMutationConflict(Exception):
+    """A user mutation raced an admitted scheduled-task occurrence."""
+
+    def __init__(self, status: str) -> None:
+        self.status = status
+        super().__init__(f"scheduled task has an active {status} occurrence")
 
 
 def _lease_is_alive(lease_expires_at: datetime | None, *, now: datetime, grace_seconds: int = 0) -> bool:
@@ -68,6 +76,14 @@ class ScheduledTaskRepository:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
         return data
+
+    @staticmethod
+    async def _lock_task(session: AsyncSession, task_id: str) -> ScheduledTaskRow | None:
+        # Match scheduled-run admission on SQLite, where FOR UPDATE is ignored:
+        # acquire the database writer before checking the child occurrence.
+        if session.get_bind().dialect.name == "sqlite":
+            await session.execute(update(ScheduledTaskRow).where(ScheduledTaskRow.id == task_id).values(updated_at=ScheduledTaskRow.updated_at))
+        return await session.get(ScheduledTaskRow, task_id, with_for_update=True)
 
     async def create(
         self,
@@ -147,7 +163,7 @@ class ScheduledTaskRepository:
     ) -> str:
         """Pause a task and cancel its waiting occurrence in one transaction."""
         async with self._sf() as session:
-            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
                 await session.rollback()
                 return "not_found"
@@ -192,7 +208,7 @@ class ScheduledTaskRepository:
     ) -> str:
         """Delete a task only before queue execution begins."""
         async with self._sf() as session:
-            task = await session.get(ScheduledTaskRow, task_id, with_for_update=True)
+            task = await self._lock_task(session, task_id)
             if task is None or task.user_id != user_id:
                 await session.rollback()
                 return "not_found"
@@ -230,11 +246,27 @@ class ScheduledTaskRepository:
         *,
         user_id: str,
         updates: dict[str, Any],
+        require_mutable: bool = False,
     ) -> dict[str, Any] | None:
         async with self._sf() as session:
-            row = await session.get(ScheduledTaskRow, task_id)
+            row = await self._lock_task(session, task_id) if require_mutable else await session.get(ScheduledTaskRow, task_id)
             if row is None or row.user_id != user_id:
                 return None
+            if require_mutable:
+                if row.status == "running":
+                    await session.rollback()
+                    raise ActiveScheduledTaskMutationConflict("running")
+                active_status = await session.scalar(
+                    select(ScheduledTaskRunRow.status)
+                    .where(
+                        ScheduledTaskRunRow.task_id == task_id,
+                        ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                    )
+                    .limit(1)
+                )
+                if active_status is not None:
+                    await session.rollback()
+                    raise ActiveScheduledTaskMutationConflict(active_status)
             for key, value in updates.items():
                 if hasattr(row, key):
                     setattr(row, key, value)

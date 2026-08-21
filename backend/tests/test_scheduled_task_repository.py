@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -5,8 +6,14 @@ import pytest
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 from deerflow.persistence.run import RunRepository
-from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskRunRepository
-from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_task_runs import (
+    ActiveScheduledRunConflict,
+    ScheduledTaskAdmissionRejected,
+    ScheduledTaskRunRepository,
+)
+from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
+from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict, ScheduledTaskRepository
+from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 
 @pytest.mark.asyncio
@@ -35,6 +42,118 @@ async def test_scheduled_task_repository_create_and_list(tmp_path):
     assert [task["id"] for task in listed] == ["task-1"]
 
     await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_mutable_update_rechecks_active_occurrence_at_commit_boundary(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-atomic-patch",
+            user_id="user-1",
+            thread_id="thread-1",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="atomic patch",
+            prompt="original prompt",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 9 * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+
+        # Model the router's earlier fast-path check, then admit an occurrence
+        # before the actual mutation reaches the repository transaction.
+        assert await task_repo.get_active_run_status("task-atomic-patch") is None
+        await run_repo.create(
+            run_record_id="task-run-atomic-patch",
+            task_id="task-atomic-patch",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="manual",
+            status="queued",
+        )
+
+        with pytest.raises(ActiveScheduledTaskMutationConflict, match="active queued"):
+            await task_repo.update(
+                "task-atomic-patch",
+                user_id="user-1",
+                updates={"prompt": "changed after admission"},
+                require_mutable=True,
+            )
+
+        task = await task_repo.get("task-atomic-patch", user_id="user-1")
+        assert task is not None
+        assert task["prompt"] == "original prompt"
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_atomic_update_and_admission_cannot_both_commit(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+
+        for index in range(5):
+            task_id = f"task-update-admission-race-{index}"
+            task = await task_repo.create(
+                task_id=task_id,
+                user_id="user-1",
+                thread_id="thread-1",
+                context_mode="reuse_thread",
+                assistant_id="lead_agent",
+                title="atomic race",
+                prompt="original prompt",
+                schedule_type="cron",
+                schedule_spec={"cron": "0 9 * * *"},
+                timezone="UTC",
+                next_run_at=None,
+            )
+
+            update_result, admission_result = await asyncio.gather(
+                task_repo.update(
+                    task_id,
+                    user_id="user-1",
+                    updates={"prompt": "updated prompt"},
+                    require_mutable=True,
+                ),
+                run_repo.create(
+                    run_record_id=f"task-run-update-admission-race-{index}",
+                    task_id=task_id,
+                    thread_id="thread-1",
+                    scheduled_for=datetime.now(UTC),
+                    trigger="manual",
+                    status="queued",
+                    coordinate_with_task=True,
+                    expected_task_user_id="user-1",
+                    expected_task_status=task["status"],
+                    expected_task_updated_at=task["updated_at"],
+                ),
+                return_exceptions=True,
+            )
+
+            successes = sum(not isinstance(result, Exception) for result in (update_result, admission_result))
+            assert successes == 1
+            assert isinstance(update_result, ActiveScheduledTaskMutationConflict) or isinstance(
+                admission_result,
+                ScheduledTaskAdmissionRejected,
+            )
+
+            current = await task_repo.get(task_id, user_id="user-1")
+            assert current is not None
+            active = await run_repo.get_active_run(task_id)
+            assert (current["prompt"] == "updated prompt") is (active is None)
+    finally:
+        await close_engine()
 
 
 @pytest.mark.asyncio
@@ -179,6 +298,189 @@ async def test_lease_aware_recovery_preserves_live_peer_and_reclaims_expired_pee
                 trigger="scheduled",
                 status="queued",
             )
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_live_launch_repairs_bookkeeping_before_releasing_claim(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        durable_run_repo = RunRepository(sf)
+        task_run_repo = ScheduledTaskRunRepository(sf, run_repository=durable_run_repo)
+        now = datetime(2026, 8, 21, 1, 30, tzinfo=UTC)
+        launched_at = now + timedelta(seconds=1)
+
+        await task_repo.create(
+            task_id="task-live-launch",
+            user_id="user-1",
+            thread_id="thread-live-launch",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="live launch",
+            prompt="p",
+            schedule_type="cron",
+            schedule_spec={"cron": "* * * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_run_repo.create(
+            run_record_id="task-run-live-launch",
+            task_id="task-live-launch",
+            thread_id="thread-live-launch",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+        assert (
+            await task_run_repo.claim_queued_run(
+                "task-run-live-launch",
+                lease_owner="pod-launcher",
+                now=now,
+                lease_seconds=120,
+                global_max_concurrent_runs=3,
+            )
+            is not None
+        )
+        assert await task_run_repo.requeue_claimed_run(
+            "task-run-live-launch",
+            lease_owner="pod-launcher",
+            error="earlier overlap",
+        )
+        assert (
+            await task_run_repo.claim_queued_run(
+                "task-run-live-launch",
+                lease_owner="pod-launcher",
+                now=now,
+                lease_seconds=120,
+                global_max_concurrent_runs=3,
+            )
+            is not None
+        )
+        await durable_run_repo.put(
+            "run-live-launch",
+            thread_id="thread-live-launch",
+            user_id="user-1",
+            status="running",
+            metadata={
+                "scheduled_task_id": "task-live-launch",
+                "scheduled_task_run_id": "task-run-live-launch",
+            },
+            created_at=launched_at.isoformat(),
+            owner_worker_id="pod-launcher",
+            lease_expires_at=(now + timedelta(seconds=120)).isoformat(),
+        )
+
+        assert await task_run_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        row = (await task_run_repo.list_by_task("task-live-launch"))[0]
+        assert row["status"] == "running"
+        assert row["run_id"] == "run-live-launch"
+        assert row["lease_owner"] is None
+        assert row["started_at"] == launched_at.isoformat()
+        assert row["error"] is None
+
+        # The original launcher is now fenced because reconciliation released
+        # its short claim, but the stable row already contains all bookkeeping.
+        assert not await task_run_repo.update_status(
+            "task-run-live-launch",
+            status="running",
+            run_id="run-live-launch",
+            started_at=launched_at,
+            protect_terminal=True,
+            expected_lease_owner="pod-launcher",
+        )
+        row = (await task_run_repo.list_by_task("task-live-launch"))[0]
+        assert row["started_at"] == launched_at.isoformat()
+        assert row["error"] is None
+    finally:
+        await close_engine()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_locks_task_before_its_active_run(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        durable_run_repo = RunRepository(sf)
+        now = datetime.now(UTC)
+
+        seed_repo = ScheduledTaskRunRepository(sf)
+        # Insert in reverse lexical order: every reconciler must still acquire
+        # task/run pairs in one deterministic global order.
+        for suffix in ("z", "a"):
+            await task_repo.create(
+                task_id=f"task-lock-order-{suffix}",
+                user_id="user-1",
+                thread_id=None,
+                context_mode="fresh_thread_per_run",
+                assistant_id="lead_agent",
+                title="lock order",
+                prompt="p",
+                schedule_type="cron",
+                schedule_spec={"cron": "* * * * *"},
+                timezone="UTC",
+                next_run_at=None,
+            )
+            await seed_repo.create(
+                run_record_id=f"task-run-lock-order-{suffix}",
+                task_id=f"task-lock-order-{suffix}",
+                thread_id=f"thread-lock-order-{suffix}",
+                scheduled_for=now,
+                trigger="scheduled",
+                status="queued",
+            )
+            assert (
+                await seed_repo.claim_queued_run(
+                    f"task-run-lock-order-{suffix}",
+                    lease_owner="pod-a",
+                    now=now,
+                    lease_seconds=120,
+                    global_max_concurrent_runs=3,
+                )
+                is not None
+            )
+
+        lock_order = []
+
+        class RecordingSession:
+            def __init__(self, session):
+                self._session = session
+
+            async def __aenter__(self):
+                await self._session.__aenter__()
+                return self
+
+            async def __aexit__(self, *args):
+                return await self._session.__aexit__(*args)
+
+            async def get(self, entity, ident, **kwargs):
+                if kwargs.get("with_for_update"):
+                    lock_order.append((entity, ident))
+                return await self._session.get(entity, ident, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self._session, name)
+
+        def recording_session_factory():
+            return RecordingSession(sf())
+
+        reconcile_repo = ScheduledTaskRunRepository(
+            recording_session_factory,
+            run_repository=durable_run_repo,
+        )
+
+        assert await reconcile_repo.reconcile_active_runs(error="lease expired", now=now) == 0
+        assert lock_order == [
+            (ScheduledTaskRow, "task-lock-order-a"),
+            (ScheduledTaskRunRow, "task-run-lock-order-a"),
+            (ScheduledTaskRow, "task-lock-order-z"),
+            (ScheduledTaskRunRow, "task-run-lock-order-z"),
+        ]
     finally:
         await close_engine()
 

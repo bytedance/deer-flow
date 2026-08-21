@@ -16,6 +16,7 @@ from app.gateway.deps import (
     get_scheduled_task_service,
     get_thread_store,
 )
+from deerflow.persistence.scheduled_tasks import ActiveScheduledTaskMutationConflict
 from deerflow.scheduler.schedules import (
     next_run_at as compute_next_run_at,
 )
@@ -214,11 +215,20 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
         if next_run_at is not None and existing["status"] in {"completed", "failed", "cancelled"}:
             updates["status"] = "enabled"
 
-    updated = await repo.update(
-        task_id,
-        user_id=str(user.id),
-        updates=updates,
-    )
+    try:
+        updated = await repo.update(
+            task_id,
+            user_id=str(user.id),
+            updates=updates,
+            require_mutable=True,
+        )
+    except ActiveScheduledTaskMutationConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scheduled task has an active {exc.status} occurrence; retry after it finishes or cancel the queued occurrence by pausing the task",
+        ) from exc
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Scheduled task not found")
     return updated
 
 
@@ -264,7 +274,18 @@ async def resume_scheduled_task(task_id: str, request: Request):
     if existing is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     await _ensure_task_mutable(existing, repo)
-    updated = await repo.update(task_id, user_id=str(user.id), updates={"status": "enabled"})
+    try:
+        updated = await repo.update(
+            task_id,
+            user_id=str(user.id),
+            updates={"status": "enabled"},
+            require_mutable=True,
+        )
+    except ActiveScheduledTaskMutationConflict as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Scheduled task has an active {exc.status} occurrence; retry after it finishes or cancel the queued occurrence by pausing the task",
+        ) from exc
     if updated is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     return updated
@@ -282,6 +303,8 @@ async def trigger_scheduled_task(task_id: str, request: Request):
     if task is None:
         raise HTTPException(status_code=404, detail="Scheduled task not found")
     result = await service.dispatch_task(task, now=datetime.now(UTC), trigger="manual")
+    if result["outcome"] == "not_found":
+        raise HTTPException(status_code=404, detail=result["error"] or "Scheduled task not found")
     if result["outcome"] == "conflict":
         raise HTTPException(status_code=409, detail=result["error"] or "Scheduled task trigger conflicted with an active run")
     if result["outcome"] == "failed":

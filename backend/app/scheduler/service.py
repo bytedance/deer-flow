@@ -9,15 +9,15 @@ from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
+from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
-# Shared so the has_active_runs fast path and the unique-index race path return
-# byte-identical outcomes for the same "task already has an active run" condition.
+# Shared so the active-row fast path and the atomic-admission conflict path
+# return byte-identical outcomes for the same active-occurrence condition.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _RESTART_RECOVERY_ERROR = "interrupted: gateway restarted before the run reached a terminal state"
 _LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its run lease"
@@ -167,6 +167,12 @@ class ScheduledTaskService:
                 scheduled_for=now,
                 trigger=trigger,
                 status="queued",
+                coordinate_with_task=True,
+                expected_task_user_id=task.get("user_id"),
+                expected_task_status=task.get("status") if trigger == "manual" else None,
+                expected_task_updated_at=task.get("updated_at") if trigger == "manual" else None,
+                expected_task_lease_owner=self._lease_owner if trigger == "scheduled" else None,
+                release_task_lease_status="enabled" if trigger == "scheduled" else None,
             )
         except ActiveScheduledRunConflict:
             active = await self._task_run_repo.get_active_run(task["id"])
@@ -175,14 +181,26 @@ class ScheduledTaskService:
             if active is None:
                 return self._active_run_conflict_result(execution_thread_id)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
+        except ScheduledTaskAdmissionRejected as exc:
+            if exc.reason == "not_found":
+                return {
+                    "outcome": "not_found",
+                    "task_run_id": None,
+                    "run_id": None,
+                    "thread_id": execution_thread_id,
+                    "error": "scheduled task no longer exists",
+                }
+            return {
+                "outcome": "conflict",
+                "task_run_id": None,
+                "run_id": None,
+                "thread_id": execution_thread_id,
+                "error": "scheduled task changed before trigger admission",
+            }
 
-        # Only scheduled dispatches own the parent task's short admission
-        # lease.  A manual trigger can race either that owner or an atomic
-        # pause/delete after inserting its queue row; releasing here with no
-        # expected owner would clear somebody else's lease and could also
-        # overwrite the newer paused state with this request's stale snapshot.
-        if trigger == "scheduled":
-            await self._release_admission_lease(task, trigger=trigger)
+        # Scheduled admission inserted the queue row and released its parent
+        # lease in one transaction. Manual admission verified that this task
+        # snapshot was still current under the same parent lock.
         queued = {
             "id": task_run_id,
             "task_id": task["id"],
@@ -433,7 +451,11 @@ class ScheduledTaskService:
                     finished_at=now,
                 )
                 continue
-            if task.get("status") == "paused":
+            # Pausing suppresses automatic occurrences, but a manual trigger is
+            # an explicit request and has always been allowed to run without
+            # resuming the schedule. A later pause still cancels an already
+            # queued manual row atomically in pause_with_queue_cancellation().
+            if task.get("status") == "paused" and queued["trigger"] != "manual":
                 await self._task_run_repo.update_status(
                     queued["id"],
                     status="interrupted",
