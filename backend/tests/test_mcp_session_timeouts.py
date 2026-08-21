@@ -541,6 +541,84 @@ async def test_valid_put_repairs_timeout_persisted_by_older_gateway(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_get_put_round_trip_removes_omitted_invalid_legacy_server(tmp_path, monkeypatch) -> None:
+    from app.gateway.routers import mcp as mcp_router
+
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "legacy": {
+                        "type": "http",
+                        "url": "https://legacy.example.invalid/mcp",
+                        "env": {"LEGACY_TOKEN": "legacy-env-secret"},
+                        "headers": {"Authorization": "Bearer legacy-header-secret"},
+                        "oauth": {
+                            "token_url": "https://legacy.example.invalid/oauth/token",
+                            "client_id": "legacy-client",
+                            "client_secret": "legacy-client-secret",
+                            "refresh_token": "legacy-refresh-token",
+                        },
+                        "session_init_timeout": 0,
+                    },
+                    "healthy": {
+                        "type": "http",
+                        "url": "https://healthy.example.invalid/mcp",
+                        "env": {"HEALTHY_TOKEN": "healthy-env-secret"},
+                        "headers": {"Authorization": "Bearer healthy-header-secret"},
+                        "oauth": {
+                            "token_url": "https://healthy.example.invalid/oauth/token",
+                            "client_id": "healthy-client",
+                            "client_secret": "healthy-client-secret",
+                            "refresh_token": "healthy-refresh-token",
+                        },
+                    },
+                },
+                "skills": {"research": {"enabled": False}},
+                "mcpInterceptors": ["example.interceptor:Interceptor"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(mcp_router, "require_admin_user", AsyncMock(return_value=None))
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    reset_extensions_config()
+
+    app = FastAPI()
+    app.include_router(mcp_router.router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            get_response = await client.get("/api/mcp/config")
+            put_response = await client.put("/api/mcp/config", json=get_response.json())
+            after_response = await client.get("/api/mcp/config")
+    finally:
+        reset_extensions_config()
+
+    assert get_response.status_code == 200
+    assert set(get_response.json()["mcp_servers"]) == {"healthy"}
+    assert get_response.json()["mcp_servers"]["healthy"]["env"] == {"HEALTHY_TOKEN": "***"}
+    assert get_response.json()["mcp_servers"]["healthy"]["headers"] == {"Authorization": "***"}
+    assert get_response.json()["mcp_servers"]["healthy"]["oauth"]["client_secret"] is None
+    assert get_response.json()["mcp_servers"]["healthy"]["oauth"]["refresh_token"] is None
+
+    assert put_response.status_code == 200
+    assert set(put_response.json()["mcp_servers"]) == {"healthy"}
+    assert after_response.status_code == 200
+    assert set(after_response.json()["mcp_servers"]) == {"healthy"}
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    assert set(persisted["mcpServers"]) == {"healthy"}
+    assert persisted["mcpServers"]["healthy"]["env"] == {"HEALTHY_TOKEN": "healthy-env-secret"}
+    assert persisted["mcpServers"]["healthy"]["headers"] == {"Authorization": "Bearer healthy-header-secret"}
+    assert persisted["mcpServers"]["healthy"]["oauth"]["client_secret"] == "healthy-client-secret"
+    assert persisted["mcpServers"]["healthy"]["oauth"]["refresh_token"] == "healthy-refresh-token"
+    assert persisted["skills"] == {"research": {"enabled": False}}
+    assert persisted["mcpInterceptors"] == ["example.interceptor:Interceptor"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("field_name", ["session_init_timeout", "tool_call_timeout"])
 async def test_patch_disable_survives_timeout_persisted_by_older_gateway(tmp_path, monkeypatch, field_name: str) -> None:
     from app.gateway.routers import mcp as mcp_router
