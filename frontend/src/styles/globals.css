@@ -487,20 +487,8 @@ html.dark .shiki span {
   --muted-ink: #5b6578;
   --muted2: #8b95ab;
   --rule: #cdd5e4;
-  --rule2: #dce2ee;
-  --rule-strong: #b7c1d4;
   --brand: #2f5fa3;
-  --brand-hi: #244a80;
-  --brand-dim: rgba(47, 95, 163, 0.1);
-  --accent2: #2f5fa3;
-  --accent2-dim: rgba(47, 95, 163, 0.08);
   --red: #b42318;
-  --red-dim: rgba(180, 35, 24, 0.08);
-  --yellow: #f2c14e;
-  --yellow-dim: rgba(242, 193, 78, 0.12);
-  --shadow-sm: 0 1px 2px rgba(27, 36, 54, 0.05);
-  --shadow-md: 0 8px 20px rgba(27, 36, 54, 0.05);
-  --shadow-lg: 0 8px 24px rgba(27, 36, 54, 0.08);
   --radius: 0.75rem;
   --sidebar-width: 256px;
   --sidebar-width-icon: 48px;
@@ -555,20 +543,8 @@ html.dark .shiki span {
   --muted-ink: #8b95ab;
   --muted2: #5b6578;
   --rule: #243049;
-  --rule2: #1b2438;
-  --rule-strong: #31405f;
   --brand: #7eb6ff;
-  --brand-hi: #a8ceff;
-  --brand-dim: rgba(126, 182, 255, 0.12);
-  --accent2: #7eb6ff;
-  --accent2-dim: rgba(126, 182, 255, 0.1);
   --red: #f97066;
-  --red-dim: rgba(249, 112, 102, 0.12);
-  --yellow: #f2c14e;
-  --yellow-dim: rgba(242, 193, 78, 0.14);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 8px 20px rgba(0, 0, 0, 0.25);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.35);
   --background: #0b1020;
   --foreground: #e7ecf6;
   --card: #10182c;
@@ -635,39 +611,6 @@ html.dark .shiki span {
 [data-skin="observatory"] [data-slot="sidebar-inset"] > * {
   position: relative;
   z-index: 1;
-}
-.obs-sky-tools {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.obs-sky-label {
-  font-size: 12px;
-  color: var(--muted-foreground);
-  white-space: nowrap;
-}
-.obs-meter {
-  display: flex;
-  gap: 3px;
-  align-items: flex-end;
-  height: 14px;
-  opacity: 0.55;
-}
-.obs-meter b {
-  width: 3px;
-  background: var(--primary);
-  display: block;
-  border-radius: 2px;
-  animation: obs-meter 1.4s ease-in-out infinite;
-}
-.obs-meter b:nth-child(2) {
-  animation-delay: 0.15s;
-}
-.obs-meter b:nth-child(3) {
-  animation-delay: 0.3s;
-}
-.obs-meter b:nth-child(4) {
-  animation-delay: 0.45s;
 }
 .obs-horizon {
   position: fixed;
@@ -846,12 +789,6 @@ html.obs-is-ready .obs-welcome-copy,
 html.obs-is-ready .obs-welcome-kicker {
   animation: obs-rise 0.5s 0.08s both;
 }
-[data-skin="observatory"] .group.is-assistant > [class*="bg-secondary"] {
-  background: transparent !important;
-  border-left: 2px solid var(--primary);
-  border-radius: 0 !important;
-  padding-left: 12px;
-}
 @keyframes obs-star-on {
   0% {
     opacity: 0;
@@ -939,17 +876,6 @@ html.obs-is-ready .obs-welcome-kicker {
     transform: rotate(360deg);
   }
 }
-@keyframes obs-meter {
-  0%,
-  100% {
-    height: 4px;
-    opacity: 0.4;
-  }
-  50% {
-    height: 14px;
-    opacity: 1;
-  }
-}
 .obs-corner-sky {
   position: fixed;
   inset: 0;
@@ -1035,17 +961,6 @@ html.obs-is-ready .obs-welcome-kicker {
     var(--sidebar)
   );
 }
-[data-skin="observatory"] .obs-nav-pulse {
-  width: 6px;
-  height: 6px;
-  border-radius: 99px;
-  background: color-mix(in srgb, var(--primary) 35%, transparent);
-  flex: 0 0 auto;
-}
-[data-skin="observatory"] .obs-nav-pulse.is-active {
-  background: var(--primary-foreground);
-  animation: obs-nav-glow 1.8s ease-in-out infinite;
-}
 [data-skin="observatory"] .obs-settings-panel {
   background: linear-gradient(
     180deg,
@@ -1090,17 +1005,6 @@ html.obs-is-ready .obs-welcome-kicker {
   mix-blend-mode: soft-light;
   opacity: 0.7;
 }
-@keyframes obs-nav-glow {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0
-      color-mix(in srgb, var(--primary-foreground) 0%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 0 5px
-      color-mix(in srgb, var(--primary-foreground) 18%, transparent);
-  }
-}
 html[data-skin="observatory"] body.obs-lock-scroll {
   overflow: hidden;
 }
@@ -1131,12 +1035,6 @@ html[data-skin="observatory"] body.obs-lock-scroll {
   stroke-linecap: round;
   opacity: 0.7;
 }
-.obs-corner-preview {
-  stroke: var(--primary) !important;
-  stroke-width: 0.4 !important;
-  stroke-linecap: round;
-  opacity: 0.75 !important;
-}
 [data-skin="observatory"] .obs-appearance {
   perspective: 900px;
 }
@@ -1155,7 +1053,6 @@ html[data-skin="observatory"] body.obs-lock-scroll {
   .obs-opening-line,
   .obs-horizon,
   .obs-horizon-orbit,
-  .obs-meter b,
   .obs-idle-sky,
   .obs-pointer-layer {
     display: none;
@@ -1171,7 +1068,6 @@ html[data-skin="observatory"] body.obs-lock-scroll {
     opacity: 1 !important;
   }
   [data-skin="observatory"] .obs-page-enter.is-on,
-  [data-skin="observatory"] .obs-nav-pulse.is-active,
   [data-skin="observatory"] .obs-skin-card,
   [data-skin="observatory"] .obs-theme-card {
     animation: none !important;

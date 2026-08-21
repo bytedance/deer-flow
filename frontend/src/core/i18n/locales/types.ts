@@ -1020,9 +1020,6 @@ export interface Translations {
     observatory: {
       name: string;
       tagline: string;
-      toggleSky: string;
-      nightLabel: string;
-      dawnLabel: string;
     };
   };
 
