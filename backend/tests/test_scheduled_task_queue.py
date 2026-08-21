@@ -343,6 +343,53 @@ async def test_pause_atomically_cancels_waiting_run_but_rejects_launching_run(tm
         await close_engine()
 
 
+async def test_manual_enqueue_cannot_unpause_a_task_that_cancels_its_waiting_run(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+
+        class DelayedCreateRunRepository(ScheduledTaskRunRepository):
+            def __init__(self, session_factory):
+                super().__init__(session_factory)
+                self.created = asyncio.Event()
+                self.resume_dispatch = asyncio.Event()
+
+            async def create(self, **kwargs):
+                row = await super().create(**kwargs)
+                self.created.set()
+                await self.resume_dispatch.wait()
+                return row
+
+        run_repo = DelayedCreateRunRepository(sf)
+        now = datetime.now(UTC)
+        task = await _seed_reuse_task(task_repo, task_id="task-manual-pause-race", now=now)
+
+        async def launch_run(**_kwargs):
+            raise AssertionError("a queued occurrence cancelled by pause must not launch")
+
+        service = _make_service(task_repo, run_repo, launch_run)
+        dispatch = asyncio.create_task(service.dispatch_task(task, now=now, trigger="manual"))
+        await run_repo.created.wait()
+
+        pause_result = await task_repo.pause_with_queue_cancellation(
+            task["id"],
+            user_id="user-1",
+            error="paused while queued",
+            now=now,
+        )
+        run_repo.resume_dispatch.set()
+        result = await dispatch
+
+        assert pause_result == "paused"
+        assert result["outcome"] == "queued"
+        assert (await task_repo.get(task["id"], user_id="user-1"))["status"] == "paused"
+        assert (await run_repo.list_by_task(task["id"]))[0]["status"] == "interrupted"
+    finally:
+        await close_engine()
+
+
 async def test_scheduled_queue_timeout_advances_cron_without_immediate_requeue(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

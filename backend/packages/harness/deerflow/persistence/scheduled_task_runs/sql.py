@@ -388,19 +388,27 @@ class ScheduledTaskRunRepository:
             row = await session.get(ScheduledTaskRunRow, run_record_id)
             if row is None:
                 return False
-            if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
-                await session.rollback()
-                return False
             if protect_terminal and row.status in TERMINAL_RUN_STATUSES:
                 # The launch-path "running" write lost the race against the
                 # completion hook; keep the terminal status/error and only
                 # backfill bookkeeping the completion write could not know.
+                # Completion clears the short launch lease, so allow that
+                # backfill after an owner mismatch only when the terminal row
+                # already identifies the exact same durable run.  A stale
+                # launcher for another run remains fenced.
+                same_run = run_id is not None and row.run_id == run_id
+                if expected_lease_owner is not None and row.lease_owner != expected_lease_owner and not same_run:
+                    await session.rollback()
+                    return False
                 if row.run_id is None and run_id is not None:
                     row.run_id = run_id
                 if row.started_at is None and started_at is not None:
                     row.started_at = started_at
                 await session.commit()
                 return True
+            if expected_lease_owner is not None and row.lease_owner != expected_lease_owner:
+                await session.rollback()
+                return False
             row.status = status
             row.run_id = run_id
             row.error = error

@@ -288,15 +288,47 @@ async def test_update_status_protect_terminal_keeps_completion_result(tmp_path):
         trigger="scheduled",
         status="queued",
     )
+    claimed_at = datetime(2026, 7, 2, 1, 0, tzinfo=UTC)
+    claimed = await repo.claim_queued_run(
+        "task-run-race",
+        lease_owner="worker-a",
+        now=claimed_at,
+        lease_seconds=120,
+        global_max_concurrent_runs=3,
+    )
+    assert claimed is not None
     # Completion hook wins the race and commits the terminal state first.
     await repo.update_status("task-run-race", status="failed", run_id="run-1", error="boom", finished_at=datetime(2026, 7, 2, 1, 1, tzinfo=UTC))
-    # Late launch-path write: keeps terminal status/error, backfills started_at.
-    await repo.update_status("task-run-race", status="running", run_id="run-1", started_at=datetime(2026, 7, 2, 1, 0, tzinfo=UTC), protect_terminal=True)
+    # Late launch-path write: completion cleared the launch lease, but the
+    # matching run id proves this is the same launch and permits the missing
+    # started_at backfill without weakening fencing for another run.
+    updated = await repo.update_status(
+        "task-run-race",
+        status="running",
+        run_id="run-1",
+        started_at=claimed_at,
+        protect_terminal=True,
+        expected_lease_owner="worker-a",
+    )
 
     entry = (await repo.list_by_task("task-1"))[0]
+    assert updated is True
     assert entry["status"] == "failed"
     assert entry["error"] == "boom"
     assert entry["started_at"] is not None
+
+    stale = await repo.update_status(
+        "task-run-race",
+        status="running",
+        run_id="run-stale",
+        started_at=claimed_at - timedelta(minutes=1),
+        protect_terminal=True,
+        expected_lease_owner="worker-stale",
+    )
+    assert stale is False
+    entry = (await repo.list_by_task("task-1"))[0]
+    assert entry["run_id"] == "run-1"
+    assert entry["started_at"] == claimed_at.isoformat()
 
     await close_engine()
 

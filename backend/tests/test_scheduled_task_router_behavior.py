@@ -593,6 +593,50 @@ async def test_update_rejects_running_task():
 
 
 @pytest.mark.asyncio
+async def test_update_rejects_queued_task_definition_until_occurrence_finishes():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-queued",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Queued task",
+        prompt="Original prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    repo.active_status = "queued"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+    config = _Config()
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_config = lambda: config
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.update_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+                body=scheduled_tasks.ScheduledTaskUpdateRequest(prompt="Changed while queued"),
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "active queued occurrence" in str(exc_info.value)
+    assert repo.items[task["id"]]["prompt"] == "Original prompt"
+
+
+@pytest.mark.asyncio
 async def test_list_thread_scheduled_tasks_filters_by_thread_id():
     repo = _Repo()
     await repo.create(

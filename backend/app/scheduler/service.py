@@ -176,7 +176,13 @@ class ScheduledTaskService:
                 return self._active_run_conflict_result(execution_thread_id)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
 
-        await self._release_admission_lease(task, trigger=trigger)
+        # Only scheduled dispatches own the parent task's short admission
+        # lease.  A manual trigger can race either that owner or an atomic
+        # pause/delete after inserting its queue row; releasing here with no
+        # expected owner would clear somebody else's lease and could also
+        # overwrite the newer paused state with this request's stale snapshot.
+        if trigger == "scheduled":
+            await self._release_admission_lease(task, trigger=trigger)
         queued = {
             "id": task_run_id,
             "task_id": task["id"],

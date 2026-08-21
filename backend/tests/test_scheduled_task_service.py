@@ -14,6 +14,7 @@ class DummyTaskRepo:
         self.rows = rows
         self.claimed = False
         self.updated = None
+        self.release_calls = []
         self.cancelled_stuck_once = None
         self.reconciled_stuck_once = None
 
@@ -31,7 +32,8 @@ class DummyTaskRepo:
     async def release_queued_admission_lease(self, task_id):
         return False
 
-    async def release_dispatch_lease(self, task_id, **_kwargs):
+    async def release_dispatch_lease(self, task_id, **kwargs):
+        self.release_calls.append((task_id, kwargs))
         return True
 
     async def claim_due_tasks(self, **_kwargs):
@@ -331,6 +333,7 @@ async def test_manual_overlap_conflict_is_kept_in_queue():
 
     assert result["outcome"] == "queued"
     assert run_repo.updated[-1][1]["status"] == "queued"
+    assert task_repo.release_calls == []
 
 
 @pytest.mark.asyncio
