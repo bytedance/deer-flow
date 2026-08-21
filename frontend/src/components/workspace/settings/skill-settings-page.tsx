@@ -148,7 +148,7 @@ function localizeSkill(skill: Skill, locale: string): Skill {
   if (!locale.startsWith("zh")) return skill;
   const zh = SKILL_ZH[skill.name];
   if (!zh) return skill;
-  return { ...skill, name: zh.name, description: zh.description };
+  return { ...skill, displayName: zh.name, description: zh.description };
 }
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
@@ -228,7 +228,9 @@ function SkillSettingsList({
           <Item className="w-full" variant="outline" key={skill.name}>
             <ItemContent>
               <ItemTitle>
-                <div className="flex items-center gap-2">{skill.name}</div>
+                <div className="flex items-center gap-2">
+                  {skill.displayName ?? skill.name}
+                </div>
               </ItemTitle>
               <ItemDescription className="line-clamp-4">
                 {skill.description}

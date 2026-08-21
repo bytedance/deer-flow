@@ -7,7 +7,8 @@ import { aboutMarkdownEnUS, aboutMarkdownZhCN } from "./about-content";
 
 export function AboutSettingsPage() {
   const { locale } = useI18n();
-  const aboutMarkdown =
-    locale === "zh-CN" ? aboutMarkdownZhCN : aboutMarkdownEnUS;
+  const aboutMarkdown = locale.startsWith("zh")
+    ? aboutMarkdownZhCN
+    : aboutMarkdownEnUS;
   return <SafeStreamdown>{aboutMarkdown}</SafeStreamdown>;
 }
