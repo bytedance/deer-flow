@@ -4,7 +4,6 @@ import { type Metadata } from "next";
 
 import { ThemeProvider } from "@/components/theme-provider";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
-import { SkinProvider } from "@/core/skins";
 
 export const metadata: Metadata = {
   title: "DeerFlow",
@@ -22,7 +21,7 @@ export default function RootLayout({
     >
       <body>
         <ThemeProvider attribute="class" enableSystem disableTransitionOnChange>
-          <SkinProvider>{children}</SkinProvider>
+          {children}
         </ThemeProvider>
       </body>
     </html>
