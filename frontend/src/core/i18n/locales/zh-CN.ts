@@ -600,11 +600,17 @@ export const zhCN: Translations = {
 
   // Chats
   chats: {
+    description: "管理你的所有对话。",
+    noMatches: "没有找到匹配的对话",
+    emptyTitle: "暂无对话",
+    emptyDescription: "开始一段新对话，你的记录会出现在这里。",
     searchChats: "搜索对话",
     branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
+    loadError: "加载对话失败",
+    retry: "重试",
     pinChat: "置顶对话",
     unpinChat: "取消置顶",
     pinChatFailed: "更新对话置顶状态失败",
@@ -803,6 +809,7 @@ export const zhCN: Translations = {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
     sections: {
+      chats: "对话",
       account: "账号",
       appearance: "外观",
       channels: "渠道",
