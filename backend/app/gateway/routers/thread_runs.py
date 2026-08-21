@@ -1329,9 +1329,14 @@ async def _enrich_thread_message_page(
                     "comment": feedback.get("comment"),
                 }
 
-        content = row.get("content")
-        if isinstance(content, dict) and content.get("type") == "ai" and run_id in run_durations:
-            content.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[run_id]
+    # ``turn_duration`` is the run's wall-clock lifetime, not model thinking
+    # time — stamp it on the run's LAST visible AI message only so the UI does
+    # not repeat the same number on every intermediate AI message of a
+    # multi-step turn (#4152). The legacy ``GET /messages`` and ``/history``
+    # endpoints already use ``stamp_turn_duration_on_last_ai``; the page
+    # endpoint was inlining the equivalent loop but stamping every AI row,
+    # which #4163 fixed for the other paths and missed here.
+    stamp_turn_duration_on_last_ai(data, run_durations)
     return data
 
 

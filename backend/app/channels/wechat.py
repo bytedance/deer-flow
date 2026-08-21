@@ -668,7 +668,9 @@ class WechatChannel(Channel):
         )
         inbound.topic_id = None
         inbound = await self._attach_connection_identity(inbound)
-        await self.bus.publish_inbound(inbound)
+        # The iLink poll loop processes updates sequentially on the Gateway
+        # loop, so no provider-side task needs a pre-handoff reservation.
+        await self._publish_inbound_or_drop(inbound)
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(

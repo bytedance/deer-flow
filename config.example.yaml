@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 33
+config_version: 34
 
 # ============================================================================
 # Logging
@@ -41,7 +41,8 @@ logging:
 # lead-only vs subagent-only configuration is not expressible yet. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
-# lets extensions_config.json remain the source of truth for extension packages.
+# lets extensions_config.json remain the source of truth for this legacy
+# config-declared middleware list. Packaged plugins use the `plugins:` block below.
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware
@@ -1493,6 +1494,15 @@ sandbox:
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
 
 # acp_agents:
+#   mcode:
+#     # MiniMax Code speaks ACP directly; no adapter package is required.
+#     # Install with `npm install --global @minimax-ai/code`, then run `mcode login`.
+#     command: mcode
+#     args: ["acp"]
+#     description: MiniMax Code for implementation, refactoring, debugging, and repository tasks
+#     # auto_approve_permissions: false  # Enable only for trusted tasks that need MCode to edit files or run commands
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
+#
 #   claude_code:
 #     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
 #     # speak ACP directly. Install `claude-agent-acp` separately or use:
@@ -1727,6 +1737,18 @@ memory:
   # For a host-installed OpenViking used by Docker DeerFlow, set base_url to
   # http://host.docker.internal:1933 and allow_insecure_http: true. The bundled
   # optional Compose overlay uses the internal http://openviking:1933 address.
+  #
+  # Honcho example (replace this DeerMem backend_config block when
+  # manager_class is honcho). This remote HTTP adapter uses Honcho's server-side
+  # deriver to build user-model memory representations; no local LLM calls.
+  #
+  # backend_config:
+  #   base_url: http://localhost:8000
+  #   # api_key: $HONCHO_API_KEY   # hosted Honcho; plain-http + api_key needs allow_insecure_http: true
+  #   workspace_prefix: deerflow-u-   # one isolated workspace per user id
+  #   # workspace_overrides: {}    # map specific user ids to custom workspaces
+  #   # user_peer_overrides: {}    # map specific user ids to custom peer names
+  #   assistant_peer: deerflow
   backend_config:
     storage_path: ""            # empty = deer-flow base_dir (factory injects absolute runtime_home); a non-empty path is the root DIRECTORY (per-user memory under {storage_path}/users/{uid}/memory.json)
     storage_class: file         # file (default) or a dotted MemoryStorage class path; invalid persistent backends fail fast
@@ -1747,6 +1769,26 @@ memory:
       # temperature:            # optional
     max_facts: 100 # Maximum number of facts to store
     fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    # Capacity eviction defaults to the historical confidence-only ranking.
+    # Opt in to hybrid-v1 to score confidence (65%), explicit-confirmation
+    # freshness (25%, 90-day half-life), and query-driven access heat (10%,
+    # 30-day half-life). Actual memory_search hits count; default injection does
+    # not. A bounded 10% correction reserve aligns storage with guaranteed
+    # correction injection. Confirmation detection is batch-level: it checks
+    # human messages among the last six filtered messages, while the LLM binds
+    # that signal to a factsToReinforce ID without a second correspondence
+    # check. Shadow mode audits hybrid disagreements without changing which
+    # facts confidence-only keeps.
+    fact_eviction_policy: confidence # confidence | hybrid-v1
+    fact_eviction_shadow_enabled: false
+    eviction_confidence_weight: 0.65
+    eviction_confirmation_weight: 0.25
+    eviction_access_weight: 0.10
+    eviction_confirmation_half_life_days: 90
+    eviction_access_half_life_days: 30
+    eviction_correction_reserved_fraction: 0.10
+    eviction_correction_reserved_max: 10
+    eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection
     # Token counting strategy for memory-injection budgeting:
     #   tiktoken (default) - accurate, but the encoding BPE data may be
@@ -2041,19 +2083,19 @@ agent_storage:
 # Background scheduler for one-time and recurring (cron) agent runs.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
-# Multi-worker note: the scheduler runs once per uvicorn worker. SQLite silently
-# ignores row-level locks, so multiple workers can double-fire the same task.
-# For multi-worker deployments (GATEWAY_WORKERS > 1), use the Postgres database
-# backend, where FOR UPDATE SKIP LOCKED serializes claims correctly.
+# The scheduler is single-instance by default. Set multi_instance: true only
+# when every Gateway instance shares Postgres, run ownership heartbeats, and
+# database-backed run events; startup recovery then preserves live peer runs.
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Global cap on active scheduled runs; each poll claims only into the remaining budget
+#   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
 scheduler:
   enabled: false
+  multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
@@ -2062,8 +2104,9 @@ scheduler:
 # ============================================================================
 # Long-running MCP Tasks Configuration
 # ============================================================================
-# Protocol-neutral durable task runtime. This foundation is disabled by
-# default; an MCP task driver must be configured before tasks can be submitted.
+# Durable runtime for ordinary MCP submit/status/cancel task toolsets. It is
+# disabled by default; task_toolsets are configured per server in
+# extensions_config.json.
 # All fields are restart-required (captured at Gateway lifespan startup).
 #
 # mcp_tasks:
@@ -2071,11 +2114,21 @@ scheduler:
 #   poll_interval_seconds: 5     # Scan interval and default task retry interval
 #   lease_seconds: 120           # Expired claims become recoverable after this delay
 #   max_concurrent_polls: 8      # Maximum status calls started by one worker per scan
+#   max_poll_backoff_seconds: 300             # Cap for exponential retries after transient errors
+#   input_required_poll_interval_seconds: 60  # Minimum poll interval while waiting for user input
+#   tracking_degraded_after_errors: 3         # Consecutive errors before query API reports degraded tracking
+#   max_result_bytes: 65536                    # Full JSON result storage limit
+#   result_preview_max_chars: 2000             # Text preview retained when a result exceeds the limit
 mcp_tasks:
   enabled: false
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_polls: 8
+  max_poll_backoff_seconds: 300
+  input_required_poll_interval_seconds: 60
+  tracking_degraded_after_errors: 3
+  max_result_bytes: 65536
+  result_preview_max_chars: 2000
 
 # ============================================================================
 # Run Ownership Configuration
@@ -2203,6 +2256,14 @@ run_ownership:
 #   langgraph_url: http://localhost:8001/api
 #   # Gateway API URL for auxiliary queries like /models, /memory (default: http://localhost:8001)
 #   gateway_url: http://localhost:8001
+#   # Maximum queued or provider-reserved inbound messages. Must be a positive integer.
+#   inbound_queue_maxsize: 1000
+#   # Fixed number of long-lived inbound handler workers. Must be a positive integer.
+#   max_concurrency: 5
+#   # Seconds to drain accepted inbound work before cancelling active handlers.
+#   # Must be a non-negative finite number. Cancelled handlers are awaited; the Gateway's
+#   # outer shutdown timeout remains the process-level bound for incomplete cleanup.
+#   shutdown_grace_period_seconds: 3
 #   #
 #   # Docker Compose note:
 #   # If channels run inside the gateway container, use container DNS names instead
@@ -2519,8 +2580,27 @@ authorization:
 # entry names an install entry point as "module.path:install"; the `config`
 # block is handed to that package verbatim and validated by the package itself.
 #
-# Loading is explicit on purpose: an installed package does nothing until it is
-# listed here, and the list order is what fixes middleware ordering.
+# Prefer the extension manager over editing this list by hand:
+#   make extension-install SOURCE="deerflow-extension-acme==1.2.3"
+#   make extension-install SOURCE="git+https://github.com/acme/deerflow-extension-acme.git@<commit>"
+#   make extension-install SOURCE="/absolute/path/to/local-extension"
+#   make extension-list
+#   make extension-enable NAME=acme
+#   make extension-disable NAME=acme
+#   make extension-remove NAME=acme
+# The installer updates backend/pyproject.toml, backend/uv.lock, and this block
+# together. It also asks the operator to confirm that the source is trusted;
+# extensions and their build systems execute with Gateway privileges.
+#
+# Every install, enable, disable, remove, or manual edit requires a Gateway
+# restart. Development launchers may fetch missing locked artifacts before
+# handoff; a built production Gateway never installs plugins during startup.
+# Local directories are copied to backend/extensions/sources as deployable
+# snapshots; use a pinned version or public HTTPS Git commit for reproducible
+# remote sources. SSH Git URLs are rejected because the stock Docker builder
+# does not forward host SSH credentials.
+# Loading remains explicit: a package installed outside the manager does nothing
+# until it is listed here, and list order fixes contribution ordering.
 #
 # This is deliberately separate from the `extensions:` block above (MCP servers,
 # skills, config-declared middlewares). That one is backed by
@@ -2528,20 +2608,16 @@ authorization:
 # endpoint; a list that causes code to be imported must stay in this
 # operator-controlled file only.
 #
-# This initial extension-system slice accepts middleware contributors. Their
-# install functions register semantically placed middlewares for the lead and/or
-# subagent stack; the examples below intentionally cover only that surface.
+# Plugins can contribute semantically placed middleware, task-lifecycle hooks,
+# system-model observers, Gateway-lifetime services, and eager FastAPI HTTP routers.
+# See examples/deerflow-extension-example for a package that exercises all five.
 #
 # plugins:
-#   - use: acme_request_observer:install
+#   - name: example                       # PEP 621 entry-point name
+#     package: deerflow-extension-example # Python distribution managed by uv
+#     use: deerflow_extension_example:install
+#     enabled: true                       # false skips import and registration
+#     required: false                     # true makes load failure abort Gateway startup
+#                                         # (install --required opts in)
 #     config:
-#       enabled: true
-#       placement: model_logical
-#   - use: acme_tool_observer:install
-#     config:
-#       enabled: true
-#       placement: tool_raw
-#   # `required: true` turns a load failure into a startup failure. Use it for
-#   # packages whose absence changes behaviour rather than just observability.
-#   - use: acme_required_middleware:install
-#     required: true
+#       label: example                    # extension-private values, if any

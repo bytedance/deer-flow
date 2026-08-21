@@ -134,6 +134,11 @@ def _format_invocation_error(agent: str, cmd: str, exc: Exception) -> str:
     if cmd == "codex-acp" and shutil.which("codex"):
         return f"{message} The installed `codex` CLI does not speak ACP directly. Install a Codex ACP adapter (for example `npx @zed-industries/codex-acp`) or update `acp_agents.codex.command` and `args` in config.yaml."
 
+    if agent == "mcode":
+        return (
+            f"{message} Install it with `npm install --global @minimax-ai/code`, run `mcode login`, and restart DeerFlow so it inherits the updated PATH. "
+            "If the Gateway runs in Docker, ensure `mcode` is installed and authenticated inside the Gateway container/image."
+        )
     return f"{message} Install the agent binary or update `acp_agents.{agent}.command` in config.yaml."
 
 
@@ -193,7 +198,7 @@ def build_invoke_acp_agent_tool(agents: dict) -> BaseTool:
                 try:
                     from acp.schema import TextContentBlock
 
-                    if hasattr(update, "content") and isinstance(update.content, TextContentBlock):
+                    if getattr(update, "session_update", None) == "agent_message_chunk" and isinstance(update.content, TextContentBlock):
                         self._chunks.append(update.content.text)
                 except Exception:
                     pass

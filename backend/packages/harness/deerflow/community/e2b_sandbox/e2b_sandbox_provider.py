@@ -15,6 +15,12 @@ provider fields during startup.
       overflow_policy: wait            # wait | reject | burst (default: wait)
       acquire_timeout: 30              # seconds for ``wait`` policy (default: 30)
       burst_limit: 2                   # extra slots for ``burst`` policy (default: 0)
+      reconciliation_interval_seconds: 60
+      reconciliation_grace_seconds: 120
+      reconciliation_orphan_ttl_seconds: 3600
+      reconciliation_max_pages: 10
+      reconciliation_max_items: 200
+      reconciliation_max_seconds: 15
       ownership:
         type: redis                    # shares ownership and capacity across Gateways
         redis_url: redis://redis:6379/0
@@ -93,6 +99,41 @@ MIN_CAPACITY_RESERVATION_SECONDS = 120.0
 # Hard upper bound for ``set_timeout`` (e2b currently caps at 24h on the
 # free plan; passing an excessive value is rejected by the control-plane).
 MAX_E2B_TIMEOUT = 24 * 60 * 60
+# These limits bound one E2B mount.
+_MAX_MOUNT_FILE_SIZE = 100 * 1024 * 1024
+_MAX_MOUNT_TOTAL_SIZE = 512 * 1024 * 1024
+_MAX_MOUNT_FILES = 2000
+# These limits bound all uploads during one sandbox creation pass.
+_MAX_MOUNT_PASS_TOTAL_BYTES = 512 * 1024 * 1024
+_MAX_MOUNT_PASS_FILES = 2000
+# Deadline checks stop preflight work and new writes. Active SDK writes finish.
+_MOUNT_PASS_DEADLINE_SECONDS = 120
+
+
+def _mount_deadline_reason() -> str:
+    return f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s"
+
+
+class _MountPassLimitExceeded(Exception):
+    """Stop the current mount upload pass at its aggregate resource limit."""
+
+
+@dataclass
+class _MountUploadBudget:
+    deadline: float
+    attempted_bytes: int = 0
+    attempted_files: int = 0
+    completed_bytes: int = 0
+    completed_files: int = 0
+
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline
+
+    def check_deadline(self) -> None:
+        if self.expired:
+            raise _MountPassLimitExceeded(_mount_deadline_reason())
+
 
 # Metadata keys we attach to every sandbox so we can discover ours via
 # ``Sandbox.list(query={...})`` from any gateway process.
@@ -104,7 +145,20 @@ META_KEY_CREATED_AT = "deer_flow_created_at"
 META_KEY_CAPACITY_LEDGER = "deer_flow_capacity_ledger"
 META_KEY_CAPACITY_RESERVATION = "deer_flow_capacity_reservation"
 META_VAL_PROVIDER = "e2b_sandbox_provider"
-E2B_EXTRA_CONFIG_KEYS = frozenset({"api_key", "domain", "home_dir", "template"})
+E2B_EXTRA_CONFIG_KEYS = frozenset(
+    {
+        "api_key",
+        "domain",
+        "home_dir",
+        "reconciliation_grace_seconds",
+        "reconciliation_interval_seconds",
+        "reconciliation_max_items",
+        "reconciliation_max_pages",
+        "reconciliation_max_seconds",
+        "reconciliation_orphan_ttl_seconds",
+        "template",
+    }
+)
 
 
 @dataclass
@@ -1746,6 +1800,21 @@ class E2BSandboxProvider(SandboxProvider):
             return []
 
     def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+        started_at = time.monotonic()
+        budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
+
+        def warn_pass_stopped(reason: str) -> None:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.warning(
+                "e2b mount upload pass stopped: reason=%s attempted_files=%d attempted_bytes=%d completed_files=%d completed_bytes=%d elapsed_ms=%d",
+                reason,
+                budget.attempted_files,
+                budget.attempted_bytes,
+                budget.completed_files,
+                budget.completed_bytes,
+                elapsed_ms,
+            )
+
         effective_user_id = user_id or get_effective_user_id()
         projection_mounts = self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
@@ -1768,6 +1837,9 @@ class E2BSandboxProvider(SandboxProvider):
             mounts.append((host_path, container_path, read_only))
 
         for host_path, container_path, read_only in mounts:
+            if budget.expired:
+                warn_pass_stopped(_mount_deadline_reason())
+                break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
                 continue
@@ -1786,7 +1858,10 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("make_dir(%s) failed (continuing): %s", container_path, e)
 
             try:
-                self._upload_tree(client, host_path, container_path, read_only)
+                self._upload_tree(client, host_path, container_path, read_only, budget=budget)
+            except _MountPassLimitExceeded as e:
+                warn_pass_stopped(str(e))
+                break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
 
@@ -2074,39 +2149,85 @@ class E2BSandboxProvider(SandboxProvider):
         src: Path,
         dest_dir: str,
         read_only: bool,
+        *,
+        budget: _MountUploadBudget | None = None,
     ) -> None:
         """Recursively upload ``src`` into ``dest_dir`` inside the sandbox."""
-        if src.is_file():
-            target = f"{dest_dir}/{src.name}"
-            with src.open("rb") as fh:
-                client.files.write(target, fh.read())
-            if read_only:
+        started_at = time.monotonic()
+        source_is_file = src.is_file()
+        files: list[tuple[Path, str, int]] = []
+        total_size = 0
+
+        def add_file(path: Path, target: str) -> None:
+            nonlocal total_size
+            if budget is not None:
+                budget.check_deadline()
+            file_size = path.stat().st_size
+            if file_size > _MAX_MOUNT_FILE_SIZE:
+                raise ValueError(f"Mount file {path} is {file_size} bytes and exceeds the {_MAX_MOUNT_FILE_SIZE}-byte file limit")
+            if len(files) >= _MAX_MOUNT_FILES:
+                raise ValueError(f"Mount {src} contains more than {_MAX_MOUNT_FILES} files and exceeds the {_MAX_MOUNT_FILES}-file limit")
+            total_size += file_size
+            if total_size > _MAX_MOUNT_TOTAL_SIZE:
+                raise ValueError(f"Mount {src} is at least {total_size} bytes and exceeds the {_MAX_MOUNT_TOTAL_SIZE}-byte total limit")
+            files.append((path, target, file_size))
+
+        if source_is_file:
+            add_file(src, f"{dest_dir}/{src.name}")
+        else:
+            for path in src.rglob("*"):
+                if budget is not None:
+                    budget.check_deadline()
+                if path.is_file():
+                    rel = path.relative_to(src).as_posix()
+                    add_file(path, f"{dest_dir}/{rel}")
+
+        upload_attempted = False
+        try:
+            for path, target, expected_size in files:
+                if budget is not None:
+                    budget.check_deadline()
+                if budget is not None and budget.attempted_files >= _MAX_MOUNT_PASS_FILES:
+                    raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
+                if budget is not None and budget.attempted_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
+                    raise _MountPassLimitExceeded(f"total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
                 try:
-                    client.commands.run(f"chmod a-w {shlex.quote(target)}")
+                    make_dir = getattr(client.files, "make_dir", None)
+                    if callable(make_dir):
+                        parent = target.rsplit("/", 1)[0]
+                        if parent and parent != dest_dir:
+                            make_dir(parent)
                 except Exception:
                     pass
-            return
-
-        for path in src.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(src).as_posix()
-            target = f"{dest_dir}/{rel}"
-            try:
-                make_dir = getattr(client.files, "make_dir", None)
-                if callable(make_dir):
-                    parent = target.rsplit("/", 1)[0]
-                    if parent and parent != dest_dir:
-                        make_dir(parent)
-            except Exception:
-                pass
-            with path.open("rb") as fh:
-                client.files.write(target, fh.read())
-        if read_only:
-            try:
-                client.commands.run(f"chmod -R a-w {shlex.quote(dest_dir)}")
-            except Exception:
-                pass
+                with path.open("rb") as fh:
+                    actual_size = os.fstat(fh.fileno()).st_size
+                    if actual_size != expected_size:
+                        raise ValueError(f"Mount file {path} changed during upload preflight")
+                    upload_attempted = True
+                    if budget is not None:
+                        budget.attempted_files += 1
+                        budget.attempted_bytes += expected_size
+                    client.files.write(target, fh)
+                if budget is not None:
+                    budget.completed_files += 1
+                    budget.completed_bytes += expected_size
+        finally:
+            if read_only and upload_attempted:
+                try:
+                    chmod_target = files[0][1] if source_is_file else dest_dir
+                    chmod_flag = "" if source_is_file else "-R "
+                    client.commands.run(f"chmod {chmod_flag}a-w {shlex.quote(chmod_target)}")
+                except Exception:
+                    pass
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.info(
+            "e2b mount upload: source=%s destination=%s files=%d bytes=%d elapsed_ms=%d",
+            src,
+            dest_dir,
+            len(files),
+            total_size,
+            elapsed_ms,
+        )
 
     def _evict_oldest_warm(self) -> str | None:
         """Evict the oldest warm entry, holding a transitioning slot.

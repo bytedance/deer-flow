@@ -48,6 +48,99 @@ test.describe("Integrations settings", () => {
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
   });
 
+  test("falls back when copying a Lark authorization link without the Clipboard API", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(document, "execCommand", {
+        configurable: true,
+        value: (command: string) => {
+          if (command !== "copy") return false;
+          const copiedText =
+            document.querySelector<HTMLTextAreaElement>(
+              "textarea[readonly]",
+            )?.value;
+          (window as typeof window & { __copiedText?: string }).__copiedText =
+            copiedText;
+          return true;
+        },
+      });
+    });
+    mockLangGraphAPI(page);
+
+    const configuredStatus = configuredLarkStatus();
+    await page.route("**/api/integrations/lark/status", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          ...configuredStatus,
+          auth: {
+            status: "not_authorized",
+            message: "Lark user authorization is not configured",
+            user: "existing-user",
+            verified: false,
+          },
+        }),
+      });
+    });
+    await page.route("**/api/integrations/lark/auth/start", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          verification_url: "about:blank#lark-auth-copy-fallback",
+          device_code: "copy-fallback-device-code",
+          generation: "copy-fallback-generation",
+          expires_in: 600,
+          user_code: null,
+          hint: null,
+        }),
+      });
+    });
+    await page.route(
+      "**/api/integrations/lark/auth/complete",
+      async (route) => {
+        await route.fulfill({
+          status: 504,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: "Authorization still pending." }),
+        });
+      },
+    );
+
+    await page.goto("/workspace/chats/new?settings=integrations");
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    const popupPromise = page.waitForEvent("popup");
+    await dialog.getByRole("button", { name: "Connect Lark" }).click();
+    const popup = await popupPromise;
+    await expect(
+      dialog.getByText("about:blank#lark-auth-copy-fallback"),
+    ).toBeVisible();
+    await popup.close();
+
+    // The app installs a compatibility shim during startup. Remove it here to
+    // model environments where Clipboard API access disappears at copy time.
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", {
+        configurable: true,
+        value: undefined,
+      });
+    });
+
+    await dialog.getByRole("button", { name: "Copy link" }).click();
+
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            (window as typeof window & { __copiedText?: string }).__copiedText,
+        ),
+      )
+      .toBe("about:blank#lark-auth-copy-fallback");
+    await expect(page.getByText("Copied to clipboard")).toBeVisible();
+  });
+
   test("keeps a single settings dialog across deep link and nav menu openings", async ({
     page,
   }) => {

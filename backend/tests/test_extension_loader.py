@@ -28,6 +28,30 @@ def test_no_specs_yields_empty_result():
     assert loaded.has_middleware_contributors is False
 
 
+def test_host_disabled_required_extension_is_skipped_before_resolution(monkeypatch):
+    def _must_not_resolve(path: str):
+        raise AssertionError(f"disabled extension was resolved: {path}")
+
+    monkeypatch.setattr("deerflow.extensions.loader.resolve_variable", _must_not_resolve)
+
+    loaded, diagnostics = load_extensions([ExtensionSpec(use="missing_extension:install", enabled=False, required=True)])
+
+    assert diagnostics == []
+    assert loaded.has_middleware_contributors is False
+
+
+def test_manager_metadata_is_accepted_without_reaching_the_install_hook():
+    spec = ExtensionSpec(
+        name="demo",
+        package="deerflow-extension-demo",
+        use=f"{_FIXTURE}:install_ok",
+        enabled=False,
+    )
+
+    assert spec.name == "demo"
+    assert spec.package == "deerflow-extension-demo"
+
+
 def test_successful_install_registers_and_attributes():
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok")
     loaded, diagnostics = load_extensions([spec])
@@ -88,6 +112,9 @@ def test_install_failure_rolls_back_partial_registration():
     assert sources == {f"{_FIXTURE}:install_ok"}
     assert len(loaded.middleware_contributors) == 1, "rollback must clear every partial registration"
     assert loaded.task_lifecycle == (), "rollback must clear partial lifecycle registrations too"
+    assert loaded.system_model_observers == ()
+    assert loaded.services == ()
+    assert loaded.routers == ()
 
 
 def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_same_use():

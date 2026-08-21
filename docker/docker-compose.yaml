@@ -58,8 +58,10 @@ services:
       sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
       && nginx -g 'daemon off;'"
     depends_on:
-      - frontend
-      - gateway
+      frontend:
+        condition: service_started
+      gateway:
+        condition: service_healthy
     networks:
       - deer-flow
     restart: unless-stopped
@@ -90,7 +92,7 @@ services:
       dockerfile: backend/Dockerfile
       args:
         APT_MIRROR: ${APT_MIRROR:-}
-        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.7.20}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.11.1}
         UV_INDEX_URL: ${UV_INDEX_URL:-https://pypi.org/simple}
         UV_EXTRAS: ${UV_EXTRAS:-}
         NPM_REGISTRY: ${NPM_REGISTRY:-}
@@ -102,7 +104,7 @@ services:
     # reconnect, but run cancel, request dedup, and per-worker IM channel
     # services remain worker-local. Override GATEWAY_WORKERS only when the
     # Redis stream bridge is enabled and those limitations are acceptable.
-    command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
+    command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
@@ -144,6 +146,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3); raise SystemExit(0 if response.status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     networks:
       - deer-flow
     restart: unless-stopped
