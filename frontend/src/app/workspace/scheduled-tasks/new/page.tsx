@@ -75,7 +75,7 @@ export default function NewScheduledTaskPage() {
         </div>
       </header>
       <main className="flex flex-1 justify-center overflow-y-auto px-4 py-6">
-        <div className="w-full max-w-xl space-y-4">
+        <div className="my-auto w-full max-w-xl space-y-4">
           <div className="space-y-3 pb-2 text-center">
             <div className="bg-primary/10 mx-auto flex h-14 w-14 items-center justify-center rounded-full">
               <CalendarClock className="text-primary h-7 w-7" />
