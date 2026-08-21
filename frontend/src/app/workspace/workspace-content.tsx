@@ -11,6 +11,7 @@ import { ObservatoryLazy } from "@/components/workspace/skins/observatory-lazy";
 import { PageEnter } from "@/components/workspace/skins/page-enter";
 import { WorkspaceSettingsDeepLink } from "@/components/workspace/workspace-settings-deep-link";
 import { WorkspaceSidebar } from "@/components/workspace/workspace-sidebar";
+import { SkinProvider } from "@/core/skins";
 
 function parseSidebarOpenCookie(
   value: string | undefined,
@@ -34,19 +35,21 @@ export async function WorkspaceContent({
 
   return (
     <QueryClientProvider>
-      <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
-        <WorkspaceSidebar />
-        <SidebarInset className="min-w-0">
-          <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
-          <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
-          <PageEnter>{children}</PageEnter>
-        </SidebarInset>
-      </SidebarProvider>
-      <ObservatoryLazy />
-      <CommandPalette />
-      <SettingsDialogHost />
-      <WorkspaceSettingsDeepLink />
-      <Toaster position="top-center" />
+      <SkinProvider>
+        <SidebarProvider className="h-screen" defaultOpen={initialSidebarOpen}>
+          <WorkspaceSidebar />
+          <SidebarInset className="min-w-0">
+            <GatewayOfflineBanner gatewayUnavailable={gatewayUnavailable} />
+            <ModelLoadErrorBanner gatewayUnavailable={gatewayUnavailable} />
+            <PageEnter>{children}</PageEnter>
+          </SidebarInset>
+        </SidebarProvider>
+        <ObservatoryLazy />
+        <CommandPalette />
+        <SettingsDialogHost />
+        <WorkspaceSettingsDeepLink />
+        <Toaster position="top-center" />
+      </SkinProvider>
     </QueryClientProvider>
   );
 }

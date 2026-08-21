@@ -9,6 +9,7 @@ import { ChatProviders } from "@/components/workspace/chats/chat-providers";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
+import { SkinProvider } from "@/core/skins";
 
 export default async function PublicShowcaseLayout({
   children,
@@ -21,12 +22,14 @@ export default async function PublicShowcaseLayout({
     <I18nProvider initialLocale={locale}>
       <AuthProvider initialUser={null}>
         <QueryClientProvider>
-          <SidebarProvider className="h-screen" defaultOpen={false}>
-            <SidebarInset className="min-w-0">
-              <ChatProviders>{children}</ChatProviders>
-            </SidebarInset>
-          </SidebarProvider>
-          <Toaster position="top-center" />
+          <SkinProvider>
+            <SidebarProvider className="h-screen" defaultOpen={false}>
+              <SidebarInset className="min-w-0">
+                <ChatProviders>{children}</ChatProviders>
+              </SidebarInset>
+            </SidebarProvider>
+            <Toaster position="top-center" />
+          </SkinProvider>
         </QueryClientProvider>
       </AuthProvider>
     </I18nProvider>
