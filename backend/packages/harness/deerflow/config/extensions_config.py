@@ -1,8 +1,8 @@
-import math
 """Unified extensions configuration for MCP servers and skills."""
 
 import json
 import logging
+import math
 import os
 import stat
 import tempfile

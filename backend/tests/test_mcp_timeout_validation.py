@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import math
-
 import pytest
 from pydantic import ValidationError
 
-from deerflow.config.extensions_config import McpServerConfig
 from app.gateway.routers.mcp import McpServerConfigResponse
+from deerflow.config.extensions_config import McpServerConfig
 
 
 @pytest.mark.parametrize("cls", [McpServerConfig, McpServerConfigResponse])
