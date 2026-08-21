@@ -172,9 +172,11 @@ defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
 a server that never answers `initialize`) cannot block agent construction or
 the task poller indefinitely. Set it to `null` to disable:
 
-Both timeout settings accept `null` or a finite number greater than zero. Zero,
-negative, NaN, and infinite values are rejected when the extensions file or
-Gateway request is validated.
+Both timeout settings accept `null` or a finite number greater than zero. JSON
+booleans, zero, negative, NaN, and infinite values are rejected when the
+extensions file or Gateway request is validated. `tool_call_timeout` must also
+fit the downstream Python `timedelta`; its largest accepted whole-second value
+is `86399999999999`.
 
 ```json
 {
@@ -199,6 +201,22 @@ durable-task submit/status/cancel calls also honor it for `http` and `sse`
 servers, independently of transport idle timeouts, so a live connection that
 never returns the matching MCP response cannot stall the task poller. Other
 `http` and `sse` tools continue to use transport-level timeouts.
+
+### Upgrading configurations written by older Gateways
+
+Older Gateway versions could persist timeout values that the current models
+reject. On file load, DeerFlow logs a warning and skips only a server whose
+validation errors are confined to `session_init_timeout` or
+`tool_call_timeout`; healthy MCP servers and skill configuration continue to
+load. Consequently, `GET /api/mcp/config` omits the invalid server until it is
+repaired.
+
+Submit a valid full replacement through `PUT /api/mcp/config` to repair the
+server. Incoming validated timeout values take precedence before the old raw
+entry is parsed for secret and advanced-field preservation, so masked secrets
+can still be round-tripped. `PATCH /api/mcp/config` may disable the invalid
+server without rewriting its other fields; attempting to enable it returns 422
+and leaves the file unchanged until a valid PUT repairs it.
 
 ## Filesystem MCP Servers
 
