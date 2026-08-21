@@ -1301,10 +1301,20 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, False)
 
         await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        _schedule_bridge_cleanup(bridge, run_id, delay=60)
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
+
+
+_bridge_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+def _schedule_bridge_cleanup(bridge: Any, run_id: str, delay: float = 60) -> asyncio.Task[None]:
+    task = asyncio.create_task(bridge.cleanup(run_id, delay=delay))
+    _bridge_cleanup_tasks.add(task)
+    task.add_done_callback(_bridge_cleanup_tasks.discard)
+    return task
 
 
 # ---------------------------------------------------------------------------

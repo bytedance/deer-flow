@@ -226,6 +226,25 @@ async def test_cleanup(bridge: MemoryStreamBridge):
 
 
 @pytest.mark.anyio
+async def test_worker_bridge_cleanup_retained_under_gc(bridge: MemoryStreamBridge):
+    """Verify worker _schedule_bridge_cleanup retains tasks against GC and cleans up successfully."""
+    import gc, weakref
+    from deerflow.runtime.runs.worker import _bridge_cleanup_tasks, _schedule_bridge_cleanup
+
+    run_id = "run-worker-gc-cleanup"
+    await bridge.publish(run_id, "test", {"data": 123})
+    task = _schedule_bridge_cleanup(bridge, run_id, delay=0.01)
+    weak_task = weakref.ref(task)
+    del task
+    gc.collect()
+
+    assert weak_task() is not None and weak_task() in _bridge_cleanup_tasks
+    await asyncio.sleep(0.05)
+    assert run_id not in bridge._streams and weak_task() not in _bridge_cleanup_tasks
+
+
+
+@pytest.mark.anyio
 async def test_stream_exists_reports_cleanup(bridge: MemoryStreamBridge):
     """Callers can detect when the in-process event log has been cleaned up.
 
