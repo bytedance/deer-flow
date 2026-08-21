@@ -261,6 +261,54 @@ def merge_skill_context(existing: list[SkillEntry] | None, new: list[SkillEntry]
     return merged
 
 
+_ARTIFACT_MAX_ENTRIES = 100
+
+
+class ArtifactEntry(TypedDict):
+    """A captured artifact reference from a tool result (issue #4676).
+
+    Stored in ``ThreadState.tool_artifacts`` so it survives context compaction.
+    The model sees only the short ``handle``; the real reference (path, URL,
+    task id) lives here and is resolved at tool-call time.
+    """
+
+    handle: str
+    tool_name: str
+    tool_call_id: str
+    call_index: int
+    artifact_type: str
+    display_name: str
+    real_ref: str
+    mime_type: NotRequired[str]
+    created_at: str
+    consumed_by: NotRequired[list[str]]
+
+
+def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[ArtifactEntry] | None) -> list[ArtifactEntry]:
+    """Reducer for the tool-artifact registry channel.
+
+    - new None/empty -> preserve existing.
+    - append entries, replacing same handle with the latest version while
+      preserving first-seen order (latest wins, e.g. for consumption updates).
+    - cap by keeping the most recent entries.
+    """
+    if not new:
+        return existing or []
+
+    by_handle: dict[str, ArtifactEntry] = {}
+    order: list[str] = []
+    for entry in [*(existing or []), *new]:
+        handle = entry["handle"]
+        if handle not in by_handle:
+            order.append(handle)
+        by_handle[handle] = entry
+
+    merged = [by_handle[handle] for handle in order]
+    if len(merged) > _ARTIFACT_MAX_ENTRIES:
+        merged = merged[-_ARTIFACT_MAX_ENTRIES:]
+    return merged
+
+
 class ThreadState(AgentState):
     sandbox: SandboxStateField
     thread_data: NotRequired[ThreadDataState | None]
@@ -273,6 +321,7 @@ class ThreadState(AgentState):
     promoted: Annotated[PromotedTools | None, merge_promoted]
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
+    tool_artifacts: Annotated[list[ArtifactEntry], merge_tool_artifacts]
     summary_text: NotRequired[str | None]
 
 
@@ -389,6 +438,7 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
         "promoted",
         "delegations",
         "skill_context",
+        "tool_artifacts",
     }
 )
 

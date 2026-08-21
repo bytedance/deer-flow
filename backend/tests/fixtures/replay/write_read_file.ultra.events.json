@@ -16,6 +16,7 @@
         "delegations",
         "messages",
         "skill_context",
+        "tool_artifacts",
         "viewed_images"
       ]
     },
@@ -27,6 +28,7 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifacts",
         "viewed_images"
       ]
     },
@@ -38,6 +40,7 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -50,6 +53,7 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -62,6 +66,7 @@
         "messages",
         "skill_context",
         "thread_data",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -75,6 +80,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -88,6 +94,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -102,6 +109,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -116,6 +124,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -130,6 +139,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -144,6 +154,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -158,6 +169,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]
@@ -172,6 +184,7 @@
         "skill_context",
         "thread_data",
         "title",
+        "tool_artifacts",
         "uploaded_files",
         "viewed_images"
       ]

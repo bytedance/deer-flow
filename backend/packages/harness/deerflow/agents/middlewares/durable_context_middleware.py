@@ -26,6 +26,7 @@ from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINA
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.tools.artifact_registry import render_artifact_registry
 
 _DURABLE_CONTEXT_DATA_KEY = "durable_context_data"
 _SUMMARY_RENDER_CHAR_BUDGET = 6000
@@ -66,7 +67,7 @@ def _insert_after_leading_system_messages(messages: list, injected: list) -> lis
     return [*messages[:index], *injected, *messages[index:]]
 
 
-def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list) -> str:
+def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list, artifacts: list | None = None) -> str:
     data_parts: list[str] = []
     if summary_text:
         bounded_summary = _bound_text(str(summary_text), _SUMMARY_RENDER_CHAR_BUDGET)
@@ -79,6 +80,10 @@ def _render_durable_context_data(summary_text: str | None, ledger: list, skills:
     skill_block = render_skill_context(skills or [])
     if skill_block:
         data_parts.append(skill_block)
+
+    artifact_block = render_artifact_registry(artifacts or [])
+    if artifact_block:
+        data_parts.append(artifact_block)
 
     if not data_parts:
         return ""
@@ -201,10 +206,12 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         *,
         skills_container_path: str | None = None,
         skill_file_read_tool_names: Collection[str] | None = None,
+        inject_tool_artifacts: bool = True,
     ) -> None:
         super().__init__()
         self._skills_root = _normalize_skills_root(skills_container_path)
         self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES if skill_file_read_tool_names is None else skill_file_read_tool_names)
+        self._inject_tool_artifacts = inject_tool_artifacts
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -252,6 +259,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
             state.get("summary_text"),
             state.get("delegations") or [],
             state.get("skill_context") or [],
+            state.get("tool_artifacts") or [] if self._inject_tool_artifacts else [],
         )
         if not data_block:
             return request

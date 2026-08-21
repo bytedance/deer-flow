@@ -29,12 +29,26 @@ export interface GoalState {
   };
 }
 
+export interface ArtifactEntry {
+  handle: string;
+  tool_name: string;
+  tool_call_id: string;
+  call_index: number;
+  artifact_type: string;
+  display_name: string;
+  real_ref: string;
+  mime_type?: string | null;
+  created_at?: string;
+  consumed_by?: string[];
+}
+
 export interface AgentThreadState extends Record<string, unknown> {
   title: string;
   messages: Message[];
   artifacts?: string[];
   todos?: Todo[];
   goal?: GoalState | null;
+  tool_artifacts?: ArtifactEntry[];
 }
 
 export interface AgentThreadContext extends Record<string, unknown> {
