@@ -362,7 +362,6 @@ export const zhCN: Translations = {
       runsCount: "{count} 次运行",
       runsCountOne: "{count} 次运行",
       noRuns: "暂无运行",
-      noTasks: "暂无定时任务",
       noTasksTitle: "还没有定时任务",
       noTasksDescription: "创建一个定时任务，让 DeerFlow 按计划自动执行。",
       filteredByThread: "按线程筛选：{id}",

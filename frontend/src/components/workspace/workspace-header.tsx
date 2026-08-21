@@ -45,9 +45,7 @@ export function WorkspaceHeader({ className }: { className?: string }) {
                 DeerFlow
               </div>
             )}
-            <div className="flex items-center gap-2">
-              <SidebarTrigger />
-            </div>
+            <SidebarTrigger />
           </div>
         )}
       </div>
