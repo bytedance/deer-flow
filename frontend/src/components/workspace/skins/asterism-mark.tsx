@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo } from "react";
+import { useEffect, useState } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -30,10 +30,12 @@ export function AsterismMark({
   className?: string;
   title?: string;
 }) {
-  const mark = useMemo(
-    () => MARKS[Math.floor(Math.random() * MARKS.length)] ?? MARKS[0],
-    [],
-  );
+  const [mark, setMark] = useState<(typeof MARKS)[number]>(() => MARKS[0]);
+
+  useEffect(() => {
+    const idx = Math.floor(Math.random() * MARKS.length);
+    setMark(MARKS[idx] ?? MARKS[0]);
+  }, []);
   return (
     <svg
       viewBox={mark.viewBox}

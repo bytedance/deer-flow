@@ -111,6 +111,7 @@ export function PointerPlay({
       return;
     let frame = 0;
     const tick = () => {
+      frame = 0;
       let moved = false;
       const next = homesRef.current.map((home, index) => {
         const current = starsRef.current[index] ?? home;
@@ -132,11 +133,18 @@ export function PointerPlay({
         starsRef.current = next;
         setStars(next);
         setMouse(mouseRef.current);
+        frame = window.requestAnimationFrame(tick);
       }
-      frame = window.requestAnimationFrame(tick);
     };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
+    const arm = () => {
+      if (!frame) frame = window.requestAnimationFrame(tick);
+    };
+    window.addEventListener("pointermove", arm, { passive: true });
+    arm();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("pointermove", arm);
+    };
   }, [gutter, settingsOpen, size.h, size.w, skin]);
 
   const visible = stars.length ? stars : homes;
