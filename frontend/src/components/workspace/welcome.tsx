@@ -56,7 +56,7 @@ export function Welcome({
             <div className="obs-welcome-kicker text-primary mb-2 flex items-center justify-center">
               <AsterismMark className="h-7 w-16" />
             </div>
-            <h1 className="obs-welcome-title font-display text-[2.6rem] leading-[1.15] font-bold tracking-tight">
+            <h1 className="obs-welcome-title text-[2.6rem] leading-[1.15] font-bold tracking-tight">
               {t.welcome.greeting}
             </h1>
           </>
