@@ -1,3 +1,4 @@
+import math
 """Unified extensions configuration for MCP servers and skills."""
 
 import json
@@ -151,6 +152,22 @@ class McpServerConfig(BaseModel):
         description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
     )
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
+    @classmethod
+    def _validate_timeout(cls, v: float | None) -> float | None:
+        """Reject non-positive, non-finite timeout values."""
+        if v is None:
+            return v
+        if not isinstance(v, (int, float)):
+            raise ValueError(f"Timeout must be a number, got {type(v).__name__}")
+        if math.isnan(v):
+            raise ValueError("Timeout must not be NaN")
+        if math.isinf(v):
+            raise ValueError("Timeout must be a finite number")
+        if v <= 0:
+            raise ValueError(f"Timeout must be positive, got {v}")
+        return v
 
     @model_validator(mode="before")
     @classmethod

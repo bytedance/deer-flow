@@ -1,4 +1,5 @@
 import asyncio
+import math
 import json
 import logging
 import os
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
@@ -396,6 +397,22 @@ class McpServerConfigResponse(BaseModel):
         description="Raw submit/status/cancel tool groups managed as durable background tasks",
     )
     model_config = ConfigDict(extra="allow")
+
+    @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
+    @classmethod
+    def _validate_timeout(cls, v: float | None) -> float | None:
+        """Reject non-positive, non-finite timeout values."""
+        if v is None:
+            return v
+        if not isinstance(v, (int, float)):
+            raise ValueError(f"Timeout must be a number, got {type(v).__name__}")
+        if math.isnan(v):
+            raise ValueError("Timeout must not be NaN")
+        if math.isinf(v):
+            raise ValueError("Timeout must be a finite number")
+        if v <= 0:
+            raise ValueError(f"Timeout must be positive, got {v}")
+        return v
 
     @model_validator(mode="before")
     @classmethod
