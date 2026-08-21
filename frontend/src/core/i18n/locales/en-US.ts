@@ -422,7 +422,6 @@ export const enUS: Translations = {
       runsCount: "{count} runs",
       runsCountOne: "{count} run",
       noRuns: "No runs yet",
-      noTasks: "No scheduled tasks yet",
       noTasksTitle: "No scheduled tasks yet",
       noTasksDescription:
         "Create a scheduled task to let DeerFlow run workflows on a schedule.",

@@ -340,7 +340,6 @@ export interface Translations {
       runsCount: string;
       runsCountOne: string;
       noRuns: string;
-      noTasks: string;
       noTasksTitle: string;
       noTasksDescription: string;
       filteredByThread: string;
