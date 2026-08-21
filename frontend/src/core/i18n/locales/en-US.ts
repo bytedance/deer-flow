@@ -554,16 +554,10 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
-    description: "Manage all of your conversations.",
-    noMatches: "No matching conversations",
-    emptyTitle: "No conversations yet",
-    emptyDescription: "Start a new conversation and it will show up here.",
     searchChats: "Search chats",
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
-    loadError: "Failed to load conversations",
-    retry: "Try again",
     pinChat: "Pin chat",
     unpinChat: "Unpin chat",
     pinChatFailed: "Failed to update pinned chat",
@@ -767,7 +761,6 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
-      chats: "Chats",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",

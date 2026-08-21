@@ -444,16 +444,10 @@ export interface Translations {
 
   // Chats
   chats: {
-    description: string;
-    noMatches: string;
-    emptyTitle: string;
-    emptyDescription: string;
     searchChats: string;
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
-    loadError: string;
-    retry: string;
     pinChat: string;
     unpinChat: string;
     pinChatFailed: string;
@@ -640,7 +634,6 @@ export interface Translations {
     title: string;
     description: string;
     sections: {
-      chats: string;
       account: string;
       appearance: string;
       channels: string;
