@@ -38,10 +38,13 @@ const PRESETS: CronPreset[] = [
   "custom",
 ];
 
-const FALLBACK_TIMEZONES = [
+const COMMON_TIMEZONES = [
   "UTC",
   "Asia/Shanghai",
+  "Asia/Hong_Kong",
+  "Asia/Taipei",
   "Asia/Tokyo",
+  "Asia/Seoul",
   "Asia/Singapore",
   "Europe/London",
   "Europe/Berlin",
@@ -59,7 +62,7 @@ function supportedTimeZones(): string[] {
   if (Array.isArray(supported) && supported.length > 0) {
     return supported;
   }
-  return FALLBACK_TIMEZONES;
+  return COMMON_TIMEZONES;
 }
 
 const TIMEZONE_OPTIONS = supportedTimeZones();
@@ -159,6 +162,7 @@ export function ScheduledTaskScheduleInput({
   const [timezone, setTimezone] = useState<string>(
     initial.timezone || detectBrowserTimezone(),
   );
+  const [showAllTimezones, setShowAllTimezones] = useState(false);
 
   // Hold the latest onChange in a ref so the effect below does not depend on
   // it. This avoids a re-render loop: if the parent passes an inline
@@ -218,12 +222,16 @@ export function ScheduledTaskScheduleInput({
     timezone,
   ]);
 
+  const timezoneLabel = (tz: string): string =>
+    (labels.timezone.common as unknown as Record<string, string>)[tz] ?? tz;
+
   const timezoneOptions = useMemo(() => {
-    if (TIMEZONE_OPTIONS.includes(timezone)) {
-      return TIMEZONE_OPTIONS;
+    const pool = showAllTimezones ? TIMEZONE_OPTIONS : COMMON_TIMEZONES;
+    if (pool.includes(timezone)) {
+      return pool;
     }
-    return [timezone, ...TIMEZONE_OPTIONS];
-  }, [timezone]);
+    return [timezone, ...pool];
+  }, [showAllTimezones, timezone]);
 
   function updateParts(patch: Partial<CronParts>) {
     setParts((prev) => ({ ...prev, ...patch }));
@@ -415,16 +423,27 @@ export function ScheduledTaskScheduleInput({
 
       <Select value={timezone} onValueChange={setTimezone}>
         <SelectTrigger className="w-full" data-testid="schedule-timezone">
-          <SelectValue />
+          <SelectValue>{timezoneLabel(timezone)}</SelectValue>
         </SelectTrigger>
         <SelectContent>
           {timezoneOptions.map((tz) => (
             <SelectItem key={tz} value={tz}>
-              {tz}
+              {timezoneLabel(tz)}
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
+      {TIMEZONE_OPTIONS.length > COMMON_TIMEZONES.length && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground hover:text-foreground justify-start px-1 text-xs"
+          onClick={() => setShowAllTimezones((prev) => !prev)}
+        >
+          {showAllTimezones ? labels.timezone.less : labels.timezone.more}
+        </Button>
+      )}
     </div>
   );
 }

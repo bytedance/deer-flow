@@ -54,7 +54,9 @@ test("thread page links to filtered scheduled tasks", async ({ page }) => {
   });
 
   await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
-  await page.getByRole("link", { name: /scheduled tasks/i }).click();
+  // The header link carries the thread_id filter (unlike the sidebar link),
+  // so target it via its aria-label to avoid a strict-mode ambiguity.
+  await page.getByLabel("Scheduled tasks", { exact: true }).click();
   await page.waitForURL(new RegExp(`thread_id=${MOCK_THREAD_ID}`));
 });
 
