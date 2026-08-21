@@ -1782,6 +1782,15 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
+        # Block bash commands that reference disabled skill paths.
+        # The structured read tools (read_file, ls, glob, grep) already gate
+        # disabled skills, but bash can bypass them via cat/grep/find.
+        user_id = resolve_runtime_user_id(runtime)
+        _skill_path_re = re.compile(r"/mnt/skills/(?:public|custom|legacy|integrations)/([^/\s"'"]+)")
+        for _m in _skill_path_re.finditer(command):
+            _skill_name = _m.group(1)
+            if _is_disabled_skill_path(f"/mnt/skills/public/{_skill_name}/placeholder", user_id=user_id):
+                return f"Error: Skill '{_skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         # Request-scoped secrets resolved for the active skill (#3861), plus a
         # short-lived GitHub App installation token threaded through by the
         # GitHub channel. Both are injected as per-call env into the subprocess,
