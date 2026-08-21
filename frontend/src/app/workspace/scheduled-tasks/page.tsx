@@ -70,12 +70,18 @@ const STATUS_DOT: Record<string, string> = {
   cancelled: "bg-zinc-400",
 };
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({
+  status,
+  statusLabel,
+}: {
+  status: string;
+  statusLabel: (v: string) => string;
+}) {
   const dot = STATUS_DOT[status] ?? "bg-zinc-400";
   return (
     <span className="text-muted-foreground inline-flex h-5 items-center gap-1.5 rounded-full border px-2 text-xs font-medium">
       <span aria-hidden className={cn("size-1.5 rounded-full", dot)} />
-      {status}
+      {statusLabel(status)}
     </span>
   );
 }
@@ -238,25 +244,39 @@ export default function ScheduledTasksPage() {
             </div>
           ) : null}
           {filteredData.length === 0 ? (
-            <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
-              <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
-                <CalendarClock className="text-muted-foreground h-7 w-7" />
+            hasTasks ? (
+              <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
+                <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
+                  <CalendarClock className="text-muted-foreground h-7 w-7" />
+                </div>
+                <div>
+                  <p className="font-medium">{st.detail.noMatchesTitle}</p>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {st.detail.noMatchesDescription}
+                  </p>
+                </div>
               </div>
-              <div>
-                <p className="font-medium">{st.detail.noTasksTitle}</p>
-                <p className="text-muted-foreground mt-1 text-sm">
-                  {st.detail.noTasksDescription}
-                </p>
+            ) : (
+              <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
+                <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
+                  <CalendarClock className="text-muted-foreground h-7 w-7" />
+                </div>
+                <div>
+                  <p className="font-medium">{st.detail.noTasksTitle}</p>
+                  <p className="text-muted-foreground mt-1 text-sm">
+                    {st.detail.noTasksDescription}
+                  </p>
+                </div>
+                <Button
+                  variant="outline"
+                  className="mt-2"
+                  onClick={() => router.push("/workspace/scheduled-tasks/new")}
+                >
+                  <Plus className="mr-1.5 h-4 w-4" />
+                  {st.create.title}
+                </Button>
               </div>
-              <Button
-                variant="outline"
-                className="mt-2"
-                onClick={() => router.push("/workspace/scheduled-tasks/new")}
-              >
-                <Plus className="mr-1.5 h-4 w-4" />
-                {st.create.title}
-              </Button>
-            </div>
+            )
           ) : (
             <div
               data-testid="scheduled-task-list"
@@ -267,7 +287,8 @@ export default function ScheduledTasksPage() {
                   key={task.id}
                   task={task}
                   onClick={() => openDetail(task.id)}
-                  statusLabel={statusLabel(task.status)}
+                  status={task.status}
+                  statusLabel={statusLabel}
                   scheduleTypeLabel={scheduleTypeLabel(task.schedule_type)}
                   nextRun={formatTimestamp(task.next_run_at, locale)}
                 />
@@ -383,13 +404,15 @@ function FilterChip({
 function TaskCard({
   task,
   onClick,
+  status,
   statusLabel,
   scheduleTypeLabel,
   nextRun,
 }: {
   task: ScheduledTask;
   onClick: () => void;
-  statusLabel: string;
+  status: string;
+  statusLabel: (v: string) => string;
   scheduleTypeLabel: string;
   nextRun: string;
 }) {
@@ -420,7 +443,7 @@ function TaskCard({
         </span>
       </div>
       <div className="border-t pt-2">
-        <StatusBadge status={statusLabel} />
+        <StatusBadge status={status} statusLabel={statusLabel} />
       </div>
     </button>
   );
@@ -487,7 +510,7 @@ function TaskDetail({
             <DialogTitle className="leading-snug">
               {editing ? editTitle || task.title : task.title}
             </DialogTitle>
-            <StatusBadge status={statusLabel(task.status)} />
+            <StatusBadge status={task.status} statusLabel={statusLabel} />
           </div>
           <Button
             variant="ghost"

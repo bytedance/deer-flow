@@ -319,14 +319,8 @@ export interface Translations {
       reuseNoticeDescription: string;
     };
     filters: {
-      allStatuses: string;
       enabled: string;
       paused: string;
-      completed: string;
-      failed: string;
-      allTypes: string;
-      cron: string;
-      once: string;
     };
     detail: {
       contextMode: string;
@@ -342,6 +336,8 @@ export interface Translations {
       noRuns: string;
       noTasksTitle: string;
       noTasksDescription: string;
+      noMatchesTitle: string;
+      noMatchesDescription: string;
       filteredByThread: string;
       loadFailed: string;
     };
@@ -384,13 +380,6 @@ export interface Translations {
       failed: string;
       skipped: string;
       interrupted: string;
-    };
-    recipes: {
-      label: string;
-      trending: { title: string; desc: string };
-      news: { title: string; desc: string };
-      issues: { title: string; desc: string };
-      weekly: { title: string; desc: string };
     };
   };
 

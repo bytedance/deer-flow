@@ -401,14 +401,8 @@ export const enUS: Translations = {
         "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
     filters: {
-      allStatuses: "All statuses",
       enabled: "Enabled",
       paused: "Paused",
-      completed: "Completed",
-      failed: "Failed",
-      allTypes: "All types",
-      cron: "Cron",
-      once: "Once",
     },
     detail: {
       contextMode: "Context mode",
@@ -425,6 +419,8 @@ export const enUS: Translations = {
       noTasksTitle: "No scheduled tasks yet",
       noTasksDescription:
         "Create a scheduled task to let DeerFlow run workflows on a schedule.",
+      noMatchesTitle: "No tasks match this filter",
+      noMatchesDescription: "Try switching back to view all scheduled tasks.",
       filteredByThread: "Filtered by thread: {id}",
       loadFailed: "Failed to load scheduled tasks",
     },
@@ -468,25 +464,6 @@ export const enUS: Translations = {
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",
-    },
-    recipes: {
-      label: "Quick create",
-      trending: {
-        title: "GitHub Trending daily",
-        desc: "Summarize today's top 10 trending repos",
-      },
-      news: {
-        title: "Daily tech news digest",
-        desc: "Collect and summarize the day's top tech news",
-      },
-      issues: {
-        title: "GitHub Issue triage",
-        desc: "Triage a repo's open issues (fill in {{repo}})",
-      },
-      weekly: {
-        title: "Weekly report",
-        desc: "Compile a weekly summary, every Monday",
-      },
     },
   },
 

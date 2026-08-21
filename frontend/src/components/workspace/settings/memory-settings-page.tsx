@@ -64,6 +64,17 @@ function hasAnyMemorySummary(memory: UserMemory): boolean {
   );
 }
 
+function isMemorySection(value: unknown): value is {
+  summary: string;
+  updatedAt: string;
+} {
+  return (
+    isRecord(value) &&
+    typeof value.summary === "string" &&
+    typeof value.updatedAt === "string"
+  );
+}
+
 function isMemoryFact(value: unknown): value is UserMemory["facts"][number] {
   return (
     isRecord(value) &&
@@ -92,7 +103,15 @@ function isImportedMemory(value: unknown): value is UserMemory {
     return false;
   }
 
-  return value.facts.every(isMemoryFact);
+  return (
+    isMemorySection(value.user.workContext) &&
+    isMemorySection(value.user.personalContext) &&
+    isMemorySection(value.user.topOfMind) &&
+    isMemorySection(value.history.recentMonths) &&
+    isMemorySection(value.history.earlierContext) &&
+    isMemorySection(value.history.longTermBackground) &&
+    value.facts.every(isMemoryFact)
+  );
 }
 
 type FactFormState = {
