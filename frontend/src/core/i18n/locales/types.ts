@@ -288,7 +288,6 @@ export interface Translations {
       taskTitle: string;
       prompt: string;
       submit: string;
-      fillRequired: string;
       invalidOnce: string;
     };
     context: {
@@ -340,6 +339,7 @@ export interface Translations {
       titlePlaceholder: string;
       promptPlaceholder: string;
       submit: string;
+      invalidOnce: string;
     };
     status: {
       enabled: string;

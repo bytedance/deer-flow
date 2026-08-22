@@ -366,7 +366,6 @@ export const enUS: Translations = {
       taskTitle: "Task title",
       prompt: "Prompt",
       submit: "Create",
-      fillRequired: "Fill all required fields",
       invalidOnce: "Enter a valid date and time",
     },
     context: {
@@ -420,6 +419,7 @@ export const enUS: Translations = {
       titlePlaceholder: "Edit title",
       promptPlaceholder: "Edit prompt",
       submit: "Save edit",
+      invalidOnce: "Enter a valid date and time",
     },
     status: {
       enabled: "Enabled",

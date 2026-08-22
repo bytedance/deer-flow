@@ -553,6 +553,12 @@ function TaskDetail({
             onChange={setEditSchedule}
             scheduleTypeLocked
           />
+          {editSchedule.schedule_type === "once" &&
+            !editSchedule.schedule_spec.run_at && (
+              <div className="text-muted-foreground text-sm">
+                {st.edit.invalidOnce}
+              </div>
+            )}
           <Button
             size="sm"
             onClick={() =>

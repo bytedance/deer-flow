@@ -350,7 +350,6 @@ export const zhCN: Translations = {
       taskTitle: "任务标题",
       prompt: "提示词",
       submit: "新建",
-      fillRequired: "请填写所有必填项",
       invalidOnce: "请输入有效的日期和时间",
     },
     context: {
@@ -402,6 +401,7 @@ export const zhCN: Translations = {
       titlePlaceholder: "编辑标题",
       promptPlaceholder: "编辑提示词",
       submit: "保存编辑",
+      invalidOnce: "请输入有效的日期和时间",
     },
     status: {
       enabled: "已启用",
