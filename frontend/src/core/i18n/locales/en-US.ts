@@ -1126,6 +1126,11 @@ export const enUS: Translations = {
       description:
         "Manage the configuration and enabled status of the agent skills.",
       createSkill: "Create skill",
+      installSkill: "Install skill",
+      installingSkill: "Installing...",
+      installSuccess: (skillName: string) =>
+        `Skill "${skillName}" installed successfully`,
+      installFailed: "Failed to install skill",
       emptyTitle: "No agent skill yet",
       emptyDescription:
         "Put your agent skill folders under the `/skills/custom` folder under the root folder of DeerFlow.",

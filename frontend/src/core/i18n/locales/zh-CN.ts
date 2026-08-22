@@ -1072,6 +1072,10 @@ export const zhCN: Translations = {
       title: "技能",
       description: "管理 Agent Skill 配置和启用状态。",
       createSkill: "新建技能",
+      installSkill: "安装技能",
+      installingSkill: "正在安装...",
+      installSuccess: (skillName: string) => `技能“${skillName}”安装成功`,
+      installFailed: "技能安装失败",
       emptyTitle: "还没有技能",
       emptyDescription:
         "将你的 Agent Skill 文件夹放在 DeerFlow 根目录下的 `/skills/custom` 文件夹中。",

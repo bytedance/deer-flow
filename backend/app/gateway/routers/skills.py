@@ -1,10 +1,11 @@
 import asyncio
 import logging
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config, require_admin_user
@@ -31,6 +32,7 @@ from deerflow.skills.security_static_scanner import (
 )
 from deerflow.skills.storage import SkillStorage, get_or_new_user_skill_storage
 from deerflow.skills.types import SKILL_MD_FILE, SkillCategory
+from deerflow.utils.file_io import run_file_io
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -38,6 +40,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["skills"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage skills."
+SKILL_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+_SKILL_UPLOAD_CHUNK_BYTES = 1024 * 1024
+
+
+@dataclass(slots=True)
+class _SkillUploadTempFile:
+    handle: BinaryIO
+    path: Path
 
 
 class SkillResponse(BaseModel):
@@ -147,6 +157,55 @@ def _get_user_skill_storage(config: AppConfig) -> SkillStorage:
     return get_or_new_user_skill_storage(get_effective_user_id(), app_config=config)
 
 
+def _prepare_skill_upload_temp() -> _SkillUploadTempFile:
+    handle = tempfile.NamedTemporaryFile(prefix="skill-upload-", suffix=".skill", delete=False)
+    return _SkillUploadTempFile(handle=handle, path=Path(handle.name))
+
+
+def _write_skill_upload_chunk(upload_temp: _SkillUploadTempFile, chunk: bytes) -> None:
+    upload_temp.handle.write(chunk)
+
+
+def _finish_skill_upload(upload_temp: _SkillUploadTempFile) -> None:
+    upload_temp.handle.close()
+
+
+def _cleanup_skill_upload(upload_temp: _SkillUploadTempFile) -> None:
+    try:
+        upload_temp.handle.close()
+    finally:
+        upload_temp.path.unlink(missing_ok=True)
+
+
+async def _install_from_archive_path(archive_path: str | Path, config: AppConfig) -> SkillInstallResponse:
+    try:
+        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(archive_path)
+        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
+        return SkillInstallResponse(**result)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from e
+    except SkillAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except SkillSecurityScanError as e:
+        if e.findings:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": str(e),
+                    "skill_name": e.skill_name,
+                    "findings": e.findings,
+                },
+            ) from e
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to install skill: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to install skill: {e}") from e
+
+
 @router.get(
     "/skills",
     response_model=SkillsListResponse,
@@ -173,31 +232,51 @@ async def install_skill(request: Request, body: SkillInstallRequest, config: App
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
     try:
         skill_file_path = resolve_thread_virtual_path(body.thread_id, body.path)
-        result = await _get_user_skill_storage(config).ainstall_skill_from_archive(skill_file_path)
-        await refresh_user_skills_system_prompt_cache_async(get_effective_user_id())
-        return SkillInstallResponse(**result)
     except FileNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except SkillAlreadyExistsError as e:
-        raise HTTPException(status_code=409, detail=str(e))
-    except SkillSecurityScanError as e:
-        if e.findings:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "message": str(e),
-                    "skill_name": e.skill_name,
-                    "findings": e.findings,
-                },
-            )
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to install skill: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to install skill: {str(e)}")
+        logger.error("Failed to resolve skill archive: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to install skill: {e}") from e
+    return await _install_from_archive_path(skill_file_path, config)
+
+
+@router.post(
+    "/skills/install/upload",
+    response_model=SkillInstallResponse,
+    summary="Upload and Install Skill",
+    description="Upload and install a local .skill archive for the current user.",
+)
+async def upload_and_install_skill(
+    request: Request,
+    file: UploadFile = File(...),
+    config: AppConfig = Depends(get_config),
+) -> SkillInstallResponse:
+    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    if not file.filename or Path(file.filename).suffix.lower() != ".skill":
+        raise HTTPException(status_code=400, detail="Only .skill files can be installed.")
+
+    upload_temp: _SkillUploadTempFile | None = None
+    uploaded_bytes = 0
+    try:
+        upload_temp = await run_file_io(_prepare_skill_upload_temp)
+        while chunk := await file.read(_SKILL_UPLOAD_CHUNK_BYTES):
+            uploaded_bytes += len(chunk)
+            if uploaded_bytes > SKILL_UPLOAD_MAX_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Skill archive exceeds the {SKILL_UPLOAD_MAX_BYTES // (1024 * 1024)} MiB upload limit.",
+                )
+            await run_file_io(_write_skill_upload_chunk, upload_temp, chunk)
+
+        await run_file_io(_finish_skill_upload, upload_temp)
+        return await _install_from_archive_path(upload_temp.path, config)
+    finally:
+        if upload_temp is not None:
+            await run_file_io(_cleanup_skill_upload, upload_temp)
 
 
 @router.post(
