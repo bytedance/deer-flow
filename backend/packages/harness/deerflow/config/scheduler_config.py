@@ -7,4 +7,5 @@ class SchedulerConfig(BaseModel):
     poll_interval_seconds: int = Field(default=5, ge=1, le=300)
     lease_seconds: int = Field(default=120, ge=5, le=3600)
     max_concurrent_runs: int = Field(default=3, ge=1, le=32)
+    queue_timeout_seconds: int = Field(default=3600, ge=60, le=604800)
     min_once_delay_seconds: int = Field(default=60, ge=1, le=86400)

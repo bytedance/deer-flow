@@ -2175,11 +2175,12 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     async def _scenario():
         captured: dict[str, object] = {}
 
-        async def fake_start_run(body, thread_id, request):
+        async def fake_start_run(body, thread_id, request, *, idempotency_key=None):
             captured["body"] = body
             captured["thread_id"] = thread_id
             captured["context"] = body.context
             captured["metadata"] = body.metadata
+            captured["idempotency_key"] = idempotency_key
             captured["if_not_exists"] = body.if_not_exists
             captured["on_completion"] = body.on_completion
             return SimpleNamespace(run_id="run-1", thread_id=thread_id)
@@ -2191,7 +2192,10 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
                 prompt="Run in background",
                 app=SimpleNamespace(state=SimpleNamespace()),
                 owner_user_id="user-1",
-                metadata={"scheduled_task_id": "task-1"},
+                metadata={
+                    "scheduled_task_id": "task-1",
+                    "scheduled_task_run_id": "task-run-1",
+                },
             )
         return captured, result
 
@@ -2200,7 +2204,11 @@ def test_launch_scheduled_thread_run_marks_context_non_interactive(_stub_app_con
     assert captured["thread_id"] == "thread-scheduled"
     assert isinstance(captured["body"], RunCreateRequest)
     assert captured["context"] == {"non_interactive": True, "user_id": "user-1"}
-    assert captured["metadata"] == {"scheduled_task_id": "task-1"}
+    assert captured["metadata"] == {
+        "scheduled_task_id": "task-1",
+        "scheduled_task_run_id": "task-run-1",
+    }
+    assert captured["idempotency_key"] == "scheduled-task:task-run-1"
     assert captured["if_not_exists"] == "create"
     assert captured["on_completion"] is None
     assert result == {"run_id": "run-1", "thread_id": "thread-scheduled"}
