@@ -306,7 +306,6 @@ export interface Translations {
       schedule: string;
       nextRun: string;
       lastRun: string;
-      lastRunId: string;
       lastError: string;
       runsCount: string;
       runsCountOne: string;
