@@ -7,6 +7,7 @@ import logging
 import math
 import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.channels.base import Channel
@@ -392,6 +393,14 @@ class ChannelService:
         try:
             config = dict(config)
             config["channel_store"] = self.store
+            if name == "buzz" and "seen_event_store_path" not in config:
+                # Durable processed-event ids for the Buzz connector's replay
+                # guard. Wired here (like channel_store) rather than defaulted
+                # inside the connector so that directly constructed channels
+                # (tests, tooling) stay free of filesystem side effects.
+                from deerflow.config.paths import get_paths
+
+                config["seen_event_store_path"] = str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
             channel = channel_cls(bus=self.bus, config=config)

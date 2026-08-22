@@ -16,7 +16,7 @@ from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
@@ -45,13 +45,6 @@ logger = logging.getLogger(__name__)
 # both bound and deferred names to the same safe identifier charset, mirroring
 # the load-time validation skill names get (skills/storage/skill_storage.py).
 _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
-
-# Subdirectory under the thread's workspace used as the temp dir for stdio MCP
-# subprocesses. Pinning the process temp dir here (alongside its cwd) makes
-# tools that write to ``os.tmpdir()`` / ``tempfile.gettempdir()`` land inside
-# the mounted user-data tree, where their output is resolvable by the
-# sandbox/artifact API — instead of on an unreachable host temp path.
-_MCP_TMP_SUBDIR = ".mcp/tmp"
 
 # Matches local-file references embedded in free text returned by an MCP server.
 # Some servers (notably Playwright's ``browser_take_screenshot``) report saved
@@ -184,7 +177,7 @@ def _prepare_stdio_workspace(paths: Paths, *, thread_id: str, user_id: str) -> t
     """
     paths.ensure_thread_dirs(thread_id, user_id=user_id)
     source_base_dir = paths.sandbox_work_dir(thread_id, user_id=user_id)
-    tmp_dir = source_base_dir / _MCP_TMP_SUBDIR
+    tmp_dir = source_base_dir / MCP_TMP_SUBDIR
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.chmod(0o700)
