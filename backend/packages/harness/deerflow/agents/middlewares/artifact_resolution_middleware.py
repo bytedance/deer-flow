@@ -38,7 +38,7 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        if not self._config.resolve_handles_in_args:
+        if not (self._config.enabled and self._config.resolve_handles_in_args):
             return handler(request)
         resolved = self._resolve_request(request)
         return handler(resolved)
@@ -49,7 +49,7 @@ class ArtifactResolutionMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        if not self._config.resolve_handles_in_args:
+        if not (self._config.enabled and self._config.resolve_handles_in_args):
             return await handler(request)
         resolved = self._resolve_request(request)
         return await handler(resolved)

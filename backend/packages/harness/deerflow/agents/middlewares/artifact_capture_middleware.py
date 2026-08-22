@@ -42,10 +42,23 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
 
     @staticmethod
     def _merge_updates(*updates: dict | None) -> dict | None:
+        """Merge state updates without clobbering list channels.
+
+        Both ``_capture`` and ``_track_consumption`` can fire in the same
+        ``before_model`` call; a plain ``dict.update`` would replace the shared
+        ``tool_artifacts`` value and silently drop one side's entries. List
+        values under the same key are concatenated instead — the reducer is
+        same-handle latest-wins, so duplicates collapse safely.
+        """
         merged: dict[str, Any] = {}
         for update in updates:
-            if update:
-                merged.update(update)
+            if not update:
+                continue
+            for key, value in update.items():
+                if key in merged and isinstance(merged[key], list) and isinstance(value, list):
+                    merged[key] = [*merged[key], *value]
+                else:
+                    merged[key] = value
         return merged or None
 
     def _thread_id(self, runtime: Runtime | None) -> str:
@@ -68,7 +81,7 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
-            entries = extract_artifacts_from_result(message, thread_id=thread_id)
+            entries = extract_artifacts_from_result(message, thread_id=thread_id, detect_refs_in_text=self._config.detect_refs_in_text)
             for entry in entries:
                 if entry["handle"] in existing_handles:
                     continue

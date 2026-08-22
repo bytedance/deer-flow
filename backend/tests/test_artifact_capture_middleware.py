@@ -26,7 +26,8 @@ class TestCapture:
 
         assert out is not None
         (entry,) = out["tool_artifacts"]
-        assert entry["artifact_type"] == "data"
+        assert entry["artifact_type"] == "file"
+        assert entry["real_ref"] == "/mnt/user-data/outputs/report.md"
         assert entry["handle"].startswith("art_")
 
     def test_handle_deterministic_per_tool_call(self):
@@ -39,15 +40,18 @@ class TestCapture:
         second = middleware.before_model({"messages": [msg]}, _runtime("thread_1"))
         assert first["tool_artifacts"][0]["handle"] == second["tool_artifacts"][0]["handle"]
 
-    def test_structured_preview_stored_as_real_ref(self):
+    def test_structured_fallback_stored_as_real_ref(self):
         middleware = ArtifactCaptureMiddleware()
-        msg = _tool_message(
-            "wrote file",
-            artifact={"structured_content": {"file": "/mnt/user-data/outputs/data.csv"}},
-        )
+        structured = {"custom_payload": {"deep": {"value": "x" * 600}}}
+        msg = _tool_message("done", tool_call_id="call_fb", artifact={"structured_content": structured})
         out = middleware.before_model({"messages": [msg]}, _runtime())
 
-        assert out["tool_artifacts"][0]["real_ref"].startswith("{")
+        assert out is not None
+        (entry,) = out["tool_artifacts"]
+        assert entry["artifact_type"] == "data"
+        import json as _json
+
+        assert entry["real_ref"] == _json.dumps(structured, ensure_ascii=False)
 
     def test_does_not_capture_twice(self):
         middleware = ArtifactCaptureMiddleware()
@@ -116,3 +120,46 @@ class TestCapture:
         }
 
         assert middleware.before_model(state, _runtime()) is None
+
+    def test_capture_and_consumption_updates_concatenate(self):
+        """Both a fresh capture and a consumption update in one before_model call must survive.
+
+        Regression: dict-merging the two updates clobbered the shared
+        ``tool_artifacts`` key, permanently losing the new capture whenever the
+        next model response was terminal.
+        """
+        middleware = ArtifactCaptureMiddleware()
+        existing_handle = generate_handle("thread_1", "call_old", 0)
+        existing = {
+            "handle": existing_handle,
+            "artifact_type": "file",
+            "real_ref": "/mnt/user-data/outputs/old.md",
+            "display_name": "old.md",
+            "tool_name": "write_file",
+            "mime_type": None,
+            "consumed_by": [],
+        }
+        state = {
+            "tool_artifacts": [existing],
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "read_file", "args": {"path": existing_handle}, "id": "call_new", "type": "tool_call"}
+                    ],
+                ),
+                ToolMessage(
+                    content="wrote file",
+                    tool_call_id="call_fresh",
+                    artifact={"structured_content": {"file": "/mnt/user-data/outputs/fresh.md"}},
+                ),
+            ],
+        }
+
+        out = middleware.before_model(state, _runtime())
+
+        assert out is not None
+        handles = {entry["handle"] for entry in out["tool_artifacts"]}
+        assert generate_handle("thread_1", "call_fresh", 0) in handles, "fresh capture was dropped"
+        consumed = next(entry for entry in out["tool_artifacts"] if entry["handle"] == existing_handle)
+        assert consumed["consumed_by"] == ["call_new"], "consumption update was dropped"

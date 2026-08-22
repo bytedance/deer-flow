@@ -280,7 +280,7 @@ def _build_runtime_middlewares(
     # ToolErrorHandlingMiddleware so the resolved args are what actually reaches
     # the tool. It mutates only the tool-call args (resolving `art_xxxxxxxx`
     # handles to real references), never the message history.
-    if app_config.tool_artifacts.resolve_handles_in_args:
+    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
         from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 
         tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
@@ -293,7 +293,9 @@ def _build_runtime_middlewares(
     # ToolOutputBudgetMiddleware truncating the content does not affect it.
     if app_config.tool_artifacts.enabled:
         from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+        from deerflow.agents.thread_state import configure_tool_artifact_max_entries
 
+        configure_tool_artifact_max_entries(app_config.tool_artifacts.max_entries)
         tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]

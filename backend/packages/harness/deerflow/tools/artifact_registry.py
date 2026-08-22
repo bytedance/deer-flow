@@ -34,19 +34,23 @@ _REMOTE_FILE_URL_PATTERN = re.compile(
     r"https?://\S+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)"
 )
 
-_STRUCTURED_REF_CAP = 500
+# Structured-content keys whose string values are treated as concrete
+# references (paths, URLs, remote task ids) rather than opaque payload.
+_STRUCTURED_REF_KEYS = frozenset({"file", "files", "file_path", "path", "url", "urls", "output", "outputs"})
+_STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
+
 _ARTIFACT_RENDER_CHAR_BUDGET = 3000
 
 
-def generate_handle(thread_id: str, tool_call_id: str, call_index: int) -> str:
+def generate_handle(thread_id: str, tool_call_id: str, call_index: int, ref_ordinal: int = 0) -> str:
     """Return a deterministic short handle for an artifact.
 
-    The same ``(thread_id, tool_call_id, call_index)`` always produces the same
-    handle. ``tool_call_id`` is unique within an ``AIMessage`` and ``call_index``
-    distinguishes multiple outputs from one tool call, so collisions are not
-    possible within a thread.
+    The same ``(thread_id, tool_call_id, call_index, ref_ordinal)`` always
+    produces the same handle. ``tool_call_id`` is unique within an ``AIMessage``
+    and ``ref_ordinal`` distinguishes multiple references extracted from one
+    result, so collisions are not possible within a thread.
     """
-    seed = f"{thread_id}:{tool_call_id}:{call_index}"
+    seed = f"{thread_id}:{tool_call_id}:{call_index}:{ref_ordinal}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:_HANDLE_LENGTH]
     return f"{_HANDLE_PREFIX}{digest}"
 
@@ -113,21 +117,128 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
     return refs
 
 
-def _extract_content_block_entries(
-    content: list[Any],
+def _collect_structured_refs(value: Any, found: list[tuple[str, str]]) -> None:
+    """Recursively collect ``(key, string_value)`` pairs under known ref keys."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if isinstance(key, str) and (key in _STRUCTURED_REF_KEYS or key in _STRUCTURED_TASK_KEYS):
+                if isinstance(item, str):
+                    found.append((key, item))
+                elif isinstance(item, list):
+                    for element in item:
+                        if isinstance(element, str):
+                            found.append((key, element))
+                        else:
+                            _collect_structured_refs(element, found)
+            else:
+                _collect_structured_refs(item, found)
+    elif isinstance(value, list):
+        for item in value:
+            _collect_structured_refs(item, found)
+
+
+def _display_name_for_ref(ref: str) -> str:
+    return ref.split("/")[-1] or ref
+
+
+class _EntrySink:
+    """Allocates sequential per-result ordinals so every extracted reference
+    within one tool result gets a distinct handle."""
+
+    def __init__(self, *, thread_id: str, tool_call_id: str, call_index: int, created_at: str, tool_name: str):
+        self._thread_id = thread_id
+        self._tool_call_id = tool_call_id
+        self._call_index = call_index
+        self._created_at = created_at
+        self._tool_name = tool_name
+        self._next_ordinal = 0
+
+    def add(self, *, artifact_type: str, display_name: str, real_ref: str, mime_type: str | None = None) -> ArtifactEntry:
+        entry = _make_entry(
+            handle=generate_handle(self._thread_id, self._tool_call_id, self._call_index, self._next_ordinal),
+            tool_name=self._tool_name,
+            tool_call_id=self._tool_call_id,
+            call_index=self._call_index,
+            artifact_type=artifact_type,
+            display_name=display_name,
+            real_ref=real_ref,
+            created_at=self._created_at,
+            mime_type=mime_type,
+        )
+        self._next_ordinal += 1
+        return entry
+
+
+def extract_artifacts_from_result(
+    result: ToolMessage,
     *,
-    tool_name: str,
-    tool_call_id: str,
     thread_id: str,
-    call_index: int,
-    created_at: str,
+    call_index: int = 0,
+    detect_refs_in_text: bool = True,
 ) -> list[ArtifactEntry]:
+    """Extract artifact references from a ``ToolMessage``.
+
+    Extraction sources, all combined (not mutually exclusive):
+
+    1. ``ToolMessage.artifact["structured_content"]`` (MCP ``structuredContent``):
+       string values under known keys (``file``/``path``/``url``/``task_id``/...)
+       become concrete ``file``/``task`` entries; when no known key matches, the
+       whole payload becomes one untruncated JSON ``data`` entry.
+    2. ``content`` blocks of type ``file`` / ``image`` with a URL source become
+       ``file`` / ``image`` entries.
+    3. ``content`` text blocks and plain-string results are scanned
+       conservatively for sandbox paths and remote file URLs (gated by
+       ``detect_refs_in_text``).
+
+    Error results produce no entries. Every reference from one result gets a
+    distinct handle via a sequential ordinal.
+    """
+    if result.status == "error":
+        return []
+
+    now = _utc_now_iso()
+    tool_name = result.name or "unknown"
+    tool_call_id = result.tool_call_id or ""
+    sink = _EntrySink(thread_id=thread_id, tool_call_id=tool_call_id, call_index=call_index, created_at=now, tool_name=tool_name)
     entries: list[ArtifactEntry] = []
-    for i, block in enumerate(content):
+
+    artifact = result.artifact
+    if artifact is not None and isinstance(artifact, dict):
+        structured = artifact.get("structured_content")
+        if structured is not None:
+            found: list[tuple[str, str]] = []
+            _collect_structured_refs(structured, found)
+            if found:
+                for key, value in found:
+                    entries.append(
+                        sink.add(
+                            artifact_type="task" if key in _STRUCTURED_TASK_KEYS else "file",
+                            display_name=_display_name_for_ref(value),
+                            real_ref=value,
+                        )
+                    )
+            else:
+                entries.append(
+                    sink.add(
+                        artifact_type="data",
+                        display_name=f"{tool_name} structured result",
+                        real_ref=json.dumps(structured, ensure_ascii=False),
+                    )
+                )
+
+    content = result.content
+    if isinstance(content, str):
+        if detect_refs_in_text and content:
+            for ref in _detect_refs_in_text(content):
+                entries.append(sink.add(artifact_type=ref["type"], display_name=ref["display"], real_ref=ref["ref"]))
+        return entries
+    if not isinstance(content, list):
+        return entries
+
+    for block in content:
         if not isinstance(block, dict):
             continue
         block_type = block.get("type", "")
-        block_index = call_index + i
 
         if block_type in {"file", "image"}:
             source = block.get("source") or {}
@@ -136,99 +247,22 @@ def _extract_content_block_entries(
             url = source.get("url")
             if isinstance(url, str) and url:
                 entries.append(
-                    _make_entry(
-                        handle=generate_handle(thread_id, tool_call_id, block_index),
-                        tool_name=tool_name,
-                        tool_call_id=tool_call_id,
-                        call_index=block_index,
+                    sink.add(
                         artifact_type="file" if block_type == "file" else "image",
                         display_name=url.split("/")[-1] or url,
                         real_ref=url,
-                        created_at=created_at,
                         mime_type=source.get("mime_type") if isinstance(source.get("mime_type"), str) else None,
                     )
                 )
             continue
 
-        if block_type == "text":
+        if block_type == "text" and detect_refs_in_text:
             text = block.get("text")
             if not isinstance(text, str):
                 continue
             for ref in _detect_refs_in_text(text):
-                entries.append(
-                    _make_entry(
-                        handle=generate_handle(thread_id, tool_call_id, block_index),
-                        tool_name=tool_name,
-                        tool_call_id=tool_call_id,
-                        call_index=block_index,
-                        artifact_type=ref["type"],
-                        display_name=ref["display"],
-                        real_ref=ref["ref"],
-                        created_at=created_at,
-                    )
-                )
+                entries.append(sink.add(artifact_type=ref["type"], display_name=ref["display"], real_ref=ref["ref"]))
     return entries
-
-
-def extract_artifacts_from_result(
-    result: ToolMessage,
-    *,
-    thread_id: str,
-    call_index: int = 0,
-) -> list[ArtifactEntry]:
-    """Extract artifact references from a ``ToolMessage``.
-
-    Precedence:
-    1. ``ToolMessage.artifact["structured_content"]`` (MCP ``structuredContent``)
-       becomes a single ``data`` entry carrying a compact JSON preview.
-    2. ``content`` blocks of type ``file`` / ``image`` with a URL source become
-       ``file`` / ``image`` entries.
-    3. ``content`` text blocks are scanned conservatively for sandbox paths and
-       remote file URLs.
-
-    Error results and plain-string content (no refs) produce no entries.
-    """
-    if result.status == "error":
-        return []
-
-    now = _utc_now_iso()
-    tool_name = result.name or "unknown"
-    tool_call_id = result.tool_call_id or ""
-    entries: list[ArtifactEntry] = []
-
-    artifact = result.artifact
-    if artifact is not None and isinstance(artifact, dict):
-        structured = artifact.get("structured_content")
-        if structured is not None:
-            preview = json.dumps(structured, ensure_ascii=False)[:_STRUCTURED_REF_CAP]
-            entries.append(
-                _make_entry(
-                    handle=generate_handle(thread_id, tool_call_id, call_index),
-                    tool_name=tool_name,
-                    tool_call_id=tool_call_id,
-                    call_index=call_index,
-                    artifact_type="data",
-                    display_name=f"{tool_name} structured result",
-                    real_ref=preview,
-                    created_at=now,
-                )
-            )
-            return entries
-
-    content = result.content
-    if isinstance(content, str):
-        return entries
-    if not isinstance(content, list):
-        return entries
-
-    return _extract_content_block_entries(
-        content,
-        tool_name=tool_name,
-        tool_call_id=tool_call_id,
-        thread_id=thread_id,
-        call_index=call_index,
-        created_at=now,
-    )
 
 
 def render_artifact_registry(entries: list[ArtifactEntry], *, max_chars: int = _ARTIFACT_RENDER_CHAR_BUDGET) -> str:

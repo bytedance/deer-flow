@@ -1,4 +1,5 @@
 from langchain_core.messages import ToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
 
 from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
 from deerflow.config.tool_artifact_config import ToolArtifactConfig
@@ -136,3 +137,58 @@ class TestResolution:
         middleware.wrap_tool_call(request, handler)
 
         assert called[0] is request
+
+    def test_feature_disabled_flag_blocks_resolution_even_when_args_flag_on(self):
+        middleware = ArtifactResolutionMiddleware(config=ToolArtifactConfig(enabled=False, resolve_handles_in_args=True))
+        handle = generate_handle("thread_1", "call_0", 0)
+        request = _request(
+            {"name": "read_file", "args": {"path": handle}, "id": "call_2", "type": "tool_call"},
+            [_artifact("thread_1", 0, "/mnt/user-data/outputs/report.md")],
+        )
+        seen = {}
+
+        def handler(req):
+            seen["args"] = req.tool_call["args"]
+            return ToolMessage(content="ok", tool_call_id="call_2")
+
+        middleware.wrap_tool_call(request, handler)
+
+        assert seen["args"] == {"path": handle}
+
+
+class TestRealToolCallRequest:
+    """Exercise the real ``ToolCallRequest.override()`` dataclass path."""
+
+    def _real_request(self, args: dict) -> ToolCallRequest:
+        return ToolCallRequest(
+            tool_call={"name": "read_file", "args": args, "id": "call_real", "type": "tool_call"},
+            tool=None,
+            state={"tool_artifacts": [_artifact("thread_1", 0, "/mnt/user-data/outputs/report.md")]},
+            runtime=None,
+        )
+
+    def test_override_produces_resolved_request(self):
+        middleware = ArtifactResolutionMiddleware()
+        handle = generate_handle("thread_1", "call_0", 0)
+        request = self._real_request({"path": handle})
+
+        resolved = middleware._resolve_request(request)
+
+        assert resolved is not request
+        assert resolved.tool_call["args"] == {"path": "/mnt/user-data/outputs/report.md"}
+        assert request.tool_call["args"] == {"path": handle}, "original request must stay untouched"
+
+    def test_end_to_end_through_wrap_tool_call(self):
+        middleware = ArtifactResolutionMiddleware()
+        handle = generate_handle("thread_1", "call_0", 0)
+        request = self._real_request({"path": f"`{handle}`"})
+        seen = {}
+
+        def handler(req):
+            seen["args"] = req.tool_call["args"]
+            return ToolMessage(content="ok", tool_call_id="call_real")
+
+        result = middleware.wrap_tool_call(request, handler)
+
+        assert seen["args"] == {"path": "/mnt/user-data/outputs/report.md"}
+        assert result.content == "ok"

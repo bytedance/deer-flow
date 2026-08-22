@@ -261,7 +261,21 @@ def merge_skill_context(existing: list[SkillEntry] | None, new: list[SkillEntry]
     return merged
 
 
-_ARTIFACT_MAX_ENTRIES = 100
+_TOOL_ARTIFACT_MAX_ENTRIES_DEFAULT = 100
+_TOOL_ARTIFACT_MAX_ENTRIES_FLOOR = 10
+_TOOL_ARTIFACT_MAX_ENTRIES_CEILING = 1000
+_tool_artifact_max_entries = _TOOL_ARTIFACT_MAX_ENTRIES_DEFAULT
+
+
+def configure_tool_artifact_max_entries(max_entries: int) -> None:
+    """Set the process-wide tool-artifact registry cap.
+
+    LangGraph reducers are module-level functions without access to runtime
+    config, so the cap is applied here and wired from agent assembly
+    (`tool_artifacts.max_entries`). Values outside [10, 1000] are clamped.
+    """
+    global _tool_artifact_max_entries
+    _tool_artifact_max_entries = max(_TOOL_ARTIFACT_MAX_ENTRIES_FLOOR, min(_TOOL_ARTIFACT_MAX_ENTRIES_CEILING, int(max_entries)))
 
 
 class ArtifactEntry(TypedDict):
@@ -304,8 +318,8 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
         by_handle[handle] = entry
 
     merged = [by_handle[handle] for handle in order]
-    if len(merged) > _ARTIFACT_MAX_ENTRIES:
-        merged = merged[-_ARTIFACT_MAX_ENTRIES:]
+    if len(merged) > _tool_artifact_max_entries:
+        merged = merged[-_tool_artifact_max_entries:]
     return merged
 
 
