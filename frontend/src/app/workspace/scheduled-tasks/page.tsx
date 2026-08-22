@@ -392,6 +392,7 @@ function FilterChip({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={onClick}
       className={cn(
         "rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
@@ -555,7 +556,11 @@ function TaskDetail({
                 timezone: editSchedule.timezone || "UTC",
               })
             }
-            disabled={updateTask.isPending}
+            disabled={
+              updateTask.isPending ||
+              (!editSchedule.schedule_spec.cron &&
+                !editSchedule.schedule_spec.run_at)
+            }
           >
             {updateTask.isPending ? t.common.loading : st.edit.submit}
           </Button>
