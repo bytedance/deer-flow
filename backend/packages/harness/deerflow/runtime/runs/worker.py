@@ -2074,21 +2074,34 @@ def valid_duration_entry(run_id: Any, duration_seconds: Any) -> bool:
     return isinstance(run_id, str) and bool(run_id) and isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool)
 
 
-async def persist_run_durations(
+RUN_MESSAGE_IDS_METADATA_KEY = "run_message_ids"
+
+
+def valid_run_message_id_entry(message_id: Any, run_id: Any) -> bool:
+    """Check that a persisted legacy message-to-run attribution is well formed."""
+    return isinstance(message_id, str) and bool(message_id) and isinstance(run_id, str) and bool(run_id)
+
+
+async def persist_run_history_metadata(
     *,
     checkpointer: Any,
     thread_id: str,
-    durations: dict[str, int],
+    durations: dict[str, int] | None = None,
+    message_run_ids: dict[str, str] | None = None,
 ) -> bool:
-    """Merge validated run durations into a metadata-only checkpoint.
+    """Merge validated run history indexes into a metadata-only checkpoint.
 
     Durations accumulate so the history fast path can serve every known turn
-    from the latest checkpoint.  Per-entry overhead is negligible (~50 bytes
-    per run_id) compared to the messages channel blob written on every graph
-    checkpoint, so no pruning is needed.
+    from the latest checkpoint. Legacy AI-message attributions are persisted
+    alongside them for every audited AI ID, including boundary fallbacks whose
+    event lookup was exhaustively empty. The full mapping is deliberate: it is
+    both the exact-attribution cache and the negative-result coverage proof, so
+    later reads query only new IDs. It grows linearly with AI messages and must
+    never contain data outside the checkpoint's materialized history.
     """
-    updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in durations.items() if valid_duration_entry(run_id, duration_seconds)}
-    if not updates:
+    duration_updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in (durations or {}).items() if valid_duration_entry(run_id, duration_seconds)}
+    message_run_id_updates = {message_id: run_id for message_id, run_id in (message_run_ids or {}).items() if valid_run_message_id_entry(message_id, run_id)}
+    if not duration_updates and not message_run_id_updates:
         return False
 
     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -2102,11 +2115,15 @@ async def persist_run_durations(
             metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
             raw_run_durations = metadata.get("run_durations")
             run_durations = {key: value for key, value in raw_run_durations.items() if valid_duration_entry(key, value)} if isinstance(raw_run_durations, dict) else {}
-            changed_durations = {run_id: duration for run_id, duration in updates.items() if run_durations.get(run_id) != duration}
-            if not changed_durations:
+            raw_message_run_ids = metadata.get(RUN_MESSAGE_IDS_METADATA_KEY)
+            run_message_ids = {message_id: run_id for message_id, run_id in raw_message_run_ids.items() if valid_run_message_id_entry(message_id, run_id)} if isinstance(raw_message_run_ids, dict) else {}
+            changed_durations = {run_id: duration for run_id, duration in duration_updates.items() if run_durations.get(run_id) != duration}
+            changed_message_run_ids = {message_id: run_id for message_id, run_id in message_run_id_updates.items() if run_message_ids.get(message_id) != run_id}
+            if not changed_durations and not changed_message_run_ids:
                 return False
 
             run_durations.update(changed_durations)
+            run_message_ids.update(changed_message_run_ids)
             parent_checkpoint_id = _checkpoint_identity(ckpt_tuple, checkpoint)
             latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
             latest_checkpoint = dict(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else {}
@@ -2118,7 +2135,16 @@ async def persist_run_durations(
             prev_step = metadata.get("step")
             metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
             metadata["run_durations"] = run_durations
-            metadata["writes"] = {"runtime_run_duration": {"run_ids": sorted(changed_durations)}}
+            if run_message_ids:
+                metadata[RUN_MESSAGE_IDS_METADATA_KEY] = run_message_ids
+            else:
+                metadata.pop(RUN_MESSAGE_IDS_METADATA_KEY, None)
+            metadata["writes"] = {
+                "runtime_run_duration": {
+                    "run_ids": sorted(changed_durations),
+                    "message_ids": sorted(changed_message_run_ids),
+                }
+            }
 
             checkpoint_ns = _checkpoint_namespace(ckpt_tuple)
             write_config = {
@@ -2139,6 +2165,20 @@ async def persist_run_durations(
             )
             return True
     return False
+
+
+async def persist_run_durations(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int],
+) -> bool:
+    """Merge validated run durations into a metadata-only checkpoint."""
+    return await persist_run_history_metadata(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations=durations,
+    )
 
 
 async def _persist_run_duration(

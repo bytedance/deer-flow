@@ -65,7 +65,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.journal import build_branch_history_seed_events
 from deerflow.runtime.runs.manager import ConflictError
-from deerflow.runtime.runs.worker import valid_duration_entry
+from deerflow.runtime.runs.worker import RUN_MESSAGE_IDS_METADATA_KEY, valid_duration_entry, valid_run_message_id_entry
 from deerflow.runtime.secret_context import redact_metadata_secrets
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import run_file_io
@@ -1349,6 +1349,57 @@ def _checkpoint_run_durations(metadata: Any) -> dict[str, int]:
     return {run_id: duration_seconds for run_id, duration_seconds in raw_durations.items() if valid_duration_entry(run_id, duration_seconds)}
 
 
+def _checkpoint_run_message_ids(metadata: Any) -> dict[str, str]:
+    raw_message_run_ids = metadata.get(RUN_MESSAGE_IDS_METADATA_KEY) if isinstance(metadata, dict) else None
+    if not isinstance(raw_message_run_ids, dict):
+        return {}
+    return {message_id: run_id for message_id, run_id in raw_message_run_ids.items() if valid_run_message_id_entry(message_id, run_id)}
+
+
+async def _persist_run_history_metadata_background(
+    *,
+    request: Request,
+    checkpointer: Any,
+    thread_id: str,
+    user_id: str | None,
+    durations: dict[str, int],
+    message_run_ids: dict[str, str],
+    fallback_message_ids: set[str],
+) -> None:
+    """Best-effort history migration behind durable checkpoint admission."""
+    from deerflow.runtime.runs.worker import persist_run_history_metadata
+
+    try:
+        async with reserve_checkpoint_write(request, thread_id, user_id=user_id):
+            if fallback_message_ids:
+                from app.gateway.deps import get_run_event_store
+
+                exact_after_admission = await get_run_event_store(request).find_latest_ai_message_run_ids(
+                    thread_id,
+                    fallback_message_ids,
+                    user_id=user_id,
+                )
+                message_run_ids = dict(message_run_ids)
+                for message_id in fallback_message_ids:
+                    exact_run_id = exact_after_admission.get(message_id)
+                    if valid_run_message_id_entry(message_id, exact_run_id):
+                        message_run_ids[message_id] = exact_run_id
+
+            await persist_run_history_metadata(
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                durations=durations,
+                message_run_ids=message_run_ids,
+            )
+    except ConflictError:
+        # A live run or another checkpoint writer owns the thread. The mapping
+        # is a read-through optimization, so the next history request can retry
+        # instead of racing a user-visible state mutation.
+        logger.debug("Skipped run-history metadata migration for busy thread %s", sanitize_log_param(thread_id))
+    except Exception:
+        logger.warning("Failed to persist run-history metadata for thread %s", sanitize_log_param(thread_id), exc_info=True)
+
+
 @router.post("/{thread_id}/history", response_model=list[HistoryEntry])
 @require_permission("threads", "read", owner_check=True)
 async def get_thread_history(
@@ -1402,8 +1453,10 @@ async def get_thread_history(
                         # carry the completed turns' durations in metadata, so the
                         # messages channel stays unchanged.
                         checkpoint_run_durations = _checkpoint_run_durations(metadata)
+                        checkpoint_run_message_ids = _checkpoint_run_message_ids(metadata)
                         current_turn_run_id = None
                         turn_run_ids: set[str] = set()
+                        legacy_ai_message_ids: set[str] = set()
                         for msg in serialized_msgs:
                             if msg.get("type") == "human":
                                 additional_kwargs = msg.get("additional_kwargs")
@@ -1413,75 +1466,124 @@ async def get_thread_history(
                                         current_turn_run_id = run_id
                                 continue
 
-                            if msg.get("type") not in {"ai", "tool"} or not current_turn_run_id:
+                            message_type = msg.get("type")
+                            if message_type not in {"ai", "tool"}:
                                 continue
 
-                            msg.setdefault("run_id", current_turn_run_id)
-                            if msg.get("type") == "ai":
-                                turn_run_ids.add(current_turn_run_id)
+                            if message_type == "ai":
+                                message_id = msg.get("id")
+                                persisted_run_id = checkpoint_run_message_ids.get(message_id) if isinstance(message_id, str) else None
+                                if persisted_run_id:
+                                    msg["run_id"] = persisted_run_id
+                                elif not isinstance(msg.get("run_id"), str) or not msg.get("run_id"):
+                                    if current_turn_run_id:
+                                        msg["run_id"] = current_turn_run_id
+                                    if isinstance(message_id, str) and message_id:
+                                        legacy_ai_message_ids.add(message_id)
 
-                        # Stamp each run's duration on its last AI message only,
-                        # same as the live message endpoints — never every AI
-                        # message in a multi-message turn (#4152).
-                        stamp_turn_duration_on_last_ai(serialized_msgs, checkpoint_run_durations)
+                                run_id = msg.get("run_id")
+                                if isinstance(run_id, str) and run_id:
+                                    turn_run_ids.add(run_id)
+                            elif current_turn_run_id:
+                                msg.setdefault("run_id", current_turn_run_id)
 
                         # Runs referenced by this checkpoint's AI messages but
-                        # absent from checkpoint metadata are either legacy
-                        # (never migrated) or just completed. Correlate once via
-                        # event-store + run-manager, then upgrade by a
-                        # metadata-only checkpoint write.
+                        # absent from duration metadata are either legacy
+                        # (never migrated) or just completed. Exact attribution
+                        # has its own completeness condition: duration-only
+                        # checkpoints written before #4949 still need their AI
+                        # IDs correlated and persisted. Correlate once via the
+                        # event store, then hydrate only the run rows whose
+                        # durations are actually required.
+                        resolved_run_durations = dict(checkpoint_run_durations)
                         missing_run_ids = turn_run_ids - set(checkpoint_run_durations)
-                        if missing_run_ids:
+                        if missing_run_ids or legacy_ai_message_ids:
                             from app.gateway.deps import get_run_event_store, get_run_manager
                             from app.gateway.routers.thread_runs import compute_run_durations
-                            from deerflow.runtime.runs.worker import persist_run_durations
 
                             run_mgr = get_run_manager(request)
                             event_store = get_run_event_store(request)
-
-                            runs = await run_mgr.list_by_thread(thread_id)
-                            events = await event_store.list_messages(thread_id, limit=1000)
-
-                            if runs:
-                                run_durations = compute_run_durations(runs)
-                                msg_to_run = {}
-                                for event in events:
-                                    content = event.get("content", {})
-                                    run_id = event.get("run_id")
-                                    if isinstance(content, dict) and content.get("type") == "ai" and "id" in content and isinstance(run_id, str) and run_id:
-                                        msg_to_run[content["id"]] = run_id
-
-                                current_turn_run_id = None
+                            user_id = get_effective_user_id()
+                            ai_message_ids = set(legacy_ai_message_ids)
+                            try:
+                                msg_to_run = (
+                                    await event_store.find_latest_ai_message_run_ids(
+                                        thread_id,
+                                        ai_message_ids,
+                                        user_id=user_id,
+                                    )
+                                    if ai_message_ids
+                                    else {}
+                                )
+                            except Exception:
+                                # A failed exact lookup must not masquerade as a
+                                # successful boundary attribution. Removing the
+                                # synthesized ids leaves the response incomplete
+                                # rather than deterministically wrong.
                                 for msg in serialized_msgs:
-                                    if msg.get("type") == "human":
-                                        additional_kwargs = msg.get("additional_kwargs")
-                                        if isinstance(additional_kwargs, dict):
-                                            run_id = additional_kwargs.get("run_id")
-                                            if isinstance(run_id, str) and run_id:
-                                                current_turn_run_id = run_id
-                                        continue
+                                    if msg.get("type") == "ai" and msg.get("id") in ai_message_ids:
+                                        msg.pop("run_id", None)
+                                raise
 
-                                    if msg.get("type") not in {"ai", "tool"}:
-                                        continue
-                                    run_id = msg_to_run.get(msg.get("id")) or current_turn_run_id
-                                    if run_id:
-                                        msg["run_id"] = run_id
+                            for msg in serialized_msgs:
+                                if msg.get("type") != "ai":
+                                    continue
+                                exact_run_id = msg_to_run.get(msg.get("id"))
+                                if exact_run_id:
+                                    msg["run_id"] = exact_run_id
 
-                                stamp_turn_duration_on_last_ai(serialized_msgs, run_durations)
+                            # Cache the complete audited attribution, including
+                            # boundary fallbacks for IDs with no event. Without
+                            # those negative-result entries, every history read
+                            # would rescan the same pre-event-store prefix.
+                            message_run_ids_to_persist = {
+                                message_id: run_id
+                                for msg in serialized_msgs
+                                if msg.get("type") == "ai" and isinstance((message_id := msg.get("id")), str) and message_id in ai_message_ids and isinstance((run_id := msg.get("run_id")), str) and run_id
+                            }
+                            fallback_message_ids_to_revalidate = set(message_run_ids_to_persist) - set(msg_to_run)
 
-                                # Intentional, best-effort write-on-read migration:
-                                # persist legacy metadata after the response so the
-                                # history request never waits on an active stream's
-                                # same-thread checkpoint lock.
+                            required_run_ids = {run_id for msg in serialized_msgs if msg.get("type") == "ai" and isinstance((run_id := msg.get("run_id")), str) and run_id and run_id not in checkpoint_run_durations}
+                            run_durations: dict[str, int] = {}
+                            if required_run_ids:
+                                runs = await run_mgr.list_by_thread(thread_id, user_id=user_id)
+                                known_run_ids = {run.run_id for run in runs}
+                                for run_id in sorted(required_run_ids - known_run_ids):
+                                    run = await run_mgr.get(run_id, user_id=user_id)
+                                    if run is not None:
+                                        runs.append(run)
+                                        known_run_ids.add(run_id)
+
+                                computed_durations = compute_run_durations(runs)
+                                run_durations = {run_id: duration for run_id, duration in computed_durations.items() if run_id in required_run_ids}
+                                resolved_run_durations.update(run_durations)
+
+                            # Intentional, best-effort write-on-read migration:
+                            # persist both exact attribution and duration after
+                            # the response so subsequent reads stay exact without
+                            # waiting on an active stream's checkpoint lock.
+                            if run_durations or message_run_ids_to_persist:
                                 background_tasks.add_task(
-                                    persist_run_durations,
+                                    _persist_run_history_metadata_background,
+                                    request=request,
                                     checkpointer=checkpointer,
                                     thread_id=thread_id,
+                                    user_id=user_id,
                                     durations=run_durations,
+                                    message_run_ids=message_run_ids_to_persist,
+                                    fallback_message_ids=fallback_message_ids_to_revalidate,
                                 )
 
+                        # Stamp only after exact attribution is final. Stamping
+                        # the synthesized boundary first can leave its duration
+                        # attached to a message whose run ID is later corrected.
+                        stamp_turn_duration_on_last_ai(
+                            serialized_msgs,
+                            resolved_run_durations,
+                        )
+
                     except Exception:
-                        logger.warning("Failed to inject turn_duration for thread %s", thread_id, exc_info=True)
+                        logger.warning("Failed to inject turn_duration for thread %s", sanitize_log_param(thread_id), exc_info=True)
 
                     values["messages"] = serialized_msgs
 
@@ -1490,7 +1592,7 @@ async def get_thread_history(
             next_tasks = list(snapshot.next or ())
 
             # Strip LangGraph internal keys from metadata
-            user_meta = {k: v for k, v in metadata.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents", "run_durations")}
+            user_meta = {k: v for k, v in metadata.items() if k not in ("created_at", "updated_at", "step", "source", "writes", "parents", "run_durations", RUN_MESSAGE_IDS_METADATA_KEY)}
             # Keep step for ordering context
             if "step" in metadata:
                 user_meta["step"] = metadata["step"]

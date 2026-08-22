@@ -20,6 +20,17 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
 
+**Targeted run-event attribution** (`runtime/events/store/`):
+`RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
+contract. Its default implementation walks `list_messages()` backward in
+1000-row pages, preserves the first page's high-watermark through the exclusive
+`before_seq` cursor, and raises when a full page has no safe progressing `seq`.
+Memory and database stores use that bounded path; the JSONL store overrides it
+with one complete thread-log read because each JSONL page would otherwise
+rescan every run file. Database owner filtering is inherited on every page.
+Callers may use a missing key as proof that no valid AI event exists only after
+an ordinary return, never after an exception.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
