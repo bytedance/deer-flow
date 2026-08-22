@@ -29,6 +29,7 @@ class SandboxOwnershipConfig(BaseModel):
     renewal_interval_seconds: float = Field(
         default=30.0,
         gt=0,
+        allow_inf_nan=False,
         description=(
             "How often an owning instance refreshes its leases. The lease TTL is derived from this (interval x ttl_multiplier), so ownership liveness is independent of sandbox.idle_timeout: "
             "renewal keeps running even when idle cleanup is disabled (idle_timeout: 0)."
@@ -37,6 +38,7 @@ class SandboxOwnershipConfig(BaseModel):
     ttl_multiplier: float = Field(
         default=4.0,
         ge=2,
+        allow_inf_nan=False,
         description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
     )
     key_prefix: str = Field(
