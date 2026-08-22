@@ -258,7 +258,7 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
                 model_settings_from_config.get("extra_body"),
                 {"thinking": {"type": "disabled"}},
             )
-            model_settings_from_config["reasoning_effort"] = "minimal"
+            model_settings_from_config["reasoning_effort"] = "low"
         elif has_thinking_settings and (disable_chat_template_kwargs := _vllm_disable_chat_template_kwargs(effective_wte.get("extra_body", {}).get("chat_template_kwargs") or {})):
             # vLLM uses chat template kwargs to switch thinking on/off.
             model_settings_from_config["extra_body"] = _deep_merge_dicts(
@@ -271,6 +271,19 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
     if not model_config.supports_reasoning_effort:
         kwargs.pop("reasoning_effort", None)
         model_settings_from_config.pop("reasoning_effort", None)
+
+    # Normalize known-but-invalid reasoning_effort values to their closest valid
+    # equivalent. "minimal" is sent by the frontend for flash ("闪速") mode and was
+    # previously also hardcoded in the thinking-disabled path above, but it is not a
+    # valid OpenAI-compatible value (the API expects one of low/medium/high/xhigh/max)
+    # and reaches the constructor via the kwargs path, which bypasses AgentConfig's
+    # Literal["low", "medium", "high"] type check. Map it to "low" for both the runtime
+    # kwargs and the config-derived settings so it never reaches the LLM client (#4514).
+    _REASONING_EFFORT_NORMALIZE: dict[str, str] = {"minimal": "low"}
+    if (re := kwargs.get("reasoning_effort")) and re in _REASONING_EFFORT_NORMALIZE:
+        kwargs["reasoning_effort"] = _REASONING_EFFORT_NORMALIZE[re]
+    if (re := model_settings_from_config.get("reasoning_effort")) and re in _REASONING_EFFORT_NORMALIZE:
+        model_settings_from_config["reasoning_effort"] = _REASONING_EFFORT_NORMALIZE[re]
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage default below / stream_chunk_timeout) see the canonical endpoint key.
