@@ -239,9 +239,10 @@ async def test_worker_bridge_cleanup_retained_under_gc(bridge: MemoryStreamBridg
     del task
     gc.collect()
 
-    assert weak_task() is not None and weak_task() in _bridge_cleanup_tasks
-    await asyncio.sleep(0.05)
-    assert run_id not in bridge._streams and weak_task() not in _bridge_cleanup_tasks
+    retained = weak_task()
+    assert retained is not None and retained in _bridge_cleanup_tasks
+    await asyncio.wait_for(retained, timeout=1.0)
+    assert run_id not in bridge._streams and retained not in _bridge_cleanup_tasks
 
 
 @pytest.mark.anyio
