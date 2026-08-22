@@ -276,29 +276,41 @@ tools:
 
 ```python
 # packages/harness/deerflow/agents/middlewares/my_middleware.py
-from langchain.agents.middleware import BaseMiddleware
-from langchain_core.runnables import RunnableConfig
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(BaseMiddleware):
+class MyMiddleware(AgentMiddleware[AgentState]):
     """Middleware description."""
 
-    def transform_state(self, state: dict, config: RunnableConfig) -> dict:
-        """Transform the state before agent execution."""
-        # Modify state as needed
-        return state
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Run before each model call."""
+        print(f"Model input contains {len(state.get('messages', []))} messages")
+        return None
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Run after each model call."""
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"Last message type: {type(last_message).__name__ if last_message else 'none'}")
+        return None
 ```
 
-2. Register in `packages/harness/deerflow/agents/lead_agent/agent.py`:
+2. Register the zero-argument middleware class in `config.yaml`:
 
-```python
-middlewares = [
-    ThreadDataMiddleware(),
-    SandboxMiddleware(),
-    MyMiddleware(),  # Add your middleware
-    TitleMiddleware(),
-    ClarificationMiddleware(),
-]
+```yaml
+extensions:
+  middlewares:
+    - deerflow.agents.middlewares.my_middleware:MyMiddleware
 ```
+
+Configured middleware runs in both the lead-agent and subagent pipelines after
+the built-in middleware and optional loop/token guards, but before the
+terminal-response, safety, and clarification tail. Treat middleware class paths
+as trusted operator configuration because loading one executes Python code.
+Embedded callers can instead pass middleware instances through
+`DeerFlowClient(middlewares=[...])` or
+`create_deerflow_agent(extra_middleware=[...])`.
 
 ### Adding New API Endpoints
 

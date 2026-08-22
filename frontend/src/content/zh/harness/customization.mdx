@@ -22,25 +22,34 @@ DeerFlow 的可插拔架构意味着系统的大多数部分都可以在不 fork
 添加自定义中间件：
 
 1. 实现 `langchain.agents.middleware` 中的 `AgentMiddleware` 接口。
-2. 在构建 Agent 时通过 `custom_middlewares` 参数传入你的中间件。
+2. 在 `extensions.middlewares` 下注册它的导入路径，或通过嵌入式 SDK API 传入实例。
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from deerflow.agents.thread_state import ThreadState
+from langgraph.runtime import Runtime
 
-class AuditMiddleware(AgentMiddleware):
-    async def on_start(self, state: ThreadState, config):
-        # 在每次模型调用前运行
-        print(f"[审计] 轮次开始：上下文中有 {len(state.messages)} 条消息")
-        return state, config
+class AuditMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        print(f"[审计] 模型输入包含 {len(state.get('messages', []))} 条消息")
+        return None
 
-    async def on_end(self, state: ThreadState, config):
-        # 在每次模型调用后运行
-        print(f"[审计] 轮次结束：最后一条消息类型 = {state.messages[-1].type}")
-        return state, config
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"[审计] 最后一条消息类型：{type(last_message).__name__ if last_message else 'none'}")
+        return None
 ```
 
-自定义中间件在链末尾 `ClarificationMiddleware` 之前注入，后者始终最后运行。
+对于运维配置的部署，该类必须提供零参数构造函数，并且 Gateway 进程必须能够导入它：
+
+```yaml
+extensions:
+  middlewares:
+    - my_company.deerflow_middlewares:AuditMiddleware
+```
+
+配置的中间件会在内置中间件及可选的循环/token 保护之后、终态响应/安全/澄清尾部之前加载到主 Agent 和子 Agent 链中。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[AuditMiddleware()])` 或 `create_deerflow_agent(extra_middleware=[AuditMiddleware()])`。
 
 ## 自定义工具
 
