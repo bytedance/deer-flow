@@ -136,14 +136,6 @@ class LocalSandbox(Sandbox):
         )
 
     @staticmethod
-    def _coerce_process_output(value: str | bytes | None) -> str:
-        if value is None:
-            return ""
-        if isinstance(value, bytes):
-            return value.decode("utf-8", errors="replace")
-        return value
-
-    @staticmethod
     def _drain_pipe(fd: int, capture: _BoundedPipeCapture) -> None:
         try:
             while chunk := os.read(fd, 8192):
@@ -502,21 +494,7 @@ class LocalSandbox(Sandbox):
                         "MSYS2_ARG_CONV_EXCL": "*",
                     }
 
-            try:
-                result = subprocess.run(
-                    args,
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    env=sandbox_env,
-                )
-                stdout, stderr, returncode = result.stdout, result.stderr, result.returncode
-            except subprocess.TimeoutExpired as exc:
-                timed_out = True
-                stdout = self._coerce_process_output(exc.stdout if exc.stdout is not None else exc.output)
-                stderr = self._coerce_process_output(exc.stderr)
-                returncode = 0
+            stdout, stderr, returncode, timed_out = self._run_windows_command(args, timeout, sandbox_env)
         else:
             args = [shell, "-c", resolved_command]
             stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
@@ -533,6 +511,93 @@ class LocalSandbox(Sandbox):
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
         return self._reverse_resolve_paths_in_output(final_output)
+
+    @staticmethod
+    def _run_windows_command(
+        args: list[str],
+        timeout: float,
+        env: dict[str, str] | None = None,
+    ) -> tuple[str, str, int, bool]:
+        """Run a Windows command with bounded capture and process-tree timeout."""
+        timed_out = False
+        stdout_read_fd, stdout_write_fd = os.pipe()
+        stderr_read_fd, stderr_write_fd = os.pipe()
+        try:
+            process = subprocess.Popen(
+                args,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_write_fd,
+                stderr=stderr_write_fd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                env=env,
+            )
+        except Exception:
+            for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # Preserve the original Popen failure; fd cleanup is best-effort.
+                    pass
+            raise
+        finally:
+            for fd in (stdout_write_fd, stderr_write_fd):
+                try:
+                    os.close(fd)
+                except OSError:
+                    # The write fd may already be closed by the exception cleanup above.
+                    pass
+
+        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
+        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
+
+        try:
+            try:
+                process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                LocalSandbox._terminate_windows_process_tree(process)
+            returncode = process.returncode if process.returncode is not None else 0
+        finally:
+            join_timeout = 10 if timed_out else _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS
+            for thread in (stdout_thread, stderr_thread):
+                thread.join(timeout=join_timeout)
+                if thread.is_alive():
+                    logger.debug("Subprocess output drain thread still active after command returned")
+
+        return stdout_capture.read(), stderr_capture.read(), returncode, timed_out
+
+    @staticmethod
+    def _terminate_windows_process_tree(process: subprocess.Popen) -> None:
+        """Terminate a Windows shell and all descendants, then reap it."""
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        taskkill = ntpath.join(system_root, "System32", "taskkill.exe")
+        try:
+            result = subprocess.run(
+                [taskkill, "/PID", str(process.pid), "/T", "/F"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0 and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    logger.debug("Windows process %s exited before fallback kill", process.pid)
+        except (OSError, subprocess.TimeoutExpired):
+            logger.debug("Failed to terminate Windows process tree for pid %s", process.pid, exc_info=True)
+            if process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    logger.debug("Windows process %s exited before fallback kill", process.pid)
+
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            logger.warning("Process tree for pid %s did not exit after taskkill", process.pid)
 
     @staticmethod
     def _run_posix_command(

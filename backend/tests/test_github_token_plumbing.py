@@ -240,21 +240,20 @@ def test_local_sandbox_rejects_invalid_env_key(monkeypatch: pytest.MonkeyPatch) 
     """
     import deerflow.sandbox.local.local_sandbox as local_sandbox
 
-    fake_run_called = False
+    fake_popen_called = False
 
-    def fake_run(*args, **kwargs):
-        nonlocal fake_run_called
-        fake_run_called = True
-        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    def fake_popen(*args, **kwargs):
+        nonlocal fake_popen_called
+        fake_popen_called = True
 
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(local_sandbox.subprocess, "Popen", fake_popen)
 
     with pytest.raises(ValueError, match="extra_env key"):
         LocalSandbox("local:t").execute_command(
             "echo hi",
             env={"X;rm -rf /mnt/user-data;Y": "v"},
         )
-    assert fake_run_called is False, "subprocess.run must not run when key is invalid"
+    assert fake_popen_called is False, "subprocess.Popen must not run when key is invalid"
 
 
 def test_aio_sandbox_rejects_invalid_env_key() -> None:
