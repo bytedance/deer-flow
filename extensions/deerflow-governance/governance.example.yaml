@@ -1,0 +1,146 @@
+# DeerFlow 治理插件配置
+#
+# 规则**有序，首条命中即返回**（与防火墙 / IAM 同一套语义）。
+# 上线新规则前先跑：governance simulate --tool bash --arg command="..." --explain
+# 进 CI 校验：governance validate
+
+approval_mode: ticket # ticket（默认，推荐）| interrupt（实验，见 docs/INTEGRATION.md）
+fail_closed: true
+strict_pricing: false # true = 未知模型的成本直接报错，而不是记成 unknown
+
+storage:
+  db_path: "data/governance.db"
+  audit_jsonl: "data/audit.jsonl" # 设为 false 关闭 JSONL 落盘
+
+# ---------------------------------------------------------------- 策略
+policy:
+  # 必填。不给隐式默认值：「忘了配」和「故意放行」在审计上不是一回事。
+  default_effect: allow
+  default_reason: "未命中治理规则，按白名单外默认放行处理（如需收紧改为 ask/deny）"
+  thread_bound_grants: true # 在 A 会话批准的操作不自动放行 B 会话
+
+  rules:
+    # ---------- 只读工具：直接放行，不进审批队列 ----------
+    - id: readonly-tools
+      tools: ["read_file", "ls", "glob", "grep", "view_image", "web_fetch", "web_search", "image_search", "tool_search"]
+      effect: allow
+      risk: low
+      reason: "只读工具，不改变任何外部状态"
+
+    # ---------- 破坏性 shell：一律拒绝，不给审批机会 ----------
+    - id: bash-destructive
+      tools: ["bash"]
+      effect: deny
+      risk: critical
+      reason: "命中破坏性命令黑名单。这类操作不应该由 Agent 执行，请人工在终端确认后手动执行"
+      when_any:
+        - { arg: command, regex: "rm\\s+(-[a-zA-Z]*\\s+)*-?[rf]" }
+        - { arg: command, regex: "\\bmkfs\\b|\\bdd\\s+if=|\\bshutdown\\b|\\breboot\\b" }
+        - { arg: command, regex: ":\\(\\)\\s*\\{.*\\};:" } # fork bomb
+        - { arg: command, regex: "\\bchmod\\s+777\\s+/" }
+        - { arg: command, regex: "curl[^|]*\\|\\s*(ba)?sh" } # 管道执行远程脚本
+
+    # ---------- 涉及凭证/推送：必须人批 ----------
+    - id: bash-credentials-or-push
+      tools: ["bash"]
+      effect: ask
+      risk: high
+      reason: "命令涉及凭证、远程推送或包发布，需要人工确认"
+      when_any:
+        - { arg: command, regex: "git\\s+push" }
+        - { arg: command, regex: "\\b(npm|pnpm|yarn)\\s+publish\\b|\\btwine\\s+upload\\b" }
+        - { arg: command, regex: "\\b(AWS_|OPENAI_|ANTHROPIC_)[A-Z_]*=" }
+        - { arg: command, regex: "\\bssh\\b|\\bscp\\b|\\brsync\\b.*::" }
+      grant_scope: exact
+      ttl_seconds: 0 # 只对这一次生效
+
+    # ---------- 子 Agent 的 shell：比主 Agent 更严 ----------
+    # 理由：子 Agent 在隔离上下文里跑，用户看不到它的中间过程，
+    # 出问题时最难复盘，所以给它更小的权限面。
+    - id: subagent-bash-ask
+      tools: ["bash"]
+      scope: subagent
+      effect: ask
+      risk: high
+      reason: "子 Agent 执行 shell，用户看不到中间过程，需要人工确认"
+      grant_scope: tool
+      ttl_seconds: 1800
+
+    # ---------- 常规 shell：放行 ----------
+    - id: bash-default
+      tools: ["bash"]
+      effect: allow
+      risk: medium
+      reason: "常规 shell 命令，已排除破坏性与凭证类"
+
+    # ---------- 写入受保护路径：人批 ----------
+    - id: write-protected-path
+      tools: ["write_file", "str_replace"]
+      effect: ask
+      risk: high
+      reason: "写入受保护路径（配置 / CI / 依赖清单），可能影响构建与部署"
+      when_any:
+        - { arg: file_path, regex: "(^|/)\\.env" }
+        - { arg: file_path, regex: "(^|/)\\.github/" }
+        - { arg: file_path, regex: "(^|/)(Dockerfile|docker-compose\\.ya?ml)$" }
+        - { arg: file_path, regex: "(^|/)(pyproject\\.toml|package\\.json|uv\\.lock|requirements\\.txt)$" }
+        - { arg: file_path, regex: "(^|/)config\\.ya?ml$" }
+      grant_scope: exact
+
+    - id: write-default
+      tools: ["write_file", "str_replace"]
+      effect: allow
+      risk: medium
+      reason: "常规文件写入"
+
+    # ---------- 改 Agent 自身配置：人批（防止自我提权） ----------
+    - id: self-modify-agent
+      tools: ["update_agent", "setup_agent", "skill_manage"]
+      effect: ask
+      risk: critical
+      reason: "修改 Agent 自身配置或技能，属于自我提权路径，必须人工确认"
+      grant_scope: exact
+
+    # ---------- MCP 外部工具：默认人批一次，批后 30 分钟内同工具放行 ----------
+    - id: mcp-tools
+      tools: ["mcp__*"]
+      effect: ask
+      risk: high
+      reason: "MCP 外部工具会把数据发到第三方服务，首次使用需要确认"
+      grant_scope: tool
+      ttl_seconds: 1800
+
+    # ---------- 委派子 Agent：放行但计入预算 ----------
+    - id: task-delegation
+      tools: ["task"]
+      effect: allow
+      risk: medium
+      reason: "委派子 Agent，成本由 BudgetBreakerMiddleware 计入"
+
+# ---------------------------------------------------------------- 预算
+# 维度：total_tokens / cost_cents（分）/ tool_calls / delegations / wall_ms
+# 层级：run（单次运行）/ thread（单个会话）/ day（当日，UTC）
+budget:
+  run:
+    total_tokens: 400000
+    cost_cents: 800 # ¥8
+    tool_calls: 120
+    delegations: 8
+    wall_ms: 1800000 # 30 分钟
+    warn_ratio: 0.75
+  thread:
+    total_tokens: 2000000
+    cost_cents: 3000 # ¥30
+    delegations: 40
+    warn_ratio: 0.8
+  day:
+    cost_cents: 20000 # ¥200
+    warn_ratio: 0.85
+
+# ---------------------------------------------------------------- 价目
+# 单位：分 / 每百万 token。**上线前务必核对各家官方价目页**，这里只是可覆盖的默认值。
+# 未在表中的模型，成本记为 unknown（不是 0），并单独统计其 token 数。
+prices:
+  deepseek-chat: { input_cents_per_mtok: 200, output_cents_per_mtok: 800 }
+  "qwen3-*": { input_cents_per_mtok: 80, output_cents_per_mtok: 200 }
+  "claude-*sonnet*": { input_cents_per_mtok: 2160, output_cents_per_mtok: 10800 }
