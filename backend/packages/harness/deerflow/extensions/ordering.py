@@ -78,11 +78,17 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     """
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
     return (
         OrderingConstraint(
             outer=ToolProgressMiddleware,
             inner=ToolErrorHandlingMiddleware,
             reason=("ToolProgressMiddleware reads deerflow_tool_meta in _update_state_from_result, so its wrap_tool_call chain must enclose the ToolErrorHandlingMiddleware step that stamps it"),
+        ),
+        OrderingConstraint(
+            outer=ToolReceiptMiddleware,
+            inner=ToolErrorHandlingMiddleware,
+            reason=("ToolReceiptMiddleware reads the deerflow_tool_meta status stamped by ToolErrorHandlingMiddleware when building each receipt, so its wrap_tool_call chain must enclose the stamping step"),
         ),
     )
