@@ -139,10 +139,14 @@ class McpTaskService:
             # compensation would terminate the pre-existing tracked task.
             raise
         except asyncio.CancelledError:
+            # Cancellation can race with a successful database commit. If it
+            # did, the durable row will converge to cancelled on its next poll;
+            # compensating is safer than leaving a live remote task untracked.
             await self._cancel_untracked_task(
                 driver=driver,
                 task_reference=task_reference,
                 driver_name=driver_name,
+                reason="caller cancellation during local persistence",
             )
             raise
         except Exception:
@@ -150,6 +154,7 @@ class McpTaskService:
                 driver=driver,
                 task_reference=task_reference,
                 driver_name=driver_name,
+                reason="local submission finalization failure",
             )
             raise
 
@@ -159,16 +164,36 @@ class McpTaskService:
         driver,
         task_reference: TaskReference,
         driver_name: str,
+        reason: str,
     ) -> None:
-        try:
-            await driver.cancel(task_reference)
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - preserve the original persistence failure or cancellation
+        compensation = asyncio.create_task(driver.cancel(task_reference))
+
+        def log_failure() -> None:
             logger.exception(
-                "Failed to cancel untracked MCP task after persistence failure (task_id=%s, driver=%s, remote_task_id=%s)",
+                "Failed to cancel untracked MCP task after %s (task_id=%s, driver=%s, remote_task_id=%s)",
+                reason,
                 task_reference.local_task_id,
                 driver_name,
                 task_reference.remote_task_id,
             )
+
+        while True:
+            try:
+                await asyncio.shield(compensation)
+                return
+            except asyncio.CancelledError:
+                if not compensation.done():
+                    # A repeated caller cancellation must not also cancel the
+                    # remote compensation. Preserve it by waiting again.
+                    continue
+                try:
+                    compensation.result()
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - preserve the original failure or cancellation
+                    log_failure()
+                return
+            except Exception:  # noqa: BLE001 - preserve the original persistence failure or cancellation
+                log_failure()
+                return
 
     async def run_once(self, *, now: datetime) -> None:
         await self._run_cancellations(now=now)

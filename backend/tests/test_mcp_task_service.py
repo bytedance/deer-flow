@@ -130,6 +130,26 @@ class HangingDriver(FakeDriver):
             raise
 
 
+class BlockingCancelDriver(FakeDriver):
+    def __init__(self, *, submission):
+        super().__init__(submission=submission)
+        self.cancel_started = asyncio.Event()
+        self.finish_cancel = asyncio.Event()
+        self.cancel_completed = False
+        self.cancel_interrupted = False
+
+    async def cancel(self, task):
+        self.cancel_calls.append(task)
+        self.cancel_started.set()
+        try:
+            await self.finish_cancel.wait()
+        except asyncio.CancelledError:
+            self.cancel_interrupted = True
+            raise
+        self.cancel_completed = True
+        return TaskSnapshot(status=TaskStatus.CANCELLED)
+
+
 def _claimed_row(*, driver_name="fake"):
     return {
         "id": "task-1",
@@ -273,6 +293,52 @@ async def test_submit_cancellation_during_persistence_cancels_remote_task():
     cancelled = driver.cancel_calls[0]
     assert cancelled.local_task_id == "task-1"
     assert cancelled.remote_task_id == "remote-1"
+
+
+@pytest.mark.asyncio
+async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
+    repo = BlockingCreateRepository()
+    driver = BlockingCancelDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = TaskSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        server_name="reports",
+        task_name="Generate report",
+        arguments={"topic": "MCP"},
+        local_task_id="task-1",
+    )
+
+    submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
+    await repo.create_started.wait()
+    submit_task.cancel()
+    await driver.cancel_started.wait()
+
+    submit_task.cancel()
+    driver.finish_cancel.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    assert len(driver.cancel_calls) == 1
+    assert driver.cancel_completed
+    assert not driver.cancel_interrupted
 
 
 @pytest.mark.asyncio
