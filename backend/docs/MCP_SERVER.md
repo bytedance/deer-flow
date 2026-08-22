@@ -172,6 +172,12 @@ defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
 a server that never answers `initialize`) cannot block agent construction or
 the task poller indefinitely. Set it to `null` to disable:
 
+Both timeout settings accept `null` or a finite number greater than zero. JSON
+booleans, zero, negative, NaN, and infinite values are rejected when the
+extensions file or Gateway request is validated. `tool_call_timeout` must also
+fit the downstream Python `timedelta`; its largest accepted whole-second value
+is `86399999999999`.
+
 ```json
 {
    "mcpServers": {
@@ -195,6 +201,34 @@ durable-task submit/status/cancel calls also honor it for `http` and `sse`
 servers, independently of transport idle timeouts, so a live connection that
 never returns the matching MCP response cannot stall the task poller. Other
 `http` and `sse` tools continue to use transport-level timeouts.
+
+### Upgrading configurations written by older Gateways
+
+Older Gateway versions could persist timeout values that the current models
+reject. On file load, DeerFlow logs a warning and skips only a server whose
+validation errors are confined to `session_init_timeout` or
+`tool_call_timeout`; healthy MCP servers and skill configuration continue to
+load. Consequently, `GET /api/mcp/config` omits the invalid server until it is
+repaired, and the server is also absent from Settings > Tools.
+
+`PUT /api/mcp/config` is a full replacement. If a client sends the result of
+GET back through PUT, the omitted invalid server is removed from
+`extensions_config.json`, including its stored `env`, `headers`, OAuth client
+secret, and OAuth refresh token. The visible-server switches in Settings >
+Tools use PATCH and do not perform that replacement, but any settings or API
+flow that submits a GET-derived full replacement has the same removal
+behavior.
+
+Before repair, preserve a backup of `extensions_config.json` that still
+contains the server's secret fields. To repair through PUT, re-supply the
+server's complete definition from the original file or backup, with valid
+timeouts. Alternatively, edit or restore the file directly before any
+GET-derived full-replacement save. Incoming validated timeout values then take
+precedence before the old raw entry is parsed for secret and advanced-field
+preservation, so masked secrets can still be round-tripped when the server is
+included in the request. `PATCH /api/mcp/config` may disable the invalid server
+without rewriting its other fields; attempting to enable it returns 422 and
+leaves the file unchanged until a valid PUT repairs it.
 
 ## Filesystem MCP Servers
 
