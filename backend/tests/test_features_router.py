@@ -8,8 +8,15 @@ from app.gateway.deps import get_config
 from app.gateway.routers import features
 
 
-def _app_with_config(*, agents_api_enabled: bool, browser_enabled: bool = False, browser_extra: dict | None = None) -> FastAPI:
+def _app_with_config(
+    *,
+    agents_api_enabled: bool,
+    browser_enabled: bool = False,
+    browser_extra: dict | None = None,
+    mcp_tasks_available: bool = False,
+) -> FastAPI:
     app = FastAPI()
+    app.state.mcp_tasks_available = mcp_tasks_available
     app.include_router(features.router)
     tools = (
         [
@@ -27,14 +34,29 @@ def test_features_reports_agents_api_enabled() -> None:
     with TestClient(_app_with_config(agents_api_enabled=True)) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
-    assert response.json() == {"agents_api": {"enabled": True}, "browser_control": {"enabled": False}}
+    assert response.json() == {
+        "agents_api": {"enabled": True},
+        "browser_control": {"enabled": False},
+        "mcp_tasks": {"enabled": False},
+    }
 
 
 def test_features_reports_agents_api_disabled() -> None:
     with TestClient(_app_with_config(agents_api_enabled=False)) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
-    assert response.json() == {"agents_api": {"enabled": False}, "browser_control": {"enabled": False}}
+    assert response.json() == {
+        "agents_api": {"enabled": False},
+        "browser_control": {"enabled": False},
+        "mcp_tasks": {"enabled": False},
+    }
+
+
+def test_features_reports_mcp_tasks_startup_capability() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, mcp_tasks_available=True)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["mcp_tasks"] == {"enabled": True}
 
 
 def test_features_reports_browser_control_enabled_when_configured_and_runtime_available() -> None:
