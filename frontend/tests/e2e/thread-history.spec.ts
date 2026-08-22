@@ -821,10 +821,10 @@ test.describe("Thread history", () => {
   test("chats list page shows all threads", async ({ page }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
-    await page.goto("/workspace/chats");
+    await page.goto("/workspace/settings?settings=chats");
 
     // Both threads should be listed in the main content area
-    const main = page.locator("main");
+    const main = page.getByTestId("chats-settings-page");
     await expect(main.getByText("First conversation")).toBeVisible({
       timeout: 15_000,
     });
@@ -859,10 +859,10 @@ test.describe("Thread history", () => {
     await expect(sidebarThread).toBeVisible({ timeout: 15_000 });
     await expect(sidebarThread.getByLabel("Feishu channel")).toBeVisible();
 
-    await page.goto("/workspace/chats");
+    await page.goto("/workspace/settings?settings=chats");
 
     const mainThread = page
-      .locator("main")
+      .getByTestId("chats-settings-page")
       .locator(`a[href='/workspace/chats/${MOCK_THREAD_ID}']`);
     await expect(mainThread.getByText("Feishu conversation")).toBeVisible({
       timeout: 15_000,
