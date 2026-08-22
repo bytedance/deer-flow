@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
@@ -800,3 +801,198 @@ class TestClarificationDisabled:
         merged = add_messages(add_messages([], [first_message]), [second_message])
 
         assert len(merged) == 1
+
+
+class TestAfterModelStripsSiblingToolCalls:
+    """Regression tests for #4906: when ask_clarification is batched with
+    sibling tool calls in one AIMessage, the siblings must be stripped so the
+    clarification interrupt can fire before any action runs."""
+
+    @staticmethod
+    def _state(last_message: object) -> dict:
+        return {"messages": [{"role": "user", "content": "hi"}, last_message]}
+
+    def test_strips_sibling_tool_calls(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-1",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "Which dir?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "rm -rf /tmp/x"}},
+                {"id": "c3", "name": "write_file", "args": {"path": "/tmp/x.txt", "content": "y"}},
+            ],
+        )
+        result = middleware.after_model(self._state(ai), None)
+        assert result is not None
+        updated = result["messages"][0]
+        assert updated.id == "msg-1", "replacement must keep the original id so add_messages replaces it"
+        assert [tc["name"] for tc in updated.tool_calls] == ["ask_clarification"]
+
+    def test_single_clarification_unchanged(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-2",
+            tool_calls=[{"id": "c1", "name": "ask_clarification", "args": {"question": "?"}}],
+        )
+        assert middleware.after_model(self._state(ai), None) is None
+
+    def test_multiple_clarifications_kept_no_siblings(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-5",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "ask_clarification", "args": {"question": "?"}},
+            ],
+        )
+        assert middleware.after_model(self._state(ai), None) is None
+
+    def test_no_clarification_unchanged(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-3",
+            tool_calls=[{"id": "c2", "name": "bash", "args": {"cmd": "ls"}}],
+        )
+        assert middleware.after_model(self._state(ai), None) is None
+
+    def test_non_ai_last_message_unchanged(self, middleware):
+        assert middleware.after_model({"messages": [{"role": "user", "content": "hi"}]}, None) is None
+
+    def test_empty_tool_calls_unchanged(self, middleware):
+        ai = AIMessage(content="plain text", id="msg-6")
+        assert middleware.after_model(self._state(ai), None) is None
+
+    def test_async_version_strips_siblings(self, middleware):
+        import asyncio
+
+        ai = AIMessage(
+            content="",
+            id="msg-4",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "ls"}},
+            ],
+        )
+        result = asyncio.run(middleware.aafter_model(self._state(ai), None))
+        assert result is not None
+        assert [tc["name"] for tc in result["messages"][0].tool_calls] == ["ask_clarification"]
+
+
+class TestAfterModelRespectsDisabledClarification:
+    """#4906 follow-up: when disable_clarification is set in the run context,
+    ask_clarification is suppressed and the agent is expected to proceed with
+    its tools — siblings must NOT be stripped in that mode."""
+
+    @staticmethod
+    def _state(last_message: object) -> dict:
+        return {"messages": [{"role": "user", "content": "hi"}, last_message]}
+
+    @staticmethod
+    def _disabled_runtime() -> object:
+        return SimpleNamespace(context={"disable_clarification": True})
+
+    def test_does_not_strip_when_clarification_disabled(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-1",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "ls"}},
+            ],
+        )
+        result = middleware.after_model(self._state(ai), self._disabled_runtime())
+        assert result is None, "siblings must be kept when clarification is suppressed"
+
+    def test_async_does_not_strip_when_clarification_disabled(self, middleware):
+        import asyncio
+
+        ai = AIMessage(
+            content="",
+            id="msg-2",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "write_file", "args": {"path": "/tmp/x", "content": "y"}},
+            ],
+        )
+        result = asyncio.run(middleware.aafter_model(self._state(ai), self._disabled_runtime()))
+        assert result is None
+
+    def test_strips_normally_without_context(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-3",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "ls"}},
+            ],
+        )
+        result = middleware.after_model(self._state(ai), SimpleNamespace(context={}))
+        assert result is not None
+        assert [tc["name"] for tc in result["messages"][0].tool_calls] == ["ask_clarification"]
+
+
+class TestAfterModelPreservesMetadata:
+    """The replacement AIMessage must keep usage/response metadata so token
+    tracking and provider diagnostics survive the sibling-strip."""
+
+    def test_preserves_usage_and_response_metadata(self, middleware):
+        ai = AIMessage(
+            content="",
+            id="msg-meta",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "ls"}},
+            ],
+            response_metadata={"finish_reason": "tool_calls"},
+            usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        )
+        result = middleware.after_model({"messages": [{"role": "user", "content": "hi"}, ai]}, None)
+        assert result is not None
+        replacement = result["messages"][0]
+        assert replacement.response_metadata == {"finish_reason": "tool_calls"}
+        assert replacement.usage_metadata == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+
+    def test_raw_tool_call_metadata_synced(self, middleware):
+        """additional_kwargs['tool_calls'] (raw provider metadata) must be
+        filtered to the kept calls, not dropped wholesale."""
+        ai = AIMessage(
+            content="",
+            id="msg-raw",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "ls"}},
+            ],
+            additional_kwargs={
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "ask_clarification", "arguments": "{}"}},
+                    {"id": "c2", "type": "function", "function": {"name": "bash", "arguments": "{}"}},
+                ]
+            },
+        )
+        result = middleware.after_model({"messages": [{"role": "user", "content": "hi"}, ai]}, None)
+        assert result is not None
+        replacement = result["messages"][0]
+        raw = replacement.additional_kwargs.get("tool_calls")
+        assert raw is not None, "raw tool-call metadata must survive the rewrite"
+        assert [entry["id"] for entry in raw] == ["c1"], "raw metadata must be filtered to the kept call"
+
+    def test_add_messages_merge_replaces_the_batch(self, middleware):
+        """The whole fix hinges on add_messages replacing the sibling-bearing
+        AIMessage by id rather than appending a second copy. Assert the merge
+        directly so a regression (e.g. a helper change that drops the id)
+        fails here instead of silently surviving in state."""
+        ai = AIMessage(
+            content="",
+            id="msg-merge",
+            tool_calls=[
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "?"}},
+                {"id": "c2", "name": "bash", "args": {"cmd": "rm -rf /tmp/x"}},
+            ],
+        )
+        result = middleware.after_model({"messages": [{"role": "user", "content": "hi"}, ai]}, None)
+        assert result is not None
+        merged = add_messages([{"role": "user", "content": "hi"}, ai], result["messages"])
+        assert len(merged) == 2, "the original AIMessage must be replaced, not appended"
+        last = merged[-1]
+        assert isinstance(last, AIMessage)
+        assert [tc["name"] for tc in last.tool_calls] == ["ask_clarification"]

@@ -9,10 +9,13 @@ from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.runtime import Runtime
 from langgraph.types import Command
+
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -370,11 +373,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         When set, we don't interrupt; we return a ToolMessage nudging the
         agent to proceed with its best judgment instead.
         """
-        runtime = getattr(request, "runtime", None)
-        context = getattr(runtime, "context", None)
-        if not context:
-            return False
-        return bool(context.get("disable_clarification"))
+        return self._clarification_disabled(getattr(request, "runtime", None))
 
     def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:
         """Suppress a clarification and tell the agent to proceed.
@@ -471,6 +470,65 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             return self._handle_disabled_clarification(request)
 
         return self._handle_clarification(request)
+
+    @override
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._strip_sibling_tool_calls(state, runtime)
+
+    @override
+    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._strip_sibling_tool_calls(state, runtime)
+
+    def _strip_sibling_tool_calls(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Strip sibling tool calls from any AIMessage that also calls `ask_clarification`.
+
+        Providers routinely batch tool calls into a single AIMessage. If that
+        turn contains `ask_clarification` next to `bash` / `write_file` / ...,
+        the clarification interrupt (`wrap_tool_call` -> `Command(goto=END)`)
+        only holds for the single intercepted call: the siblings still run in
+        parallel, and langchain's `return_direct` router only inspects the last
+        ToolMessage, so interrupt-vs-continue becomes order-dependent (#4906).
+
+        The model's text instruction ("call ask_clarification IMMEDIATELY, do
+        NOT start working") is a soft constraint; this rewrite makes it
+        structural. The replacement keeps the original message id so
+        `add_messages` replaces the batch instead of appending a duplicate.
+
+        When clarifications are suppressed (`disable_clarification`), the
+        agent is expected to proceed with its tools, so nothing is stripped.
+        """
+        if self._clarification_disabled(runtime):
+            return None
+        messages = state.get("messages") or []
+        if not messages:
+            return None
+        last = messages[-1]
+        if not isinstance(last, AIMessage):
+            return None
+        tool_calls = getattr(last, "tool_calls", None) or []
+        if not tool_calls:
+            return None
+
+        clarification_calls = [call for call in tool_calls if call.get("name") == "ask_clarification"]
+        if not clarification_calls:
+            return None
+        if len(clarification_calls) == len(tool_calls):
+            # Already a pure clarification turn — nothing to strip.
+            return None
+
+        # clone_ai_message_with_tool_calls keeps raw provider tool-call
+        # metadata (additional_kwargs) in sync with the filtered structured
+        # tool_calls and preserves the message id and usage metadata via
+        # model_copy, instead of hand-rebuilding the message.
+        replacement = clone_ai_message_with_tool_calls(last, clarification_calls)
+        return {"messages": [replacement]}
+
+    @staticmethod
+    def _clarification_disabled(runtime: Runtime | None) -> bool:
+        context = getattr(runtime, "context", None)
+        if not context:
+            return False
+        return bool(context.get("disable_clarification"))
 
     @override
     async def awrap_tool_call(

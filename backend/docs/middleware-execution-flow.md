@@ -19,7 +19,7 @@
 | 10 | ViewImageMiddleware | | ✓ | | | | | ✓ | ✗ | `vision` |
 | 11 | SubagentLimitMiddleware | | | ✓ | | | | ✓ | ✗ | `subagent` |
 | 12 | LoopDetectionMiddleware | ✓ | | ✓ | ✓ | ✓ | | ✓ | ✗ | 始终开启 |
-| 13 | ClarificationMiddleware | | | | | | ✓ | ✓ | ✗ | 始终最后 |
+| 13 | ClarificationMiddleware | | | ✓ | | | ✓ | ✓ | ✗ | 始终最后 |
 
 主 agent **14 个** middleware（`make_lead_agent`），subagent **4 个**（ThreadData、Sandbox、Guardrail、ToolErrorHandling）。`create_deerflow_agent` Phase 1 实现 **13 个**（Guardrail 仅支持自定义实例，无内置默认）。
 
@@ -174,6 +174,7 @@ sequenceDiagram
 > [!important] 核心规则
 > 列表最后的 middleware，其 `after_model` **最先执行**。
 > ClarificationMiddleware 在列表末尾，所以它第一个拦截 model 输出。
+> 这个"始终最后"不变式对 `after_model` 链同样关键：剥离兄弟 tool calls 依赖 ClarificationMiddleware 作为第一个 after_* 钩子看到**未经改动**的 AIMessage（`messages[-1]`）。任何排在其后、会追加消息的钩子都会把 `messages[-1]` 移走，使剥离静默失效——因此 ClarificationMiddleware 必须保持列表最后。
 
 ## 对比：真正的洋葱 vs DeerFlow 的实际情况
 
