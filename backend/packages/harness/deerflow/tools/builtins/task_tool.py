@@ -262,10 +262,14 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    # Resolve the dispatching identity up front: per-user API agents are only
+    # resolvable for their owner, and both the available-names listing (error
+    # message) and the config lookup must see the same user scope.
+    user_id = resolve_runtime_user_id(runtime)
+    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, user_id=user_id) if runtime_app_config is not None else get_available_subagent_names(user_id=user_id)
 
     # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config, user_id=user_id) if runtime_app_config is not None else get_subagent_config(subagent_type, user_id=user_id)
     if config is None:
         available = ", ".join(available_subagent_names)
         error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
@@ -296,7 +300,6 @@ async def task_tool(
     thread_id = None
     parent_model = None
     trace_id = None
-    user_id = None
     deerflow_trace_id = None
     metadata: dict = {}
 
@@ -314,8 +317,8 @@ async def task_tool(
         # Get or generate trace_id for distributed tracing
         trace_id = metadata.get("trace_id") or str(uuid.uuid4())[:8]
 
-    # Get user_id for tracing (uses standard resolution order)
-    user_id = resolve_runtime_user_id(runtime)
+    # user_id was resolved above (standard resolution order) so the registry could
+    # scope per-user API agent lookups; it is reused below for tracing.
 
     # Propagate the authenticated runtime context so delegated tool calls are
     # evaluated by GuardrailMiddleware with the same identity/attribution as

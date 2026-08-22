@@ -152,7 +152,20 @@ The Lead Agent invokes ACP agents through the `invoke_acp_agent` built-in tool.
 
 ## Custom agents as subagents
 
-Custom agents created through the DeerFlow App UI can also be invoked as subagents using the `task` tool. When you specify `agent="my-custom-agent"`, the runtime loads that agent's configuration (skills, tool groups, model) and runs it as a subagent for the delegated task.
+Custom agents you create in the DeerFlow App (`/workspace/agents`) can be dispatched through the `task` tool. The runtime resolves `subagent_type` in three tiers, where later tiers never shadow earlier ones:
+
+1. Built-in subagents (`general-purpose`, `bash`)
+2. Operator-defined `subagents.custom_agents` in `config.yaml`
+3. **Your own custom agents**, resolved from your user account only
+
+A custom agent dispatched as a subagent keeps its identity: its SOUL becomes the subagent's system prompt, its tool-group allowlist restricts which tools it can use (an unrestricted agent inherits the full pool), and its skills and model selection carry over. Subagents never re-delegate (`task` is always denied for them), and one user's agents are never visible to another user's threads.
+
+<Callout type="info" emoji="🧩">
+  This is the building block for role-differentiated delegation — e.g. a Writer
+  agent with writing skills, a Coder restricted to shell tools, and a Reviewer
+  that critiques their output — without giving up DeerFlow's dynamic, benefit-based
+  routing for fixed multi-agent graphs.
+</Callout>
 
 <Cards num={2}>
   <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />

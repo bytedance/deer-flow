@@ -1113,6 +1113,8 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.
 
+You can also delegate to your own custom agents from `/workspace/agents`: the runtime resolves `task(subagent_type=...)` against built-ins first, then operator-defined `subagents.custom_agents`, then **your user-scoped custom agents** — keeping their SOUL, tool-group allowlist, skills, and model while never allowing them to re-delegate. See [Subagents](frontend/src/content/en/harness/subagents.mdx) for details.
+
 ### Sandbox & File System
 
 `E2BSandboxProvider` uses `wait` as its default overflow policy. It waits for

@@ -21,7 +21,7 @@ def test_get_available_subagent_names_keeps_bash_when_allowed(monkeypatch) -> No
 
 
 def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda *args, **kwargs: ["general-purpose"])
 
     section = prompt_module._build_subagent_section(3)
 
@@ -34,7 +34,7 @@ def test_build_subagent_section_hides_bash_examples_when_unavailable(monkeypatch
 
 
 def test_build_subagent_section_includes_bash_when_available(monkeypatch) -> None:
-    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda: ["general-purpose", "bash"])
+    monkeypatch.setattr(prompt_module, "get_available_subagent_names", lambda *args, **kwargs: ["general-purpose", "bash"])
 
     section = prompt_module._build_subagent_section(3)
 
