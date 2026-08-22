@@ -1,9 +1,11 @@
 """Tests for StreamBridge implementations."""
 
 import asyncio
+import gc
 import os
 import re
 import uuid
+import weakref
 from collections import defaultdict
 
 import anyio
@@ -228,7 +230,6 @@ async def test_cleanup(bridge: MemoryStreamBridge):
 @pytest.mark.anyio
 async def test_worker_bridge_cleanup_retained_under_gc(bridge: MemoryStreamBridge):
     """Verify worker _schedule_bridge_cleanup retains tasks against GC and cleans up successfully."""
-    import gc, weakref
     from deerflow.runtime.runs.worker import _bridge_cleanup_tasks, _schedule_bridge_cleanup
 
     run_id = "run-worker-gc-cleanup"
@@ -241,7 +242,6 @@ async def test_worker_bridge_cleanup_retained_under_gc(bridge: MemoryStreamBridg
     assert weak_task() is not None and weak_task() in _bridge_cleanup_tasks
     await asyncio.sleep(0.05)
     assert run_id not in bridge._streams and weak_task() not in _bridge_cleanup_tasks
-
 
 
 @pytest.mark.anyio
