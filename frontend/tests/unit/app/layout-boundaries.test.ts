@@ -42,4 +42,12 @@ describe("layout performance boundaries", () => {
       expect(layout).not.toContain("getI18n");
     }
   });
+
+  it("mounts no user-settings requests in auth-disabled or static mode", () => {
+    const workspaceLayout = source("src/app/workspace/layout.tsx");
+
+    expect(workspaceLayout).toContain(
+      "enabled={!isAuthDisabledMode() && !isStaticWebsiteOnly()}",
+    );
+  });
 });

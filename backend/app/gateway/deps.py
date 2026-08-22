@@ -732,6 +732,13 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_user_repository() -> SQLiteUserRepository:
+    """Return the shared SQL-backed user repository after engine startup."""
+    get_local_provider()
+    assert _cached_repo is not None
+    return _cached_repo
+
+
 async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 

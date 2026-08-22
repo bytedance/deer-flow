@@ -15,6 +15,14 @@ class UserNotFoundError(LookupError):
     """
 
 
+class UserPreferencesNotInitializedError(LookupError):
+    """Raised when a partial preference update precedes initialization."""
+
+
+class UserPreferencesWriteConflict(RuntimeError):
+    """Raised after bounded optimistic preference-update retries fail."""
+
+
 class UserRepository(ABC):
     """Abstract interface for user data storage.
 
@@ -104,4 +112,19 @@ class UserRepository(ABC):
         Returns:
             User if found, None otherwise
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_user_preferences(self, user_id: str) -> tuple[dict | None, int]:
+        """Return the user's persisted UI preferences and revision."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def initialize_user_preferences(self, user_id: str, settings: dict) -> tuple[dict, int]:
+        """Persist settings only when the user has no preference record yet."""
+        raise NotImplementedError
+
+    @abstractmethod
+    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict, int]:
+        """Atomically deep-merge a validated partial preference update."""
         raise NotImplementedError

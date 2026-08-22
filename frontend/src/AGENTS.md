@@ -13,7 +13,33 @@
    ownership and returns 206/416 through `FileResponse`.
 3. `useThreadHistory` loads persisted conversation pages from `GET /api/threads/{id}/messages/page`, preserving the backend's thread-global event `seq`; rendering overlays checkpoint/live copies at their matching canonical identities (a summarized checkpoint may contain a protected early input plus a recent tail). Context-compaction rescue diffs every retained visible identity rather than slicing at the first anchor, and keeps a run-scoped ledger of committed visible messages so replacement updates and repeated rolling checkpoint windows cannot erase an already displayed step. The resolver suppresses checkpoint/transient prefixes whose canonical position is still behind an unloaded cursor page instead of collapsing that unknown gap before a recent anchor, then adds optimistic messages without timestamp re-sorting. History invalidation preserves already-loaded pages so their established ordering positions are not discarded. Dynamic context re-keys the submitted user message from `X` to `X__user`; UI identity matching normalizes that reserved suffix only for human messages so the submitted frame and checkpoint replacement remain one visible turn. A locally submitted turn also records its pre-submit identity baseline: if `messages-tuple` publishes new AI/tool steps before `values` publishes that turn's human message, render ordering moves only those non-baseline visible steps behind the new human while leaving history, hidden controls, and reconnected runs untouched. Keep that local order anchor through finish, stop, and stream error because the SDK's settled frame can retain transient event order; replace it on the next local submit and clear it on thread switch or replay-gap recovery.
 4. Stop actions call the LangGraph SDK stream stop path; `core/threads/hooks.ts` invalidates current-thread, thread-history, token-usage, and sidebar/search caches immediately and schedules one follow-up refetch because SDK stop may finish via abort + fire-and-forget cancel before backend title finalization commits
-5. TanStack Query manages server state; localStorage stores user settings. The
+5. TanStack Query manages server state. `core/settings` keeps user settings in
+   localStorage as an offline fallback; in normal authenticated Gateway mode,
+   `UserSettingsSync` hydrates the browser-safe base-settings allowlist from
+   `GET /api/user-preferences`, or performs a first-writer-wins import of a
+   valid legacy local value when no server record exists. Later base mutations
+   are serialized as nested `PATCH` writes, and response values never overwrite
+   a newer local edit. Thread model override keys/ids remain local, as do browser
+   notification permission/system state and all workspace/credential data.
+   Every active-user mutation is captured at the store boundary and enters a
+   user-scoped, allowlisted local outbox before async activation or network
+   observers can run. If a setting changes between `UserSettingsSync` render
+   and activation, startup also seeds a full current-state patch before
+   hydrating the server response, retaining that patch in memory when browser
+   storage rejects the durable outbox write.
+   Failed writes remain in that outbox; the next handshake folds them over the
+   server read and retries before clearing, so reconnect/reload cannot silently
+   erase an unsynchronized local selection. Keep `UserSettingsSync` mounted
+   before interactive workspace content so its render-time version boundary is
+   established before settings controls render.
+   Authenticated fallback caches are also keyed by user. A Web Lock serializes
+   the one-time claim of the historical unscoped cache across tabs; without Web
+   Locks, the ambiguous legacy value is not imported. Storage events for a
+   different user's cache are ignored, and every API call sends an expected-user
+   guard that the Gateway compares with the authenticated cookie owner, so a tab
+   left open across an account switch cannot read or patch the new account.
+   Auth-disabled and static-website modes mount no settings synchronization and
+   retain the prior local-only behavior. The
    Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates

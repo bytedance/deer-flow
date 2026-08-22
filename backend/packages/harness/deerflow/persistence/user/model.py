@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -47,6 +47,14 @@ class UserRow(Base):
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
+
+    # Browser-safe, user-level UI preferences. The API owns a strict allowlist;
+    # this JSON column must never receive credentials, browser permission state,
+    # or thread/workspace-scoped data. NULL distinguishes "never migrated" from
+    # a stored preference object so the frontend can perform a one-time import
+    # from its legacy localStorage value.
+    preferences: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    preferences_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (
         Index(

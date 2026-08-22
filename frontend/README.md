@@ -77,6 +77,19 @@ pnpm start
 
 ## Configuration
 
+### Settings Persistence
+
+When Gateway authentication is enabled, DeerFlow synchronizes a small,
+browser-safe allowlist of base UI settings across signed-in sessions. Existing
+server settings win on sign-in; accounts without a record import their valid
+local settings once. Local storage remains the non-blocking offline fallback,
+and per-thread model overrides, browser notification permission, workspace
+state, and credentials never enter this synchronization API. Auth-disabled
+deployments retain the original local-only behavior. Authenticated fallback
+caches and failed-write outboxes are account-scoped. A cross-tab Web Lock gives
+the old unscoped cache a single owner during upgrade; browsers without Web
+Locks skip that ambiguous import and start from defaults until server hydration.
+
 ### Environment Variables
 
 Key environment variables (see `.env.example` for full list):

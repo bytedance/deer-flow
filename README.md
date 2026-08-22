@@ -390,6 +390,18 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
+With Gateway authentication enabled, the Web UI also persists an allowlisted
+set of user-level display and model defaults through the owner-scoped
+`/api/user-preferences` API. An existing server record is authoritative at
+sign-in; otherwise DeerFlow imports the browser's valid local base settings
+once. Local storage remains the offline fallback. Thread overrides, browser
+notification permission/system state, workspace data, and credentials stay
+local and are never accepted by this API. Auth-disabled deployments keep the
+original local-only settings behavior. Authenticated fallback caches are keyed
+by account. On browsers with cross-tab Web Locks, only one authenticated
+account can claim the old unscoped cache; without that lock, DeerFlow safely
+skips the ambiguous legacy import instead of copying it across accounts.
+
 #### LangGraph Studio (Optional)
 
 The default `make dev` topology uses DeerFlow's Gateway-embedded runtime and

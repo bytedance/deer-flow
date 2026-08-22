@@ -37,6 +37,7 @@ from app.gateway.routers import (
     thread_runs,
     threads,
     uploads,
+    user_preferences,
 )
 from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
 from deerflow.config import app_config as deerflow_app_config
@@ -756,6 +757,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Auth API is mounted at /api/v1/auth
     app.include_router(auth.router)
+
+    # Authenticated user-level UI settings (server-backed, owner-scoped)
+    app.include_router(user_preferences.router)
 
     # Feedback API is mounted at /api/threads/{thread_id}/runs/{run_id}/feedback
     app.include_router(feedback.router)

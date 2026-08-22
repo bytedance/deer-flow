@@ -12,15 +12,21 @@ construct this after ``init_engine_from_config()`` has run.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
+from app.gateway.auth.repositories.base import (
+    UserNotFoundError,
+    UserPreferencesNotInitializedError,
+    UserPreferencesWriteConflict,
+    UserRepository,
+)
 from deerflow.persistence.user.model import UserRow
 
 
@@ -179,3 +185,88 @@ class SQLiteUserRepository(UserRepository):
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
+
+    async def get_user_preferences(self, user_id: str) -> tuple[dict | None, int]:
+        stmt = select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id)
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).one_or_none()
+        if row is None:
+            raise UserNotFoundError(f"User {user_id} no longer exists")
+        preferences, revision = row
+        return deepcopy(preferences), int(revision)
+
+    async def initialize_user_preferences(self, user_id: str, settings: dict) -> tuple[dict, int]:
+        """Set the first preference record without overwriting another client.
+
+        The conditional update is the cross-process arbiter: two tabs or Gateway
+        workers can both observe NULL, but only one can change it. The loser
+        reads and returns the winner's server value.
+        """
+        candidate = deepcopy(settings)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(UserRow)
+                .where(UserRow.id == user_id, UserRow.preferences.is_(None))
+                .values(
+                    preferences=candidate,
+                    preferences_revision=UserRow.preferences_revision + 1,
+                )
+            )
+            if result.rowcount == 0:
+                row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
+                if row is None:
+                    raise UserNotFoundError(f"User {user_id} no longer exists")
+                existing, revision = row
+                if existing is None:
+                    # A concurrent transaction may have lost before committing;
+                    # let a normal retry from the client resolve that rare race.
+                    raise UserPreferencesWriteConflict(f"Preferences for user {user_id} are being initialized")
+                return deepcopy(existing), int(revision)
+
+            row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one()
+            await session.commit()
+            stored, revision = row
+            return deepcopy(stored), int(revision)
+
+    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict, int]:
+        """Merge with an optimistic revision CAS supported by SQLite/Postgres."""
+        for _attempt in range(5):
+            async with self._sf() as session:
+                row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
+                if row is None:
+                    raise UserNotFoundError(f"User {user_id} no longer exists")
+                current, revision = row
+                if current is None:
+                    raise UserPreferencesNotInitializedError(f"Preferences for user {user_id} have not been initialized")
+
+                merged = _merge_preferences(current, patch)
+                result = await session.execute(
+                    update(UserRow)
+                    .where(
+                        UserRow.id == user_id,
+                        UserRow.preferences_revision == revision,
+                    )
+                    .values(
+                        preferences=merged,
+                        preferences_revision=revision + 1,
+                    )
+                )
+                if result.rowcount == 1:
+                    await session.commit()
+                    return merged, int(revision) + 1
+                await session.rollback()
+
+        raise UserPreferencesWriteConflict(f"Concurrent preference updates for user {user_id} did not settle")
+
+
+def _merge_preferences(current: dict, patch: dict) -> dict:
+    """Deep-merge allowlisted sections; JSON null clears optional fields."""
+    merged = deepcopy(current)
+    for section, values in patch.items():
+        target = merged.setdefault(section, {})
+        for key, value in values.items():
+            if value is None:
+                target.pop(key, None)
+            else:
+                target[key] = deepcopy(value)
+    return merged

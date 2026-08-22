@@ -4,11 +4,14 @@ import "streamdown/styles.css";
 import { redirect } from "next/navigation";
 
 import { GatewayOfflineFallback } from "@/components/workspace/gateway-offline-fallback";
+import { isAuthDisabledMode } from "@/core/auth/auth-disabled-user";
 import { AuthProvider } from "@/core/auth/AuthProvider";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
+import { UserSettingsSync } from "@/core/settings/user-settings-sync";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import { WorkspaceContent } from "./workspace-content";
 
@@ -26,6 +29,10 @@ export default async function WorkspaceLayout({
     case "authenticated":
       content = (
         <AuthProvider initialUser={result.user}>
+          <UserSettingsSync
+            enabled={!isAuthDisabledMode() && !isStaticWebsiteOnly()}
+            userId={result.user.id}
+          />
           <WorkspaceContent>{children}</WorkspaceContent>
         </AuthProvider>
       );
