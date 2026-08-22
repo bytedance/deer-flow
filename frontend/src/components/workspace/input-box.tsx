@@ -2190,7 +2190,6 @@ export function InputBox({
         <PromptInput
           className={cn(
             "bg-background/85 relative z-10 rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl",
-            skin === "observatory" && "obs-input-shell",
             polishingInput &&
               "shadow-primary/10 ring-primary/25 shadow-lg ring-1",
             className,

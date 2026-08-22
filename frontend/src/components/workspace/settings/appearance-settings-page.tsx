@@ -258,7 +258,6 @@ function SkinCard({
       onClick={() => onSelect(id)}
       className={cn(
         "obs-skin-card relative flex h-full flex-col gap-3 overflow-hidden rounded-lg border p-4 text-left transition-all",
-        observatory && "obs-skin-card--observatory",
         active
           ? "border-primary ring-primary/30 shadow-sm ring-2"
           : "hover:border-border hover:shadow-sm",
