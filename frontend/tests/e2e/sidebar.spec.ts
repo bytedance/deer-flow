@@ -3,14 +3,18 @@ import { expect, test } from "@playwright/test";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 test.describe("Sidebar navigation", () => {
-  test("sidebar contains Chats and Agents nav links", async ({ page }) => {
+  test("sidebar contains Scheduled Tasks and Agents nav links", async ({
+    page,
+  }) => {
     mockLangGraphAPI(page);
 
     await page.goto("/workspace/chats/new");
 
     // Sidebar uses data-sidebar="menu-button" with asChild rendering on <Link>
     const sidebar = page.locator("[data-sidebar='sidebar']");
-    await expect(sidebar.locator("a[href='/workspace/chats']")).toBeVisible({
+    await expect(
+      sidebar.locator("a[href='/workspace/scheduled-tasks']"),
+    ).toBeVisible({
       timeout: 15_000,
     });
     await expect(sidebar.locator("a[href='/workspace/agents']")).toBeVisible();
@@ -45,8 +49,10 @@ test.describe("Sidebar navigation", () => {
     await page.goto("/workspace/chats/new");
 
     const sidebar = page.locator("[data-sidebar='sidebar']");
-    // Chats remains a real link; Agents is no longer a navigable link.
-    await expect(sidebar.locator("a[href='/workspace/chats']")).toBeVisible({
+    // Scheduled Tasks remains a real link; Agents is no longer a navigable link.
+    await expect(
+      sidebar.locator("a[href='/workspace/scheduled-tasks']"),
+    ).toBeVisible({
       timeout: 15_000,
     });
     await expect(sidebar.locator("a[href='/workspace/agents']")).toHaveCount(0);
@@ -93,7 +99,9 @@ test.describe("Sidebar navigation", () => {
       expect(box!.x + box!.width).toBeLessThanOrEqual(viewportWidth + 1);
     };
 
-    await expectInsideViewport(page.getByText(/Welcome to|欢迎使用/).first());
+    await expectInsideViewport(
+      page.getByText(/Hello, again|你好，欢迎回来/).first(),
+    );
     await expectInsideViewport(page.getByRole("textbox").first());
     await expectInsideViewport(page.locator("[data-slot='suggestions-list']"));
 
@@ -108,7 +116,7 @@ test.describe("Sidebar navigation", () => {
     );
     await expect(mobileSidebar).toBeVisible();
     await expect(
-      mobileSidebar.locator("a[href='/workspace/chats']"),
+      mobileSidebar.locator("a[href='/workspace/scheduled-tasks']"),
     ).toBeVisible();
     await expect(
       mobileSidebar.locator("a[href='/workspace/agents']"),

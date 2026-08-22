@@ -5,6 +5,7 @@ import {
   CableIcon,
   InfoIcon,
   BrainIcon,
+  MessagesSquare,
   PaletteIcon,
   PlugZapIcon,
   SparklesIcon,
@@ -25,9 +26,10 @@ import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
 function SettingsPageLoading() {
+  const { t } = useI18n();
   return (
     <p role="status" className="text-muted-foreground py-8 text-center text-sm">
-      Loading…
+      {t.common.loading}
     </p>
   );
 }
@@ -84,6 +86,10 @@ const ToolSettingsPage = dynamic(
     import("./tool-settings-page").then((module) => module.ToolSettingsPage),
   { loading: SettingsPageLoading },
 );
+const ChatsSettingsPage = dynamic(
+  () => import("./chats-settings-page").then((m) => m.ChatsSettingsPage),
+  { loading: SettingsPageLoading },
+);
 const AboutSettingsPage = dynamic(
   () =>
     import("./about-settings-page").then((module) => module.AboutSettingsPage),
@@ -91,6 +97,7 @@ const AboutSettingsPage = dynamic(
 );
 
 export type SettingsSection =
+  | "chats"
   | "account"
   | "appearance"
   | "channels"
@@ -153,6 +160,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
       },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
       { id: "skills", label: t.settings.sections.skills, icon: SparklesIcon },
+      {
+        id: "chats",
+        label: t.settings.sections.chats,
+        icon: MessagesSquare,
+      },
       { id: "about", label: t.settings.sections.about, icon: InfoIcon },
     ],
     [
@@ -164,6 +176,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.tools,
       t.settings.sections.skills,
       t.settings.sections.notification,
+      t.settings.sections.chats,
       t.settings.sections.about,
     ],
   );
@@ -173,7 +186,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       onOpenChange={(open) => props.onOpenChange?.(open)}
     >
       <DialogContent
-        className="flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col sm:max-w-5xl md:max-w-6xl"
+        className="flex h-[75vh] max-h-[calc(100vh-2rem)] flex-col overflow-hidden sm:max-w-5xl md:max-w-6xl"
         aria-describedby={undefined}
       >
         <DialogHeader className="gap-1">
@@ -196,7 +209,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                         "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                         active
                           ? "bg-primary text-primary-foreground shadow-sm"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                          : "text-muted-foreground hover:bg-secondary hover:text-foreground",
                       )}
                     >
                       <Icon className="size-4" />
@@ -208,7 +221,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
             </ul>
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
-            <div className="space-y-8 p-6">
+            <div className="space-y-6 p-5">
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
@@ -218,6 +231,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   onClose={() => props.onOpenChange?.(false)}
                 />
               )}
+              {activeSection === "chats" && <ChatsSettingsPage />}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "integrations" && <IntegrationsSettingsPage />}

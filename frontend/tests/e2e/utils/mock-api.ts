@@ -967,6 +967,33 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  // Workspace-changes is unused by most tests; return 404 so the
+  // fetcher's 401 login redirect never fires when the backend is absent.
+  void page.route("**/api/threads/*/runs/*/workspace-changes", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Workspace changes not enabled" }),
+      });
+    }
+    return route.fallback();
+  });
+
+  // Token usage is disabled in tests; returning 404 keeps
+  // fetchThreadTokenUsage from throwing and avoids the fetcher's 401 login
+  // redirect when the real backend is unavailable.
+  void page.route("**/api/threads/*/token-usage", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 404,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Token usage not enabled" }),
+      });
+    }
+    return route.fallback();
+  });
+
   void page.route("**/api/threads/*/uploads/limits", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({
