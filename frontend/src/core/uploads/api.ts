@@ -13,7 +13,7 @@ export interface UploadedFileInfo {
   artifact_url: string;
   extension?: string;
   modified?: number;
-  markdown_file?: string;
+  markdown_file?: string | null;
   markdown_path?: string;
   markdown_virtual_path?: string;
   markdown_artifact_url?: string;

@@ -119,7 +119,17 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 ### 当前消息中的文件上下文
 
 发送消息时，前端会把该消息附带的上传文件元数据放入
-`HumanMessage.additional_kwargs.files`。`UploadsMiddleware` 只把当前消息中的文件
+`HumanMessage.additional_kwargs.files`。
+
+Web 上传会把上传响应中的 `markdown_file` 一并写入每个文件的结构化元数据，
+使 `UploadsMiddleware` 能按显式的“源文件 → 转换 Markdown”关系提取大纲；
+同名源文件发生冲突重命名时，例如 `a.pdf → a_1.md`，不会再按
+`a.pdf → a.md` 猜测。新消息中的 `markdown_file: null` 表示本次上传明确
+没有转换产物，因此不回退到同名 Markdown。为兼容旧客户端和历史消息，
+只有在该字段完全缺失时才沿用 `<stem>.md` 查找。非法、越界或已失效的
+companion 元数据会被忽略，原始上传文件仍保留在 Agent 上下文中。
+
+`UploadsMiddleware` 只把当前消息中的文件
 注入 Agent 上下文，格式如下：
 
 ```xml

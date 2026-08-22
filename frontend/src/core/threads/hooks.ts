@@ -31,7 +31,11 @@ import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import type { UploadedFileInfo } from "../uploads";
-import { promptInputFilePartToFile, uploadFiles } from "../uploads";
+import {
+  promptInputFilePartToFile,
+  uploadedFileInfoToMessageFile,
+  uploadFiles,
+} from "../uploads";
 
 import {
   branchThreadFromTurn,
@@ -2151,12 +2155,7 @@ export function useThreadStream({
 
               // Update optimistic human message with uploaded status + paths
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                (info) => ({
-                  filename: info.filename,
-                  size: info.size,
-                  path: info.virtual_path,
-                  status: "uploaded" as const,
-                }),
+                uploadedFileInfoToMessageFile,
               );
               setOptimisticMessages((messages) => {
                 if (messages.length > 1 && messages[0]) {
@@ -2189,12 +2188,7 @@ export function useThreadStream({
 
         // Build files metadata for submission (included in additional_kwargs)
         const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          (info) => ({
-            filename: info.filename,
-            size: info.size,
-            path: info.virtual_path,
-            status: "uploaded" as const,
-          }),
+          uploadedFileInfoToMessageFile,
         );
 
         await thread.submit(

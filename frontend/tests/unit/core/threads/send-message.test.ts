@@ -44,6 +44,7 @@ test("keeps uploaded files on the visible user message only", () => {
         size: 42,
         path: "/uploads/report.pdf",
         status: "uploaded",
+        markdown_file: "report_1.md",
       },
     ],
   });
@@ -56,6 +57,7 @@ test("keeps uploaded files on the visible user message only", () => {
         size: 42,
         path: "/uploads/report.pdf",
         status: "uploaded",
+        markdown_file: "report_1.md",
       },
     ],
   });
