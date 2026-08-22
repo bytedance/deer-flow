@@ -96,6 +96,9 @@ export default function ScheduledTasksPage() {
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
+  const isLoading = threadId
+    ? threadTasksQuery.isPending
+    : allTasksQuery.isPending;
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -247,7 +250,11 @@ export default function ScheduledTasksPage() {
               </div>
             </div>
           ) : null}
-          {filteredData.length === 0 ? (
+          {isLoading ? (
+            <div className="text-muted-foreground flex h-40 items-center justify-center text-sm">
+              {t.common.loading}
+            </div>
+          ) : filteredData.length === 0 ? (
             queryError ? null : hasTasks ? (
               <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
                 <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
@@ -599,6 +606,10 @@ function TaskDetail({
           {
             label: stDetail.lastRun,
             value: formatTimestamp(task.last_run_at, locale),
+          },
+          {
+            label: stDetail.lastError,
+            value: task.last_error || NONE,
           },
         ].map((row) => (
           <div

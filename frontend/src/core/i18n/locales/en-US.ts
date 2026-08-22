@@ -367,6 +367,7 @@ export const enUS: Translations = {
       prompt: "Prompt",
       submit: "Create",
       fillRequired: "Fill all required fields",
+      invalidOnce: "Enter a valid date and time",
     },
     context: {
       fresh: "Fresh thread",

@@ -32,22 +32,8 @@ export default function NewScheduledTaskPage() {
     schedule_spec: { cron: "0 9 * * *" },
     timezone: "",
   });
-  const [formError, setFormError] = useState<string | null>(null);
 
   const handleCreate = () => {
-    const hasSchedule =
-      Boolean(createSchedule.schedule_spec.cron) ||
-      Boolean(createSchedule.schedule_spec.run_at);
-    if (
-      !title ||
-      !prompt ||
-      !hasSchedule ||
-      (contextMode === "reuse_thread" && !targetThreadId)
-    ) {
-      setFormError(st.create.fillRequired);
-      return;
-    }
-    setFormError(null);
     createTask.mutate(
       {
         context_mode: contextMode,
@@ -129,9 +115,12 @@ export default function NewScheduledTaskPage() {
             initial={createSchedule}
             onChange={setCreateSchedule}
           />
-          {formError && (
-            <div className="text-destructive text-sm">{formError}</div>
-          )}
+          {createSchedule.schedule_type === "once" &&
+            !createSchedule.schedule_spec.run_at && (
+              <div className="text-muted-foreground text-sm">
+                {st.create.invalidOnce}
+              </div>
+            )}
           <div className="flex justify-end gap-2">
             <Button
               variant="outline"

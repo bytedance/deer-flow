@@ -351,6 +351,7 @@ export const zhCN: Translations = {
       prompt: "提示词",
       submit: "新建",
       fillRequired: "请填写所有必填项",
+      invalidOnce: "请输入有效的日期和时间",
     },
     context: {
       fresh: "新线程",
