@@ -18,6 +18,7 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "tools",
   "skills",
   "notification",
+  "chats",
   "about",
 ]);
 
