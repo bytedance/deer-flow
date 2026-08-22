@@ -74,7 +74,7 @@ def _expand_tool_groups(groups: list[str] | None, *, app_config: Any | None = No
         return None
     full_config = _resolve_full_app_config(app_config)
     if full_config is None:
-        logger.debug("Could not resolve app config for tool-group expansion; inheriting full tool pool")
+        logger.warning("Could not resolve app config for tool-group expansion; inheriting full tool pool")
         return None
     return [tool.name for tool in full_config.tools if tool.group in groups]
 
@@ -85,15 +85,18 @@ def _load_user_agent_record(name: str, *, user_id: str | None = None) -> tuple[A
 
     try:
         agent = load_agent_config(name, user_id=user_id)
-    except (FileNotFoundError, ValueError):
-        # FileNotFoundError: no such agent; ValueError: unparsable config or a name
-        # rejected by validate_agent_name (e.g. path traversal via subagent_type).
+    except (FileNotFoundError, ValueError, OSError):
+        # FileNotFoundError: no such agent. ValueError: unparsable config or a
+        # name rejected by validate_agent_name (e.g. path traversal via subagent_type).
+        # OSError: unreadable store (permissions, I/O) — degrade to "not resolvable"
+        # so a broken store surfaces as the task tool's clean unknown-type error,
+        # mirroring _list_user_agents.
         return None
     if agent is None:
         return None
     try:
         soul = load_agent_soul(name, user_id=user_id)
-    except (FileNotFoundError, ValueError):
+    except (FileNotFoundError, ValueError, OSError):
         soul = None
     return agent, soul
 
@@ -118,9 +121,10 @@ def _build_agent_store_subagent_config(name: str, *, app_config: Any | None = No
     so user-defined agents can be dispatched via ``task(subagent_type=...)`` without
     shadowing operator-controlled sources. SOUL.md becomes the system prompt;
     ``tool_groups`` expand to concrete tool names; an unset model maps to
-    ``"inherit"`` so the subagent follows its parent by default; ``max_turns`` /
-    ``timeout_seconds`` keep the SubagentConfig defaults (per-agent yaml overrides
-    still apply on top). The subagent never re-delegates: the SubagentConfig default
+    ``"inherit"`` so the subagent follows its parent by default. Global
+    ``subagents.timeout_seconds`` / ``subagents.max_turns`` defaults apply to this tier
+    exactly as they do to built-ins (layered on by the registry), and per-agent yaml
+    overrides still win over both. The subagent never re-delegates: the SubagentConfig default
     ``disallowed_tools=["task"]`` holds.
     """
     record = _load_user_agent_record(name, user_id=user_id)
@@ -161,37 +165,40 @@ def get_subagent_config(name: str, *, app_config: Any | None = None, user_id: st
     config = BUILTIN_SUBAGENTS.get(name)
     if config is None:
         config = _build_custom_subagent_config(name, app_config=app_config)
+    from_agent_store = False
     if config is None:
         config = _build_agent_store_subagent_config(name, app_config=app_config, user_id=user_id)
+        from_agent_store = config is not None
     if config is None:
         return None
 
     # Step 2: Apply per-agent overrides from config.yaml agents section.
     # Only explicit per-agent overrides are applied here. Global defaults
-    # (timeout_seconds, max_turns at the top level) apply to built-in agents
-    # but must NOT override custom agents' own values — custom agents define
-    # their own defaults in the custom_agents section.
+    # (timeout_seconds, max_turns at the top level) apply to built-in agents and
+    # agent-store agents — neither declares its own values the way yaml
+    # custom_agents do — but must NOT override custom agents' own values.
     subagents_config = _resolve_subagents_app_config(app_config)
     is_builtin = name in BUILTIN_SUBAGENTS
+    applies_global_defaults = is_builtin or from_agent_store
     agent_override = subagents_config.agents.get(name)
 
     overrides = {}
 
-    # Timeout: per-agent override > global default (builtins only) > config's own value
+    # Timeout: per-agent override > global default (builtins + store agents) > config's own value
     if agent_override is not None and agent_override.timeout_seconds is not None:
         if agent_override.timeout_seconds != config.timeout_seconds:
             logger.debug("Subagent '%s': timeout overridden (%ss -> %ss)", name, config.timeout_seconds, agent_override.timeout_seconds)
             overrides["timeout_seconds"] = agent_override.timeout_seconds
-    elif is_builtin and subagents_config.timeout_seconds != config.timeout_seconds:
+    elif applies_global_defaults and subagents_config.timeout_seconds != config.timeout_seconds:
         logger.debug("Subagent '%s': timeout from global default (%ss -> %ss)", name, config.timeout_seconds, subagents_config.timeout_seconds)
         overrides["timeout_seconds"] = subagents_config.timeout_seconds
 
-    # Max turns: per-agent override > global default (builtins only) > config's own value
+    # Max turns: per-agent override > global default (builtins + store agents) > config's own value
     if agent_override is not None and agent_override.max_turns is not None:
         if agent_override.max_turns != config.max_turns:
             logger.debug("Subagent '%s': max_turns overridden (%s -> %s)", name, config.max_turns, agent_override.max_turns)
             overrides["max_turns"] = agent_override.max_turns
-    elif is_builtin and subagents_config.max_turns is not None and subagents_config.max_turns != config.max_turns:
+    elif applies_global_defaults and subagents_config.max_turns is not None and subagents_config.max_turns != config.max_turns:
         logger.debug("Subagent '%s': max_turns from global default (%s -> %s)", name, config.max_turns, subagents_config.max_turns)
         overrides["max_turns"] = subagents_config.max_turns
 

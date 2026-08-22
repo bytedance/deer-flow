@@ -158,7 +158,9 @@ Custom agents you create in the DeerFlow App (`/workspace/agents`) can be dispat
 2. Operator-defined `subagents.custom_agents` in `config.yaml`
 3. **Your own custom agents**, resolved from your user account only
 
-A custom agent dispatched as a subagent keeps its identity: its SOUL becomes the subagent's system prompt, its tool-group allowlist restricts which tools it can use (an unrestricted agent inherits the full pool), and its skills and model selection carry over. Subagents never re-delegate (`task` is always denied for them), and one user's agents are never visible to another user's threads.
+A custom agent dispatched as a subagent keeps its identity: its SOUL becomes the subagent's system prompt, its `tool_groups` allowlist restricts which tools it can use (an unrestricted agent inherits the full pool), and its skills and model selection carry over. The allowlist is applied strictly: unlike a lead persona — where built-in, MCP, and ACP tools are added outside group filtering — a delegated subagent can only use tools whose names survive the expansion. Global `subagents.timeout_seconds` / `subagents.max_turns` defaults and operator `agents:` overrides apply to this tier exactly as they do to built-in subagents. Subagents never re-delegate (`task` is always denied for them).
+
+On installations that have not run `scripts/migrate_user_isolation.py`, agents in the legacy shared layout (`{base_dir}/agents/{name}`) remain visible to every user's threads — both as lead personas and as dispatchable subagent types — until migrated.
 
 <Callout type="info" emoji="🧩">
   This is the building block for role-differentiated delegation — e.g. a Writer

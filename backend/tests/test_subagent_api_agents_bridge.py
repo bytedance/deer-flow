@@ -260,3 +260,70 @@ class TestFailurePaths:
         cfg = registry_module.get_subagent_config("restricted", app_config=None, user_id="u1")
         assert cfg is not None
         assert cfg.tools is None
+
+    def test_fail_open_expansion_logs_warning(self, api_agent_base: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+        import logging
+
+        import deerflow.config.app_config as app_config_module
+
+        def _raise():
+            raise RuntimeError("no config here")
+
+        monkeypatch.setattr(app_config_module, "get_app_config", _raise)
+        _write_user_agent(api_agent_base, "restricted", {"tool_groups": ["web"]})
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.registry"):
+            registry_module.get_subagent_config("restricted", user_id="u1")
+        assert any("inheriting full tool pool" in r.message for r in caplog.records)
+
+    def test_unreadable_store_degrades_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # PermissionError / OSError from a broken store must degrade to the task
+        # tool's clean unknown-type error, never propagate into the tool call.
+        import deerflow.config.agents_config as agents_cfg_module
+
+        def _raise(name, *, user_id=None):
+            raise PermissionError("store unreadable")
+
+        monkeypatch.setattr(agents_cfg_module, "load_agent_config", _raise)
+        assert registry_module.get_subagent_config("writer", user_id="u1") is None
+
+
+class TestGlobalDefaultsForStoreAgents:
+    """Review finding: global ``subagents`` defaults apply to this tier like builtins."""
+
+    @staticmethod
+    def _app_config_with_globals(timeout_seconds: int, max_turns: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            tools=[],
+            subagents=SimpleNamespace(
+                custom_agents={},
+                agents={},
+                timeout_seconds=timeout_seconds,
+                max_turns=max_turns,
+                get_model_for=lambda name: None,
+                get_skills_for=lambda name: None,
+            ),
+        )
+
+    def test_global_timeout_and_max_turns_apply(self, api_agent_base: Path) -> None:
+        _write_user_agent(api_agent_base, "coder", {})
+        cfg = registry_module.get_subagent_config("coder", app_config=self._app_config_with_globals(1800, 150), user_id="u1")
+        assert cfg is not None
+        assert cfg.timeout_seconds == 1800
+        assert cfg.max_turns == 150
+
+    def test_bare_defaults_without_effective_globals(self, api_agent_base: Path) -> None:
+        _write_user_agent(api_agent_base, "coder", {})
+        cfg = registry_module.get_subagent_config("coder", app_config=self._app_config_with_globals(900, 50), user_id="u1")
+        assert cfg is not None
+        # Globals equal to the dataclass defaults change nothing observable.
+        assert cfg.timeout_seconds == 900
+        assert cfg.max_turns == 50
+
+    def test_per_agent_yaml_override_still_wins(self, api_agent_base: Path) -> None:
+        _write_user_agent(api_agent_base, "coder", {})
+        app_config = self._app_config_with_globals(1800, 150)
+        app_config.subagents.agents = {"coder": SimpleNamespace(timeout_seconds=55, max_turns=None)}
+        cfg = registry_module.get_subagent_config("coder", app_config=app_config, user_id="u1")
+        assert cfg is not None
+        assert cfg.timeout_seconds == 55
+        assert cfg.max_turns == 150
