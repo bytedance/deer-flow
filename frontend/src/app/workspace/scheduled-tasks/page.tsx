@@ -96,6 +96,9 @@ export default function ScheduledTasksPage() {
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
+  const isLoading = threadId
+    ? threadTasksQuery.isPending
+    : allTasksQuery.isPending;
   const [detailOpen, setDetailOpen] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
