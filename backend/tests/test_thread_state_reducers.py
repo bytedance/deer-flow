@@ -128,9 +128,19 @@ class TestMergeViewedImages:
         merged = merge_viewed_images(existing, new)
         assert set(merged.keys()) == {"k1", "k2"}
 
-    def test_empty_dict_clears(self):
-        existing = {"k1": {"mime_type": "image/png", "size": 1, "actual_path": "/a"}}
-        assert merge_viewed_images(existing, {}) == {}
+    def test_empty_dict_is_noop(self):
+        # ``merge_viewed_images`` follows the same no-op invariant as the
+        # sibling reducers (merge_todos / merge_goal / merge_promoted /
+        # merge_delegations / merge_skill_context): an accidental ``{}`` write
+        # must NOT silently wipe the image history (D1 in the agent-core
+        # hunt). There is deliberately no clear sentinel: no caller needs
+        # explicit clearing today, so clearing requires an explicit opt-in
+        # added alongside the caller that needs it.
+        existing = {"k1": {"base64": "x", "mime_type": "image/png"}}
+        assert merge_viewed_images(existing, {}) == existing
+        # None is the canonical "node didn't touch" signal and must also be a
+        # no-op (preserves existing).
+        assert merge_viewed_images(existing, None) == existing
 
 
 class TestMergeDelegations:
