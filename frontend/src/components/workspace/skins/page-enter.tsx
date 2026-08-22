@@ -20,16 +20,14 @@ export function PageEnter({ children }: { children: React.ReactNode }) {
     return () => window.cancelAnimationFrame(id);
   }, [pathname, skin]);
 
-  if (skin !== "observatory") {
-    return children;
-  }
-
   return (
     <div
       className={
-        on
-          ? "obs-page-enter is-on min-h-0 flex-1"
-          : "obs-page-enter min-h-0 flex-1"
+        skin === "observatory"
+          ? on
+            ? "obs-page-enter is-on min-h-0 flex-1"
+            : "obs-page-enter min-h-0 flex-1"
+          : "min-h-0 flex-1"
       }
     >
       {children}

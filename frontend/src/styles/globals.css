@@ -829,14 +829,10 @@ html.obs-is-ready .obs-welcome-kicker {
   }
 }
 [data-skin="observatory"] .obs-page-enter {
-  overflow: hidden;
   opacity: 0;
 }
 [data-skin="observatory"] .obs-page-enter.is-on {
   animation: obs-rise 0.7s ease both;
-}
-[data-skin="observatory"] [data-slot="sidebar-inset"] {
-  overflow: hidden !important;
 }
 @keyframes obs-dock-in {
   from {
@@ -1005,7 +1001,7 @@ html.obs-is-ready .obs-welcome-kicker {
   mix-blend-mode: soft-light;
   opacity: 0.7;
 }
-html[data-skin="observatory"] body.obs-lock-scroll {
+html[data-skin="observatory"].obs-is-opening body.obs-lock-scroll {
   overflow: hidden;
 }
 .obs-pointer-layer {
