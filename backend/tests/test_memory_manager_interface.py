@@ -249,6 +249,21 @@ def test_only_add_and_get_context_are_abstract():
     assert "add" in MemoryManager.__abstractmethods__
     assert "get_context" in MemoryManager.__abstractmethods__
     assert "from_config" in MemoryManager.__abstractmethods__
-    # tier-2/3 are NOT abstract (they have defaults)
-    for non_abstract in ("search", "get_memory", "shutdown_flush", "warm", "create_fact", "on_pre_compress"):
+    for non_abstract in ("search", "get_memory", "shutdown_flush", "warm", "create_fact", "on_pre_compress", "batch_delete_facts", "batch_update_facts"):
         assert non_abstract not in MemoryManager.__abstractmethods__, non_abstract
+
+
+def test_minimal_backend_raises_not_implemented_for_batch_operations():
+    """batch_delete_facts and batch_update_facts default to NotImplementedError.
+    A minimal backend inherits the raise; callers catch it and return 501."""
+    backend = _MinimalBackend(backend_config={})
+    try:
+        backend.batch_delete_facts(["x"], user_id="u")
+        raise AssertionError("batch_delete_facts should have raised NotImplementedError")
+    except NotImplementedError:
+        pass
+    try:
+        backend.batch_update_facts([{"fact_id": "x"}], user_id="u")
+        raise AssertionError("batch_update_facts should have raised NotImplementedError")
+    except NotImplementedError:
+        pass
