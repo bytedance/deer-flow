@@ -19,17 +19,6 @@ export type CronParts = {
   raw?: string;
 };
 
-export type ScheduleFormState = {
-  scheduleType: "once" | "cron";
-  preset?: CronPreset;
-  parts?: CronParts;
-  /** datetime-local wall value "YYYY-MM-DDTHH:mm", interpreted in `timezone`. */
-  runAtLocal?: string;
-  timezone: string;
-};
-
-export type ScheduleLocale = "en" | "zh";
-
 export const WEEKDAYS: Weekday[] = [
   "mon",
   "tue",
@@ -61,26 +50,6 @@ const CRON_TO_WEEKDAY: Record<string, Weekday> = {
   "7": "sun",
 };
 
-const EN_WEEKDAY: Record<Weekday, string> = {
-  mon: "Mon",
-  tue: "Tue",
-  wed: "Wed",
-  thu: "Thu",
-  fri: "Fri",
-  sat: "Sat",
-  sun: "Sun",
-};
-
-const ZH_WEEKDAY: Record<Weekday, string> = {
-  mon: "周一",
-  tue: "周二",
-  wed: "周三",
-  thu: "周四",
-  fri: "周五",
-  sat: "周六",
-  sun: "周日",
-};
-
 function clamp(
   value: number | undefined,
   min: number,
@@ -94,6 +63,39 @@ function clamp(
 
 export function pad2(n: number): string {
   return String(Math.trunc(Number.isFinite(n) ? n : 0)).padStart(2, "0");
+}
+
+/**
+ * Build a "YYYY-MM-DDTHH:mm" wall-time string for a one-time run from the
+ * individual year/month/day/time fields, or "" when the inputs do not form a
+ * valid date. Mirrors the bounds checks the form previously inlined: integer
+ * fields, year >= 1970, month 1-12, day 1-31, and a day that actually exists
+ * in the month (rejects e.g. Feb 30 via the Date.UTC rollover check).
+ */
+export function buildOnceRunAtLocal(
+  year: string,
+  month: string,
+  day: string,
+  time: string,
+): string {
+  const y = Number(year);
+  const mo = Number(month);
+  const d = Number(day);
+  const valid =
+    year !== "" &&
+    month !== "" &&
+    day !== "" &&
+    time !== "" &&
+    Number.isInteger(y) &&
+    Number.isInteger(mo) &&
+    Number.isInteger(d) &&
+    y >= 1970 &&
+    mo >= 1 &&
+    mo <= 12 &&
+    d >= 1 &&
+    d <= 31 &&
+    new Date(Date.UTC(y, mo - 1, d)).getUTCDate() === d;
+  return valid ? `${year}-${pad2(mo)}-${pad2(d)}T${time}` : "";
 }
 
 function orderedWeekdays(days: Weekday[] | undefined): Weekday[] {
@@ -196,57 +198,6 @@ export function parseCron(cron: string): {
     };
   }
   return { preset: "custom", parts: { raw: expr } };
-}
-
-export function describeSchedule(
-  state: ScheduleFormState,
-  locale: ScheduleLocale,
-): string {
-  const tz = state.timezone;
-  const zh = locale === "zh";
-
-  if (state.scheduleType === "once") {
-    const runAt = (state.runAtLocal ?? "").replace("T", " ");
-    return zh ? `单次 ${runAt} (${tz})` : `Once at ${runAt} (${tz})`;
-  }
-
-  const parts = state.parts ?? {};
-  const hhmm = `${pad2(parts.hour ?? 0)}:${pad2(parts.minute ?? 0)}`;
-
-  switch (state.preset) {
-    case "hourly": {
-      const minute = parts.minute ?? 0;
-      return zh
-        ? `每小时第 ${minute} 分钟 (${tz})`
-        : `Every hour at :${pad2(minute)} (${tz})`;
-    }
-    case "daily":
-      return zh ? `每天 ${hhmm} (${tz})` : `Every day at ${hhmm} (${tz})`;
-    case "weekly": {
-      const ordered = orderedWeekdays(parts.weekdays);
-      if (ordered.length === 0) {
-        return zh ? `每天 ${hhmm} (${tz})` : `Every day at ${hhmm} (${tz})`;
-      }
-      if (zh) {
-        const names = ordered.map((w) => ZH_WEEKDAY[w]).join("、");
-        return `每周 ${names} ${hhmm} (${tz})`;
-      }
-      const names = ordered.map((w) => EN_WEEKDAY[w]).join(", ");
-      return `Every ${names} at ${hhmm} (${tz})`;
-    }
-    case "monthly": {
-      const dom = parts.dayOfMonth ?? 1;
-      return zh
-        ? `每月 ${dom} 日 ${hhmm} (${tz})`
-        : `On day ${dom} of every month at ${hhmm} (${tz})`;
-    }
-    case "custom":
-      return zh
-        ? `自定义: ${parts.raw ?? ""} (${tz})`
-        : `Custom: ${parts.raw ?? ""} (${tz})`;
-  }
-  // Unreachable — switch is exhaustive over CronPreset.
-  return zh ? `自定义 (${tz})` : `Custom (${tz})`;
 }
 
 /**

@@ -48,7 +48,9 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
           {t.settings.skills.adminRequired}
         </div>
       ) : error ? (
-        <div>Error: {error.message}</div>
+        <div className="text-destructive text-sm">
+          {t.settings.skills.loadError}: {error.message}
+        </div>
       ) : (
         <SkillSettingsList skills={skills} onClose={onClose} />
       )}

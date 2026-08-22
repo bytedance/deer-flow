@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,16 +13,15 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  describeSchedule,
+  buildOnceRunAtLocal,
   pad2,
   parseCron,
   serializeCron,
   utcToZonedLocalInput,
-  WEEKDAYS,
   zonedLocalToUtcIso,
+  WEEKDAYS,
   type CronParts,
   type CronPreset,
-  type ScheduleLocale,
   type Weekday,
 } from "@/core/scheduled-tasks/cron";
 
@@ -40,10 +39,13 @@ const PRESETS: CronPreset[] = [
   "custom",
 ];
 
-const FALLBACK_TIMEZONES = [
+const COMMON_TIMEZONES = [
   "UTC",
   "Asia/Shanghai",
+  "Asia/Hong_Kong",
+  "Asia/Taipei",
   "Asia/Tokyo",
+  "Asia/Seoul",
   "Asia/Singapore",
   "Europe/London",
   "Europe/Berlin",
@@ -51,6 +53,20 @@ const FALLBACK_TIMEZONES = [
   "America/Chicago",
   "America/Los_Angeles",
 ];
+
+function supportedTimeZones(): string[] {
+  const supported = (
+    Intl as unknown as {
+      supportedValuesOf?: (key: string) => string[] | undefined;
+    }
+  ).supportedValuesOf?.("timeZone");
+  if (Array.isArray(supported) && supported.length > 0) {
+    return supported;
+  }
+  return COMMON_TIMEZONES;
+}
+
+const TIMEZONE_OPTIONS = supportedTimeZones();
 
 function detectBrowserTimezone(): string {
   try {
@@ -64,19 +80,52 @@ function detectBrowserTimezone(): string {
   return "UTC";
 }
 
-function timezoneOptions(): string[] {
-  const supported = (
-    Intl as unknown as {
-      supportedValuesOf?: (key: string) => string[] | undefined;
-    }
-  ).supportedValuesOf?.("timeZone");
-  if (Array.isArray(supported) && supported.length > 0) {
-    return supported;
-  }
-  return FALLBACK_TIMEZONES;
+function parseLocal(value: string): {
+  year: string;
+  month: string;
+  day: string;
+  time: string;
+} {
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}:\d{2}))?$/.exec(
+    value || "",
+  );
+  return match
+    ? {
+        year: match[1] ?? "",
+        month: match[2] ?? "",
+        day: match[3] ?? "",
+        time: match[4] ?? "",
+      }
+    : { year: "", month: "", day: "", time: "" };
 }
 
-const TIMEZONE_OPTIONS = timezoneOptions();
+function OncePart({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  min: number;
+  max: number;
+}) {
+  return (
+    <div className="flex flex-1 flex-col gap-1">
+      <span className="text-muted-foreground text-xs">{label}</span>
+      <Input
+        type="number"
+        min={min}
+        max={max}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label={label}
+      />
+    </div>
+  );
+}
 
 export function ScheduledTaskScheduleInput({
   initial,
@@ -87,8 +136,7 @@ export function ScheduledTaskScheduleInput({
   onChange: (value: ScheduleValue) => void;
   scheduleTypeLocked?: boolean;
 }) {
-  const { t, locale } = useI18n();
-  const schedLocale: ScheduleLocale = locale.startsWith("zh") ? "zh" : "en";
+  const { t } = useI18n();
   const labels = t.scheduledTasks;
 
   const [scheduleType, setScheduleType] = useState<"once" | "cron">(
@@ -100,17 +148,23 @@ export function ScheduledTaskScheduleInput({
   const [parts, setParts] = useState<CronParts>(
     () => parseCron(initial.schedule_spec.cron ?? "0 9 * * *").parts,
   );
-  const [runAtLocal, setRunAtLocal] = useState<string>(
+  const initOnce =
     initial.schedule_type === "once" && initial.schedule_spec.run_at
-      ? utcToZonedLocalInput(
-          initial.schedule_spec.run_at,
-          initial.timezone || "UTC",
+      ? parseLocal(
+          utcToZonedLocalInput(
+            initial.schedule_spec.run_at,
+            initial.timezone || "UTC",
+          ),
         )
-      : "",
-  );
+      : { year: "", month: "", day: "", time: "" };
+  const [onceYear, setOnceYear] = useState(initOnce.year);
+  const [onceMonth, setOnceMonth] = useState(initOnce.month);
+  const [onceDay, setOnceDay] = useState(initOnce.day);
+  const [onceTime, setOnceTime] = useState(initOnce.time);
   const [timezone, setTimezone] = useState<string>(
     initial.timezone || detectBrowserTimezone(),
   );
+  const [showAllTimezones, setShowAllTimezones] = useState(false);
 
   // Hold the latest onChange in a ref so the effect below does not depend on
   // it. This avoids a re-render loop: if the parent passes an inline
@@ -121,9 +175,15 @@ export function ScheduledTaskScheduleInput({
 
   // Emit on every change including mount. On mount this syncs the parent with
   // the browser-detected timezone and the canonicalized cron, so the submitted
-  // value always matches what the user sees in the preview.
+  // value always matches what the user sees in the form.
   useEffect(() => {
     if (scheduleType === "once") {
+      const runAtLocal = buildOnceRunAtLocal(
+        onceYear,
+        onceMonth,
+        onceDay,
+        onceTime,
+      );
       const runAt = runAtLocal ? zonedLocalToUtcIso(runAtLocal, timezone) : "";
       onChangeRef.current({
         schedule_type: "once",
@@ -139,7 +199,27 @@ export function ScheduledTaskScheduleInput({
       schedule_spec: cron ? { cron } : {},
       timezone,
     });
-  }, [scheduleType, preset, parts, runAtLocal, timezone]);
+  }, [
+    scheduleType,
+    preset,
+    parts,
+    onceYear,
+    onceMonth,
+    onceDay,
+    onceTime,
+    timezone,
+  ]);
+
+  const timezoneLabel = (tz: string): string =>
+    (labels.timezone.common as unknown as Record<string, string>)[tz] ?? tz;
+
+  const timezoneOptions = useMemo(() => {
+    const pool = showAllTimezones ? TIMEZONE_OPTIONS : COMMON_TIMEZONES;
+    if (pool.includes(timezone)) {
+      return pool;
+    }
+    return [timezone, ...pool];
+  }, [showAllTimezones, timezone]);
 
   function updateParts(patch: Partial<CronParts>) {
     setParts((prev) => ({ ...prev, ...patch }));
@@ -176,11 +256,6 @@ export function ScheduledTaskScheduleInput({
       return { ...prev, weekdays: WEEKDAYS.filter((d) => set.has(d)) };
     });
   }
-
-  const preview = describeSchedule(
-    { scheduleType, preset, parts, runAtLocal, timezone },
-    schedLocale,
-  );
 
   return (
     <div className="flex flex-col gap-2" data-testid="schedule-input">
@@ -301,33 +376,62 @@ export function ScheduledTaskScheduleInput({
           )}
         </>
       ) : (
-        <Input
-          type="datetime-local"
-          value={runAtLocal}
-          onChange={(e) => setRunAtLocal(e.target.value)}
-          aria-label={labels.fields.runAt}
-        />
+        <>
+          <div className="flex items-end gap-2">
+            <OncePart
+              label={labels.fields.year}
+              value={onceYear}
+              onChange={setOnceYear}
+              min={2000}
+              max={2100}
+            />
+            <OncePart
+              label={labels.fields.month}
+              value={onceMonth}
+              onChange={setOnceMonth}
+              min={1}
+              max={12}
+            />
+            <OncePart
+              label={labels.fields.day}
+              value={onceDay}
+              onChange={setOnceDay}
+              min={1}
+              max={31}
+            />
+          </div>
+          <Input
+            type="time"
+            value={onceTime}
+            onChange={(e) => setOnceTime(e.target.value)}
+            aria-label={labels.fields.time}
+          />
+        </>
       )}
 
       <Select value={timezone} onValueChange={setTimezone}>
         <SelectTrigger className="w-full" data-testid="schedule-timezone">
-          <SelectValue />
+          <SelectValue>{timezoneLabel(timezone)}</SelectValue>
         </SelectTrigger>
         <SelectContent>
-          {TIMEZONE_OPTIONS.map((tzOption) => (
-            <SelectItem key={tzOption} value={tzOption}>
-              {tzOption}
+          {timezoneOptions.map((tz) => (
+            <SelectItem key={tz} value={tz}>
+              {timezoneLabel(tz)}
             </SelectItem>
           ))}
         </SelectContent>
       </Select>
-
-      <div
-        className="text-muted-foreground text-sm"
-        data-testid="schedule-preview"
-      >
-        {preview}
-      </div>
+      {TIMEZONE_OPTIONS.length > COMMON_TIMEZONES.length && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-muted-foreground hover:text-foreground justify-start px-1 text-xs"
+          onClick={() => setShowAllTimezones((prev) => !prev)}
+        >
+          {showAllTimezones ? labels.timezone.less : labels.timezone.more}
+        </Button>
+      )}
     </div>
   );
 }
