@@ -2087,9 +2087,14 @@ agent_storage:
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
 # database-backed run events; startup recovery then preserves live peer runs.
 #
+# When channel_connections.enabled is true and IM channels are running, the
+# same poll_interval_seconds also drives the notification delivery worker that
+# pushes scheduled-run outcomes to the owner's bound IM identities (WeCom
+# proactive push today). Manual "run now" and interrupts stay silent.
+#
 # scheduler:
 #   enabled: false               # Master switch for the background poller
-#   poll_interval_seconds: 5     # How often to scan for due tasks
+#   poll_interval_seconds: 5     # How often to scan for due tasks (+ IM outbox delivery)
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
@@ -2210,6 +2215,9 @@ run_ownership:
 # - Telegram uses a deep link when `bot_username` is configured.
 # - Slack, Discord, Feishu, DingTalk, WeChat, and WeCom use `/connect <code>`
 #   through the already-running bot/app.
+# - When enabled (and channels are running), scheduled-task completions/failures
+#   also enqueue IM pushes to the owner's connected identities (see scheduler
+#   section above). Manual triggers and interrupts do not notify.
 #
 # channel_connections:
 #   enabled: false

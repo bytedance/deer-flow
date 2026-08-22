@@ -1343,12 +1343,13 @@ Current MVP capabilities:
 - Use `skip` overlap behavior for due cron executions that collide with an active run on the same reused thread
 - Pause, resume, trigger, inspect history, and delete tasks
 - Execute scheduled work through the normal DeerFlow run lifecycle
+- When `channel_connections.enabled: true`, push completed/failed scheduled-run summaries to the task owner's connected IM identities (outbox + delivery worker). Manual "run now" and interrupts stay silent. Channel/transport outages park deliveries without exhausting retries; platform rejections retry for roughly 15 minutes before settling as `failed`. Proactive push is currently implemented for WeCom; other connected providers enqueue but fail until they grow a `send_notification` path.
 
 Current MVP limits:
 
 - No conversation-created `schedule_task` tool yet
 - No text-only notification jobs
-- No channel or GitHub dispatch targets
+- No channel or GitHub dispatch targets (result push above is not a dispatch target)
 - No `interval` schedule type in this first cut
 
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.

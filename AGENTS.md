@@ -104,6 +104,7 @@ Skill quality review note:
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
+- When `channel_connections.enabled: true` and a channel service is running, scheduled-run outcomes enqueue into a notification outbox and a delivery worker pushes them to the owner's connected IM identities (WeCom implements proactive push today). Manual triggers and interrupts stay silent; see README Scheduled Tasks.
 
 ## Commands: Root vs. Module
 

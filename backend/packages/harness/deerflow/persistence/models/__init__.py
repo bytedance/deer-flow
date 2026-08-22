@@ -24,6 +24,7 @@ from deerflow.persistence.channel_connections.model import (
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.persistence.notification_deliveries.model import NotificationDeliveryRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -39,6 +40,7 @@ __all__ = [
     "ChannelOAuthStateRow",
     "FeedbackRow",
     "McpTaskRow",
+    "NotificationDeliveryRow",
     "RunEventRow",
     "RunRow",
     "ScheduledTaskRow",
