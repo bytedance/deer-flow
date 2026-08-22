@@ -16,6 +16,7 @@ from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
+from deerflow.runtime.events.message_identity import message_identity
 from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
@@ -387,6 +388,53 @@ class DbRunEventStore(RunEventStore):
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         async with self._sf() as session:
             return await session.scalar(stmt) or 0
+
+    async def get_message_seqs(
+        self,
+        thread_id,
+        identities,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        wanted = set(identities)
+        if not wanted:
+            return {}
+        resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
+        # ``content`` is a TEXT column holding a JSON *string* (see
+        # ``_content_to_db``), not a JSON column, so the identity fields cannot
+        # be projected in SQL — the rows are decoded here instead. Only the two
+        # columns the lookup needs are selected, and the scan is bounded to this
+        # thread's message rows.
+        stmt = select(RunEventRow.seq, RunEventRow.content).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message").order_by(RunEventRow.seq)
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+
+        found: dict[str, int] = {}
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            for seq, raw in result:
+                # Plain-text content (never a message dict) is skipped without
+                # paying for a failed JSON parse.
+                if not isinstance(raw, str) or not raw.startswith("{"):
+                    continue
+                try:
+                    content = json.loads(raw)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if not isinstance(content, dict):
+                    continue
+                identity = message_identity(content)
+                # Earliest seq wins: a message re-persisted later keeps the
+                # position it first occupied in the feed.
+                if identity in wanted and identity not in found:
+                    found[identity] = seq
+                    # Later rows can only be re-persisted copies that already
+                    # lose that tiebreak, so the scan (and its JSON decoding)
+                    # ends with the last wanted seq instead of the thread's
+                    # full message count.
+                    if len(found) == len(wanted):
+                        break
+        return found
 
     async def delete_by_thread(
         self,

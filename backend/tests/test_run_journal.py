@@ -330,7 +330,15 @@ class TestFinalToolMessageReconciliation:
         assert not any(m["event_type"] == "llm.tool.result" for m in messages)
 
     @pytest.mark.anyio
-    async def test_root_chain_end_ignores_non_allowlisted_tool_message(self, journal_setup):
+    async def test_root_chain_end_ignores_subagent_tool_message(self, journal_setup):
+        """Reconciliation covers the lead agent's own calls only.
+
+        A subagent's internal tool results belong to its own step feed
+        (``subagent.step``), not to the thread's message feed;
+        ``_remember_current_run_tool_calls`` records lead-agent calls only.
+        This is the boundary that keeps reconciliation safe now that it is no
+        longer narrowed to an ``ask_clarification`` allowlist.
+        """
         from langchain_core.messages import ToolMessage
 
         j, store = journal_setup
@@ -338,7 +346,7 @@ class TestFinalToolMessageReconciliation:
             _make_llm_response("", tool_calls=[{"id": "call_search", "name": "web_search", "args": {"query": "deerflow"}}]),
             run_id=uuid4(),
             parent_run_id=None,
-            tags=["lead_agent"],
+            tags=["subagent:general-purpose"],
         )
         tool_msg = ToolMessage(content="Search result", tool_call_id="call_search", name="web_search")
 
@@ -371,6 +379,40 @@ class TestFinalToolMessageReconciliation:
 
         messages = await store.list_messages("t1")
         assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_any_middleware_short_circuited_tool_message(self, journal_setup):
+        """A middleware that blocks a tool call still returns a user-visible result.
+
+        ReadBeforeWriteMiddleware answers a blocked ``write_file`` with an error
+        ToolMessage instead of running the tool, so LangChain never emits
+        ``on_tool_end`` and the message never reached the event store. The user
+        saw it during the run and it vanished on reload (#4666). Reconciliation
+        is not specific to ``ask_clarification``: any visible tool result the
+        model asked for in this run belongs in the thread feed.
+        """
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {"path": "/mnt/user-data/outputs/a.txt"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        blocked = ToolMessage(
+            content="Error: write_file blocked — read the file before writing to it",
+            tool_call_id="call_write",
+            name="write_file",
+        )
+
+        j.on_chain_end({"messages": [blocked]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["name"] == "write_file"
 
 
 class TestCustomEvents:

@@ -23,7 +23,7 @@ import os
 import sys
 import threading
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -50,6 +50,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -966,6 +967,10 @@ async def run_agent(
                 )
             return goal_evaluator_model
 
+        # Built once per run, not per _stream_once call: goal continuations
+        # re-enter the stream and would otherwise discard the resolved seqs.
+        seq_stamper = _MessageSeqStamper(event_store, thread_id) if "values" in requested_modes else None
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
@@ -980,7 +985,10 @@ async def run_agent(
                                 break
                             llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                             sse_event = _lg_mode_to_sse_event(single_mode)
-                            await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                            single_payload = serialize(chunk, mode=single_mode)
+                            if single_mode == "values" and seq_stamper is not None:
+                                single_payload = await seq_stamper.stamp(single_payload)
+                            await bridge.publish(run_id, sse_event, single_payload)
                             if single_mode == "custom":
                                 await subagent_events.add(chunk)
                         return
@@ -1012,6 +1020,7 @@ async def run_agent(
                             namespace=namespace,
                             file_tool_chunk_batcher=file_tool_chunk_batcher,
                             subagent_events=subagent_events,
+                            seq_stamper=seq_stamper,
                         )
             finally:
                 stream_error = sys.exception()
@@ -2418,6 +2427,56 @@ def _compose_sse_event(sse_event: str, namespace: tuple[str, ...]) -> str:
     return "|".join((sse_event, *namespace))
 
 
+class _MessageSeqStamper:
+    """Attach each already-persisted message's feed seq to a ``values`` frame.
+
+    A checkpoint carries no seq of its own and loses messages to summarization,
+    so a client merging it with the seq-ordered thread feed cannot place a
+    surviving old message once the feed's loaded page window no longer reaches
+    back to it (#4666). The seq exists in the event store keyed by message
+    identity; this carries it to the client and writes nothing back to the
+    checkpoint.
+
+    Cost is bounded to frames that introduce identities it has not resolved
+    yet. Messages produced by this run are not in the feed while streaming, so
+    they are looked up once, recorded as misses, and never retried — in a real
+    run the only frame that pays for a query is the one where compaction brings
+    older messages back into view. An unstamped message needs no seq: appending
+    it at the tail is already its correct position.
+    """
+
+    __slots__ = ("_store", "_thread_id", "_seqs", "_missing")
+
+    def __init__(self, event_store: Any, thread_id: str) -> None:
+        self._store = event_store
+        self._thread_id = thread_id
+        self._seqs: dict[str, int] = {}
+        self._missing: set[str] = set()
+
+    async def stamp(self, payload: Any) -> Any:
+        if self._store is None or not isinstance(payload, Mapping):
+            return payload
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return payload
+
+        identities = [message_identity(m) if isinstance(m, Mapping) else None for m in messages]
+        unresolved = {i for i in identities if i is not None and i not in self._seqs and i not in self._missing}
+        if unresolved:
+            try:
+                found = await self._store.get_message_seqs(self._thread_id, sorted(unresolved))
+            except Exception:
+                # Placement is an enhancement: a client without seq falls back
+                # to its own ordering rule. Never fail the frame over it.
+                logger.warning("Failed to resolve message seqs for thread %s", self._thread_id, exc_info=True)
+                found = {}
+            self._seqs.update(found)
+            self._missing.update(unresolved - found.keys())
+
+        stamped = [attach_message_seq(message, seq) if identity is not None and (seq := self._seqs.get(identity)) is not None else message for message, identity in zip(messages, identities, strict=True)]
+        return {**payload, "messages": stamped}
+
+
 async def _publish_stream_item(
     *,
     bridge: Any,
@@ -2427,6 +2486,7 @@ async def _publish_stream_item(
     namespace: tuple[str, ...],
     file_tool_chunk_batcher: Any,
     subagent_events: Any,
+    seq_stamper: Any = None,
 ) -> None:
     """Publish one stream frame, preserving the subgraph namespace.
 
@@ -2447,6 +2507,11 @@ async def _publish_stream_item(
             await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
     chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
     for publish_chunk in chunks_to_publish:
-        await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
+        payload = serialize(publish_chunk, mode=mode)
+        if mode == "values" and seq_stamper is not None:
+            # Root frames only: a subagent's snapshot is not part of this
+            # thread's feed ordering (the namespaced branch returned above).
+            payload = await seq_stamper.stamp(payload)
+        await bridge.publish(run_id, sse_event, payload)
     if mode == "custom":
         await subagent_events.add(chunk)
