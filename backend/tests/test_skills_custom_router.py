@@ -398,6 +398,56 @@ def test_custom_skill_update_static_scan_failure_blocks_edit_before_llm(monkeypa
     assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
 
 
+def test_custom_skill_update_rejects_blank_description_before_write(monkeypatch, tmp_path):
+    """A blank description must be rejected at the write gate, not after the file is committed.
+
+    The loader drops a skill whose description is blank, so letting the edit
+    through would overwrite a working SKILL.md with content that no longer
+    loads -- the skill would vanish from every consumer.
+    """
+    skills_root = tmp_path / "skills"
+    from deerflow.config.paths import Paths
+
+    custom_dir = _user_custom_dir(tmp_path, "default") / "demo-skill"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    original_content = _skill_content("demo-skill")
+    (custom_dir / "SKILL.md").write_text(original_content, encoding="utf-8")
+    config = SimpleNamespace(
+        skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
+        skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr("deerflow.config.paths._paths", None)
+    refresh_calls = []
+    scan_calls = []
+
+    async def _refresh(user_id: str):
+        refresh_calls.append(("refresh", user_id))
+
+    async def _scan(*args, **kwargs):
+        scan_calls.append({"args": args, "kwargs": kwargs})
+        return await _async_scan("allow", "ok")
+
+    monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr("app.gateway.routers.skills.get_effective_user_id", lambda: "default")
+    monkeypatch.setattr("app.gateway.routers.skills.scan_skill_content", _scan)
+
+    app = _make_test_app(config)
+
+    with TestClient(app) as client:
+        response = client.put(
+            "/api/skills/custom/demo-skill",
+            json={"content": "---\nname: demo-skill\ndescription: ''\n---\n\n# demo-skill\n"},
+        )
+
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"].lower()
+    assert scan_calls == []
+    assert refresh_calls == []
+    assert (custom_dir / "SKILL.md").read_text(encoding="utf-8") == original_content
+
+
 def test_custom_skill_rollback_blocked_by_scanner(monkeypatch, tmp_path):
     skills_root = tmp_path / "skills"
     from deerflow.config.paths import Paths
