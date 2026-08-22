@@ -295,7 +295,6 @@ export const enUS: Translations = {
   // Sidebar
   sidebar: {
     newChat: "New chat",
-    chats: "Chats",
     channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",

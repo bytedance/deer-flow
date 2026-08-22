@@ -65,6 +65,39 @@ export function pad2(n: number): string {
   return String(Math.trunc(Number.isFinite(n) ? n : 0)).padStart(2, "0");
 }
 
+/**
+ * Build a "YYYY-MM-DDTHH:mm" wall-time string for a one-time run from the
+ * individual year/month/day/time fields, or "" when the inputs do not form a
+ * valid date. Mirrors the bounds checks the form previously inlined: integer
+ * fields, year >= 1970, month 1-12, day 1-31, and a day that actually exists
+ * in the month (rejects e.g. Feb 30 via the Date.UTC rollover check).
+ */
+export function buildOnceRunAtLocal(
+  year: string,
+  month: string,
+  day: string,
+  time: string,
+): string {
+  const y = Number(year);
+  const mo = Number(month);
+  const d = Number(day);
+  const valid =
+    year !== "" &&
+    month !== "" &&
+    day !== "" &&
+    time !== "" &&
+    Number.isInteger(y) &&
+    Number.isInteger(mo) &&
+    Number.isInteger(d) &&
+    y >= 1970 &&
+    mo >= 1 &&
+    mo <= 12 &&
+    d >= 1 &&
+    d <= 31 &&
+    new Date(Date.UTC(y, mo - 1, d)).getUTCDate() === d;
+  return valid ? `${year}-${pad2(mo)}-${pad2(d)}T${time}` : "";
+}
+
 function orderedWeekdays(days: Weekday[] | undefined): Weekday[] {
   const set = new Set(days ?? []);
   return WEEKDAYS.filter((w) => set.has(w));

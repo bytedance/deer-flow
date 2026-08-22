@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowLeftIcon, CalendarClock } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -17,12 +17,14 @@ import { useCreateScheduledTask } from "@/core/scheduled-tasks/hooks";
 export default function NewScheduledTaskPage() {
   const { t } = useI18n();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const initialThreadId = searchParams.get("thread_id");
   const st = t.scheduledTasks;
   const createTask = useCreateScheduledTask();
   const [contextMode, setContextMode] = useState<
     "fresh_thread_per_run" | "reuse_thread"
-  >("fresh_thread_per_run");
-  const [targetThreadId, setTargetThreadId] = useState("");
+  >(initialThreadId ? "reuse_thread" : "fresh_thread_per_run");
+  const [targetThreadId, setTargetThreadId] = useState(initialThreadId ?? "");
   const [title, setTitle] = useState("");
   const [prompt, setPrompt] = useState("");
   const [createSchedule, setCreateSchedule] = useState<ScheduleValue>({
