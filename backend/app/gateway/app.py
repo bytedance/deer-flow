@@ -3,10 +3,11 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
@@ -627,6 +628,40 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
+
+    # Give contributed routers a neutral way to ask "is this caller an admin"
+    # without importing app.gateway.deps, which would pin them to an
+    # unpublished internal layer and defeat independent distribution. The
+    # resolver mirrors require_admin_user's primary path (deps.py): it reads
+    # request.state.user, which AuthMiddleware stamps before any router runs,
+    # rather than the async get_current_user_from_request/get_optional_user_from_request
+    # accessors that exist for tests and alternative ASGI compositions. Staying
+    # synchronous keeps resolve_principal/require_admin usable from both sync
+    # and async route handlers.
+    def _resolve_extension_principal(request):
+        """Project the host's auth context into the neutral extension shape.
+
+        Deliberately a projection, not a handle: an extension gets the
+        questions it may ask (who, is that an admin, and what role they
+        hold), not the host's AuthContext, which would pin every extension to
+        its internals.
+        """
+        user = getattr(request.state, "user", None)
+        if user is None:
+            return None
+        system_role = getattr(user, "system_role", None)
+        return ExtensionPrincipal(
+            user_id=str(user.id),
+            is_admin=system_role == "admin",
+            is_internal=getattr(request.state, "auth_source", None) == AUTH_SOURCE_INTERNAL,
+            # The host's only role concept is the single system_role column
+            # (e.g. "admin", "user") — there is no multi-role system to
+            # project, so a set role becomes the one-element tuple rather
+            # than reading a "roles" attribute the user model never had.
+            roles=(system_role,) if isinstance(system_role, str) and system_role else (),
+        )
+
+    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, _resolve_extension_principal)
 
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)

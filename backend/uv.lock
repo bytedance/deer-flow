@@ -807,6 +807,7 @@ version = "2.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "bcrypt" },
+    { name = "deerflow-extension-api" },
     { name = "deerflow-harness" },
     { name = "dingtalk-stream" },
     { name = "e2b-code-interpreter" },
@@ -867,6 +868,7 @@ dev = [
 requires-dist = [
     { name = "bcrypt", specifier = ">=4.0.0" },
     { name = "coincurve", marker = "extra == 'buzz'", specifier = ">=20.0.0" },
+    { name = "deerflow-extension-api", editable = "packages/extension-api" },
     { name = "deerflow-harness", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["browser"], marker = "extra == 'browser'", editable = "packages/harness" },
     { name = "deerflow-harness", extras = ["memory-zh"], marker = "extra == 'memory-zh'", editable = "packages/harness" },
@@ -910,7 +912,7 @@ extensions = []
 
 [[package]]
 name = "deerflow-extension-api"
-version = "0.1.2"
+version = "0.2.0"
 source = { editable = "packages/extension-api" }
 
 [[package]]
