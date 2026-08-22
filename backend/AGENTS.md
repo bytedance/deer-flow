@@ -162,6 +162,8 @@ modules that only need lightweight types, config, or registries should import
 the concrete submodule instead of adding eager package-root imports that pull in
 the tool graph or subagent executor during state/schema imports.
 
+**Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
