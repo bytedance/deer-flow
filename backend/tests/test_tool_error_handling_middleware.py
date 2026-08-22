@@ -232,9 +232,11 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
 
 def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.MonkeyPatch):
     # ArtifactResolutionMiddleware must sit inner of ToolProgressMiddleware and
-    # outer of ToolErrorHandlingMiddleware (resolved args reach the tool);
-    # ArtifactCaptureMiddleware must sit outer of ToolErrorHandlingMiddleware
-    # (it sees normalized results) — issue #4676.
+    # outer of ToolErrorHandlingMiddleware (resolved args reach the tool).
+    # ArtifactCaptureMiddleware is position-independent in the wrap chain — it
+    # is a `before_model` hook reading state messages, not a tool wrapper — so
+    # the assertion below only pins its assembly slot, not a behavioral
+    # dependency. — issue #4676.
     from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
     from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
     from deerflow.config.tool_artifact_config import ToolArtifactConfig

@@ -30,14 +30,20 @@ _HANDLE_LENGTH = 8
 _SANDBOX_PATH_PATTERN = re.compile(r"/mnt/user-data/\S+")
 
 # Conservative URL-with-file-extension match for remote references.
-_REMOTE_FILE_URL_PATTERN = re.compile(
-    r"https?://\S+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)"
-)
+_REMOTE_FILE_URL_PATTERN = re.compile(r"https?://\S+\.(?:png|jpg|jpeg|gif|html|pdf|csv|json|txt|log|md|xlsx?|docx?|zip)")
 
 # Structured-content keys whose string values are treated as concrete
 # references (paths, URLs, remote task ids) rather than opaque payload.
-_STRUCTURED_REF_KEYS = frozenset({"file", "files", "file_path", "path", "url", "urls", "output", "outputs"})
+# Deliberately excludes generic result keys such as `output`/`outputs`: their
+# values are usually prose, and path-shaped refs inside them are already caught
+# by the free-text scan over tool content.
+_STRUCTURED_REF_KEYS = frozenset({"file", "files", "file_path", "path", "url", "urls"})
 _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
+
+# Characters stripped from detected refs: prose punctuation plus the closing
+# quotes/brackets/backticks that markdown- and JSON-formatted tool output
+# commonly wraps paths in. `\S+` would otherwise consume them into `real_ref`.
+_REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`"
 
 _ARTIFACT_RENDER_CHAR_BUDGET = 3000
 
@@ -91,7 +97,7 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     seen: set[str] = set()
     for match in _SANDBOX_PATH_PATTERN.finditer(text):
-        raw = match.group(0).rstrip(".,;:)")
+        raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
         if raw in seen:
             continue
         seen.add(raw)
@@ -103,7 +109,7 @@ def _detect_refs_in_text(text: str) -> list[dict[str, str]]:
             }
         )
     for match in _REMOTE_FILE_URL_PATTERN.finditer(text):
-        raw = match.group(0).rstrip(".,;:)")
+        raw = match.group(0).rstrip(_REF_TRAILING_NOISE_CHARS)
         if raw in seen:
             continue
         seen.add(raw)

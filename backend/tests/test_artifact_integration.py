@@ -114,11 +114,5 @@ def test_handle_projected_into_model_context():
 
     # Round 3 is the request after both capture and consumption happened.
     round3 = model.received[-1]
-    durable_blocks = [
-        message.content
-        for message in round3
-        if getattr(message, "additional_kwargs", {}).get("durable_context_data")
-    ]
-    assert any(FRESH_HANDLE in content for content in durable_blocks), (
-        "captured handle never reached the model-facing durable context block"
-    )
+    durable_blocks = [message.content for message in round3 if getattr(message, "additional_kwargs", {}).get("durable_context_data")]
+    assert any(FRESH_HANDLE in content for content in durable_blocks), "captured handle never reached the model-facing durable context block"

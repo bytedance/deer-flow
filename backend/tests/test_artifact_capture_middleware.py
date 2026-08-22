@@ -91,9 +91,7 @@ class TestCapture:
             "messages": [
                 AIMessage(
                     content="",
-                    tool_calls=[
-                        {"name": "read_file", "args": {"path": f"{handle}"}, "id": "call_2", "type": "tool_call"}
-                    ],
+                    tool_calls=[{"name": "read_file", "args": {"path": f"{handle}"}, "id": "call_2", "type": "tool_call"}],
                 )
             ],
         }
@@ -121,6 +119,59 @@ class TestCapture:
 
         assert middleware.before_model(state, _runtime()) is None
 
+    def test_capture_respects_configured_max_entries(self):
+        """The configured cap is enforced per-agent by the middleware, not by a process global."""
+        middleware = ArtifactCaptureMiddleware(config=ToolArtifactConfig(max_entries=20))
+        existing = [
+            {
+                "handle": generate_handle("thread_1", f"call_old_{i}", 0),
+                "artifact_type": "file",
+                "real_ref": f"/mnt/user-data/outputs/old_{i}.md",
+                "display_name": f"old_{i}.md",
+                "tool_name": "write_file",
+                "consumed_by": [],
+            }
+            for i in range(18)
+        ]
+        messages = [ToolMessage(content="wrote file", tool_call_id=f"call_new_{i}", artifact={"structured_content": {"file": f"/mnt/user-data/outputs/new_{i}.md"}}) for i in range(5)]
+
+        out = middleware.before_model({"messages": messages, "tool_artifacts": existing}, _runtime())
+
+        assert out is not None
+        assert len(out["tool_artifacts"]) == 2, "must emit only up to the remaining budget"
+
+    def test_capture_skips_already_seen_and_empty_results(self, monkeypatch):
+        """Steady-state cost must drop to the new message tail, not full history."""
+        from deerflow.agents.middlewares import artifact_capture_middleware
+
+        calls: list[str] = []
+        real_extract = artifact_capture_middleware.extract_artifacts_from_result
+
+        def spy(result, **kwargs):
+            calls.append(result.tool_call_id)
+            return real_extract(result, **kwargs)
+
+        monkeypatch.setattr(artifact_capture_middleware, "extract_artifacts_from_result", spy)
+
+        middleware = ArtifactCaptureMiddleware()
+        captured_msg = _tool_message(
+            "wrote file",
+            tool_call_id="call_cap",
+            artifact={"structured_content": {"file": "/mnt/user-data/outputs/report.md"}},
+        )
+        empty_msg = _tool_message("no refs here at all", tool_call_id="call_empty")
+
+        first = middleware.before_model({"messages": [captured_msg, empty_msg]}, _runtime())
+        assert first is not None
+        assert len(calls) == 2
+
+        calls.clear()
+        state = {"messages": [captured_msg, empty_msg], "tool_artifacts": first["tool_artifacts"]}
+        second = middleware.before_model(state, _runtime())
+
+        assert second is None or "tool_artifacts" not in (second or {})
+        assert calls == [], "already-captured and known-empty results must be skipped without extraction"
+
     def test_capture_and_consumption_updates_concatenate(self):
         """Both a fresh capture and a consumption update in one before_model call must survive.
 
@@ -144,9 +195,7 @@ class TestCapture:
             "messages": [
                 AIMessage(
                     content="",
-                    tool_calls=[
-                        {"name": "read_file", "args": {"path": existing_handle}, "id": "call_new", "type": "tool_call"}
-                    ],
+                    tool_calls=[{"name": "read_file", "args": {"path": existing_handle}, "id": "call_new", "type": "tool_call"}],
                 ),
                 ToolMessage(
                     content="wrote file",

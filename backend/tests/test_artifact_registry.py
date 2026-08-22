@@ -4,11 +4,7 @@ import json
 
 from langchain_core.messages import ToolMessage
 
-from deerflow.agents.thread_state import (
-    _TOOL_ARTIFACT_MAX_ENTRIES_DEFAULT,
-    configure_tool_artifact_max_entries,
-    merge_tool_artifacts,
-)
+from deerflow.agents.thread_state import merge_tool_artifacts
 from deerflow.tools.artifact_registry import (
     _detect_refs_in_text,
     extract_artifacts_from_result,
@@ -137,6 +133,20 @@ def test_extract_from_structured_list_valued_keys():
     assert len(handles) == 2
 
 
+def test_structured_generic_output_key_not_treated_as_ref():
+    """Prose under generic result keys must not become a bogus file entry."""
+    result = ToolMessage(
+        content=[{"type": "text", "text": "done"}],
+        tool_call_id="call-4f",
+        name="mcp_analyst",
+        artifact={"structured_content": {"output": "Analysis complete; revenue up 12% quarter over quarter."}},
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    assert len(entries) == 1
+    assert entries[0]["artifact_type"] == "data"
+    assert "Analysis complete" in entries[0]["real_ref"]
+
+
 def test_structured_fallback_whole_object_not_truncated():
     structured = {"custom_payload": {"nested": ["x" * 200] * 10}}
     result = ToolMessage(
@@ -239,6 +249,25 @@ def test_detect_refs_in_text_noise():
     assert refs == []
 
 
+def test_detect_refs_in_text_strips_quotes_backticks_brackets():
+    text = 'Saved to `/mnt/user-data/outputs/report.md` and {"path": "/mnt/user-data/a.txt"} plus [/mnt/user-data/c.csv]'
+    values = [ref["ref"] for ref in _detect_refs_in_text(text)]
+    assert "/mnt/user-data/outputs/report.md" in values
+    assert "/mnt/user-data/a.txt" in values
+    assert "/mnt/user-data/c.csv" in values
+
+
+def test_string_content_with_quoted_path_captured_cleanly():
+    result = ToolMessage(
+        content='Wrote "/mnt/user-data/outputs/notes.md" successfully',
+        tool_call_id="call-6c",
+        name="write_file",
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    assert len(entries) == 1
+    assert entries[0]["real_ref"] == "/mnt/user-data/outputs/notes.md"
+
+
 def test_merge_tool_artifacts_append():
     existing = [
         {
@@ -322,47 +351,16 @@ def test_merge_tool_artifacts_empty_new_preserves_existing():
 
 
 def test_merge_tool_artifacts_cap():
-    entries = [
-        {
-            "handle": f"art_{i:08x}",
-            "tool_name": "t",
-            "tool_call_id": f"call-{i}",
-            "call_index": 0,
-            "artifact_type": "file",
-            "display_name": f"{i}.txt",
-            "real_ref": f"/tmp/{i}.txt",
-            "created_at": "2026-08-19T00:00:00Z",
-        }
-        for i in range(150)
-    ]
+    """Reducer enforces the absolute ceiling only; configured caps live in the middleware."""
+    entries = [_entry(f"art_{i:08x}", i) for i in range(1500)]
     merged = merge_tool_artifacts(None, entries)
-    assert len(merged) == 100
-    assert merged[0]["handle"] == "art_00000032"
+    assert len(merged) == 1000
+    assert merged[0]["handle"] == f"art_{500:08x}"
+    assert merged[-1]["handle"] == f"art_{1499:08x}"
 
 
-def test_merge_tool_artifacts_respects_configured_cap():
-    entries = [_entry(f"art_{i:08x}", i) for i in range(30)]
-    configure_tool_artifact_max_entries(20)
-    try:
-        merged = merge_tool_artifacts(None, entries)
-        assert len(merged) == 20
-        assert merged[0]["handle"] == "art_0000000a"
-        merged2 = merge_tool_artifacts(entries[:10], entries[10:])
-        assert len(merged2) == 20
-    finally:
-        configure_tool_artifact_max_entries(_TOOL_ARTIFACT_MAX_ENTRIES_DEFAULT)
-
-
-def test_configure_tool_artifact_max_entries_clamps():
-    configure_tool_artifact_max_entries(5)
-    try:
-        entries = [_entry(f"art_{i:08x}", i) for i in range(30)]
-        assert len(merge_tool_artifacts(None, entries)) == 10
-    finally:
-        configure_tool_artifact_max_entries(_TOOL_ARTIFACT_MAX_ENTRIES_DEFAULT)
-    configure_tool_artifact_max_entries(5000)
-    try:
-        entries = [_entry(f"art_{i:08x}", i) for i in range(1100)]
-        assert len(merge_tool_artifacts(None, entries)) == 1000
-    finally:
-        configure_tool_artifact_max_entries(_TOOL_ARTIFACT_MAX_ENTRIES_DEFAULT)
+def test_merge_tool_artifacts_consumption_update_does_not_grow_count():
+    entries = [_entry(f"art_{i:08x}", i) for i in range(1000)]
+    consumed = {**entries[0], "consumed_by": ["call-x"]}
+    merged = merge_tool_artifacts(entries, [consumed])
+    assert len(merged) == 1000

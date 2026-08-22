@@ -31,6 +31,11 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         super().__init__()
         self._config = config or ToolArtifactConfig()
         self._handle_re = re.compile(_HANDLE_PATTERN)
+        # Bounded memo of (thread_id, tool_call_id, detect flag) triples whose
+        # extraction yielded nothing, so ref-free results are not re-scanned on
+        # every model call. FIFO-evicted to keep memory bounded.
+        self._empty_results: dict[tuple[str, str, bool], None] = {}
+        self._EMPTY_MEMO_LIMIT = 4096
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -76,29 +81,52 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         messages = state.get("messages") or []
         existing = state.get("tool_artifacts") or []
         existing_handles = {entry.get("handle") for entry in existing if isinstance(entry, dict)}
+        # Handles are deterministic per (thread_id, tool_call_id), so a message
+        # that already contributed entries can never yield anything new on a
+        # rescan — skip it before paying for extraction. Consumption updates
+        # preserve `tool_call_id`, so this stays accurate across rounds.
+        seen_call_ids = {entry.get("tool_call_id") for entry in existing if isinstance(entry, dict)}
 
         new_entries: list[ArtifactEntry] = []
         for message in messages:
             if not isinstance(message, ToolMessage):
                 continue
+            tool_call_id = message.tool_call_id or ""
+            if tool_call_id and tool_call_id in seen_call_ids:
+                continue
+            memo_key = (thread_id, tool_call_id, self._config.detect_refs_in_text) if tool_call_id else None
+            if memo_key is not None and memo_key in self._empty_results:
+                continue
             entries = extract_artifacts_from_result(message, thread_id=thread_id, detect_refs_in_text=self._config.detect_refs_in_text)
+            if not entries:
+                if memo_key is not None:
+                    self._remember_empty(memo_key)
+                continue
             for entry in entries:
                 if entry["handle"] in existing_handles:
                     continue
                 existing_handles.add(entry["handle"])
                 new_entries.append(entry)
 
+        # Per-agent configured cap: emit only up to the remaining budget so the
+        # registry converges to `max_entries` without any process-wide state.
+        budget = max(0, self._config.max_entries - len(existing))
+        new_entries = new_entries[:budget]
+
         if new_entries:
             return {"tool_artifacts": new_entries}
         return None
+
+    def _remember_empty(self, memo_key: tuple[str, str, bool]) -> None:
+        while len(self._empty_results) >= self._EMPTY_MEMO_LIMIT:
+            self._empty_results.pop(next(iter(self._empty_results)))
+        self._empty_results[memo_key] = None
 
     def _track_consumption(self, state: AgentState) -> dict | None:
         existing = state.get("tool_artifacts") or []
         if not existing:
             return None
-        handle_map: dict[str, ArtifactEntry] = {
-            entry["handle"]: cast(ArtifactEntry, entry) for entry in existing if isinstance(entry, dict)
-        }
+        handle_map: dict[str, ArtifactEntry] = {entry["handle"]: cast(ArtifactEntry, entry) for entry in existing if isinstance(entry, dict)}
         if not handle_map:
             return None
 

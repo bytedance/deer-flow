@@ -286,16 +286,17 @@ def _build_runtime_middlewares(
         tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
-
-    # Artifact capture runs outer of ToolErrorHandlingMiddleware so it sees the
-    # normalized result (errors already converted to error ToolMessages, which
-    # the capture middleware skips). It captures lightweight metadata only, so
-    # ToolOutputBudgetMiddleware truncating the content does not affect it.
+    # Artifact capture is a `before_model` hook that reads state messages, so
+    # its position in the tool-execution wrap chain is functionally irrelevant:
+    # it always sees the normalized results stored in state, and error results
+    # (status == "error") are skipped at extraction. It is appended after
+    # ToolErrorHandlingMiddleware purely for readability. It captures
+    # lightweight metadata only, so ToolOutputBudgetMiddleware truncating the
+    # content does not affect it. The configured cap (max_entries) is enforced
+    # inside the middleware when it emits updates; no assembly-time side effect.
     if app_config.tool_artifacts.enabled:
         from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
-        from deerflow.agents.thread_state import configure_tool_artifact_max_entries
 
-        configure_tool_artifact_max_entries(app_config.tool_artifacts.max_entries)
         tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
