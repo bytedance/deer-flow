@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -41,6 +42,38 @@ def _telegram_update(*, text: str = "/start", user_id: int = 42, chat_id: int = 
     return update
 
 
+async def _await_connections(repo, owner_user_id: str, *, timeout: float = 2.0) -> list:
+    """Poll the connection repo until rows for the owner appear or the deadline passes.
+
+    The bind runs as a scheduled task on the (test) main loop, so the test must
+    yield until it completes. A deadline gives a loaded CI runner headroom for the
+    aiosqlite thread hops in consume_oauth_state / upsert_connection instead of a
+    fixed iteration count that can time out and mask the real bind failure.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    connections: list = []
+    while loop.time() < deadline:
+        connections = await repo.list_connections(owner_user_id)
+        if connections:
+            return connections
+        await asyncio.sleep(0.01)
+    return connections
+
+
+async def _await_reply(reply_text, *, timeout: float = 2.0) -> None:
+    """Yield until the bind task has dispatched its reply (the task's final step).
+
+    The reply is sent right after the upsert, so the connection row can be visible
+    before the reply has been awaited; wait for the reply explicitly instead of
+    relying on an incidental extra await.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while reply_text.await_count == 0 and loop.time() < deadline:
+        await asyncio.sleep(0.01)
+
+
 @pytest.mark.anyio
 async def test_start_with_deep_link_state_binds_telegram_chat(repo):
     state = "telegram-bind-state"
@@ -54,13 +87,15 @@ async def test_start_with_deep_link_state_binds_telegram_chat(repo):
         bus=MessageBus(),
         config={"bot_token": "test-token", "connection_repo": repo},
     )
+    channel._main_loop = asyncio.get_running_loop()
     update = _telegram_update(text=f"/start {state}")
     context = MagicMock()
     context.args = [state]
 
     await channel._cmd_start(update, context)
+    connections = await _await_connections(repo, "deerflow-user-1")
+    await _await_reply(update.message.reply_text)
 
-    connections = await repo.list_connections("deerflow-user-1")
     assert len(connections) == 1
     assert connections[0]["provider"] == "telegram"
     assert connections[0]["external_account_id"] == "42"
@@ -91,13 +126,15 @@ async def test_start_token_bypasses_allowed_users_filter(repo):
             "allowed_users": [999],  # newcomer (42) is not whitelisted
         },
     )
+    channel._main_loop = asyncio.get_running_loop()
     update = _telegram_update(text=f"/start {state}", user_id=42)
     context = MagicMock()
     context.args = [state]
 
     await channel._cmd_start(update, context)
+    connections = await _await_connections(repo, "deerflow-user-1")
+    await _await_reply(update.message.reply_text)
 
-    connections = await repo.list_connections("deerflow-user-1")
     assert len(connections) == 1
     assert connections[0]["external_account_id"] == "42"
     assert "connected" in update.message.reply_text.await_args.args[0].lower()
@@ -118,7 +155,7 @@ async def test_bound_telegram_message_publishes_connection_identity(repo):
         bus=bus,
         config={"bot_token": "test-token", "connection_repo": repo},
     )
-    channel._main_loop = __import__("asyncio").get_event_loop()
+    channel._main_loop = asyncio.get_running_loop()
     channel._send_running_reply = AsyncMock()
 
     await channel._on_text(_telegram_update(text="hello"), None)
@@ -130,3 +167,56 @@ async def test_bound_telegram_message_publishes_connection_identity(repo):
     assert inbound.user_id == "42"
     assert inbound.chat_id == "100"
     assert inbound.text == "hello"
+
+
+@pytest.mark.anyio
+async def test_bind_dispatcher_uses_submit_threadsafe_when_main_loop_running(repo):
+    channel = TelegramChannel(
+        bus=MessageBus(),
+        config={"bot_token": "test-token", "connection_repo": repo},
+    )
+    channel._main_loop = asyncio.get_running_loop()
+
+    def _fake_submit(coroutine, *args, **kwargs):
+        coroutine.close()
+        return True
+
+    channel._submit_threadsafe_coroutine = MagicMock(side_effect=_fake_submit)
+    channel._bind_connection_from_start_token_on_main = AsyncMock(return_value=True)
+
+    handled = await channel._bind_connection_from_start_token(_telegram_update(), "bind-token")
+
+    assert handled is True
+    channel._submit_threadsafe_coroutine.assert_called_once()
+    assert channel._submit_threadsafe_coroutine.call_args.kwargs["name"] == "bind_connection"
+    channel._bind_connection_from_start_token_on_main.assert_called_once()
+    channel._bind_connection_from_start_token_on_main.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_bind_on_main_replies_via_telegram_loop(repo):
+    state = "telegram-bind-state"
+    await repo.create_oauth_state(
+        owner_user_id="deerflow-user-1",
+        provider="telegram",
+        state=state,
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+    channel = TelegramChannel(
+        bus=MessageBus(),
+        config={"bot_token": "test-token", "connection_repo": repo},
+    )
+
+    async def _passthrough(coro):
+        return await coro
+
+    channel._run_on_telegram_loop = AsyncMock(side_effect=_passthrough)
+    update = _telegram_update(text=f"/start {state}")
+
+    assert await channel._bind_connection_from_start_token_on_main(update, state) is True
+
+    channel._run_on_telegram_loop.assert_awaited_once()
+    update.message.reply_text.assert_called_once()
+    assert "connected" in update.message.reply_text.call_args.args[0].lower()
+    connections = await repo.list_connections("deerflow-user-1")
+    assert len(connections) == 1
