@@ -113,7 +113,19 @@ def test_local_sandbox_reverse_patterns_route_through_the_helper(tmp_path: Path)
     )
 
     resolved = str(Path(local).resolve())
-    assert [p.pattern for p in sandbox._reverse_output_patterns] == [build_output_mask_pattern(resolved).pattern]
+    assert [p.pattern for p in sandbox._reverse_output_patterns] == [build_output_mask_pattern(resolved, separator_agnostic=True).pattern]
+
+
+def test_local_sandbox_reverse_patterns_match_forward_slash_windows_paths() -> None:
+    """Agent-written files use forward slashes even when the cached base is native Windows."""
+    mapping = PathMapping(container_path="/mnt/data", local_path=r"C:\Users\test\data")
+    sandbox = LocalSandbox(id="local", path_mappings=[mapping])
+    sandbox._resolved_local_paths = {mapping: r"C:\Users\test\data"}
+
+    pattern = sandbox._reverse_output_patterns[0]
+
+    assert pattern.search("C:/Users/test/data/config.json")
+    assert pattern.search(r"C:\Users\test\data\config.json")
 
 
 def test_tools_mask_patterns_route_through_the_helper(tmp_path: Path) -> None:
