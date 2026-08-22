@@ -161,10 +161,13 @@ class JsonlRunEventStore(RunEventStore):
 
         All seq numbers for the batch are reserved under a single per-thread
         write lock. Records are grouped by run_id and appended to their own
-        run files while that lock is held. If a write fails, already-appended
-        groups are rolled back so callers (e.g. worker.py's flush-retry path)
-        may safely re-buffer the entire batch. This rollback does not make a
-        multi-file batch crash-atomic.
+        run files while that lock is held. If a write fails and rollback
+        succeeds, already-appended groups for the current thread are restored
+        so callers (e.g. worker.py's flush-retry path) may safely re-buffer
+        that thread's batch. When a batch contains multiple thread IDs, thread
+        groups are processed sequentially, so a later failure does not roll
+        back earlier thread groups. This rollback does not make a multi-file
+        batch crash-atomic.
         """
         if not events:
             return []
@@ -257,7 +260,11 @@ class JsonlRunEventStore(RunEventStore):
                         with open(path, "r+b") as f:
                             f.truncate(original_size)
                 except OSError:
-                    logger.warning("Failed to roll back JSONL batch append for %s", path, exc_info=True)
+                    logger.error(
+                        "Failed to roll back JSONL batch append for %s; retrying the batch may create duplicate records",
+                        path,
+                        exc_info=True,
+                    )
             raise
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):

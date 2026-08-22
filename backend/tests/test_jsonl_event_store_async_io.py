@@ -10,6 +10,7 @@ Verifies:
 from __future__ import annotations
 
 import asyncio
+import logging
 import tempfile
 from pathlib import Path
 
@@ -265,6 +266,48 @@ async def test_mixed_run_batch_failure_restores_all_run_files(monkeypatch):
         assert not r2_path.exists()
         assert [event["content"] for event in await store.list_events("t1", "r1")] == ["existing"]
         assert await store.list_events("t1", "r2") == []
+
+
+@pytest.mark.anyio
+async def test_mixed_run_batch_logs_error_when_rollback_fails(monkeypatch, caplog):
+    """A rollback failure must make possible retry duplicates visible to operators."""
+    from deerflow.runtime.events.store import jsonl as jsonl_mod
+
+    real_append = jsonl_mod.JsonlRunEventStore._append_records
+    real_unlink = Path.unlink
+    append_calls = 0
+
+    def failing_append(self, path, records):
+        nonlocal append_calls
+        append_calls += 1
+        if append_calls == 2:
+            real_append(self, path, records)
+            raise OSError("simulated second-run write failure")
+        real_append(self, path, records)
+
+    monkeypatch.setattr(jsonl_mod.JsonlRunEventStore, "_append_records", failing_append)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = _make_store(Path(tmp))
+        r2_path = store._run_file("t1", "r2")
+
+        def failing_unlink(path, missing_ok=False):
+            if path == r2_path:
+                raise OSError("simulated rollback failure")
+            return real_unlink(path, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", failing_unlink)
+        events = [
+            {"thread_id": "t1", "run_id": "r1", "event_type": "trace", "category": "trace"},
+            {"thread_id": "t1", "run_id": "r2", "event_type": "trace", "category": "trace"},
+        ]
+        with caplog.at_level(logging.ERROR, logger=jsonl_mod.__name__), pytest.raises(OSError, match="second-run"):
+            await store.put_batch(events)
+
+        assert r2_path.exists()
+
+    rollback_errors = [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert any("duplicate records" in record.getMessage() for record in rollback_errors)
 
 
 # ---------------------------------------------------------------------------
