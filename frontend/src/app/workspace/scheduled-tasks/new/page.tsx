@@ -55,6 +55,7 @@ export default function NewScheduledTaskPage() {
           <Button
             variant="ghost"
             size="icon-sm"
+            aria-label={t.common.close}
             onClick={() => router.push("/workspace/scheduled-tasks")}
           >
             <ArrowLeftIcon className="h-4 w-4" />
