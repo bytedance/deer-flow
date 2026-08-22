@@ -135,7 +135,7 @@ export function ChatsSettingsPage() {
                     <span>
                       {thread.updated_at
                         ? formatTimeAgo(thread.updated_at)
-                        : t.pages.untitled}
+                        : "—"}
                     </span>
                     {channelSource ? (
                       <span className="bg-muted rounded px-1.5 py-0.5">
@@ -182,6 +182,18 @@ export function ChatsSettingsPage() {
               </div>
             ) : null}
           </div>
+          {hasNextPage && isSearching ? (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void fetchNextPage()}
+              disabled={isFetchingNextPage}
+            >
+              {isFetchingNextPage
+                ? t.chats.loadingMore
+                : t.chats.loadMoreToSearch}
+            </Button>
+          ) : null}
         </div>
       )}
     </SettingsSection>
