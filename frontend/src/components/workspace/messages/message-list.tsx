@@ -70,6 +70,7 @@ import {
 } from "@/core/sidecar";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
+import { resolveSubtaskDescription } from "@/core/tasks/presentation";
 import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
@@ -1244,7 +1245,11 @@ export function MessageList({
                         const task: Subtask = {
                           id: taskId,
                           subagent_type: toolCall.args.subagent_type,
-                          description: toolCall.args.description,
+                          description: resolveSubtaskDescription(
+                            toolCall.args.description,
+                            toolCall.args.prompt,
+                            t.subtasks.subtask,
+                          ),
                           prompt: toolCall.args.prompt,
                           status,
                           ...(status === "failed"

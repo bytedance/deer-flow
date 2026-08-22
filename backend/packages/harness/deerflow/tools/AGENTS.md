@@ -10,7 +10,7 @@
    - `setup_agent` - Bootstrap-only: persist a brand-new custom agent's `SOUL.md` and `config.yaml`. Bound only when `is_bootstrap=True`.
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
-   - `task` - Delegate to subagent (description, prompt, subagent_type)
+   - `task` - Delegate to subagent (`prompt`, `subagent_type`, and an optional model-visible `description` used only as a short progress label). Execution never depends on `description`; lifecycle display falls back to `prompt` when a provider omits it.
 
 Scheduled-task runtime note:
 - Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
