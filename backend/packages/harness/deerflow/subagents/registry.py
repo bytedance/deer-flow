@@ -47,54 +47,168 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
     )
 
 
-def get_subagent_config(name: str, *, app_config: Any | None = None) -> SubagentConfig | None:
+def _resolve_full_app_config(app_config: Any | None = None) -> Any | None:
+    """Return a full AppConfig-like object carrying ``.tools`` for group expansion."""
+    if app_config is not None and hasattr(app_config, "tools"):
+        return app_config
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        resolved = get_app_config()
+    except Exception:
+        return None
+    return resolved if hasattr(resolved, "tools") else None
+
+
+def _expand_tool_groups(groups: list[str] | None, *, app_config: Any | None = None) -> list[str] | None:
+    """Expand ``AgentConfig.tool_groups`` into concrete tool names.
+
+    Mirrors :func:`deerflow.tools.tools.get_available_tools`'s config-level group
+    filtering without instantiating tool objects: the executor later intersects
+    this allowlist with the real assembled pool, so names alone suffice here.
+    ``None`` (unrestricted) passes through unchanged; an explicit empty list stays
+    empty ("no tools"). When no app config can be resolved the agent inherits the
+    full pool, matching the unrestricted default rather than silently disabling it.
+    """
+    if groups is None:
+        return None
+    full_config = _resolve_full_app_config(app_config)
+    if full_config is None:
+        logger.warning("Could not resolve app config for tool-group expansion; inheriting full tool pool")
+        return None
+    expanded = [tool.name for tool in full_config.tools if tool.group in groups]
+    # A non-empty input that expands to nothing is almost always a typo'd group
+    # name (or a config-name/tool-object divergence, the #1803 failure mode):
+    # the subagent would silently run with zero tools. An explicit empty list is
+    # the documented "disable all tools" intent and stays warning-free.
+    if not expanded and groups:
+        logger.warning(
+            "Agent tool_groups %s expanded to no tools; the subagent will run without tools. Check group names against config.yaml.",
+            groups,
+        )
+    return expanded
+
+
+def _load_user_agent_record(name: str, *, user_id: str | None = None) -> tuple[Any, str | None] | None:
+    """Load ``(AgentConfig, soul)`` from the per-user agent store; None when absent/invalid."""
+    from deerflow.config.agents_config import load_agent_config, load_agent_soul
+
+    try:
+        agent = load_agent_config(name, user_id=user_id)
+    except (FileNotFoundError, ValueError, OSError):
+        # FileNotFoundError: no such agent. ValueError: unparsable config or a
+        # name rejected by validate_agent_name (e.g. path traversal via subagent_type).
+        # OSError: unreadable store (permissions, I/O) — degrade to "not resolvable"
+        # so a broken store surfaces as the task tool's clean unknown-type error,
+        # mirroring _list_user_agents.
+        return None
+    if agent is None:
+        return None
+    try:
+        soul = load_agent_soul(name, user_id=user_id)
+    except (FileNotFoundError, ValueError, OSError):
+        soul = None
+    return agent, soul
+
+
+def _list_user_agents(*, user_id: str | None = None) -> list[Any]:
+    """List AgentConfig entries from the per-user store; [] on any failure."""
+    from deerflow.config.agents_config import list_custom_agents
+
+    try:
+        return list_custom_agents(user_id=user_id)
+    except Exception:
+        # Unexpected store failures (I/O errors, permission problems) should
+        # surface in production logs; absence of agents is handled upstream as [].
+        logger.warning("Could not list user-scoped custom agents", exc_info=True)
+        return []
+
+
+def _build_agent_store_subagent_config(name: str, *, app_config: Any | None = None, user_id: str | None = None) -> SubagentConfig | None:
+    """Build a SubagentConfig from the user-scoped custom-agent store (``/api/agents``).
+
+    Third resolution tier: built-in > config.yaml custom_agents > per-user API agents,
+    so user-defined agents can be dispatched via ``task(subagent_type=...)`` without
+    shadowing operator-controlled sources. SOUL.md becomes the system prompt;
+    ``tool_groups`` expand to concrete tool names; an unset model maps to
+    ``"inherit"`` so the subagent follows its parent by default. Global
+    ``subagents.timeout_seconds`` / ``subagents.max_turns`` defaults apply to this tier
+    exactly as they do to built-ins (layered on by the registry), and per-agent yaml
+    overrides still win over both. The subagent never re-delegates: the SubagentConfig default
+    ``disallowed_tools=["task"]`` holds.
+    """
+    record = _load_user_agent_record(name, user_id=user_id)
+    if record is None:
+        return None
+    agent, soul = record
+    system_prompt = (soul.strip() or None) if isinstance(soul, str) else None
+    return SubagentConfig(
+        name=name,
+        description=agent.description or "",
+        system_prompt=system_prompt,
+        tools=_expand_tool_groups(agent.tool_groups, app_config=app_config),
+        skills=agent.skills,
+        model=agent.model or "inherit",
+    )
+
+
+def get_subagent_config(name: str, *, app_config: Any | None = None, user_id: str | None = None) -> SubagentConfig | None:
     """Get a subagent configuration by name, with config.yaml overrides applied.
 
     Resolution order (mirrors Codex's config layering):
     1. Built-in subagents (general-purpose, bash)
     2. Custom subagents from config.yaml custom_agents section
-    3. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, skills)
+    3. User-scoped custom agents from the agent store (``/api/agents``, per-user)
+    4. Per-agent overrides from config.yaml agents section (timeout, max_turns, model, skills)
 
     Args:
         name: The name of the subagent.
         app_config: Optional AppConfig or SubagentsAppConfig to resolve overrides from.
+        user_id: Owner whose agent-store agents are resolvable. Defaults to the
+            effective user from the current runtime context.
 
     Returns:
         SubagentConfig if found (with any config.yaml overrides applied), None otherwise.
     """
-    # Step 1: Look up built-in, then fall back to custom_agents
+    # Step 1: Look up built-in, then fall back to custom_agents, then to the
+    # user-scoped API agent store. Later tiers can never shadow earlier ones.
     config = BUILTIN_SUBAGENTS.get(name)
     if config is None:
         config = _build_custom_subagent_config(name, app_config=app_config)
+    from_agent_store = False
+    if config is None:
+        config = _build_agent_store_subagent_config(name, app_config=app_config, user_id=user_id)
+        from_agent_store = config is not None
     if config is None:
         return None
 
     # Step 2: Apply per-agent overrides from config.yaml agents section.
     # Only explicit per-agent overrides are applied here. Global defaults
-    # (timeout_seconds, max_turns at the top level) apply to built-in agents
-    # but must NOT override custom agents' own values — custom agents define
-    # their own defaults in the custom_agents section.
+    # (timeout_seconds, max_turns at the top level) apply to built-in agents and
+    # agent-store agents — neither declares its own values the way yaml
+    # custom_agents do — but must NOT override custom agents' own values.
     subagents_config = _resolve_subagents_app_config(app_config)
     is_builtin = name in BUILTIN_SUBAGENTS
+    applies_global_defaults = is_builtin or from_agent_store
     agent_override = subagents_config.agents.get(name)
 
     overrides = {}
 
-    # Timeout: per-agent override > global default (builtins only) > config's own value
+    # Timeout: per-agent override > global default (builtins + store agents) > config's own value
     if agent_override is not None and agent_override.timeout_seconds is not None:
         if agent_override.timeout_seconds != config.timeout_seconds:
             logger.debug("Subagent '%s': timeout overridden (%ss -> %ss)", name, config.timeout_seconds, agent_override.timeout_seconds)
             overrides["timeout_seconds"] = agent_override.timeout_seconds
-    elif is_builtin and subagents_config.timeout_seconds != config.timeout_seconds:
+    elif applies_global_defaults and subagents_config.timeout_seconds != config.timeout_seconds:
         logger.debug("Subagent '%s': timeout from global default (%ss -> %ss)", name, config.timeout_seconds, subagents_config.timeout_seconds)
         overrides["timeout_seconds"] = subagents_config.timeout_seconds
 
-    # Max turns: per-agent override > global default (builtins only) > config's own value
+    # Max turns: per-agent override > global default (builtins + store agents) > config's own value
     if agent_override is not None and agent_override.max_turns is not None:
         if agent_override.max_turns != config.max_turns:
             logger.debug("Subagent '%s': max_turns overridden (%s -> %s)", name, config.max_turns, agent_override.max_turns)
             overrides["max_turns"] = agent_override.max_turns
-    elif is_builtin and subagents_config.max_turns is not None and subagents_config.max_turns != config.max_turns:
+    elif applies_global_defaults and subagents_config.max_turns is not None and subagents_config.max_turns != config.max_turns:
         logger.debug("Subagent '%s': max_turns from global default (%s -> %s)", name, config.max_turns, subagents_config.max_turns)
         overrides["max_turns"] = subagents_config.max_turns
 
@@ -116,22 +230,30 @@ def get_subagent_config(name: str, *, app_config: Any | None = None) -> Subagent
     return config
 
 
-def list_subagents(*, app_config: Any | None = None) -> list[SubagentConfig]:
+def list_subagents(*, app_config: Any | None = None, user_id: str | None = None) -> list[SubagentConfig]:
     """List all available subagent configurations (with config.yaml overrides applied).
 
+    Args:
+        app_config: Optional AppConfig or SubagentsAppConfig to resolve overrides from.
+        user_id: Owner whose agent-store agents are included.
+
     Returns:
-        List of all registered SubagentConfig instances (built-in + custom).
+        List of all registered SubagentConfig instances (built-in + custom + API agents).
     """
     configs = []
-    for name in get_subagent_names(app_config=app_config):
-        config = get_subagent_config(name, app_config=app_config)
+    for name in get_subagent_names(app_config=app_config, user_id=user_id):
+        config = get_subagent_config(name, app_config=app_config, user_id=user_id)
         if config is not None:
             configs.append(config)
     return configs
 
 
-def get_subagent_names(*, app_config: Any | None = None) -> list[str]:
-    """Get all available subagent names (built-in + custom).
+def get_subagent_names(*, app_config: Any | None = None, user_id: str | None = None) -> list[str]:
+    """Get all available subagent names (built-in + custom + per-user API agents).
+
+    Args:
+        app_config: Optional AppConfig or SubagentsAppConfig to resolve from.
+        user_id: Owner whose agent-store agents are included.
 
     Returns:
         List of subagent names.
@@ -144,16 +266,26 @@ def get_subagent_names(*, app_config: Any | None = None) -> list[str]:
         if custom_name not in names:
             names.append(custom_name)
 
+    # Merge per-user API agents last so they can never shadow built-ins or
+    # operator-controlled yaml entries.
+    for agent in _list_user_agents(user_id=user_id):
+        if agent.name not in names:
+            names.append(agent.name)
+
     return names
 
 
-def get_available_subagent_names(*, app_config: Any | None = None) -> list[str]:
+def get_available_subagent_names(*, app_config: Any | None = None, user_id: str | None = None) -> list[str]:
     """Get subagent names that should be exposed to the active runtime.
+
+    Args:
+        app_config: Optional AppConfig or SubagentsAppConfig to resolve from.
+        user_id: Owner whose agent-store agents are visible.
 
     Returns:
         List of subagent names visible to the current sandbox configuration.
     """
-    names = get_subagent_names(app_config=app_config)
+    names = get_subagent_names(app_config=app_config, user_id=user_id)
     try:
         host_bash_allowed = is_host_bash_allowed(app_config) if hasattr(app_config, "sandbox") else is_host_bash_allowed()
     except Exception:

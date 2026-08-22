@@ -299,7 +299,7 @@ Skip simple one-off tasks.
 """
 
 
-def _build_available_subagents_description(available_names: list[str], bash_available: bool, *, app_config: AppConfig | None = None) -> str:
+def _build_available_subagents_description(available_names: list[str], bash_available: bool, *, app_config: AppConfig | None = None, user_id: str | None = None) -> str:
     """Dynamically build subagent type descriptions from registry.
 
     Mirrors Codex's pattern where agent_type_description is dynamically generated
@@ -323,7 +323,7 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
         if name in builtin_descriptions:
             lines.append(f"- **{name}**: {builtin_descriptions[name]}")
         else:
-            config = get_subagent_config(name, app_config=app_config)
+            config = get_subagent_config(name, app_config=app_config, user_id=user_id)
             if config is not None:
                 # config.description is agent-editable (persisted by setup_agent /
                 # update_agent), so escape it before it renders into the
@@ -343,6 +343,7 @@ def _build_subagent_section(
     max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     *,
     app_config: AppConfig | None = None,
+    user_id: str | None = None,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -355,12 +356,12 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    available_names = get_available_subagent_names(app_config=app_config, user_id=user_id) if app_config is not None else get_available_subagent_names(user_id=user_id)
     bash_available = "bash" in available_names
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
-    available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
+    available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config, user_id=user_id)
     direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
     direct_execution_example = (
         '# User asks: "Run the tests"\n# Thinking: Direct bash is cheaper than delegation\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
@@ -1010,7 +1011,7 @@ def apply_prompt_template(
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
-    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
+    subagent_section = _build_subagent_section(n, total, app_config=app_config, user_id=user_id) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"

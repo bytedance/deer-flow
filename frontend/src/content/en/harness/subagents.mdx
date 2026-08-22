@@ -152,7 +152,22 @@ The Lead Agent invokes ACP agents through the `invoke_acp_agent` built-in tool.
 
 ## Custom agents as subagents
 
-Custom agents created through the DeerFlow App UI can also be invoked as subagents using the `task` tool. When you specify `agent="my-custom-agent"`, the runtime loads that agent's configuration (skills, tool groups, model) and runs it as a subagent for the delegated task.
+Custom agents you create in the DeerFlow App (`/workspace/agents`) can be dispatched through the `task` tool. The runtime resolves `subagent_type` in three tiers, where later tiers never shadow earlier ones:
+
+1. Built-in subagents (`general-purpose`, `bash`)
+2. Operator-defined `subagents.custom_agents` in `config.yaml`
+3. **Your own custom agents**, resolved from your user account only
+
+A custom agent dispatched as a subagent keeps its identity: its SOUL becomes the subagent's system prompt, its `tool_groups` allowlist restricts which tools it can use (an unrestricted agent inherits the full pool), and its skills and model selection carry over. The allowlist is applied strictly: unlike a lead persona — where built-in, MCP, and ACP tools are added outside group filtering — a delegated subagent can only use tools whose names survive the expansion. Global `subagents.timeout_seconds` / `subagents.max_turns` defaults and operator `agents:` overrides apply to this tier exactly as they do to built-in subagents. Subagents never re-delegate (`task` is always denied for them).
+
+On installations that have not run `scripts/migrate_user_isolation.py`, agents in the legacy shared layout (`{base_dir}/agents/{name}`) remain visible to every user's threads — both as lead personas and as dispatchable subagent types — until migrated.
+
+<Callout type="info" emoji="🧩">
+  This is the building block for role-differentiated delegation — e.g. a Writer
+  agent with writing skills, a Coder restricted to shell tools, and a Reviewer
+  that critiques their output — without giving up DeerFlow's dynamic, benefit-based
+  routing for fixed multi-agent graphs.
+</Callout>
 
 <Cards num={2}>
   <Cards.Card title="Sandbox" href="/docs/harness/sandbox" />

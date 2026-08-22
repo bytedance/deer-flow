@@ -145,8 +145,8 @@ async def test_real_task_tool_events_reach_astream_events(monkeypatch):
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", _SubagentStatus)
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", _Executor)
-    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name: config)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *_args, **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda *_args, **_kwargs: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _task_id: completed)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _task_id: None)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
