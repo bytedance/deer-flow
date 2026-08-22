@@ -709,7 +709,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
-    subagent_enabled = cfg.get("subagent_enabled", False)
+    requested_subagent_enabled = cfg.get("subagent_enabled", False)
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
@@ -717,6 +717,15 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    # Keep compatibility with lightweight AgentConfig-shaped objects used by
+    # integrations that predate caller-level subagent restrictions.
+    allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
+    # The request switch may disable delegation, but it can never widen the
+    # server-side custom-agent policy. An explicit empty list is a hard deny.
+    subagent_enabled = bool(requested_subagent_enabled and allowed_subagents != [])
+    config.setdefault("configurable", {})["subagent_enabled"] = subagent_enabled
+    if isinstance(config.get("context"), dict):
+        config["context"]["subagent_enabled"] = subagent_enabled
     available_skills = _available_skill_names(agent_config, is_bootstrap)
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
@@ -775,6 +784,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             "subagent_enabled": subagent_enabled,
             "tool_groups": agent_config.tool_groups if agent_config else None,
             "available_skills": sorted(available_skills) if available_skills is not None else None,
+            "allowed_subagents": list(allowed_subagents) if allowed_subagents is not None else None,
         }
     )
 
@@ -860,6 +870,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 deferred_names=setup.deferred_names,
                 user_id=resolved_user_id,
                 skill_names=skill_setup.skill_names or None,
+                allowed_subagents=allowed_subagents,
             ),
             state_schema=get_thread_state_schema(mode),
         )
@@ -944,6 +955,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
+            allowed_subagents=allowed_subagents,
         ),
         state_schema=get_thread_state_schema(mode),
     )

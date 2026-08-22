@@ -201,6 +201,11 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Controls which deployment-level subagents this custom agent may invoke:
+    # None = all currently enabled definitions, [] = none, list = allowlist.
+    # The default Lead Agent has no AgentConfig and therefore keeps access to
+    # the full catalog.
+    allowed_subagents: list[str] | None = None
     # Per-agent LLM sampling overrides (temperature / max_tokens) layered on top
     # of the referenced model profile. None = no overrides (issue #4336).
     model_settings: AgentModelSettings | None = None
@@ -232,6 +237,7 @@ MANAGED_AGENT_CONFIG_FIELDS: frozenset[str] = frozenset(
         "model",
         "tool_groups",
         "skills",
+        "allowed_subagents",
         "model_settings",
         "thinking_enabled",
         "reasoning_effort",
