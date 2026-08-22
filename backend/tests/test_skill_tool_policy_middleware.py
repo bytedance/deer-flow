@@ -12,6 +12,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 
 from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, write_slash_skill_source_path
+from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import Skill, SkillCategory
 
 _SLASH_SOURCE_OWNER_TOKEN = "test-slash-source-owner"
@@ -167,6 +168,45 @@ def test_slash_activated_skill_filters_first_model_call_and_task():
     filtered = middleware._filter_model_request(request)
 
     assert _tool_names(filtered) == ["read_file", "review_skill_package"]
+
+
+def test_slash_activation_normalizes_unscoped_portable_tools_but_not_command_patterns(tmp_path):
+    skill_dir = tmp_path / "portable"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: portable\ndescription: Portable tools\nallowed-tools: WebFetch Bash(git:*)\n---\nBody\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, category=SkillCategory.CUSTOM)
+    assert skill is not None
+    context = {}
+    write_slash_skill_source_path(
+        context,
+        skill.get_container_file_path(),
+        owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    middleware = _middleware([skill])
+    request = ModelRequestStub(
+        [NamedTool("bash"), NamedTool("web_fetch"), NamedTool("web_search")],
+        context=context,
+    )
+
+    filtered = middleware.wrap_model_call(request, lambda model_request: model_request)
+
+    assert _tool_names(filtered) == ["web_fetch"]
+    assert (
+        middleware.wrap_tool_call(
+            ToolRequestStub("web_fetch", context=context),
+            lambda _: "executed",
+        )
+        == "executed"
+    )
+    blocked = middleware.wrap_tool_call(
+        ToolRequestStub("bash", context=context),
+        lambda _: "executed",
+    )
+    assert blocked.status == "error"
 
 
 @pytest.mark.parametrize("active_source", ["slash", "skill_context"])
