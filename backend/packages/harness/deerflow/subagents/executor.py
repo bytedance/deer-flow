@@ -497,6 +497,11 @@ class SubagentExecutor:
             self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
         else:
             self.model_name = None
+        # Resolve thinking_enabled: config explicit > False
+        self.thinking_enabled = config.thinking_enabled if config.thinking_enabled is not None else False
+        # Resolve reasoning_effort: config explicit > None
+        self.reasoning_effort = config.reasoning_effort
+
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.thread_id = thread_id
@@ -562,7 +567,12 @@ class SubagentExecutor:
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        # Clamp thinking_enabled when the subagent's model does not support thinking
+        if self.thinking_enabled:
+            model_cfg = next((m for m in app_config.models if m.name == self.model_name), None)
+            if model_cfg is not None and not model_cfg.supports_thinking:
+                self.thinking_enabled = False
+        model = create_chat_model(name=self.model_name, thinking_enabled=self.thinking_enabled, reasoning_effort=self.reasoning_effort, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 

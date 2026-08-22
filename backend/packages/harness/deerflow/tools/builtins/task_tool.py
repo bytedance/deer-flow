@@ -313,7 +313,7 @@ async def task_tool(
         if thread_id is None:
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
-        # Try to get parent model from configurable
+        # Try to get parent model and thinking config from configurable
         metadata = runtime.config.get("metadata", {})
         parent_model = metadata.get("model_name")
 
