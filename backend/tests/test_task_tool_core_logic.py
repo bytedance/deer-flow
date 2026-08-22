@@ -1,8 +1,10 @@
 """Core behavior tests for task tool orchestration."""
 
 import asyncio
+import gc
 import importlib
 import inspect
+import weakref
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -1858,7 +1860,6 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
 @pytest.mark.asyncio
 async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
     """Verify deferred cleanup task is retained in _deferred_cleanup_tasks and completes after GC."""
-    import gc, weakref
     cleaned = []
     orig_sleep = asyncio.sleep
 
@@ -1882,8 +1883,3 @@ async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
 
     assert cleaned == ["exec-gc"]
     assert weak_task() not in task_tool_module._deferred_cleanup_tasks
-
-
-
-
-
