@@ -90,7 +90,8 @@ Each mount has these fixed limits:
 The full sandbox creation pass also allows 512 MiB and 2,000 files. Skill
 projections and configured mounts share this budget.
 
-The pass has a cooperative 120-second deadline. The provider checks it before
+The pass has a cooperative deadline controlled by
+``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
 each mount, during directory preflight, and before each SDK write. The deadline
 does not interrupt active filesystem or E2B SDK calls.
 
@@ -101,3 +102,12 @@ An invalid mount does not block later mounts.
 Each successful upload logs its source, destination, file count, byte count, and elapsed time.
 
 A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
+
+A ``MountUploadResult`` is attached to ``E2BSandbox.mount_upload_result``
+after creation. ``result.truncated`` is ``True`` only when the upload pass
+was stopped early by a resource limit (deadline, file count cap, or byte
+budget).  Individual mount failures (missing host path, SDK errors) are
+logged but do NOT set ``truncated``.  ``None`` on a reclaimed sandbox
+means "not available" — the result was recorded at creation time and is
+preserved within the same Gateway process lifetime via a provider-level
+map.
