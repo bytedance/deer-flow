@@ -800,3 +800,120 @@ class TestClarificationDisabled:
         merged = add_messages(add_messages([], [first_message]), [second_message])
 
         assert len(merged) == 1
+
+
+class TestDropParallelSiblingTools:
+    """after_model must drop sibling tools when ask_clarification is in the same turn.
+
+    langchain's return_direct router inspects all client-side tool calls of the
+    last AIMessage and routes to END only when every one is return_direct, so a
+    parallel bash/write_file would both execute and keep the agent loop alive.
+    """
+
+    def _runtime(self, **context):
+        return SimpleNamespace(context=context)
+
+    def _ai(self, tool_calls, content=""):
+        from langchain_core.messages import AIMessage
+
+        return AIMessage(content=content, tool_calls=tool_calls)
+
+    def test_drops_siblings_when_clarification_is_first(self, middleware):
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "Which dir?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "rm -rf /tmp/foo"}},
+            ]
+        )
+        update = middleware.after_model({"messages": [msg]}, self._runtime())
+        assert update is not None
+        patched = update["messages"][0]
+        assert [tc["name"] for tc in patched.tool_calls] == ["ask_clarification"]
+        assert patched.id == msg.id
+
+    def test_drops_siblings_when_clarification_is_last(self, middleware):
+        msg = self._ai(
+            [
+                {"id": "b1", "name": "bash", "args": {"command": "echo hi"}},
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+            ]
+        )
+        update = middleware.after_model({"messages": [msg]}, self._runtime())
+        assert update is not None
+        assert [tc["name"] for tc in update["messages"][0].tool_calls] == ["ask_clarification"]
+
+    def test_leaves_solo_clarification_unchanged(self, middleware):
+        msg = self._ai([{"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}}])
+        assert middleware.after_model({"messages": [msg]}, self._runtime()) is None
+
+    def test_leaves_non_clarification_turn_unchanged(self, middleware):
+        msg = self._ai(
+            [
+                {"id": "b1", "name": "bash", "args": {"command": "ls"}},
+                {"id": "w1", "name": "write_file", "args": {"path": "a.txt"}},
+            ]
+        )
+        assert middleware.after_model({"messages": [msg]}, self._runtime()) is None
+
+    def test_disable_clarification_keeps_sibling_tools(self, middleware):
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "echo hi"}},
+            ]
+        )
+        assert middleware.after_model({"messages": [msg]}, self._runtime(disable_clarification=True)) is None
+
+    def test_strips_matching_tool_use_content_blocks(self, middleware):
+        content = [
+            {"type": "text", "text": "asking"},
+            {"type": "tool_use", "id": "c1", "name": "ask_clarification", "input": {"question": "q?"}},
+            {"type": "tool_use", "id": "b1", "name": "bash", "input": {"command": "rm -rf /"}},
+        ]
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "rm -rf /"}},
+            ],
+            content=content,
+        )
+        patched = middleware.after_model({"messages": [msg]}, self._runtime())["messages"][0]
+        assert patched.content == [
+            {"type": "text", "text": "asking"},
+            {"type": "tool_use", "id": "c1", "name": "ask_clarification", "input": {"question": "q?"}},
+        ]
+
+    def test_strips_idless_gemini_function_call_content_blocks(self, middleware):
+        # Gemini-style function_call blocks have no id; langchain synthesizes
+        # ids onto tool_calls only. Matching by id would leave the dropped
+        # sibling's content block in the transcript.
+        content = [
+            {"type": "text", "text": "asking"},
+            {"type": "function_call", "name": "ask_clarification", "args": {"question": "q?"}},
+            {"type": "function_call", "name": "bash", "args": {"command": "rm -rf /"}},
+        ]
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "rm -rf /"}},
+            ],
+            content=content,
+        )
+        patched = middleware.after_model({"messages": [msg]}, self._runtime())["messages"][0]
+        assert patched.content == [
+            {"type": "text", "text": "asking"},
+            {"type": "function_call", "name": "ask_clarification", "args": {"question": "q?"}},
+        ]
+        assert [tc["name"] for tc in patched.tool_calls] == ["ask_clarification"]
+
+    def test_aafter_model_matches_sync(self, middleware):
+        import asyncio
+
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "echo hi"}},
+            ]
+        )
+        update = asyncio.run(middleware.aafter_model({"messages": [msg]}, self._runtime()))
+        assert [tc["name"] for tc in update["messages"][0].tool_calls] == ["ask_clarification"]
