@@ -22,6 +22,7 @@ from deerflow.agents.thread_state import (
     merge_sandbox,
     merge_skill_context,
     merge_todos,
+    merge_tool_artifacts,
     merge_viewed_images,
 )
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
@@ -354,6 +355,11 @@ class TestThreadStateAnnotations:
         hints = get_type_hints(ThreadState, include_extras=True)
         assert merge_skill_context in hints["skill_context"].__metadata__
 
+    def test_tool_artifacts_field_is_wired_to_merge_tool_artifacts(self):
+        """ThreadState.tool_artifacts must merge artifact records by handle."""
+        hints = get_type_hints(ThreadState, include_extras=True)
+        assert merge_tool_artifacts in hints["tool_artifacts"].__metadata__
+
     def test_public_reducer_field_names_match_thread_state_contract(self):
         assert THREAD_STATE_REDUCER_FIELDS == {
             "messages",
@@ -365,4 +371,5 @@ class TestThreadStateAnnotations:
             "promoted",
             "delegations",
             "skill_context",
+            "tool_artifacts",
         }

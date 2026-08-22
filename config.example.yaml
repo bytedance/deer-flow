@@ -1063,6 +1063,26 @@ tool_output:
   #   bash: 20000
 
 # ============================================================================
+# Tool Artifact Handle Registry Configuration (issue #4676)
+# ============================================================================
+# Captures lightweight artifact references (paths, URLs, task ids) from tool
+# results into durable per-thread state (`ThreadState.tool_artifacts`) so they
+# survive context compaction. The model references artifacts by short handles
+# (`art_xxxxxxxx`) that are resolved to real references before tool execution.
+# Handles are listed in the model context and rendered as badges in the UI.
+
+tool_artifacts:
+  enabled: true
+  # Maximum artifact entries retained per thread.
+  max_entries: 100
+  # Conservatively scan free-text tool results for sandbox paths / remote file URLs.
+  detect_refs_in_text: true
+  # Project available artifact handles into the model request as durable context.
+  inject_model_context: true
+  # Resolve artifact handles found in tool arguments to real references before execution.
+  resolve_handles_in_args: true
+
+# ============================================================================
 # Suggestions Configuration
 # ============================================================================
 # Configure whether the agent automatically generates follow-up question

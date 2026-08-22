@@ -165,6 +165,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SubagentDateContextMiddleware
     # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
+    # + 1 ArtifactResolutionMiddleware + 1 ArtifactCaptureMiddleware
+    #   (tool_artifacts enabled by default, #4676).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -174,7 +176,7 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
 
-    assert len(middlewares) == 18
+    assert len(middlewares) == 20
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
@@ -226,6 +228,70 @@ def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatc
     progress_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolProgressMiddleware))
     error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
     assert progress_idx < error_idx, f"ToolProgressMiddleware (index {progress_idx}) must be outer (lower index) than ToolErrorHandlingMiddleware (index {error_idx}); order: {[type(m).__name__ for m in middlewares]}"
+
+
+def test_artifact_middlewares_ordering_in_runtime_chain(monkeypatch: pytest.MonkeyPatch):
+    # ArtifactResolutionMiddleware must sit inner of ToolProgressMiddleware and
+    # outer of ToolErrorHandlingMiddleware (resolved args reach the tool);
+    # ArtifactCaptureMiddleware must sit outer of ToolErrorHandlingMiddleware
+    # (it sees normalized results) — issue #4676.
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+    from deerflow.config.tool_progress_config import ToolProgressConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_progress=ToolProgressConfig(enabled=True),
+        tool_artifacts=ToolArtifactConfig(enabled=True, resolve_handles_in_args=True),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+    names = [type(m).__name__ for m in middlewares]
+
+    resolution_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactResolutionMiddleware))
+    capture_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ArtifactCaptureMiddleware))
+    error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
+    assert resolution_idx < error_idx < capture_idx, f"expected resolution < error < capture, got: {names}"
+
+
+def test_artifact_capture_absent_when_disabled(monkeypatch: pytest.MonkeyPatch):
+    from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+    from deerflow.config.tool_artifact_config import ToolArtifactConfig
+
+    app_config = AppConfig(
+        models=[
+            ModelConfig(
+                name="test-model",
+                display_name="test-model",
+                description=None,
+                use="langchain_openai:ChatOpenAI",
+                model="test-model",
+            )
+        ],
+        sandbox=SandboxConfig(use="test"),
+        guardrails=GuardrailsConfig(enabled=False),
+        circuit_breaker=CircuitBreakerConfig(failure_threshold=7, recovery_timeout_sec=11),
+        tool_artifacts=ToolArtifactConfig(enabled=False),
+    )
+
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
+    assert not any(isinstance(m, ArtifactCaptureMiddleware) for m in middlewares)
 
 
 def test_middleware_ordering_guard_moved_to_declarative_constraints(monkeypatch: pytest.MonkeyPatch):

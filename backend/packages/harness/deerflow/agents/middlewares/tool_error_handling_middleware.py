@@ -275,7 +275,28 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
+    # Artifact handle resolution runs inner of ToolProgressMiddleware so blocked
+    # or failing tools never resolve handles unnecessarily, and outer of
+    # ToolErrorHandlingMiddleware so the resolved args are what actually reaches
+    # the tool. It mutates only the tool-call args (resolving `art_xxxxxxxx`
+    # handles to real references), never the message history.
+    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
+        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+
+        tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
+
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
+
+    # Artifact capture runs outer of ToolErrorHandlingMiddleware so it sees the
+    # normalized result (errors already converted to error ToolMessages, which
+    # the capture middleware skips). It captures lightweight metadata only, so
+    # ToolOutputBudgetMiddleware truncating the content does not affect it.
+    if app_config.tool_artifacts.enabled:
+        from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+        from deerflow.agents.thread_state import configure_tool_artifact_max_entries
+
+        configure_tool_artifact_max_entries(app_config.tool_artifacts.max_entries)
+        tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
@@ -461,6 +482,7 @@ def build_subagent_runtime_middlewares(
         DurableContextMiddleware(
             skills_container_path=app_config.skills.container_path,
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+            inject_tool_artifacts=app_config.tool_artifacts.enabled and app_config.tool_artifacts.inject_model_context,
         )
     )
 
