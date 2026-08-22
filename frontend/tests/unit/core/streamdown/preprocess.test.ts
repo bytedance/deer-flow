@@ -321,7 +321,16 @@ test("stripLeakedSystemTags handles no tags present", () => {
   expect(stripLeakedSystemTags(input)).toBe(input);
 });
 
-test("stripLeakedSystemTags strips <uploaded_files> tag", () => {
+test("stripLeakedSystemTags strips <current_uploads> tag", () => {
+  expect(
+    stripLeakedSystemTags("<current_uploads>file.pdf</current_uploads>"),
+  ).toBe("file.pdf");
+});
+
+test("stripLeakedSystemTags strips legacy <uploaded_files> tag", () => {
+  // Display-only backward compatibility (#4212): pre-#4174 history still
+  // carries <uploaded_files> blocks; the leaked-tag stripper keeps handling
+  // the legacy spelling so old threads do not render raw XML.
   expect(
     stripLeakedSystemTags("<uploaded_files>file.pdf</uploaded_files>"),
   ).toBe("file.pdf");
