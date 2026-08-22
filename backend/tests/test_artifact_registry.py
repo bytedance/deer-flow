@@ -80,6 +80,44 @@ def test_extract_from_image_block():
     assert entries[0]["real_ref"] == "/mnt/user-data/outputs/chart.png"
 
 
+def test_file_block_rejects_data_and_blob_urls():
+    """Embedded-resource URIs must never enter the registry or tool args."""
+    result = ToolMessage(
+        content=[
+            {"type": "file", "source": {"type": "url", "url": "data:text/plain;base64,QUFB" + "A" * 500}},
+            {"type": "image", "source": {"type": "url", "url": "blob:https://example.com/uuid"}},
+            {"type": "file", "source": {"type": "url", "url": "//cdn.example.com/pixel.gif"}},
+            {"type": "file", "source": {"type": "url", "url": "/mnt/user-data/outputs/real.txt"}},
+        ],
+        tool_call_id="call-2b",
+        name="mcp_embedded",
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    refs = {entry["real_ref"] for entry in entries}
+    assert refs == {"/mnt/user-data/outputs/real.txt"}
+
+
+def test_structured_url_key_rejects_non_http_uris():
+    """Structured refs get the same URI-shape gate as content blocks."""
+    result = ToolMessage(
+        content=[{"type": "text", "text": "done"}],
+        tool_call_id="call-4g",
+        name="mcp_embedded",
+        artifact={
+            "structured_content": {
+                "url": "data:text/html;base64,PGh0bWw+" + "Q" * 300,
+                "file": "/mnt/user-data/outputs/keep.md",
+                "task_id": "job-11",
+            }
+        },
+    )
+    entries = extract_artifacts_from_result(result, thread_id="thread-1")
+    refs = {entry["real_ref"] for entry in entries}
+    assert refs == {"/mnt/user-data/outputs/keep.md", "job-11"}
+    types = {entry["real_ref"]: entry["artifact_type"] for entry in entries}
+    assert types["job-11"] == "task"
+
+
 def test_extract_from_text_with_path():
     result = ToolMessage(
         content=[{"type": "text", "text": "Report saved to /mnt/user-data/outputs/report.html"}],
@@ -348,6 +386,36 @@ def test_merge_tool_artifacts_empty_new_preserves_existing():
     assert merged == existing
     merged2 = merge_tool_artifacts(existing, [])
     assert merged2 == existing
+
+
+def test_merge_tool_artifacts_trim_directive_slides_window():
+    """A trailing trim directive makes the configured cap a sliding window."""
+    existing = [_entry(f"art_{i:08x}", i) for i in range(20)]
+    fresh = [_entry(f"art_new{i:02x}", 100 + i) for i in range(2)]
+    update = [*fresh, {"op": "trim_to", "keep": 20}]
+
+    merged = merge_tool_artifacts(existing, update)
+
+    assert len(merged) == 20
+    assert merged[0]["handle"] == "art_00000002", "oldest two must be evicted"
+    handles = {entry["handle"] for entry in merged}
+    assert {f"art_new{i:02x}" for i in range(2)} <= handles, "fresh entries must survive"
+    assert "art_00000000" not in handles and "art_00000001" not in handles
+
+
+def test_merge_tool_artifacts_no_trim_without_directive():
+    existing = [_entry(f"art_{i:08x}", i) for i in range(5)]
+    fresh = [_entry(f"art_new{i:02x}", 50 + i) for i in range(2)]
+    merged = merge_tool_artifacts(existing, fresh)
+    assert len(merged) == 7
+
+
+def test_merge_tool_artifacts_trim_clamped_to_ceiling():
+    entries = [_entry(f"art_{i:08x}", i) for i in range(1200)]
+    update = [*entries, {"op": "trim_to", "keep": 5000}]
+    merged = merge_tool_artifacts(None, update)
+    assert len(merged) == 1000
+    assert merged[0]["handle"] == f"art_{200:08x}"
 
 
 def test_merge_tool_artifacts_cap():

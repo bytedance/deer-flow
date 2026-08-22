@@ -45,7 +45,22 @@ _STRUCTURED_TASK_KEYS = frozenset({"task_id", "job_id"})
 # commonly wraps paths in. `\S+` would otherwise consume them into `real_ref`.
 _REF_TRAILING_NOISE_CHARS = ".,;:)]}\"'`"
 
+# Content-block and structured-key refs are trusted only in these shapes.
+# `data:`/`blob:` URIs can carry arbitrarily large embedded payloads (MCP
+# embedded resources) that must never enter thread state, tool args, or crowd
+# out the render budget; other schemes are equally unresolvable downstream.
+_ACCEPTED_URL_SHAPES = ("http://", "https://", "/")
+_REJECTED_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.\-]*:")
+
 _ARTIFACT_RENDER_CHAR_BUDGET = 3000
+
+
+def _is_referenceable_url(url: str) -> bool:
+    """Accept http(s) URLs and absolute paths; reject any other URI scheme
+    (including protocol-relative `//host` forms)."""
+    if url.startswith("//"):
+        return False
+    return not _REJECTED_SCHEME_RE.match(url) or url.startswith(_ACCEPTED_URL_SHAPES)
 
 
 def generate_handle(thread_id: str, tool_call_id: str, call_index: int, ref_ordinal: int = 0) -> str:
@@ -216,6 +231,8 @@ def extract_artifacts_from_result(
             _collect_structured_refs(structured, found)
             if found:
                 for key, value in found:
+                    if not _is_referenceable_url(value):
+                        continue
                     entries.append(
                         sink.add(
                             artifact_type="task" if key in _STRUCTURED_TASK_KEYS else "file",
@@ -251,7 +268,7 @@ def extract_artifacts_from_result(
             if not isinstance(source, dict):
                 continue
             url = source.get("url")
-            if isinstance(url, str) and url:
+            if isinstance(url, str) and url and _is_referenceable_url(url):
                 entries.append(
                     sink.add(
                         artifact_type="file" if block_type == "file" else "image",

@@ -119,8 +119,8 @@ class TestCapture:
 
         assert middleware.before_model(state, _runtime()) is None
 
-    def test_capture_respects_configured_max_entries(self):
-        """The configured cap is enforced per-agent by the middleware, not by a process global."""
+    def test_capture_slides_window_at_configured_cap(self):
+        """At the configured cap, fresh captures evict the oldest entries instead of being dropped."""
         middleware = ArtifactCaptureMiddleware(config=ToolArtifactConfig(max_entries=20))
         existing = [
             {
@@ -131,14 +131,90 @@ class TestCapture:
                 "tool_name": "write_file",
                 "consumed_by": [],
             }
-            for i in range(18)
+            for i in range(20)
         ]
-        messages = [ToolMessage(content="wrote file", tool_call_id=f"call_new_{i}", artifact={"structured_content": {"file": f"/mnt/user-data/outputs/new_{i}.md"}}) for i in range(5)]
+        messages = [
+            ToolMessage(
+                content="wrote file",
+                tool_call_id=f"call_new_{i}",
+                artifact={"structured_content": {"file": f"/mnt/user-data/outputs/new_{i}.md"}},
+            )
+            for i in range(2)
+        ]
 
         out = middleware.before_model({"messages": messages, "tool_artifacts": existing}, _runtime())
 
         assert out is not None
-        assert len(out["tool_artifacts"]) == 2, "must emit only up to the remaining budget"
+        update = out["tool_artifacts"]
+        assert update[-1].get("op") == "trim_to" and update[-1]["keep"] == 20, "trim directive must ride along"
+        fresh_handles = {entry["handle"] for entry in update[:2]}
+        assert fresh_handles == {generate_handle("thread_1", f"call_new_{i}", 0) for i in range(2)}
+
+        from deerflow.agents.thread_state import merge_tool_artifacts
+
+        merged = merge_tool_artifacts(existing, update)
+        assert len(merged) == 20
+        merged_handles = {entry["handle"] for entry in merged}
+        assert all(handle in merged_handles for handle in fresh_handles), "fresh artifacts must be registered"
+        assert generate_handle("thread_1", "call_old_0", 0) not in merged_handles, "oldest must be evicted"
+        assert generate_handle("thread_1", "call_old_19", 0) in merged_handles, "recent entries must survive"
+
+    def test_disabled_flag_disables_whole_middleware_including_consumption(self):
+        middleware = ArtifactCaptureMiddleware(config=ToolArtifactConfig(enabled=False))
+        entry = {
+            "handle": generate_handle("thread_1", "call_1", 0),
+            "artifact_type": "file",
+            "real_ref": "/mnt/user-data/outputs/report.md",
+            "display_name": "report.md",
+            "tool_name": "write_file",
+            "consumed_by": [],
+        }
+        state = {
+            "tool_artifacts": [entry],
+            "messages": [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "read_file", "args": {"path": entry["handle"]}, "id": "call_2", "type": "tool_call"}],
+                )
+            ],
+        }
+
+        assert middleware.before_model(state, _runtime()) is None
+
+    def test_consumption_scan_memoized_across_rounds(self, monkeypatch):
+        """Historical AIMessage args must not be regex-rescanned once settled."""
+        middleware = ArtifactCaptureMiddleware()
+        entry = {
+            "handle": generate_handle("thread_1", "call_1", 0),
+            "artifact_type": "file",
+            "real_ref": "/mnt/user-data/outputs/report.md",
+            "display_name": "report.md",
+            "tool_name": "write_file",
+            "consumed_by": [],
+        }
+        ai_message = AIMessage(
+            content="",
+            tool_calls=[{"name": "read_file", "args": {"path": entry["handle"]}, "id": "call_2", "type": "tool_call"}],
+        )
+
+        scan_calls: list[str] = []
+        original = ArtifactCaptureMiddleware._find_handles
+
+        def counting_find_handles(self, value):
+            scan_calls.append("scan")
+            return original(self, value)
+
+        monkeypatch.setattr(ArtifactCaptureMiddleware, "_find_handles", counting_find_handles)
+
+        first = middleware.before_model({"messages": [ai_message], "tool_artifacts": [entry]}, _runtime())
+        assert first is not None and first["tool_artifacts"][0]["consumed_by"] == ["call_2"]
+        scans_after_first = len(scan_calls)
+
+        settled_state = {"messages": [ai_message], "tool_artifacts": first["tool_artifacts"]}
+        second = middleware.before_model(settled_state, _runtime())
+
+        assert second is None or "tool_artifacts" not in (second or {})
+        assert len(scan_calls) == scans_after_first, "settled tool calls must be skipped without rescanning"
 
     def test_capture_skips_already_seen_and_empty_results(self, monkeypatch):
         """Steady-state cost must drop to the new message tail, not full history."""

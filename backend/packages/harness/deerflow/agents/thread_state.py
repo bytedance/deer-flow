@@ -294,7 +294,11 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
     - new None/empty -> preserve existing.
     - append entries, replacing same handle with the latest version while
       preserving first-seen order (latest wins, e.g. for consumption updates).
-    - cap by keeping the most recent entries.
+    - a trailing ``{"op": "trim_to", "keep": N}`` directive (emitted by the
+      capture middleware) makes the configured cap a sliding window: the
+      oldest entries beyond N are evicted. Without a directive nothing is
+      evicted, so updates stay purely additive.
+    - absolute ceiling of 1000 applies regardless.
     """
     if not new:
         return existing or []
@@ -302,12 +306,22 @@ def merge_tool_artifacts(existing: list[ArtifactEntry] | None, new: list[Artifac
     by_handle: dict[str, ArtifactEntry] = {}
     order: list[str] = []
     for entry in [*(existing or []), *new]:
+        if not isinstance(entry, dict) or "handle" not in entry:
+            continue
         handle = entry["handle"]
         if handle not in by_handle:
             order.append(handle)
         by_handle[handle] = entry
 
     merged = [by_handle[handle] for handle in order]
+
+    for item in reversed(new):
+        if isinstance(item, dict) and item.get("op") == "trim_to":
+            keep = min(int(item.get("keep", len(merged))), _ARTIFACT_MAX_ENTRIES_CEILING)
+            if keep < len(merged):
+                merged = merged[-keep:]
+            break
+
     if len(merged) > _ARTIFACT_MAX_ENTRIES_CEILING:
         merged = merged[-_ARTIFACT_MAX_ENTRIES_CEILING:]
     return merged

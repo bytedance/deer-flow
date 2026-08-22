@@ -1073,7 +1073,8 @@ tool_output:
 
 tool_artifacts:
   enabled: true
-  # Maximum artifact entries retained per thread.
+  # Maximum artifact entries retained per thread (a sliding window: the
+  # oldest entries are evicted when the cap is exceeded).
   max_entries: 100
   # Conservatively scan free-text tool results for sandbox paths / remote file URLs.
   detect_refs_in_text: true

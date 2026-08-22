@@ -31,19 +31,27 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
         super().__init__()
         self._config = config or ToolArtifactConfig()
         self._handle_re = re.compile(_HANDLE_PATTERN)
-        # Bounded memo of (thread_id, tool_call_id, detect flag) triples whose
-        # extraction yielded nothing, so ref-free results are not re-scanned on
-        # every model call. FIFO-evicted to keep memory bounded.
+        # Bounded memos (FIFO-evicted) so steady-state cost stays on the new
+        # message tail instead of a full-history rescan per model call:
+        # - _empty_results: extraction yielded nothing for this tool result
+        # - _quiet_calls: args scan produced no new consumption for this call
         self._empty_results: dict[tuple[str, str, bool], None] = {}
-        self._EMPTY_MEMO_LIMIT = 4096
+        self._quiet_calls: dict[tuple[str, str], None] = {}
+        self._MEMO_LIMIT = 4096
 
     @override
     def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._merge_updates(self._capture(state, runtime), self._track_consumption(state))
+        if not self._config.enabled:
+            return None
+        thread_id = self._thread_id(runtime)
+        return self._merge_updates(self._capture(state, runtime), self._track_consumption(state, thread_id))
 
     @override
     async def abefore_model(self, state: AgentState, runtime: Runtime) -> dict | None:
-        return self._merge_updates(self._capture(state, runtime), self._track_consumption(state))
+        if not self._config.enabled:
+            return None
+        thread_id = self._thread_id(runtime)
+        return self._merge_updates(self._capture(state, runtime), self._track_consumption(state, thread_id))
 
     @staticmethod
     def _merge_updates(*updates: dict | None) -> dict | None:
@@ -108,21 +116,30 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                 existing_handles.add(entry["handle"])
                 new_entries.append(entry)
 
-        # Per-agent configured cap: emit only up to the remaining budget so the
-        # registry converges to `max_entries` without any process-wide state.
-        budget = max(0, self._config.max_entries - len(existing))
-        new_entries = new_entries[:budget]
-
-        if new_entries:
-            return {"tool_artifacts": new_entries}
-        return None
+        if not new_entries:
+            return None
+        # Configured cap as a sliding window: when the projection exceeds it,
+        # a trailing trim directive makes the reducer evict the oldest entries
+        # (latest-wins merge keeps everything else intact). Fresh captures —
+        # typically the artifacts that post-date compaction and matter most —
+        # are always registered; nothing freezes at the cap.
+        projected = len(existing) + len(new_entries)
+        if projected > self._config.max_entries:
+            return {"tool_artifacts": [*new_entries, {"op": "trim_to", "keep": self._config.max_entries}]}
+        return {"tool_artifacts": new_entries}
 
     def _remember_empty(self, memo_key: tuple[str, str, bool]) -> None:
-        while len(self._empty_results) >= self._EMPTY_MEMO_LIMIT:
-            self._empty_results.pop(next(iter(self._empty_results)))
-        self._empty_results[memo_key] = None
+        self._remember_bounded(self._empty_results, memo_key)
 
-    def _track_consumption(self, state: AgentState) -> dict | None:
+    def _remember_quiet(self, quiet_key: tuple[str, str]) -> None:
+        self._remember_bounded(self._quiet_calls, quiet_key)
+
+    def _remember_bounded(self, memo: dict, key) -> None:  # noqa: ANN001
+        while len(memo) >= self._MEMO_LIMIT:
+            memo.pop(next(iter(memo)))
+        memo[key] = None
+
+    def _track_consumption(self, state: AgentState, thread_id: str = "") -> dict | None:
         existing = state.get("tool_artifacts") or []
         if not existing:
             return None
@@ -140,6 +157,13 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                 args = tool_call.get("args")
                 if not tool_call_id or not isinstance(args, dict):
                     continue
+                # Args are immutable once in state, so one scan settles a tool
+                # call forever: after this round it can never produce new
+                # consumption. Memoize immediately to keep later rounds off the
+                # regex entirely.
+                quiet_key = (thread_id, tool_call_id)
+                if quiet_key in self._quiet_calls:
+                    continue
                 for handle in self._find_handles(args):
                     entry = handle_map.get(handle)
                     if entry is None:
@@ -150,6 +174,7 @@ class ArtifactCaptureMiddleware(AgentMiddleware[AgentState]):
                     updated: dict[str, Any] = {**entry, "consumed_by": [*consumed, tool_call_id]}
                     consumed_updates.append(cast(ArtifactEntry, updated))
                     handle_map[handle] = consumed_updates[-1]
+                self._remember_quiet(quiet_key)
 
         if consumed_updates:
             return {"tool_artifacts": consumed_updates}
