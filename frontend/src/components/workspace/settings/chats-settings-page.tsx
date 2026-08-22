@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ThreadChannelIcon } from "@/components/workspace/thread-channel-source";
+import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
 import {
@@ -118,39 +119,44 @@ export function ChatsSettingsPage() {
         </div>
       ) : filteredThreads.length > 0 ? (
         <div className="overflow-hidden rounded-lg border">
-          {filteredThreads.map((thread) => {
-            const channelSource = channelSourceOfThread(thread);
-            return (
-              <Link
-                key={thread.thread_id}
-                href={pathOfThread(thread)}
-                className="hover:bg-secondary/50 flex min-h-14 items-center gap-3 border-b px-4 transition-colors last:border-b-0"
-              >
-                <ThreadChannelIcon source={channelSource} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm font-medium">
-                    {titleOfThread(thread)}
-                  </div>
-                  <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
-                    <span>
-                      {thread.updated_at
-                        ? formatTimeAgo(thread.updated_at)
-                        : "—"}
-                    </span>
-                    {channelSource ? (
-                      <span className="bg-muted rounded px-1.5 py-0.5">
-                        {channelSource.label}
+          <VirtualThreadList
+            estimateSize={56}
+            items={filteredThreads}
+            scrollParentSelector='[data-slot="scroll-area-viewport"]'
+            renderItem={(thread) => {
+              const channelSource = channelSourceOfThread(thread);
+              return (
+                <Link
+                  key={thread.thread_id}
+                  href={pathOfThread(thread)}
+                  className="hover:bg-secondary/50 flex min-h-14 items-center gap-3 border-b px-4 transition-colors"
+                >
+                  <ThreadChannelIcon source={channelSource} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium">
+                      {titleOfThread(thread)}
+                    </div>
+                    <div className="text-muted-foreground mt-0.5 flex items-center gap-2 text-xs">
+                      <span>
+                        {thread.updated_at
+                          ? formatTimeAgo(thread.updated_at)
+                          : "—"}
                       </span>
-                    ) : null}
+                      {channelSource ? (
+                        <span className="bg-muted rounded px-1.5 py-0.5">
+                          {channelSource.label}
+                        </span>
+                      ) : null}
+                    </div>
                   </div>
-                </div>
-                <ChevronRight
-                  className="text-muted-foreground size-4 shrink-0"
-                  aria-hidden="true"
-                />
-              </Link>
-            );
-          })}
+                  <ChevronRight
+                    className="text-muted-foreground size-4 shrink-0"
+                    aria-hidden="true"
+                  />
+                </Link>
+              );
+            }}
+          />
           {hasNextPage && !isSearching ? (
             <div ref={sentinelRef} aria-hidden="true" className="h-px w-full" />
           ) : null}
