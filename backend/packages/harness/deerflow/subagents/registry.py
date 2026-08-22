@@ -76,7 +76,17 @@ def _expand_tool_groups(groups: list[str] | None, *, app_config: Any | None = No
     if full_config is None:
         logger.warning("Could not resolve app config for tool-group expansion; inheriting full tool pool")
         return None
-    return [tool.name for tool in full_config.tools if tool.group in groups]
+    expanded = [tool.name for tool in full_config.tools if tool.group in groups]
+    # A non-empty input that expands to nothing is almost always a typo'd group
+    # name (or a config-name/tool-object divergence, the #1803 failure mode):
+    # the subagent would silently run with zero tools. An explicit empty list is
+    # the documented "disable all tools" intent and stays warning-free.
+    if not expanded and groups:
+        logger.warning(
+            "Agent tool_groups %s expanded to no tools; the subagent will run without tools. Check group names against config.yaml.",
+            groups,
+        )
+    return expanded
 
 
 def _load_user_agent_record(name: str, *, user_id: str | None = None) -> tuple[Any, str | None] | None:

@@ -275,6 +275,38 @@ class TestFailurePaths:
             registry_module.get_subagent_config("restricted", user_id="u1")
         assert any("inheriting full tool pool" in r.message for r in caplog.records)
 
+    def test_typo_group_expands_to_empty_with_warning(self, api_agent_base: Path, caplog: pytest.LogCaptureFixture) -> None:
+        # A typo'd group name (or a config-name/tool-object divergence, the #1803
+        # failure mode) must not silently strip every tool from the subagent.
+        import logging
+
+        _write_user_agent(api_agent_base, "typo", {"tool_groups": ["weeb"]})
+        app_config = SimpleNamespace(
+            tools=[SimpleNamespace(name="web_search", group="web")],
+            subagents=SimpleNamespace(custom_agents={}, agents={}, timeout_seconds=1800, max_turns=None, get_model_for=lambda n: None, get_skills_for=lambda n: None),
+        )
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.registry"):
+            cfg = registry_module.get_subagent_config("typo", app_config=app_config, user_id="u1")
+        assert cfg is not None
+        assert cfg.tools == []
+        assert any("expanded to no tools" in r.message and "weeb" in r.message for r in caplog.records)
+
+    def test_explicit_empty_groups_stays_warning_free(self, api_agent_base: Path, caplog: pytest.LogCaptureFixture) -> None:
+        # An explicit empty tool_groups list is the documented "disable all tools"
+        # intent — it must not trigger the typo warning.
+        import logging
+
+        _write_user_agent(api_agent_base, "toolless", {"tool_groups": []})
+        app_config = SimpleNamespace(
+            tools=[SimpleNamespace(name="web_search", group="web")],
+            subagents=SimpleNamespace(custom_agents={}, agents={}, timeout_seconds=1800, max_turns=None, get_model_for=lambda n: None, get_skills_for=lambda n: None),
+        )
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.registry"):
+            cfg = registry_module.get_subagent_config("toolless", app_config=app_config, user_id="u1")
+        assert cfg is not None
+        assert cfg.tools == []
+        assert not any("expanded to no tools" in r.message for r in caplog.records)
+
     def test_unreadable_store_degrades_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # PermissionError / OSError from a broken store must degrade to the task
         # tool's clean unknown-type error, never propagate into the tool call.
