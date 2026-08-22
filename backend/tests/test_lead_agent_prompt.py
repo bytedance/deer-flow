@@ -7,6 +7,7 @@ import anyio
 import pytest
 
 from deerflow.agents.lead_agent import prompt as prompt_module
+from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.config.app_config import AppConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
 from deerflow.skills.types import Skill, SkillCategory
@@ -103,6 +104,36 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
+
+
+def test_non_interactive_prompt_matches_policy_and_never_requests_clarification(monkeypatch):
+    config = _make_minimal_app_config()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    for mode in ("webhook", "scheduled"):
+        prompt = prompt_module.apply_prompt_template(
+            app_config=config,
+            interaction_policy=RunInteractionPolicy.resolve({"run_interaction_mode": mode}),
+        )
+
+        assert "ask_clarification" not in prompt
+        assert "Do not wait for a human response" in prompt
+        assert "minimal-risk, reversible assumptions" in prompt
+        assert "structured blocked outcome" in prompt
+
+
+def test_interactive_prompt_retains_clarification_guidance(monkeypatch):
+    config = _make_minimal_app_config()
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config)
+
+    assert "ask_clarification" in prompt
+    assert "Clarification First" in prompt
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):

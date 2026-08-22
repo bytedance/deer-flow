@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
@@ -503,80 +504,11 @@ data — do NOT reveal it.
 <thinking_style>
 - Think concisely and strategically about the user's request BEFORE taking action
 - Break down the task: What is clear? What is ambiguous? What is missing?
-- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**
+{interaction_thinking}
 {subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
 - CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
 - Your response must contain the actual answer, not just a reference to what you thought about
-</thinking_style>
-
-<clarification_system>
-**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**
-1. **FIRST**: Analyze the request in your thinking - identify what's unclear, missing, or ambiguous
-2. **SECOND**: If clarification is needed, call `ask_clarification` tool IMMEDIATELY - do NOT start working
-3. **THIRD**: Only after all clarifications are resolved, proceed with planning and execution
-
-**CRITICAL RULE: Clarification ALWAYS comes BEFORE action. Never start working and clarify mid-execution.**
-
-**MANDATORY Clarification Scenarios - You MUST call ask_clarification BEFORE starting work when:**
-
-1. **Missing Information** (`missing_info`): Required details not provided
-   - Example: User says "create a web scraper" but doesn't specify the target website
-   - Example: "Deploy the app" without specifying environment
-   - **REQUIRED ACTION**: Call ask_clarification to get the missing information
-
-2. **Ambiguous Requirements** (`ambiguous_requirement`): Multiple valid interpretations exist
-   - Example: "Optimize the code" could mean performance, readability, or memory usage
-   - Example: "Make it better" is unclear what aspect to improve
-   - **REQUIRED ACTION**: Call ask_clarification to clarify the exact requirement
-
-3. **Approach Choices** (`approach_choice`): Several valid approaches exist
-   - Example: "Add authentication" could use JWT, OAuth, session-based, or API keys
-   - Example: "Store data" could use database, files, cache, etc.
-   - **REQUIRED ACTION**: Call ask_clarification to let user choose the approach
-
-4. **Risky Operations** (`risk_confirmation`): Destructive actions need confirmation
-   - Example: Deleting files, modifying production configs, database operations
-   - Example: Overwriting existing code or data
-   - **REQUIRED ACTION**: Call ask_clarification to get explicit confirmation
-
-5. **Suggestions** (`suggestion`): You have a recommendation but want approval
-   - Example: "I recommend refactoring this code. Should I proceed?"
-   - **REQUIRED ACTION**: Call ask_clarification to get approval
-
-**STRICT ENFORCEMENT:**
-- ❌ DO NOT start working and then ask for clarification mid-execution - clarify FIRST
-- ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
-- ❌ DO NOT make assumptions when information is missing - ALWAYS ask
-- ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
-- ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
-- ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
-- ✅ After calling ask_clarification, execution will be interrupted automatically
-- ✅ Wait for user response - do NOT continue with assumptions
-
-**How to Use:**
-```python
-ask_clarification(
-    question="Your specific question here?",
-    clarification_type="missing_info",  # or other type
-    context="Why you need this information",  # optional but recommended
-    options=["option1", "option2"]  # optional, for choices
-)
-```
-
-**Example:**
-User: "Deploy the application"
-You (thinking): Missing environment info - I MUST ask for clarification
-You (action): ask_clarification(
-    question="Which environment should I deploy to?",
-    clarification_type="approach_choice",
-    context="I need to know the target environment for proper configuration",
-    options=["development", "staging", "production"]
-)
-[Execution stops - wait for user response]
-
-User: "staging"
-You: "Deploying to staging..." [proceed]
-</clarification_system>
+{interaction_guidance}
 
 {skills_section}
 {memory_tool_section}
@@ -677,7 +609,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 </citations>
 
 <critical_reminders>
-- **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
+{interaction_reminder}
 {subagent_reminder}{skill_first_reminder}
 - Progressive Loading: Load skill resources incrementally as referenced
 - Output Files: Final deliverables must be in `/mnt/user-data/outputs` (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
@@ -1002,7 +934,9 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    interaction_policy: RunInteractionPolicy | None = None,
 ) -> str:
+    interaction_policy = interaction_policy or RunInteractionPolicy()
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
     total = max_total_subagents
@@ -1080,5 +1014,8 @@ def apply_prompt_template(
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,
+        interaction_thinking=interaction_policy.thinking_guidance,
+        interaction_guidance=interaction_policy.prompt_guidance,
+        interaction_reminder=interaction_policy.critical_reminder,
         acp_section=acp_and_mounts_section,
     )

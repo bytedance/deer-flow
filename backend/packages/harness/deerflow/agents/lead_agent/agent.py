@@ -48,6 +48,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthzDecision, AuthzRequest
@@ -713,7 +714,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
-    non_interactive = bool(cfg.get("non_interactive", False))
+    interaction_policy = RunInteractionPolicy.resolve(cfg)
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
@@ -812,7 +813,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
         )
         raw_tools = get_available_tools(model_name=model_name, subagent_enabled=subagent_enabled, app_config=resolved_app_config) + [setup_agent]
         configured_tools = raw_tools
-        if non_interactive:
+        if not interaction_policy.allows_clarification:
             configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
         authorization_candidates = [*configured_tools]
         if skill_setup.describe_skill_tool:
@@ -860,6 +861,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
                 deferred_names=setup.deferred_names,
                 user_id=resolved_user_id,
                 skill_names=skill_setup.skill_names or None,
+                interaction_policy=interaction_policy,
             ),
             state_schema=get_thread_state_schema(mode),
         )
@@ -893,7 +895,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
     # Default lead agent (unchanged behavior)
     raw_tools = get_available_tools(model_name=model_name, groups=agent_config.tool_groups if agent_config else None, subagent_enabled=subagent_enabled, app_config=resolved_app_config)
     configured_tools = raw_tools + extra_tools
-    if non_interactive:
+    if not interaction_policy.allows_clarification:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
     authorization_candidates = [*configured_tools]
     if skill_setup.describe_skill_tool:
@@ -944,6 +946,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig):
             mcp_routing_hints_section=mcp_routing_hints_section,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
+            interaction_policy=interaction_policy,
         ),
         state_schema=get_thread_state_schema(mode),
     )

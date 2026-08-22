@@ -1342,7 +1342,7 @@ Current MVP capabilities:
 - Manage tasks at `/workspace/scheduled-tasks`
 - Choose whether each scheduled task reuses a thread or creates a fresh thread per run
 - Support `once` and `cron` schedules
-- Run background scheduled executions as non-interactive DeerFlow runs (`ask_clarification` is not exposed there)
+- Run background scheduled executions as unattended DeerFlow runs: they do not wait for a human, make minimal-risk reversible assumptions, and report irreversible ambiguity as blocked
 - Use `skip` overlap behavior for due cron executions that collide with an active run on the same reused thread
 - Pause, resume, trigger, inspect history, and delete tasks
 - Execute scheduled work through the normal DeerFlow run lifecycle
