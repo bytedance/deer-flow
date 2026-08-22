@@ -247,15 +247,11 @@ export default function ScheduledTasksPage() {
               </div>
             </div>
           ) : null}
-<<<<<<< HEAD
           {isLoading ? (
             <div className="text-muted-foreground flex h-40 items-center justify-center text-sm">
               {t.common.loading}
             </div>
           ) : filteredData.length === 0 ? (
-=======
-          {filteredData.length === 0 ? (
->>>>>>> 35b57c28 (fix(frontend): mount SkinProvider in workspace and showcase layouts)
             queryError ? null : hasTasks ? (
               <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
                 <div className="bg-muted flex h-14 w-14 items-center justify-center rounded-full">
