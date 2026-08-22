@@ -1,10 +1,8 @@
 "use client";
 
 import {
-  BugIcon,
   ChevronsUpDown,
   GlobeIcon,
-  InfoIcon,
   MailIcon,
   Settings2Icon,
   SettingsIcon,
@@ -106,20 +104,10 @@ export function WorkspaceNavMenu() {
                   >
                     <DropdownMenuItem>
                       <GithubIcon />
-                      {t.workspace.visitGithub}
+                      {t.workspace.github}
                     </DropdownMenuItem>
                   </a>
                   <DropdownMenuSeparator />
-                  <a
-                    href="https://github.com/bytedance/deer-flow/issues"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <DropdownMenuItem>
-                      <BugIcon />
-                      {t.workspace.reportIssue}
-                    </DropdownMenuItem>
-                  </a>
                   <a href="mailto:support@deerflow.tech">
                     <DropdownMenuItem>
                       <MailIcon />
@@ -127,15 +115,6 @@ export function WorkspaceNavMenu() {
                     </DropdownMenuItem>
                   </a>
                 </DropdownMenuGroup>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  onClick={() => {
-                    openSettings("about");
-                  }}
-                >
-                  <InfoIcon />
-                  {t.workspace.about}
-                </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
           ) : (
