@@ -229,3 +229,13 @@ def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch
         assert isinstance(get_agent_store(), FileAgentStore)
     finally:
         reset_app_config()
+
+
+def test_get_agent_store_does_not_hide_invalid_config(monkeypatch):
+    """An invalid config must not silently switch a configured DB store to files."""
+    from deerflow.config import app_config
+
+    monkeypatch.setattr(app_config, "get_app_config", side_effect=ValueError("invalid config"))
+
+    with pytest.raises(ValueError, match="invalid config"):
+        get_agent_store()
