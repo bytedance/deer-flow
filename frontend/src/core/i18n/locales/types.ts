@@ -327,6 +327,7 @@ export interface Translations {
       prompt: string;
       submit: string;
       fillRequired: string;
+      invalidOnce: string;
     };
     context: {
       fresh: string;
