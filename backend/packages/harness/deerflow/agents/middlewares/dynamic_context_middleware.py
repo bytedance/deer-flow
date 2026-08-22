@@ -221,10 +221,14 @@ class DynamicContextMiddleware(AgentMiddleware):
     day see the corrected date in history and skip re-injection.
     """
 
-    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None):
+    def __init__(self, agent_name: str | None = None, *, app_config: AppConfig | None = None, disable_memory: bool = False):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        # Per-run opt-out (configurable.disable_memory_injection): skip the memory
+        # block while keeping the date reminder. The global memory.injection_enabled
+        # switch is unaffected.
+        self._disable_memory = disable_memory
 
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -236,7 +240,7 @@ class DynamicContextMiddleware(AgentMiddleware):
         """
         from deerflow.agents.lead_agent.prompt import _get_memory_context
 
-        injection_enabled = self._app_config.memory.injection_enabled if self._app_config else True
+        injection_enabled = (not self._disable_memory) and (self._app_config.memory.injection_enabled if self._app_config else True)
         memory_context = (
             _get_memory_context(
                 self._agent_name,
