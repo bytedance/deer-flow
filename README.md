@@ -837,6 +837,8 @@ is per-user (it never touches another user's credentials), validates the new
 credentials through the official CLI's live tenant-token probe before replacing
 the active app, and revokes/removes the previous app's OAuth tokens. A rejected
 credential change does not supersede an in-progress setup or authorization flow.
+The previous OAuth data is cleared before the CLI stores the replacement app,
+so the new file-backed keychain secret remains available during reconnection.
 DeerFlow then immediately opens browser authorization for the newly bound app so
 the switch ends in a usable connection.
 

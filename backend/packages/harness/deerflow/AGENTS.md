@@ -7,6 +7,16 @@ Request trace correlation is controlled by `logging.enhance.enabled` at **both**
 
 The same ContextVar value is injected into enhanced log records as `trace_id` and into Langfuse metadata as `deerflow_trace_id`.
 
+### Managed Lark CLI credentials (`integrations/lark_cli.py`)
+
+App registration and direct app switching replace the per-user Lark credential
+tree transactionally. Clear the old OAuth data before running `lark-cli config
+init`: on Linux that command writes the new app secret into the file-backed
+keychain under the data directory, so clearing the directory afterward would
+leave `config.json` with a dangling keychain reference. The transaction snapshot
+still supplies the previous OAuth data for logout and restores the complete old
+tree if any switch step fails.
+
 `logging` is registered as a **restart-required** field
 (`STARTUP_ONLY_FIELDS["logging"]`): `configure_logging()` installs the trace-context
 filter and enhanced formatter on root handlers only during app.py lifespan startup,
