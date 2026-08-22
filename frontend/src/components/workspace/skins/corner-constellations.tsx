@@ -56,6 +56,7 @@ export function CornerConstellations({
   const [placed, setPlaced] = useState(HOMES);
   const placedRef = useRef(HOMES);
   const localRef = useRef({ x: -200, y: -200 });
+  const armRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (skin !== "observatory") return;
@@ -67,6 +68,7 @@ export function CornerConstellations({
         x: ((event.clientX - rect.left) / rect.width) * 160,
         y: ((event.clientY - rect.top) / rect.height) * 120,
       };
+      armRef.current?.();
     };
     window.addEventListener("pointermove", onMove, { passive: true });
     return () => window.removeEventListener("pointermove", onMove);
@@ -95,11 +97,20 @@ export function CornerConstellations({
         setPlaced(next);
         const box = svgRef.current?.getBoundingClientRect();
         if (box) onStars?.(next.map((star) => toScreen(star, box)));
+        frame = window.requestAnimationFrame(tick);
+      } else {
+        frame = 0;
       }
-      frame = window.requestAnimationFrame(tick);
     };
-    frame = window.requestAnimationFrame(tick);
-    return () => window.cancelAnimationFrame(frame);
+    const arm = () => {
+      if (frame === 0) frame = window.requestAnimationFrame(tick);
+    };
+    armRef.current = arm;
+    arm();
+    return () => {
+      armRef.current = null;
+      window.cancelAnimationFrame(frame);
+    };
   }, [onStars, skin]);
 
   const byId = Object.fromEntries(placed.map((star) => [star.id, star]));
