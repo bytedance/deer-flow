@@ -111,10 +111,17 @@ make gateway            # Run Gateway API only (port 8001)
 make test               # Run offline backend tests (excludes live external-API tests)
 make test-live          # Explicitly run live DeerFlowClient tests with real APIs
 make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
+make benchmark          # Run informational runtime/config hot-path benchmarks
 make lint               # Lint with ruff
 make format             # Format code with ruff
 make migrate-rev MSG="..."  # Autogenerate a new alembic revision (see Schema Migrations section)
 ```
+
+The deterministic offline benchmark suite lives in `backend/benchmarks/` and
+uses `pytest-benchmark`. It is intentionally separate from `make test`, has no
+hard performance thresholds, and runs in a non-blocking daily/manual workflow.
+Pass additional plugin options through `BENCHMARK_ARGS`, for example
+`make benchmark BENCHMARK_ARGS="--benchmark-json=benchmark-results.json"`.
 
 The backend `make dev` target pre-creates and excludes `DEER_FLOW_HOME`
 (default: `backend/.deer-flow`) and `backend/sandbox` from Uvicorn's reload
