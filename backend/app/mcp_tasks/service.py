@@ -128,17 +128,37 @@ class McpTaskService:
             # This handle already has a durable owner. Cancelling it as
             # compensation would terminate the pre-existing tracked task.
             raise
-        except Exception:
-            try:
-                await driver.cancel(task_reference)
-            except Exception:  # noqa: BLE001 - preserve the original persistence failure
-                logger.exception(
-                    "Failed to cancel untracked MCP task after persistence failure (task_id=%s, driver=%s, remote_task_id=%s)",
-                    local_task_id,
-                    driver_name,
-                    submission.remote_task_id,
-                )
+        except asyncio.CancelledError:
+            await self._cancel_untracked_task(
+                driver=driver,
+                task_reference=task_reference,
+                driver_name=driver_name,
+            )
             raise
+        except Exception:
+            await self._cancel_untracked_task(
+                driver=driver,
+                task_reference=task_reference,
+                driver_name=driver_name,
+            )
+            raise
+
+    @staticmethod
+    async def _cancel_untracked_task(
+        *,
+        driver,
+        task_reference: TaskReference,
+        driver_name: str,
+    ) -> None:
+        try:
+            await driver.cancel(task_reference)
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001 - preserve the original persistence failure or cancellation
+            logger.exception(
+                "Failed to cancel untracked MCP task after persistence failure (task_id=%s, driver=%s, remote_task_id=%s)",
+                task_reference.local_task_id,
+                driver_name,
+                task_reference.remote_task_id,
+            )
 
     async def run_once(self, *, now: datetime) -> None:
         claimed = await self._repository.claim_due_tasks(

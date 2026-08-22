@@ -56,6 +56,17 @@ class FailingCreateRepository(FakeRepository):
         raise RuntimeError("database unavailable")
 
 
+class BlockingCreateRepository(FakeRepository):
+    def __init__(self):
+        super().__init__()
+        self.create_started = asyncio.Event()
+
+    async def create(self, **kwargs):
+        self.created.append(kwargs)
+        self.create_started.set()
+        await asyncio.Event().wait()
+
+
 class DuplicateCreateRepository(FakeRepository):
     async def create(self, **kwargs):
         self.created.append(kwargs)
@@ -214,6 +225,91 @@ async def test_submit_cancels_remote_task_when_persistence_fails():
         "status_tool": "status",
         "cancel_tool": "cancel",
     }
+
+
+@pytest.mark.asyncio
+async def test_submit_cancellation_during_persistence_cancels_remote_task():
+    repo = BlockingCreateRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = TaskSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        server_name="reports",
+        task_name="Generate report",
+        arguments={"topic": "MCP"},
+        local_task_id="task-1",
+    )
+
+    submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
+    await repo.create_started.wait()
+    submit_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    assert len(driver.cancel_calls) == 1
+    cancelled = driver.cancel_calls[0]
+    assert cancelled.local_task_id == "task-1"
+    assert cancelled.remote_task_id == "remote-1"
+
+
+@pytest.mark.asyncio
+async def test_submit_cancellation_preserves_cancelled_error_when_compensation_fails(caplog):
+    repo = BlockingCreateRepository()
+    driver = FakeDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+        ),
+        cancel_error=RuntimeError("cancel unavailable"),
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = TaskSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        server_name="reports",
+        task_name="Generate report",
+        arguments={},
+        local_task_id="task-1",
+    )
+
+    submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
+    await repo.create_started.wait()
+    submit_task.cancel()
+
+    with caplog.at_level(logging.ERROR), pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    assert len(driver.cancel_calls) == 1
+    assert "Failed to cancel untracked MCP task" in caplog.text
+    assert "cancel unavailable" in caplog.text
 
 
 @pytest.mark.asyncio
