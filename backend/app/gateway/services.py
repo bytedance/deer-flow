@@ -309,9 +309,15 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 )
 
 # Keys honored only for internally-authenticated callers (the scheduler path).
-# ``non_interactive`` strips ``ask_clarification`` from the lead-agent toolset;
-# arbitrary HTTP/IM clients must not be able to force autonomous execution.
-_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
+# ``non_interactive`` and its explicit successor ``interaction_mode`` control
+# whether ``ask_clarification`` is exposed; arbitrary HTTP/IM clients must not
+# be able to force autonomous execution or override a server-selected mode.
+_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"interaction_mode", "non_interactive"})
+
+# Internal-caller-only values that must remain runtime-only rather than being
+# copied into checkpoint-persisted ``configurable``. ChannelManager supplies
+# both values over an internally authenticated request path.
+_CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"channel_name", "disable_clarification"})
 
 # Server-owned authorization identity fields. These must never be accepted from
 # client-supplied ``body.config.context`` or ``body.config.configurable``. They
@@ -343,10 +349,7 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
 #                              channel; the bash tool exposes it as
 #                              ``GH_TOKEN``/``GITHUB_TOKEN`` so ``gh`` and
 #                              ``git`` push as the bot, not the host user.
-#   ``disable_clarification`` — set for non-interactive channels (GitHub
-#                              webhooks) so ClarificationMiddleware proceeds
-#                              instead of dead-ending the run.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token"})
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -360,7 +363,7 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _CONTEXT_INTERNAL_CALLER_KEYS:
+            for key in _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS:
                 value.pop(key, None)
 
 
@@ -380,11 +383,16 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     is True; for non-internal callers those keys are dropped from client requests
     by :func:`strip_internal_context_keys`.
 
-    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is forwarded into ``config['context']`` only, never
-    ``configurable``. These are secrets / runtime flags read by tools and middlewares
-    from ``runtime.context``; keeping them out of ``configurable`` avoids persisting a
-    short-lived token in the checkpoint store.
+    :data:`_CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS` are accepted only for internal
+    callers and forwarded into runtime context only. This keeps channel policy
+    inputs out of persisted checkpoints while preventing public callers from
+    selecting autonomous or webhook behavior through legacy flags.
+
+    A final set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``)
+    is forwarded into ``config['context']`` only, never ``configurable``. These
+    are request-scoped secrets read by tools from ``runtime.context``; keeping
+    them out of ``configurable`` avoids persisting a short-lived token in the
+    checkpoint store.
     """
     if not context:
         return
@@ -396,6 +404,10 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             if isinstance(configurable, dict):
                 configurable.setdefault(key, context[key])
             if isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
+    if internal and isinstance(runtime_context, dict):
+        for key in _CONTEXT_INTERNAL_RUNTIME_ONLY_KEYS:
+            if key in context:
                 runtime_context.setdefault(key, context[key])
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints).

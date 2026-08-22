@@ -554,7 +554,18 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
         "get_available_tools",
         lambda **kwargs: [_named_tool("ask_clarification"), _named_tool("bash")],
     )
+    captured_prompt_policy = {}
     monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda config, model_name, agent_name=None, **kwargs: [])
+
+    def _capture_prompt_policy(**kwargs):
+        captured_prompt_policy["policy"] = kwargs["interaction_policy"]
+        return "prompt"
+
+    monkeypatch.setattr(
+        lead_agent_module,
+        "apply_prompt_template",
+        _capture_prompt_policy,
+    )
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
 
@@ -570,6 +581,7 @@ def test_make_lead_agent_filters_clarification_tool_for_non_interactive_runs(mon
     )
 
     assert [tool.name for tool in result["tools"]] == ["bash"]
+    assert captured_prompt_policy["policy"].mode.value == "scheduled"
 
 
 def test_make_lead_agent_rejects_invalid_bootstrap_agent_name(monkeypatch):
