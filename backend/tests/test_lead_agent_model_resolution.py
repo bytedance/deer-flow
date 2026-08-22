@@ -1308,6 +1308,102 @@ def test_request_thinking_overrides_agent_default(monkeypatch):
     assert captured["thinking_enabled"] is True  # request wins over agent's False
 
 
+def test_make_lead_agent_applies_agent_subagent_defaults_consistently(monkeypatch):
+    """Custom-agent subagent defaults drive tools, prompt, and middleware."""
+    app_config = _make_app_config([_make_model("agent-model", supports_thinking=True)])
+    agent_config = _make_agent_config(
+        model="agent-model",
+        subagent_enabled=True,
+        max_concurrent_subagents=2,
+    )
+
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+
+    def _fake_get_available_tools(**kwargs):
+        captured["tools_subagent_enabled"] = kwargs["subagent_enabled"]
+        return []
+
+    def _fake_build_middlewares(config, model_name, agent_name=None, **kwargs):
+        captured["middleware_config"] = config
+        captured["middleware_runtime"] = lead_agent_module._get_runtime_config(config)
+        return []
+
+    def _fake_prompt(**kwargs):
+        captured["prompt_subagent_enabled"] = kwargs["subagent_enabled"]
+        captured["prompt_max_concurrent"] = kwargs["max_concurrent_subagents"]
+        return "prompt"
+
+    monkeypatch.setattr(tools_module, "get_available_tools", _fake_get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _fake_build_middlewares)
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", _fake_prompt)
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    lead_agent_module._make_lead_agent({"context": {"agent_name": "researcher"}}, app_config=app_config)
+
+    assert captured["tools_subagent_enabled"] is True
+    assert captured["prompt_subagent_enabled"] is True
+    assert captured["prompt_max_concurrent"] == 2
+    assert captured["middleware_runtime"]["subagent_enabled"] is True
+    assert captured["middleware_runtime"]["max_concurrent_subagents"] == 2
+    assert captured["middleware_config"]["context"]["subagent_enabled"] is True
+    assert captured["middleware_config"]["configurable"]["subagent_enabled"] is True
+
+
+def test_request_subagent_values_override_agent_defaults(monkeypatch):
+    """Explicit request values win, including a falsy subagent switch."""
+    app_config = _make_app_config([_make_model("agent-model", supports_thinking=True)])
+    agent_config = _make_agent_config(
+        model="agent-model",
+        subagent_enabled=True,
+        max_concurrent_subagents=2,
+    )
+
+    import deerflow.tools as tools_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+
+    def _fake_get_available_tools(**kwargs):
+        captured["tools_subagent_enabled"] = kwargs["subagent_enabled"]
+        return []
+
+    def _fake_build_middlewares(config, model_name, agent_name=None, **kwargs):
+        captured["middleware_runtime"] = lead_agent_module._get_runtime_config(config)
+        return []
+
+    monkeypatch.setattr(tools_module, "get_available_tools", _fake_get_available_tools)
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", _fake_build_middlewares)
+    monkeypatch.setattr(
+        lead_agent_module,
+        "apply_prompt_template",
+        lambda **kwargs: captured.update(prompt_subagent_enabled=kwargs["subagent_enabled"], prompt_max_concurrent=kwargs["max_concurrent_subagents"]) or "prompt",
+    )
+    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
+
+    lead_agent_module._make_lead_agent(
+        {
+            "context": {
+                "agent_name": "researcher",
+                "subagent_enabled": False,
+                "max_concurrent_subagents": 4,
+            }
+        },
+        app_config=app_config,
+    )
+
+    assert captured["tools_subagent_enabled"] is False
+    assert captured["prompt_subagent_enabled"] is False
+    assert captured["prompt_max_concurrent"] == 4
+    assert captured["middleware_runtime"]["subagent_enabled"] is False
+    assert captured["middleware_runtime"]["max_concurrent_subagents"] == 4
+
+
 def test_make_lead_agent_no_agent_settings_passes_none_overrides(monkeypatch):
     """Without a custom agent, model_overrides is None (no behavior change)."""
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])

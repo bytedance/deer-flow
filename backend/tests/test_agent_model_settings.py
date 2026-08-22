@@ -1,9 +1,9 @@
-"""Tests for the per-agent model-settings block on :class:`AgentConfig` (#4336).
+"""Tests for per-agent runtime defaults on :class:`AgentConfig` (#4336, #2381).
 
-Covers the new ``model_settings`` / ``thinking_enabled`` / ``reasoning_effort``
-fields: validation bounds, YAML round-trip via ``load_agent_config``, backward
-compatibility (absent = None), and that they are treated as managed fields by
-``preserve_non_managed_fields``.
+Covers the per-agent model and runtime defaults: validation bounds, YAML
+round-trip via ``load_agent_config``, backward compatibility (absent = None),
+and preservation of hand-authored fields that are not exposed by an update
+surface.
 """
 
 from __future__ import annotations
@@ -29,6 +29,8 @@ def test_model_settings_default_to_none() -> None:
     assert cfg.model_settings is None
     assert cfg.thinking_enabled is None
     assert cfg.reasoning_effort is None
+    assert cfg.subagent_enabled is None
+    assert cfg.max_concurrent_subagents is None
 
 
 def test_model_settings_parse_full_shape() -> None:
@@ -37,12 +39,16 @@ def test_model_settings_parse_full_shape() -> None:
         model_settings={"temperature": 0.2, "max_tokens": 12000},
         thinking_enabled=True,
         reasoning_effort="high",
+        subagent_enabled=True,
+        max_concurrent_subagents=2,
     )
     assert isinstance(cfg.model_settings, AgentModelSettings)
     assert cfg.model_settings.temperature == 0.2
     assert cfg.model_settings.max_tokens == 12000
     assert cfg.thinking_enabled is True
     assert cfg.reasoning_effort == "high"
+    assert cfg.subagent_enabled is True
+    assert cfg.max_concurrent_subagents == 2
 
 
 @pytest.mark.parametrize("temperature", [-0.1, 2.1])
@@ -76,7 +82,13 @@ def test_reasoning_effort_rejects_codex_unsupported_minimal() -> None:
         AgentConfig(name="x", reasoning_effort="minimal")  # type: ignore[arg-type]
 
 
-def test_model_settings_are_managed_fields() -> None:
+@pytest.mark.parametrize("value", [0, 5])
+def test_max_concurrent_subagents_stays_within_runtime_limits(value: int) -> None:
+    with pytest.raises(ValidationError):
+        AgentConfig(name="x", max_concurrent_subagents=value)
+
+
+def test_agent_config_fields_follow_update_surface_contract() -> None:
     # These are managed by the HTTP agent settings API, so the generic
     # preserve_non_managed_fields helper must not also carry them. Surfaces that
     # do not expose them directly, such as the harness update_agent tool, need a
@@ -84,17 +96,27 @@ def test_model_settings_are_managed_fields() -> None:
     for field in ("model_settings", "thinking_enabled", "reasoning_effort"):
         assert field in MANAGED_AGENT_CONFIG_FIELDS
 
+    # Subagent defaults are intentionally config.yaml-only for this issue.
+    # Treating them as non-managed makes every rewrite surface preserve them
+    # without expanding the HTTP or LLM-facing update APIs.
+    for field in ("subagent_enabled", "max_concurrent_subagents"):
+        assert field not in MANAGED_AGENT_CONFIG_FIELDS
+
 
 def test_preserve_non_managed_excludes_model_settings() -> None:
     cfg = AgentConfig(
         name="a",
         model_settings={"temperature": 0.5},
         thinking_enabled=True,
+        subagent_enabled=True,
+        max_concurrent_subagents=2,
         github={"installation_id": 7},
     )
     preserved = preserve_non_managed_fields(cfg)
     assert "model_settings" not in preserved
     assert "thinking_enabled" not in preserved
+    assert preserved["subagent_enabled"] is True
+    assert preserved["max_concurrent_subagents"] == 2
     # github stays preserved (hand-authored, not managed by the update surfaces).
     assert "github" in preserved
 
@@ -117,6 +139,8 @@ def test_load_agent_config_round_trips_model_settings(tmp_path: Path, monkeypatc
         "model_settings": {"temperature": 0.2, "max_tokens": 12000},
         "thinking_enabled": True,
         "reasoning_effort": "high",
+        "subagent_enabled": True,
+        "max_concurrent_subagents": 2,
     }
     _write_agent(tmp_path, "default", "researcher", body)
 
@@ -127,6 +151,8 @@ def test_load_agent_config_round_trips_model_settings(tmp_path: Path, monkeypatc
     assert cfg.model_settings.max_tokens == 12000
     assert cfg.thinking_enabled is True
     assert cfg.reasoning_effort == "high"
+    assert cfg.subagent_enabled is True
+    assert cfg.max_concurrent_subagents == 2
 
 
 def test_load_agent_config_without_model_settings_is_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -142,3 +168,5 @@ def test_load_agent_config_without_model_settings_is_none(tmp_path: Path, monkey
     assert cfg.model_settings is None
     assert cfg.thinking_enabled is None
     assert cfg.reasoning_effort is None
+    assert cfg.subagent_enabled is None
+    assert cfg.max_concurrent_subagents is None

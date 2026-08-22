@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.config.subagents_config import MAX_CONCURRENT_SUBAGENT_CALLS, MIN_CONCURRENT_SUBAGENT_CALLS
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,14 @@ class AgentConfig(BaseModel):
     # Per-agent reasoning-effort default for models that support it. None = do
     # not override (a request-supplied reasoning_effort still wins over this).
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Per-agent subagent defaults. None leaves the runtime defaults unchanged;
+    # explicit request values still take precedence over these fields.
+    subagent_enabled: bool | None = None
+    max_concurrent_subagents: int | None = Field(
+        default=None,
+        ge=MIN_CONCURRENT_SUBAGENT_CALLS,
+        le=MAX_CONCURRENT_SUBAGENT_CALLS,
+    )
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.
