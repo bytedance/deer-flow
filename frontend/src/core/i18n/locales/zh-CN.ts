@@ -410,7 +410,6 @@ export const zhCN: Translations = {
       schedule: "调度",
       nextRun: "下次运行",
       lastRun: "上次运行",
-      lastRunId: "上次运行 ID",
       lastError: "上次错误",
       runsCount: "{count} 次运行",
       runsCountOne: "{count} 次运行",

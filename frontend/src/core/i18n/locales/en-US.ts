@@ -428,7 +428,6 @@ export const enUS: Translations = {
       schedule: "Schedule",
       nextRun: "Next run",
       lastRun: "Last run",
-      lastRunId: "Last run id",
       lastError: "Last error",
       runsCount: "{count} runs",
       runsCountOne: "{count} run",
