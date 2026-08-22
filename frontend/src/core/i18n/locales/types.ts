@@ -221,7 +221,6 @@ export interface Translations {
   sidebar: {
     recentChats: string;
     newChat: string;
-    chats: string;
     demoChats: string;
     agents: string;
     scheduledTasks: string;

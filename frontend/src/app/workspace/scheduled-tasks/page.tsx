@@ -183,6 +183,10 @@ export default function ScheduledTasksPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTask?.id]);
 
+  const createHref = threadId
+    ? `/workspace/scheduled-tasks/new?thread_id=${encodeURIComponent(threadId)}`
+    : "/workspace/scheduled-tasks/new";
+
   const statusFilters = [
     { id: "enabled" as const, label: st.filters.enabled },
     { id: "paused" as const, label: st.filters.paused },
@@ -204,7 +208,7 @@ export default function ScheduledTasksPage() {
         </div>
         <Button
           size="sm"
-          onClick={() => router.push("/workspace/scheduled-tasks/new")}
+          onClick={() => router.push(createHref)}
           data-testid="scheduled-task-create-toggle"
         >
           <Plus className="mr-1.5 h-4 w-4" />
@@ -270,7 +274,7 @@ export default function ScheduledTasksPage() {
                 <Button
                   variant="outline"
                   className="mt-2"
-                  onClick={() => router.push("/workspace/scheduled-tasks/new")}
+                  onClick={() => router.push(createHref)}
                 >
                   <Plus className="mr-1.5 h-4 w-4" />
                   {st.create.title}

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  buildOnceRunAtLocal,
   parseCron,
   serializeCron,
   utcToZonedLocalInput,
@@ -123,6 +124,48 @@ describe("parseCron", () => {
     expect(parseCron("0 9 * * 1-5").preset).toBe("custom");
     expect(parseCron("garbage").preset).toBe("custom");
     expect(parseCron("garbage").parts.raw).toBe("garbage");
+  });
+});
+
+describe("buildOnceRunAtLocal", () => {
+  test("valid date + time", () => {
+    expect(buildOnceRunAtLocal("2026", "2", "28", "09:00")).toBe(
+      "2026-02-28T09:00",
+    );
+  });
+
+  test("leap year Feb 29 is valid", () => {
+    expect(buildOnceRunAtLocal("2024", "2", "29", "09:00")).toBe(
+      "2024-02-29T09:00",
+    );
+  });
+
+  test("rejects Feb 30 via rollover", () => {
+    expect(buildOnceRunAtLocal("2026", "2", "30", "09:00")).toBe("");
+  });
+
+  test("rejects Feb 29 in a non-leap year", () => {
+    expect(buildOnceRunAtLocal("2026", "2", "29", "09:00")).toBe("");
+  });
+
+  test("rejects month 0 and month 13", () => {
+    expect(buildOnceRunAtLocal("2026", "0", "15", "09:00")).toBe("");
+    expect(buildOnceRunAtLocal("2026", "13", "15", "09:00")).toBe("");
+  });
+
+  test("rejects empty time", () => {
+    expect(buildOnceRunAtLocal("2026", "2", "28", "")).toBe("");
+  });
+
+  test("rejects pre-1970 year", () => {
+    expect(buildOnceRunAtLocal("1969", "1", "1", "09:00")).toBe("");
+  });
+
+  test("round-trips with zonedLocalToUtcIso", () => {
+    const local = buildOnceRunAtLocal("2026", "7", "2", "09:00");
+    expect(zonedLocalToUtcIso(local, "Asia/Shanghai")).toBe(
+      "2026-07-02T01:00:00+00:00",
+    );
   });
 });
 

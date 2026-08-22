@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/select";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildOnceRunAtLocal,
   pad2,
   parseCron,
   serializeCron,
@@ -120,6 +121,7 @@ function OncePart({
         max={max}
         value={value}
         onChange={(event) => onChange(event.target.value)}
+        aria-label={label}
       />
     </div>
   );
@@ -176,26 +178,12 @@ export function ScheduledTaskScheduleInput({
   // value always matches what the user sees in the form.
   useEffect(() => {
     if (scheduleType === "once") {
-      const year = Number(onceYear);
-      const month = Number(onceMonth);
-      const day = Number(onceDay);
-      const validDate =
-        onceYear &&
-        onceMonth &&
-        onceDay &&
-        onceTime &&
-        Number.isInteger(year) &&
-        Number.isInteger(month) &&
-        Number.isInteger(day) &&
-        year >= 1970 &&
-        month >= 1 &&
-        month <= 12 &&
-        day >= 1 &&
-        day <= 31 &&
-        new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
-      const runAtLocal = validDate
-        ? `${onceYear}-${pad2(month)}-${pad2(day)}${onceTime ? `T${onceTime}` : ""}`
-        : "";
+      const runAtLocal = buildOnceRunAtLocal(
+        onceYear,
+        onceMonth,
+        onceDay,
+        onceTime,
+      );
       const runAt = runAtLocal ? zonedLocalToUtcIso(runAtLocal, timezone) : "";
       onChangeRef.current({
         schedule_type: "once",
