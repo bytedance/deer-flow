@@ -86,4 +86,22 @@ describe("documentation content links", () => {
 
     expect(brokenLinks).toEqual([]);
   });
+
+  it("documents the custom-agent create request naming contract", () => {
+    const customAgentDocs = DOC_LANGUAGES.flatMap((lang) =>
+      ["application/agents-and-threads.mdx", "harness/lead-agent.mdx"].map(
+        (path) => readFileSync(join(CONTENT_ROOT, lang, path), "utf8"),
+      ),
+    );
+
+    for (const source of customAgentDocs) {
+      expect(source).not.toContain("display_name");
+    }
+
+    const chineseApiGuide = readFileSync(
+      join(CONTENT_ROOT, "zh/application/agents-and-threads.mdx"),
+      "utf8",
+    );
+    expect(chineseApiGuide).toContain('"name": "data-analyst"');
+  });
 });
