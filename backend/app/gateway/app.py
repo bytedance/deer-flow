@@ -20,6 +20,7 @@ from app.gateway.routers import (
     browser,
     channel_connections,
     channels,
+    connector,
     console,
     features,
     feedback,
@@ -750,6 +751,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Connector proxy API is mounted at /api/connector
+    app.include_router(connector.router)
 
     # Assistants compatibility API (LangGraph Platform stub)
     app.include_router(assistants_compat.router)

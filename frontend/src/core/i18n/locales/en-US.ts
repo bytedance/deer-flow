@@ -302,6 +302,47 @@ export const enUS: Translations = {
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
+    connectedApps: "Connected Apps",
+  },
+
+  // Connector page
+  connectorPage: {
+    title: "Connectors",
+    subtitleConnected: (count: number) =>
+      `${count} app${count !== 1 ? "s" : ""} connected — your agents can use them directly.`,
+    subtitleEmpty:
+      "Connect your third-party apps so AI agents can work with them.",
+    consoleAction: "Console",
+    searchPlaceholder: "Search by name, category, or service…",
+    statusAll: "All",
+    statusConnected: "Connected",
+    statusDisconnected: "Disconnected",
+    connectOAuth: "Connect via OAuth",
+    connectApiKey: "Connect via API Key",
+    connect: "Connect",
+    disconnect: "Disconnect",
+    noResults: "No providers match your search.",
+    noProvidersAvailable:
+      "No apps available right now. Please try again later.",
+    apiKeyDialogTitle: (name: string) => `Connect ${name}`,
+    apiKeyDialogDescription: (service: string) =>
+      `Paste your API key for ${service}. It will be stored securely.`,
+    apiKeyPlaceholder: "sk-…",
+    cancel: "Cancel",
+    loading: "Loading providers…",
+    errorTitle: "Cannot load connectors",
+    errorDescription:
+      "The service is temporarily unavailable. Please try again later.",
+    errorAction: "Open Console",
+    oauthToast:
+      "Complete authorization in the opened window, then refresh this page.",
+    connectedViaOAuth: "Connected via OAuth",
+    connected: "Connected",
+    connectedToast: (name: string) => `Connected to ${name}`,
+    unknownFieldsHint:
+      "This provider does not supply a credential form. The connection will be created with empty credentials. Once connected, you can update the credentials from the provider dashboard.",
+    connectFailed: "Failed to connect",
+    clearFilter: "✕ Clear",
   },
 
   backgroundTasks: {
