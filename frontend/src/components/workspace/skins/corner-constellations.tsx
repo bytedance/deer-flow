@@ -100,6 +100,9 @@ export function CornerConstellations({
         frame = window.requestAnimationFrame(tick);
       } else {
         frame = 0;
+        const box = svgRef.current?.getBoundingClientRect();
+        if (box)
+          onStars?.(placedRef.current.map((star) => toScreen(star, box)));
       }
     };
     const arm = () => {
@@ -107,9 +110,16 @@ export function CornerConstellations({
     };
     armRef.current = arm;
     arm();
+    const onResize = () => {
+      const box = svgRef.current?.getBoundingClientRect();
+      if (box) onStars?.(placedRef.current.map((star) => toScreen(star, box)));
+      arm();
+    };
+    window.addEventListener("resize", onResize);
     return () => {
       armRef.current = null;
       window.cancelAnimationFrame(frame);
+      window.removeEventListener("resize", onResize);
     };
   }, [onStars, skin]);
 
