@@ -1,7 +1,7 @@
 """deployment-level managed subagents.
 
-Revision ID: 0013_managed_subagents
-Revises: 0012_mcp_task_results
+Revision ID: 0014_managed_subagents
+Revises: 0013_mcp_task_notifications
 Create Date: 2026-08-18
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0013_managed_subagents"
-down_revision: str | Sequence[str] | None = "0012_mcp_task_results"
+revision: str = "0014_managed_subagents"
+down_revision: str | Sequence[str] | None = "0013_mcp_task_notifications"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -95,6 +95,7 @@ export type MockAPIOptions = {
   features?: {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
+    mcpTasksEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -306,6 +307,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
+    mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -1172,6 +1174,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
+          mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
         }),
       });
     }

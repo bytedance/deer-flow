@@ -288,6 +288,45 @@ export const zhCN: Translations = {
     agentsDisabledTooltip: "功能未启用",
   },
 
+  backgroundTasks: {
+    label: "后台任务",
+    title: "后台任务",
+    description: "当前对话中的 MCP 长程任务。",
+    active: "进行中",
+    recent: "最近任务",
+    empty: "暂无后台任务",
+    emptyHint: "在当前对话中启动的 MCP 长程任务会显示在这里。",
+    loadFailed: "无法加载后台任务",
+    retry: "重试",
+    cancel: "取消任务",
+    cancelling: "正在取消…",
+    cancelFailed: "取消任务失败",
+    cancellationRetrying: (attempt) =>
+      `第 ${attempt} 次取消失败；DeerFlow 将继续重试。`,
+    notificationRetrying: (attempt) =>
+      `第 ${attempt} 次聊天通知失败；DeerFlow 将退避后重试。`,
+    notificationStopped: "聊天通知因反复失败或永久拒绝，已停止重试。",
+    trackingDegraded: "状态检查有所延迟，DeerFlow 仍在重试。",
+    viewDetails: "查看详情",
+    hideDetails: "收起详情",
+    detailsFailed: "无法加载任务详情",
+    result: "结果",
+    resultArtifact: "结果产物",
+    inputRequired: "需要输入",
+    inputUnavailable: "当前集成暂时无法将你的回复发回远端任务。",
+    lastPollError: "最近一次状态错误",
+    created: (time) => `开始于${time}`,
+    updated: (time) => `更新于${time}`,
+    status: {
+      submitted: "已提交",
+      working: "进行中",
+      inputRequired: "需要输入",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+  },
+
   // 定时任务
   scheduledTasks: {
     scheduleType: {
