@@ -80,7 +80,7 @@ def get_agent_store() -> AgentStore:
 
     try:
         config = get_app_config()
-    except Exception:  # noqa: BLE001 — no resolvable config → file default
+    except FileNotFoundError:
         return _file_store()
     return make_agent_store(config)
 
