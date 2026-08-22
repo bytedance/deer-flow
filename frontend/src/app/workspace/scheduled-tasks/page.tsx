@@ -609,7 +609,7 @@ function TaskDetail({
           },
           {
             label: stDetail.lastError,
-            value: task.last_error || NONE,
+            value: task.last_error ?? NONE,
           },
         ].map((row) => (
           <div
