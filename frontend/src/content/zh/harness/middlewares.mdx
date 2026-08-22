@@ -216,16 +216,28 @@ summarization:
 自定义中间件可以注入到链中用于专业用途。中间件必须实现 `langchain.agents.middleware` 中的 `AgentMiddleware` 接口：
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(AgentMiddleware):
-    async def on_start(self, state, config):
-        # 在模型调用前运行
-        return state, config
+class MyMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        print(f"模型输入包含 {len(state.get('messages', []))} 条消息")
+        return None
 
-    async def on_end(self, state, config):
-        # 在模型调用后运行
-        return state, config
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"最后一条消息类型：{type(last_message).__name__ if last_message else 'none'}")
+        return None
 ```
 
-自定义中间件在链末尾 `ClarificationMiddleware` 之前注入。
+对于运维配置的部署，请通过导入路径注册零参数构造的类：
+
+```yaml
+extensions:
+  middlewares:
+    - my_company.deerflow_middlewares:MyMiddleware
+```
+
+配置的中间件会在内置中间件及可选的循环/token 保护之后、终态响应/安全/澄清尾部之前加载到主 Agent 和子 Agent 链中。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以通过 `DeerFlowClient(middlewares=[...])` 或 `create_deerflow_agent(extra_middleware=[...])` 传入实例。

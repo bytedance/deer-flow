@@ -22,25 +22,34 @@ Middlewares are the primary extension point for adding behavior to the Lead Agen
 To add a custom middleware:
 
 1. Implement the `AgentMiddleware` interface from `langchain.agents.middleware`.
-2. Pass your middleware to the `custom_middlewares` parameter when building the agent.
+2. Register its import path under `extensions.middlewares`, or pass an instance through an embedded SDK API.
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from deerflow.agents.thread_state import ThreadState
+from langgraph.runtime import Runtime
 
-class AuditMiddleware(AgentMiddleware):
-    async def on_start(self, state: ThreadState, config):
-        # Runs before each model call
-        print(f"[audit] turn starts: {len(state.messages)} messages in context")
-        return state, config
+class AuditMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        print(f"[audit] model input has {len(state.get('messages', []))} messages")
+        return None
 
-    async def on_end(self, state: ThreadState, config):
-        # Runs after each model call
-        print(f"[audit] turn ends: last message type = {state.messages[-1].type}")
-        return state, config
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"[audit] last message type: {type(last_message).__name__ if last_message else 'none'}")
+        return None
 ```
 
-Custom middlewares are injected into the chain immediately before `ClarificationMiddleware`, which always runs last.
+For an operator-managed deployment, the class must have a zero-argument constructor and be importable by the Gateway process:
+
+```yaml
+extensions:
+  middlewares:
+    - my_company.deerflow_middlewares:AuditMiddleware
+```
+
+Configured middleware is loaded into both lead-agent and subagent pipelines after the built-in middleware and optional loop/token guards, but before the terminal-response, safety, and clarification tail. Treat these class paths as trusted configuration because loading one executes Python code. Embedded callers can instead use `DeerFlowClient(middlewares=[AuditMiddleware()])` or `create_deerflow_agent(extra_middleware=[AuditMiddleware()])`.
 
 ## Custom tools
 

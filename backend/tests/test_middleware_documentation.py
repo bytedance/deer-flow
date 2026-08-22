@@ -1,0 +1,41 @@
+"""Keep documented middleware examples aligned with the locked LangChain API."""
+
+import re
+from pathlib import Path
+
+import pytest
+from langchain.agents.middleware import AgentMiddleware
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+MIDDLEWARE_GUIDES = (
+    Path("backend/CONTRIBUTING.md"),
+    Path("frontend/src/content/en/harness/customization.mdx"),
+    Path("frontend/src/content/en/harness/middlewares.mdx"),
+    Path("frontend/src/content/zh/harness/customization.mdx"),
+    Path("frontend/src/content/zh/harness/middlewares.mdx"),
+)
+
+
+def _middleware_example(path: Path) -> str:
+    content = (REPO_ROOT / path).read_text(encoding="utf-8")
+    examples = [block for block in re.findall(r"```python\n(.*?)\n```", content, flags=re.DOTALL) if "AgentMiddleware" in block and ("class MyMiddleware" in block or "class AuditMiddleware" in block)]
+    assert len(examples) == 1, f"expected one custom middleware example in {path}"
+    return examples[0]
+
+
+@pytest.mark.parametrize("path", MIDDLEWARE_GUIDES, ids=str)
+def test_custom_middleware_example_uses_current_lifecycle_hooks(path: Path) -> None:
+    namespace: dict[str, object] = {}
+    example = _middleware_example(path)
+    exec(compile(example, str(path), "exec"), namespace)  # noqa: S102 - executes a controlled in-repo documentation example
+
+    middleware_types = [value for value in namespace.values() if isinstance(value, type) and value is not AgentMiddleware and issubclass(value, AgentMiddleware)]
+    assert len(middleware_types) == 1
+
+    middleware_type = middleware_types[0]
+    assert middleware_type.before_model is not AgentMiddleware.before_model
+    assert middleware_type.after_model is not AgentMiddleware.after_model
+
+    middleware = middleware_type()
+    assert middleware.before_model({"messages": []}, None) is None
+    assert middleware.after_model({"messages": []}, None) is None

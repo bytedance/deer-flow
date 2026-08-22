@@ -232,18 +232,28 @@ Custom middlewares can be injected into the chain for specialized use cases. A m
 The basic structure is:
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(AgentMiddleware):
-    async def on_start(self, state, config):
-        # Runs before the model call
-        # Modify state or config here
-        return state, config
+class MyMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        print(f"Model input contains {len(state.get('messages', []))} messages")
+        return None
 
-    async def on_end(self, state, config):
-        # Runs after the model call
-        # Inspect or modify the result
-        return state, config
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        messages = state.get("messages", [])
+        last_message = messages[-1] if messages else None
+        print(f"Last message type: {type(last_message).__name__ if last_message else 'none'}")
+        return None
 ```
 
-Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.
+For operator-managed deployments, register a zero-argument class by import path:
+
+```yaml
+extensions:
+  middlewares:
+    - my_company.deerflow_middlewares:MyMiddleware
+```
+
+Configured middleware runs in both lead-agent and subagent pipelines after the built-in middleware and optional loop/token guards, but before the terminal-response, safety, and clarification tail. Treat middleware paths as trusted configuration because loading one executes Python code. Embedded callers can instead pass instances through `DeerFlowClient(middlewares=[...])` or `create_deerflow_agent(extra_middleware=[...])`.
