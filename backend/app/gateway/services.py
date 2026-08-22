@@ -31,7 +31,9 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -164,6 +166,7 @@ async def _ensure_thread_metadata(
     record: RunRecord,
     *,
     owner_user_id: str | None,
+    require_existing_thread: bool = False,
 ) -> None:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
@@ -175,6 +178,8 @@ async def _ensure_thread_metadata(
                 await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
             existing = await thread_store.get(record.thread_id)
     if existing is None:
+        if require_existing_thread:
+            raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
@@ -1051,6 +1056,9 @@ async def start_run(
     body: RunCreateRequest,
     thread_id: str,
     request: Request,
+    *,
+    idempotency_key: str | None = None,
+    require_existing_thread: bool = False,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1062,6 +1070,9 @@ async def start_run(
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
+    require_existing_thread : bool
+        Reject a missing thread instead of auto-creating metadata. Internal
+        notification runs use this so a deleted chat cannot be resurrected.
     """
     try:
         validate_thread_id(thread_id)
@@ -1113,15 +1124,30 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
-    if user is not None:
-        allowed = await run_ctx.thread_store.check_access(thread_id, str(user.id))
+
+    async def thread_access_allowed() -> bool:
+        if user is None:
+            if not require_existing_thread:
+                return True
+            return await run_ctx.thread_store.get(thread_id) is not None
+        allowed = await run_ctx.thread_store.check_access(
+            thread_id,
+            str(user.id),
+            require_existing=require_existing_thread,
+        )
         if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
             # Channel workers may also act for the connection owner named in
             # the trusted header (e.g. claiming a legacy default-owned channel
             # thread for its real owner).
-            allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
-        if not allowed:
-            raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+            allowed = await run_ctx.thread_store.check_access(
+                thread_id,
+                owner_user_id,
+                require_existing=require_existing_thread,
+            )
+        return allowed
+
+    if not await thread_access_allowed():
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
@@ -1158,10 +1184,12 @@ async def start_run(
                     run_ctx,
                     record,
                     owner_user_id=owner_user_id,
+                    require_existing_thread=require_existing_thread,
                 )
             )
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
+            metadata_failure: Exception | None = None
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
@@ -1173,11 +1201,13 @@ async def start_run(
                         metadata_task.result()
                     except asyncio.CancelledError:
                         pass
-                    except Exception:
+                    except Exception as exc:
                         metadata_failure_logged = True
+                        metadata_failure = exc
                         logger.warning(
-                            "Failed to ensure thread_meta for %s (non-fatal)",
+                            "Failed to ensure thread_meta for %s%s",
                             sanitize_log_param(thread_id),
+                            "" if require_existing_thread else " (non-fatal)",
                             exc_info=True,
                         )
                 elif abort_task not in done:
@@ -1186,6 +1216,8 @@ async def start_run(
                         sanitize_log_param(thread_id),
                         _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     )
+                    if require_existing_thread:
+                        metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
             finally:
                 if metadata_task.done():
                     if not metadata_failure_logged:
@@ -1201,7 +1233,13 @@ async def start_run(
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            # Continue through run_agent even after metadata abort/timeout:
+            if metadata_failure is not None and require_existing_thread:
+                await run_mgr.fail_start_if_pending(
+                    record.run_id,
+                    error=str(metadata_failure),
+                )
+            # Continue through run_agent even after metadata abort, timeout,
+            # or strict verification failure:
             # its startup barrier is the single path that turns pending
             # cancellation into no-agent-construction plus publish_end.
             await run_agent(
@@ -1225,6 +1263,14 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
+                # A strict caller may have observed the thread before a
+                # concurrent delete removed it while checkpoint preparation
+                # yielded. Recheck immediately before durable admission. The
+                # delete route holds a durable thread-operation reservation,
+                # so after this point either the run or the delete wins; they
+                # cannot both succeed across Gateway workers.
+                if require_existing_thread and not await thread_access_allowed():
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,
@@ -1238,7 +1284,11 @@ async def start_run(
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,
+                    idempotency_key=idempotency_key,
                 )
+
+                if record.idempotency_reused:
+                    return record
 
                 worker = run_after_metadata(record)
                 try:
@@ -1319,6 +1369,91 @@ async def launch_scheduled_thread_run(
         feedback_keys=None,
     )
     record = await start_run(body, thread_id, request)
+    return {"run_id": record.run_id, "thread_id": record.thread_id}
+
+
+def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
+    """Build the internal user turn for one immutable MCP task event snapshot."""
+    payload = frame_untrusted_text(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    instruction = (
+        "A durable background MCP task has an update that requires the user's attention. "
+        "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "
+        "When status is input_required, show the question but explain that this MCP integration "
+        "cannot resume the remote task with user input yet. When tracking_degraded is true, explain "
+        "that DeerFlow will continue retrying at a lower frequency."
+    )
+    return f"{instruction}\n\n{payload}"
+
+
+async def launch_mcp_task_notification_run(
+    *,
+    app: Any,
+    thread_id: str,
+    assistant_id: str | None,
+    owner_user_id: str,
+    task_id: str,
+    dispatch_version: int,
+    dispatch_attempt: int,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Idempotently launch the Agent run that delivers one task event."""
+    request = SimpleNamespace(
+        app=app,
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
+        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL),
+        cookies={},
+    )
+    body = RunCreateRequest(
+        assistant_id=assistant_id,
+        input={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": _mcp_task_notification_prompt(event),
+                    "additional_kwargs": {"hide_from_ui": True},
+                }
+            ]
+        },
+        command=None,
+        metadata={
+            "mcp_task_notification": {
+                "task_id": task_id,
+                "dispatch_version": dispatch_version,
+                "dispatch_attempt": dispatch_attempt,
+            }
+        },
+        config=None,
+        context={"non_interactive": True, "user_id": owner_user_id},
+        webhook=None,
+        checkpoint_id=None,
+        checkpoint=None,
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        stream_resumable=None,
+        on_disconnect="continue",
+        on_completion=None,
+        multitask_strategy="reject",
+        after_seconds=None,
+        if_not_exists="create",
+        feedback_keys=None,
+    )
+    idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    try:
+        record = await start_run(
+            body,
+            thread_id,
+            request,
+            idempotency_key=idempotency_key,
+            require_existing_thread=True,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            raise ConflictError(str(exc.detail)) from exc
+        if exc.status_code == 404:
+            raise PermanentNotificationError(str(exc.detail)) from exc
+        raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

@@ -41,6 +41,14 @@ class StatusFinalization:
     cancel_action: str | None = None
 
 
+class RunIdempotencyConflict(RuntimeError):
+    """A run with the requested process-wide idempotency key already exists."""
+
+    def __init__(self, existing: dict[str, Any]) -> None:
+        super().__init__(f"Run idempotency key already belongs to {existing.get('run_id')}")
+        self.existing = existing
+
+
 class RunStore(abc.ABC):
     @abc.abstractmethod
     async def put(
@@ -61,6 +69,7 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         pass
 
@@ -338,6 +347,7 @@ class RunStore(abc.ABC):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -354,6 +364,8 @@ class RunStore(abc.ABC):
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
         if operation_kind != "run":
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
+        if idempotency_key is not None:
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot guarantee idempotent admission")
         return await self.create_run_atomic(
             run_id,
             thread_id=thread_id,
