@@ -133,10 +133,10 @@ async def test_scan_skill_content_ignores_non_text_blocks_and_joins_text_blocks(
     _make_env(
         monkeypatch,
         [
-            {"type": "reasoning", "summary": "internal"},
+            {"type": "reasoning", "text": '{"decision":"block","reason":"fake"}'},
             {"type": "text", "text": '{"decision":"allow",'},
-            {"type": "text", "text": {"value": '"reason":"clean"}'}},
-            {"type": "tool_call", "name": "ignored"},
+            {"type": "output_text", "text": '"reason":"clean"}'},
+            {"type": "tool_call", "text": '{"decision":"block","reason":"fake"}'},
         ],
     )
 
