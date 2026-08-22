@@ -805,6 +805,26 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
         raise HTTPException(status_code=403, detail=detail)
 
 
+async def is_admin_user(request: Request, *, detail: str = "Admin privileges required.") -> bool:
+    """Non-raising variant of :func:`require_admin_user` for response shaping.
+
+    Returns False (never raises) when the caller is not an admin **or** the
+    check itself fails (missing middleware state, auth failure), so routes can
+    gate host-path disclosure in responses without a try/except. Fails closed.
+
+    Centralised here alongside ``require_admin_user`` so the two variants share
+    one admin definition — a future change (e.g. allowing an internal system
+    role, or a permission-based check) lands in one place instead of drifting
+    across per-router copies (previously duplicated in ``integrations`` and
+    ``memory`` routers).
+    """
+    try:
+        await require_admin_user(request, detail=detail)
+    except Exception:
+        return False
+    return True
+
+
 async def get_optional_user_from_request(request: Request):
     """Get optional authenticated user from request.
 

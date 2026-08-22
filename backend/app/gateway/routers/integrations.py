@@ -5,7 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from app.gateway.deps import get_config, require_admin_user
+from app.gateway.deps import get_config, is_admin_user, require_admin_user
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.integrations.lark_cli import (
@@ -36,19 +36,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to install integrations."
-
-
-async def _is_admin_user(request: Request) -> bool:
-    """Non-raising admin check used to gate host-path disclosure in responses.
-
-    Fails closed: any error (missing middleware state, auth failure) is treated
-    as non-admin so host paths are redacted rather than accidentally exposed.
-    """
-    try:
-        await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-    except Exception:
-        return False
-    return True
 
 
 class LarkCliProbeResponse(BaseModel):
@@ -260,7 +247,7 @@ def _auth_complete_to_response(result: LarkAuthCompleteResult, *, include_host_p
 async def get_lark_status(request: Request, config: AppConfig = Depends(get_config)) -> LarkIntegrationStatusResponse:
     try:
         status = await asyncio.to_thread(get_lark_integration_status, get_effective_user_id(), config, check_latest=True, check_runtime=True)
-        return _status_to_response(status, include_host_paths=await _is_admin_user(request))
+        return _status_to_response(status, include_host_paths=await is_admin_user(request))
     except Exception as e:
         logger.error("Failed to get Lark integration status: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to get Lark integration status.")
@@ -317,7 +304,7 @@ async def complete_lark_app_config(request: Request, body: LarkConfigCompleteReq
             interval=body.interval,
             expires_in=body.expires_in,
         )
-        return _config_complete_to_response(result, include_host_paths=await _is_admin_user(request))
+        return _config_complete_to_response(result, include_host_paths=await is_admin_user(request))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except LarkFlowSupersededError as e:
@@ -342,7 +329,7 @@ async def switch_lark_app_credentials(request: Request, body: LarkConfigCredenti
             app_secret=body.app_secret,
             brand=body.brand,
         )
-        return _config_complete_to_response(result, include_host_paths=await _is_admin_user(request))
+        return _config_complete_to_response(result, include_host_paths=await is_admin_user(request))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -390,7 +377,7 @@ async def complete_lark_browser_auth(request: Request, body: LarkAuthCompleteReq
             generation=body.generation,
             wait_timeout_seconds=body.wait_timeout_seconds,
         )
-        return _auth_complete_to_response(result, include_host_paths=await _is_admin_user(request))
+        return _auth_complete_to_response(result, include_host_paths=await is_admin_user(request))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except LarkFlowSupersededError as e:
