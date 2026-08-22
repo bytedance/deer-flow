@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+import app.mcp_tasks.service as service_module
 from app.mcp_tasks.errors import PermanentNotificationError
 from app.mcp_tasks.service import McpTaskService
 from deerflow.mcp.tasks import (
@@ -135,6 +136,7 @@ class BlockingCancelDriver(FakeDriver):
         super().__init__(submission=submission)
         self.cancel_started = asyncio.Event()
         self.finish_cancel = asyncio.Event()
+        self.cancel_finished = asyncio.Event()
         self.cancel_completed = False
         self.cancel_interrupted = False
 
@@ -145,8 +147,10 @@ class BlockingCancelDriver(FakeDriver):
             await self.finish_cancel.wait()
         except asyncio.CancelledError:
             self.cancel_interrupted = True
+            self.cancel_finished.set()
             raise
         self.cancel_completed = True
+        self.cancel_finished.set()
         return TaskSnapshot(status=TaskStatus.CANCELLED)
 
 
@@ -335,6 +339,57 @@ async def test_submit_repeated_cancellation_does_not_interrupt_compensation():
 
     with pytest.raises(asyncio.CancelledError):
         await submit_task
+
+    assert len(driver.cancel_calls) == 1
+    assert driver.cancel_completed
+    assert not driver.cancel_interrupted
+
+
+@pytest.mark.asyncio
+async def test_submit_stops_waiting_for_hung_compensation_without_cancelling_it(monkeypatch, caplog):
+    monkeypatch.setattr(service_module, "_UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS", 0)
+    repo = BlockingCreateRepository()
+    driver = BlockingCancelDriver(
+        submission=TaskSubmission(
+            remote_task_id="remote-1",
+            snapshot=TaskSnapshot(status=TaskStatus.SUBMITTED),
+            driver_data={"cancel_tool": "cancel"},
+        )
+    )
+    registry = McpTaskDriverRegistry()
+    registry.register("fake", driver)
+    service = McpTaskService(
+        repository=repo,
+        drivers=registry,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+    )
+    request = TaskSubmitRequest(
+        user_id="user-1",
+        thread_id="thread-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        server_name="reports",
+        task_name="Generate report",
+        arguments={"topic": "MCP"},
+        local_task_id="task-1",
+    )
+
+    submit_task = asyncio.create_task(service.submit(driver_name="fake", request=request))
+    await repo.create_started.wait()
+    submit_task.cancel()
+
+    with caplog.at_level(logging.WARNING), pytest.raises(asyncio.CancelledError):
+        await submit_task
+
+    assert "cancellation continues in the background" in caplog.text
+    await driver.cancel_started.wait()
+    assert not driver.cancel_interrupted
+    assert not driver.cancel_completed
+
+    driver.finish_cancel.set()
+    await driver.cancel_finished.wait()
 
     assert len(driver.cancel_calls) == 1
     assert driver.cancel_completed

@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _MAX_PERSISTED_ERROR_CHARS = 4_000
 _MAX_INPUT_REQUIRED_BYTES = 65_536
 _MAX_NOTIFICATION_ATTEMPTS = 5
+_UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS = 5.0
 
 
 def _bound_error(error: str | None) -> str | None:
@@ -74,6 +75,7 @@ class McpTaskService:
         self._get_run = get_run
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task[None] | None = None
+        self._compensation_tasks: set[asyncio.Task[Any]] = set()
         self._stop = asyncio.Event()
 
     @property
@@ -158,42 +160,59 @@ class McpTaskService:
             )
             raise
 
-    @staticmethod
     async def _cancel_untracked_task(
+        self,
         *,
         driver,
         task_reference: TaskReference,
         driver_name: str,
         reason: str,
     ) -> None:
-        compensation = asyncio.create_task(driver.cancel(task_reference))
+        compensation = asyncio.create_task(
+            driver.cancel(task_reference),
+            name=f"mcp-submit-compensation-{task_reference.local_task_id}",
+        )
+        self._compensation_tasks.add(compensation)
 
-        def log_failure() -> None:
-            logger.exception(
+        def finalize(task: asyncio.Task[Any]) -> None:
+            self._compensation_tasks.discard(task)
+            try:
+                error = task.exception()
+            except asyncio.CancelledError as exc:
+                error = exc
+            if error is None:
+                return
+            logger.error(
                 "Failed to cancel untracked MCP task after %s (task_id=%s, driver=%s, remote_task_id=%s)",
                 reason,
                 task_reference.local_task_id,
                 driver_name,
                 task_reference.remote_task_id,
+                exc_info=(type(error), error, error.__traceback__),
             )
 
-        while True:
+        compensation.add_done_callback(finalize)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS
+        while not compensation.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.warning(
+                    "Timed out after %.1f seconds waiting for untracked MCP task compensation after %s; cancellation continues in the background (task_id=%s, driver=%s, remote_task_id=%s)",
+                    _UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS,
+                    reason,
+                    task_reference.local_task_id,
+                    driver_name,
+                    task_reference.remote_task_id,
+                )
+                return
             try:
-                await asyncio.shield(compensation)
-                return
+                await asyncio.wait({compensation}, timeout=remaining)
             except asyncio.CancelledError:
-                if not compensation.done():
-                    # A repeated caller cancellation must not also cancel the
-                    # remote compensation. Preserve it by waiting again.
-                    continue
-                try:
-                    compensation.result()
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001 - preserve the original failure or cancellation
-                    log_failure()
-                return
-            except Exception:  # noqa: BLE001 - preserve the original persistence failure or cancellation
-                log_failure()
-                return
+                # Repeated caller cancellation does not propagate through
+                # asyncio.wait() to the compensation task. Keep waiting only
+                # until the original deadline.
+                continue
 
     async def run_once(self, *, now: datetime) -> None:
         await self._run_cancellations(now=now)
