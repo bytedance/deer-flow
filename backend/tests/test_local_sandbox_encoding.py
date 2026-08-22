@@ -1,5 +1,4 @@
 import builtins
-from types import SimpleNamespace
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
@@ -79,16 +78,16 @@ def test_get_shell_uses_cmd_as_last_windows_fallback(monkeypatch):
 
 
 def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows", "OPENAI_API_KEY": "should-not-leak"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("Write-Output hello")
 
@@ -104,28 +103,23 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
                 "-Command",
                 "Write-Output hello",
             ],
-            {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {"PATH": r"C:\Windows"},
-            },
+            600,
+            {"PATH": r"C:\Windows"},
         )
     ]
 
 
 def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo hello")
 
@@ -133,53 +127,48 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
     assert calls == [
         (
             [r"C:\Program Files\Git\bin\sh.exe", "-c", "echo hello"],
+            600,
             {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {
-                    "PATH": r"C:\Program Files\Git\bin",
-                    "MSYS_NO_PATHCONV": "1",
-                    "MSYS2_ARG_CONV_EXCL": "*",
-                },
+                "PATH": r"C:\Program Files\Git\bin",
+                "MSYS_NO_PATHCONV": "1",
+                "MSYS2_ARG_CONV_EXCL": "*",
             },
         )
     ]
 
 
 def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\tools"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\tools\busybox\sh.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo /mnt/skills/demo")
 
     assert output == "ok"
     # Non-MSYS posix shell adds no MSYS_* vars; the env is the scrubbed inherited
     # environment, not None (#3861).
-    assert calls[0][1]["env"] == {"PATH": r"C:\tools"}
-    assert "MSYS_NO_PATHCONV" not in calls[0][1]["env"]
+    assert calls[0][2] == {"PATH": r"C:\tools"}
+    assert "MSYS_NO_PATHCONV" not in calls[0][2]
 
 
 def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
-    calls: list[tuple[object, dict]] = []
+    calls: list[tuple[list[str], float, dict[str, str]]] = []
 
-    def fake_run(*args, **kwargs):
-        calls.append((args[0], kwargs))
-        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+    def fake_run(args, timeout, env):
+        calls.append((args, timeout, env))
+        return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Windows", "GITHUB_TOKEN": "should-not-leak"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Windows\System32\cmd.exe"))
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
 
     output = LocalSandbox("t").execute_command("echo hello")
 
@@ -189,12 +178,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
     assert calls == [
         (
             [r"C:\Windows\System32\cmd.exe", "/c", "echo hello"],
-            {
-                "shell": False,
-                "capture_output": True,
-                "text": True,
-                "timeout": 600,
-                "env": {"PATH": r"C:\Windows"},
-            },
+            600,
+            {"PATH": r"C:\Windows"},
         )
     ]
