@@ -766,6 +766,18 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
 
+  # Web search tool (uses You.com; YDC_API_KEY optional)
+  # You.com runs its own web index and returns extracted page snippets rather
+  # than a single meta description, so results are usable without a follow-up
+  # fetch. With no key it uses the keyless endpoint (free tier, currently 100
+  # searches/day); set YDC_API_KEY and it switches to the full Search API.
+  # Get a key at https://you.com/platform?utm_source=bytedance-deer-flow&utm_medium=oss_integration&utm_campaign=2026-08-oss-integrations&utm_content=sample
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.youcom.tools:web_search_tool
+  #   max_results: 5                  # Clamped to 1-100 by You.com
+  #   # api_key: $YDC_API_KEY         # Omit to use the keyless free tier
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless
