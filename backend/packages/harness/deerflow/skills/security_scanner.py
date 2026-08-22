@@ -80,6 +80,35 @@ def _extract_json_object(raw: str) -> dict | None:
     return None
 
 
+def _extract_response_text(content: Any) -> str:
+    """Normalize provider response content to text before JSON parsing.
+
+    ChatOpenAI's Responses API uses LangChain's block format, where
+    ``AIMessage.content`` is a list such as ``[{"type": "text", "text": "..."}]``.
+    Converting that list with ``str()`` produces Python repr syntax (single
+    quotes), which is not JSON and makes an otherwise valid moderation result
+    look unparseable.  Keep only textual blocks; reasoning/tool blocks must not
+    become part of the moderation decision payload.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+                continue
+            if not isinstance(block, dict):
+                continue
+            value = block.get("text")
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, dict) and isinstance(value.get("value"), str):
+                parts.append(value["value"])
+        return "\n".join(parts)
+    return str(content or "")
+
+
 def _format_static_findings_context(static_findings: list[dict[str, Any]]) -> str:
     if not static_findings:
         return "None."
@@ -155,7 +184,7 @@ async def scan_skill_content(
             config=invoke_config,
         )
         model_responded = True
-        raw = str(getattr(response, "content", "") or "")
+        raw = _extract_response_text(getattr(response, "content", ""))
         parsed = _extract_json_object(raw)
         if parsed:
             decision = str(parsed.get("decision", "")).lower()
