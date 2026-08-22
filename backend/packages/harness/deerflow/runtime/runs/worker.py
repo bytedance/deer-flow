@@ -34,6 +34,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import TOOL_RESULTS_DIRNAME
@@ -112,6 +113,19 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
+
+def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the bounded model-state projection without trusting display names."""
+    return [
+        {
+            "task_id": row["id"],
+            "task_name": neutralize_untrusted_tags(str(row["task_name"])),
+            "status": row["status"],
+            "updated_at": row["updated_at"],
+        }
+        for row in task_rows
+    ]
 
 
 async def _persist_delivery_receipt(
@@ -425,6 +439,7 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
+    mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -605,6 +620,20 @@ async def run_agent(
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+
+    if ctx.mcp_task_repo is not None and record.user_id is not None:
+        try:
+            task_rows = await ctx.mcp_task_repo.list_by_thread(
+                thread_id,
+                user_id=record.user_id,
+                limit=20,
+            )
+            graph_input = {
+                **graph_input,
+                "background_tasks": _project_background_tasks(task_rows),
+            }
+        except Exception:
+            logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
 
     async def _finish_cancellation(
         action: str,

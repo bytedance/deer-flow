@@ -1,7 +1,7 @@
 """Durable scheduled-task enqueue state.
 
-Revision ID: 0013_scheduled_task_enqueue
-Revises: 0012_mcp_task_results
+Revision ID: 0014_scheduled_task_enqueue
+Revises: 0013_mcp_task_notifications
 Create Date: 2026-08-20
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0013_scheduled_task_enqueue"
-down_revision: str | Sequence[str] | None = "0012_mcp_task_results"
+revision: str = "0014_scheduled_task_enqueue"
+down_revision: str | Sequence[str] | None = "0013_mcp_task_notifications"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
@@ -37,6 +37,13 @@ def _replace_active_index(*, statuses: str) -> None:
 def upgrade() -> None:
     from deerflow.persistence.migrations._helpers import safe_add_column
 
+    # Before this revision, ``queued`` was a transient pre-launch marker and
+    # startup interrupted crash leftovers.  Durable enqueue gives the same
+    # value a new meaning, so preserve the old restart behavior at the upgrade
+    # boundary instead of launching an occurrence that may already have run.
+    op.execute(
+        sa.text("UPDATE scheduled_task_runs SET status = 'interrupted', error = 'interrupted: gateway upgraded before the queued run reached a terminal state', finished_at = COALESCE(finished_at, CURRENT_TIMESTAMP) WHERE status = 'queued'")
+    )
     safe_add_column(
         "scheduled_task_runs",
         sa.Column("lease_owner", sa.String(length=128), nullable=True),

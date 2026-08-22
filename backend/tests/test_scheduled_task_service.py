@@ -108,6 +108,15 @@ class DummyRunRepo:
 
     async def update_status(self, run_record_id, **kwargs):
         self.updated.append((run_record_id, kwargs))
+        return True
+
+    async def reconcile_launched_run(self, run_record_id, **kwargs):
+        self.updated.append((run_record_id, {"reconciled": True, **kwargs}))
+        return True
+
+    async def fail_launching_run(self, run_record_id, **kwargs):
+        self.updated.append((run_record_id, {"status": "failed", **kwargs}))
+        return True
 
     async def has_active_runs(self, task_id):
         return self.active
@@ -793,7 +802,7 @@ class _StatefulRunRepo:
         row["status"] = "queued"
         return True
 
-    async def update_status(self, run_record_id: str, **kwargs) -> None:
+    async def update_status(self, run_record_id: str, **kwargs) -> bool:
         self.updates.append((run_record_id, kwargs))
         if self._updates_raised < self._fail_updates:
             # The launch-path queued->running write fails AFTER _launch_run has
@@ -803,11 +812,27 @@ class _StatefulRunRepo:
             raise RuntimeError("simulated transient DB error on queued->running write")
         row = self.rows.get(run_record_id)
         if row is None:
-            return
+            return False
         if "status" in kwargs:
             row["status"] = kwargs["status"]
         if kwargs.get("run_id") is not None:
             row["run_id"] = kwargs["run_id"]
+        return True
+
+    async def reconcile_launched_run(self, run_record_id: str, **kwargs) -> bool:
+        row = self.rows.get(run_record_id)
+        if row is None:
+            return False
+        row["status"] = "running"
+        row["run_id"] = kwargs["run_id"]
+        return True
+
+    async def fail_launching_run(self, run_record_id: str, **kwargs) -> bool:
+        row = self.rows.get(run_record_id)
+        if row is None or row["status"] != "launching":
+            return False
+        row["status"] = "failed"
+        return True
 
     async def has_active_runs(self, task_id: str) -> bool:
         return any(row["task_id"] == task_id and row["status"] in self._ACTIVE for row in self.rows.values())

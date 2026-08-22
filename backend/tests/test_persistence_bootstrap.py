@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0013_scheduled_task_enqueue"
+HEAD = "0014_scheduled_task_enqueue"
 BASELINE = "0001_baseline"
 
 

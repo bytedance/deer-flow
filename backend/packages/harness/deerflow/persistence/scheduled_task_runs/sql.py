@@ -370,25 +370,172 @@ class ScheduledTaskRunRepository:
         error: str,
         now: datetime,
     ) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(
-                ScheduledTaskRunRow.status == "queued",
-                ScheduledTaskRunRow.created_at <= created_before,
-            )
-            .order_by(ScheduledTaskRunRow.created_at.asc(), ScheduledTaskRunRow.id.asc())
-            .with_for_update(skip_locked=True)
-        )
+        """Expire waiting rows and update each parent in one transaction.
+
+        The queued child keeps the task unclaimable until the parent lock is
+        held.  Releasing the child slot and advancing the parent in the same
+        transaction prevents a peer scheduler from taking a stale due-task
+        lease between those two writes.
+        """
         async with self._sf() as session:
-            rows = list((await session.execute(stmt)).scalars())
-            for row in rows:
+            candidate_keys = list(
+                (
+                    await session.execute(
+                        select(
+                            ScheduledTaskRunRow.id,
+                            ScheduledTaskRunRow.task_id,
+                        )
+                        .where(
+                            ScheduledTaskRunRow.status == "queued",
+                            ScheduledTaskRunRow.created_at <= created_before,
+                        )
+                        .order_by(
+                            ScheduledTaskRunRow.task_id.asc(),
+                            ScheduledTaskRunRow.id.asc(),
+                        )
+                    )
+                ).all()
+            )
+
+        expired: list[dict[str, Any]] = []
+        for row_id, task_id in candidate_keys:
+            async with self._sf() as session:
+                task = await self._lock_task(session, task_id)
+                row = await session.get(ScheduledTaskRunRow, row_id, with_for_update=True)
+                if row is None or row.status != "queued":
+                    await session.rollback()
+                    continue
+
                 row.status = "failed"
                 row.error = error
                 row.finished_at = now
                 row.lease_owner = None
                 row.lease_expires_at = None
+
+                if task is not None:
+                    if task.status == "paused":
+                        # Match update_after_launch(protect_paused=True): a
+                        # concurrent/later pause owns the parent presentation.
+                        task.lease_owner = None
+                        task.lease_expires_at = None
+                    else:
+                        if row.trigger == "manual":
+                            next_at = task.next_run_at
+                            task_status = task.status or "enabled"
+                        else:
+                            next_at = compute_next_run_at(
+                                task.schedule_type,
+                                task.schedule_spec,
+                                task.timezone,
+                                now=now,
+                            )
+                            task_status = "failed" if task.schedule_type == "once" else "enabled"
+                        task.status = task_status
+                        task.next_run_at = next_at
+                        task.last_thread_id = row.thread_id
+                        task.last_error = error
+                        task.lease_owner = None
+                        task.lease_expires_at = None
+                    task.updated_at = datetime.now(UTC)
+
+                await session.commit()
+                expired.append(self._row_to_dict(row))
+        return expired
+
+    async def fail_launching_run(
+        self,
+        run_record_id: str,
+        *,
+        task_id: str,
+        lease_owner: str,
+        error: str,
+        now: datetime,
+    ) -> bool:
+        """Fail a claimed launch and update its parent without a release gap."""
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True)
+            if row is None or row.task_id != task_id or row.status != "launching" or row.lease_owner != lease_owner:
+                await session.rollback()
+                return False
+
+            row.status = "failed"
+            row.error = error
+            row.started_at = now
+            row.finished_at = now
+            row.lease_owner = None
+            row.lease_expires_at = None
+
+            if task is not None:
+                if row.trigger == "manual":
+                    task_status = task.status or "enabled"
+                else:
+                    task_status = "failed" if task.schedule_type == "once" else "enabled"
+                task.status = task_status
+                task.next_run_at = compute_next_run_at(
+                    task.schedule_type,
+                    task.schedule_spec,
+                    task.timezone,
+                    now=now,
+                )
+                task.last_run_at = now
+                task.last_run_id = None
+                task.last_thread_id = row.thread_id
+                task.last_error = error
+                task.lease_owner = None
+                task.lease_expires_at = None
+                task.updated_at = datetime.now(UTC)
+
             await session.commit()
-            return [self._row_to_dict(row) for row in rows]
+            return True
+
+    async def reconcile_launched_run(
+        self,
+        run_record_id: str,
+        *,
+        task_id: str,
+        run_id: str,
+        started_at: datetime,
+    ) -> bool:
+        """Associate a run that committed after its short claim was recovered.
+
+        The Gateway launch path is idempotent per scheduled occurrence, so a
+        peer that already reclaimed this row resolves to the same durable run.
+        Parent-first locking restores the active slot before later parent
+        bookkeeping can make the task due again.
+        """
+        async with self._sf() as session:
+            await self._lock_task(session, task_id)
+            row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True)
+            if row is None or row.task_id != task_id:
+                await session.rollback()
+                return False
+            if row.status in TERMINAL_RUN_STATUSES:
+                if row.run_id is None:
+                    # Timeout/pause can terminalize a claim that recovery
+                    # briefly returned to ``queued`` while Gateway admission
+                    # was still completing.  A returned durable run is the
+                    # stronger fact; completion-owned terminal rows already
+                    # carry this exact run_id and stay terminal below.
+                    row.status = "running"
+                    row.run_id = run_id
+                    row.error = None
+                    row.finished_at = None
+                    row.started_at = row.started_at or started_at
+                elif row.run_id != run_id:
+                    await session.rollback()
+                    return False
+                elif row.started_at is None:
+                    row.started_at = started_at
+            else:
+                row.status = "running"
+                row.run_id = run_id
+                row.error = None
+                row.started_at = row.started_at or started_at
+                row.lease_owner = None
+                row.lease_expires_at = None
+            await session.commit()
+            return True
 
     async def recover_expired_launch_claims(self, *, error: str, now: datetime) -> int:
         """Recover single-instance claims that outlived their short lease."""

@@ -339,6 +339,130 @@ async def test_expired_launch_claim_is_requeued_but_waiting_timeout_fails(tmp_pa
         await close_engine()
 
 
+async def test_slow_launch_is_reassociated_after_lease_recovery(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        task = await _seed_reuse_task(task_repo, task_id="task-slow-launch", now=now)
+        queued = await run_repo.create(
+            run_record_id="task-run-slow-launch",
+            task_id=task["id"],
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="manual",
+            status="queued",
+        )
+        launch_started = asyncio.Event()
+        allow_launch_return = asyncio.Event()
+
+        async def launch_run(**kwargs):
+            launch_started.set()
+            await allow_launch_return.wait()
+            return {"run_id": "run-slow-launch", "thread_id": kwargs["thread_id"]}
+
+        service = ScheduledTaskService(
+            task_repo=task_repo,
+            task_run_repo=run_repo,
+            launch_run=launch_run,
+            poll_interval_seconds=1,
+            lease_seconds=5,
+            max_concurrent_runs=3,
+        )
+        attempt = asyncio.create_task(service._attempt_queued_run(task, queued, now=now))
+        await launch_started.wait()
+
+        recovered = await run_repo.recover_expired_launch_claims(
+            error="launch lease expired",
+            now=now + timedelta(seconds=6),
+        )
+        assert recovered == 1
+        assert (await run_repo.list_by_task(task["id"]))[0]["status"] == "queued"
+
+        allow_launch_return.set()
+        result = await attempt
+
+        row = (await run_repo.list_by_task(task["id"]))[0]
+        assert result["outcome"] == "launched"
+        assert row["status"] == "running"
+        assert row["run_id"] == "run-slow-launch"
+        assert row["lease_owner"] is None
+    finally:
+        await close_engine()
+
+
+async def test_failed_launch_releases_child_and_advances_parent_atomically(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-failed-launch-atomic",
+            user_id="user-1",
+            thread_id="thread-1",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Atomic failure",
+            prompt="fail",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 9 * * *"},
+            timezone="UTC",
+            next_run_at=now - timedelta(minutes=1),
+        )
+        await run_repo.create(
+            run_record_id="task-run-failed-launch-atomic",
+            task_id="task-failed-launch-atomic",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
+        assert (
+            await run_repo.claim_queued_run(
+                "task-run-failed-launch-atomic",
+                lease_owner="worker-a",
+                now=now,
+                lease_seconds=120,
+                global_max_concurrent_runs=3,
+            )
+            is not None
+        )
+
+        failed, peer_claims = await asyncio.gather(
+            run_repo.fail_launching_run(
+                "task-run-failed-launch-atomic",
+                task_id="task-failed-launch-atomic",
+                lease_owner="worker-a",
+                error="launch failed",
+                now=now,
+            ),
+            task_repo.claim_due_tasks(
+                now=now,
+                lease_owner="worker-b",
+                lease_seconds=120,
+                limit=1,
+            ),
+        )
+
+        assert failed is True
+        assert peer_claims == []
+        row = (await run_repo.list_by_task("task-failed-launch-atomic"))[0]
+        task = await task_repo.get("task-failed-launch-atomic", user_id="user-1")
+        assert row["status"] == "failed"
+        assert task is not None
+        assert datetime.fromisoformat(task["next_run_at"]) > now
+        assert task["lease_owner"] is None
+        assert task["last_error"] == "launch failed"
+    finally:
+        await close_engine()
+
+
 async def test_pause_atomically_cancels_waiting_run_but_rejects_launching_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

@@ -200,6 +200,9 @@ _FRAMEWORK_STRUCTURED_TAGS = [
     # Framework-authored hidden HumanMessage that instructs the agent to keep
     # working (runtime/goal.py::make_goal_continuation_message).
     "goal_continuation",
+    # Gateway-authored hidden HumanMessage carrying untrusted remote MCP task
+    # output as data for a user-facing notification run.
+    "background_task_event",
     # Subagent system-prompt blocks. Subagents run the same sanitization
     # middlewares (build_subagent_runtime_middlewares -> _build_runtime_middlewares),
     # so forging these mimics trusted context on that agent's model input too.

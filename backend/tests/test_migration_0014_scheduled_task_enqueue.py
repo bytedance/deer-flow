@@ -13,7 +13,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-async def test_migration_adds_queue_claim_fields_and_expands_active_index(tmp_path: Path) -> None:
+async def test_migration_interrupts_legacy_queue_and_adds_claim_fields(tmp_path: Path) -> None:
     db_path = tmp_path / "deer.db"
     sync = sa.create_engine(f"sqlite:///{db_path}")
     try:
@@ -34,9 +34,14 @@ async def test_migration_adds_queue_claim_fields_and_expands_active_index(tmp_pa
                     "'enabled', 'skip', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
                 )
             )
+            conn.execute(
+                sa.text(
+                    "INSERT INTO scheduled_task_runs (id, task_id, thread_id, scheduled_for, trigger, status, created_at) VALUES ('run-legacy-queued', 'task-legacy', 'thread-1', CURRENT_TIMESTAMP, 'scheduled', 'queued', CURRENT_TIMESTAMP)"
+                )
+            )
             conn.execute(sa.text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))
             conn.execute(sa.text("DELETE FROM alembic_version"))
-            conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('0012_mcp_task_results')"))
+            conn.execute(sa.text("INSERT INTO alembic_version (version_num) VALUES ('0013_mcp_task_notifications')"))
     finally:
         sync.dispose()
 
@@ -47,12 +52,16 @@ async def test_migration_adds_queue_claim_fields_and_expands_active_index(tmp_pa
             columns = {column["name"]: column for column in await conn.run_sync(lambda connection: sa.inspect(connection).get_columns("scheduled_task_runs"))}
             version = await conn.scalar(sa.text("SELECT version_num FROM alembic_version"))
             overlap_policy = await conn.scalar(sa.text("SELECT overlap_policy FROM scheduled_tasks WHERE id = 'task-legacy'"))
+            legacy_run = (await conn.execute(sa.text("SELECT status, error, finished_at FROM scheduled_task_runs WHERE id = 'run-legacy-queued'"))).one()
             index_sql = await conn.scalar(sa.text("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'uq_scheduled_task_run_active'"))
 
-        assert version == "0013_scheduled_task_enqueue"
+        assert version == "0014_scheduled_task_enqueue"
         assert {"lease_owner", "lease_expires_at", "attempt_count"} <= columns.keys()
         assert columns["attempt_count"]["nullable"] is False
         assert overlap_policy == "enqueue"
+        assert legacy_run.status == "interrupted"
+        assert "gateway upgraded" in legacy_run.error
+        assert legacy_run.finished_at is not None
         assert "'launching'" in index_sql
     finally:
         await engine.dispose()

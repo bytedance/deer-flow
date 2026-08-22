@@ -265,13 +265,11 @@ class ScheduledTaskService:
                 now=now,
             )
             task_status = self._task_status_for_launch(task, trigger=trigger)
-            await self._task_run_repo.update_status(
-                task_run_id,
-                status="running",
+            await self._record_launched_run(
+                task_run_id=task_run_id,
+                task_id=task["id"],
                 run_id=launched_run_id,
                 started_at=now,
-                protect_terminal=True,
-                expected_lease_owner=self._lease_owner,
             )
             await self._task_repo.update_after_launch(
                 task["id"],
@@ -321,13 +319,11 @@ class ScheduledTaskService:
                 # the run as launched so callers know a run is in flight.
                 task_status = self._task_status_for_launch(task, trigger=trigger)
                 try:
-                    await self._task_run_repo.update_status(
-                        task_run_id,
-                        status="running",
+                    await self._record_launched_run(
+                        task_run_id=task_run_id,
+                        task_id=task["id"],
                         run_id=launched_run_id,
                         started_at=now,
-                        protect_terminal=True,
-                        expected_lease_owner=self._lease_owner,
                     )
                 except Exception:
                     logger.exception(
@@ -371,25 +367,19 @@ class ScheduledTaskService:
 
             # _launch_run itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
-            task_status = self._task_status_for_failure(task, trigger=trigger)
-            await self._task_run_repo.update_status(
+            finalized = await self._task_run_repo.fail_launching_run(
                 task_run_id,
-                status="failed",
+                task_id=task["id"],
+                lease_owner=self._lease_owner,
                 error=str(exc),
-                started_at=now,
-                finished_at=now,
-                expected_lease_owner=self._lease_owner,
+                now=now,
             )
-            await self._task_repo.update_after_launch(
-                task["id"],
-                status=task_status,
-                next_run_at=next_at,
-                last_run_at=now,
-                last_run_id=None,
-                last_thread_id=execution_thread_id,
-                last_error=str(exc),
-                increment_run_count=False,
-            )
+            if not finalized:
+                logger.warning(
+                    "Scheduled task-run %s lost its launch claim before failure bookkeeping; leaving recovery-owned state unchanged",
+                    task_run_id,
+                )
+                return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
             return {
                 "outcome": "failed",
                 "task_run_id": task_run_id,
@@ -397,6 +387,37 @@ class ScheduledTaskService:
                 "thread_id": execution_thread_id,
                 "error": str(exc),
             }
+
+    async def _record_launched_run(
+        self,
+        *,
+        task_run_id: str,
+        task_id: str,
+        run_id: str,
+        started_at: datetime,
+    ) -> None:
+        updated = await self._task_run_repo.update_status(
+            task_run_id,
+            status="running",
+            run_id=run_id,
+            started_at=started_at,
+            protect_terminal=True,
+            expected_lease_owner=self._lease_owner,
+        )
+        if updated:
+            return
+        reconciled = await self._task_run_repo.reconcile_launched_run(
+            task_run_id,
+            task_id=task_id,
+            run_id=run_id,
+            started_at=started_at,
+        )
+        if not reconciled:
+            logger.error(
+                "Scheduled task-run %s launched durable run %s but could not restore its occurrence association",
+                task_run_id,
+                run_id,
+            )
 
     def _active_run_conflict_result(self, thread_id: str) -> dict[str, Any]:
         """Manual-trigger response when the task already has an active run.
@@ -466,37 +487,11 @@ class ScheduledTaskService:
             await self._attempt_queued_run(task, queued, now=now)
 
     async def _expire_waiting_runs(self, *, now: datetime) -> None:
-        expired = await self._task_run_repo.expire_queued_runs(
+        await self._task_run_repo.expire_queued_runs(
             created_before=now - timedelta(seconds=self._queue_timeout_seconds),
             error=_QUEUE_TIMEOUT_ERROR,
             now=now,
         )
-        for queued in expired:
-            task = await self._task_repo.get_internal(queued["task_id"])
-            if task is None:
-                continue
-            if queued["trigger"] == "manual":
-                next_at = task.get("next_run_at")
-                status = task.get("status") or "enabled"
-            else:
-                next_at = next_run_at(
-                    task["schedule_type"],
-                    task["schedule_spec"],
-                    task["timezone"],
-                    now=now,
-                )
-                status = "failed" if task["schedule_type"] == "once" else "enabled"
-            await self._task_repo.update_after_launch(
-                task["id"],
-                status=status,
-                next_run_at=next_at,
-                last_run_at=task.get("last_run_at"),
-                last_run_id=task.get("last_run_id"),
-                last_thread_id=queued["thread_id"],
-                last_error=_QUEUE_TIMEOUT_ERROR,
-                increment_run_count=False,
-                protect_paused=True,
-            )
 
     async def handle_run_completion(self, record: RunRecord) -> None:
         metadata = record.metadata or {}

@@ -50,6 +50,7 @@ from urllib.parse import urlparse
 
 from app.channels import buzz_nostr
 from app.channels.base import Channel
+from app.channels.buzz_seen_events import BuzzSeenEventStore
 from app.channels.commands import is_known_channel_command
 from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundQueueFullError, MessageBus, OutboundMessage
@@ -273,6 +274,14 @@ class BuzzChannel(Channel):
         self._last_requester: dict[tuple[str, str | None], str] = {}
         self._pending_auth_challenge: str | None = None  # set from an AUTH relay frame; consumed by the NIP-42 flow in _session
         self._seen_created_at: dict[str, int] = {}  # channel id -> high-water mark of PROCESSED created_at (see _advance_watermark)
+        # Persistent processed-event-id record. The resubscribe filter replays
+        # by design (inclusive ``since``), and the manager's inbound dedupe has
+        # a 10-minute in-process TTL — so without durable ids, every relay
+        # reconnect (or gateway restart) re-answers the last message in each
+        # channel. Dedupe here is by exact event id only, never timestamp, so
+        # it cannot skip a genuinely new event. ``seen_event_store`` is a test
+        # seam; the default persists under ``{base_dir}/channels/``.
+        self._seen_events: BuzzSeenEventStore = config.get("seen_event_store") or BuzzSeenEventStore(config.get("seen_event_store_path"))
         self._chat_subscriptions: set[str] = set()  # channel ids with a live per-channel REQ on the CURRENT connection
         self._resubscribe_attempts: dict[str, int] = {}  # sub id -> CLOSED-recovery attempts spent on the current connection/auth epoch
         self._auth_completed = False  # has THIS socket's NIP-42 handshake been ACKNOWLEDGED by the relay? (see _handle_auth_ok, _AUTH_REQUIRED_CLOSE_PREFIX)
@@ -369,6 +378,9 @@ class BuzzChannel(Channel):
         self._pending_auth_event_id = None
         self._session_started_at = None
         self._pending_auth_challenge = None
+        # Seen-id persistence is coalesced (FLUSH_DELAY_SECONDS); a clean stop
+        # must not lose records still inside that window to a replay on restart.
+        self._seen_events.flush()
         logger.info("[buzz] channel stopped")
 
     # -- subscriptions ------------------------------------------------------
@@ -1231,6 +1243,21 @@ class BuzzChannel(Channel):
         channel_id = channel_id_values[0]
         created_at = int(ev.get("created_at", 0))
         text = str(ev.get("content", ""))
+        event_id = str(ev.get("id", ""))
+
+        # Drop redeliveries of events this connector already fully processed.
+        # The resubscribe filter replays the watermark event on every reconnect
+        # (inclusive ``since``), and after a long disconnect or cursor eviction
+        # the relay's default backlog comes back too. The manager's inbound
+        # dedupe only covers a 10-minute in-process window, so without this a
+        # relay reconnect re-answers the last message in each channel. Matching
+        # is by exact event id, so a new event — whatever its author-chosen
+        # created_at — is never affected. Sits before the /connect branch
+        # deliberately: a replayed /connect would otherwise be re-answered with
+        # a spurious "code invalid or expired" reply on every reconnect.
+        if self._seen_events.seen(channel_id, event_id):
+            logger.debug("[buzz] dropped replayed event id=%s in channel %s", event_id, channel_id)
+            return
 
         # /connect <code> must be consulted before the allowlist gate (framework
         # ordering rule — see Channel._pending_connect_code) so a not-yet-bound
@@ -1252,6 +1279,7 @@ class BuzzChannel(Channel):
             # cursor: leaving it behind would replay this /connect on every reconnect
             # and answer each replay with a spurious "code invalid or expired" reply.
             self._advance_watermark(channel_id, created_at)
+            self._seen_events.record(channel_id, event_id)
             return
         if author not in self._allowed_users:
             # Deny-by-default is intentional (see start()'s empty-allowlist warning),
@@ -1283,8 +1311,11 @@ class BuzzChannel(Channel):
         await self._publish(inbound)
         # Only a fully accepted-and-published event advances the cursor, and only
         # after the publish actually succeeded. A dropped event must never move it
-        # (that was the DoS), and a failed publish must leave it replayable.
+        # (that was the DoS), and a failed publish must leave it replayable. The
+        # same rule applies to the persistent seen-id record: recording before a
+        # failed publish would turn "replayable" into "silently skipped".
         self._advance_watermark(channel_id, created_at)
+        self._seen_events.record(channel_id, event_id)
 
     # -- outbound --------------------------------------------------------------
 
