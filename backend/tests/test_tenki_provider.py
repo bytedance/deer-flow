@@ -1,6 +1,6 @@
 """Unit tests for the Tenki community sandbox provider.
 
-These run in CI without ``tenki-sandbox`` installed: they cover the lazy-import
+These run in CI without ``tenki`` installed: they cover the lazy-import
 error path, provider lifecycle, path-safety guards, the native ``fs`` file
 round-trip, warm-pool mechanics, and scope resolution — none of which need a live
 sandbox. A single opt-in integration test (``test_integration_real_sandbox``)
@@ -175,35 +175,13 @@ class _FakeSandbox:
             raise self.close_error
 
 
-class _FakeProject:
-    def __init__(self, id: str, name: str) -> None:
-        self.id = id
-        self.name = name
-
-
-class _FakeWorkspace:
-    def __init__(self, id: str, name: str, projects: list[_FakeProject]) -> None:
-        self.id = id
-        self.name = name
-        self.projects = projects
-
-
-class _FakeIdentity:
-    def __init__(self, workspaces: list[_FakeWorkspace]) -> None:
-        self.workspaces = workspaces
-
-
 class _FakeClient:
-    def __init__(self, *, workspaces=None, sandbox_factory=None, **kwargs) -> None:
+    def __init__(self, *, sandbox_factory=None, **kwargs) -> None:
         self.create_count = 0
         self.create_kwargs: list[dict] = []
         self._sandbox_factory = sandbox_factory or (lambda: _FakeSandbox())
         self.last_sandbox: _FakeSandbox | None = None
         self._by_id: dict[str, _FakeSandbox] = {}
-        self._workspaces = workspaces if workspaces is not None else [_FakeWorkspace("ws1", "Workspace", [_FakeProject("proj1", "Project")])]
-
-    def who_am_i(self):
-        return _FakeIdentity(self._workspaces)
 
     def create(self, **kwargs):
         self.create_count += 1
@@ -643,13 +621,13 @@ def test_load_config_accepts_valid_environment_key(monkeypatch):
 
 def test_create_passes_prefixed_name_and_scope(monkeypatch):
     client = _FakeClient()
-    provider = _install(monkeypatch, client=client)
+    provider = _install(monkeypatch, client=client, config_attrs={"workspace_id": "ws1"})
     sid = provider.acquire("thread-1", user_id="u1")
     assert sid in provider._sandboxes
     kwargs = client.create_kwargs[0]
     assert kwargs["name"].startswith("deer-flow-tenki-")
-    assert kwargs["project_id"] == "proj1"
     assert kwargs["workspace_id"] == "ws1"
+    assert "project_id" not in kwargs
     provider.shutdown()
 
 
@@ -897,28 +875,20 @@ def test_shutdown_destroys_all_and_stops_reaper(monkeypatch):
 # ── Provider: scope resolution ─────────────────────────────────────────
 
 
-def test_scope_auto_resolves_single(monkeypatch):
+def test_workspace_id_omitted_lets_sdk_infer_scope(monkeypatch):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
     provider.acquire("thread-1", user_id="u1")
-    assert client.create_kwargs[0]["project_id"] == "proj1"
-    assert client.create_kwargs[0]["workspace_id"] == "ws1"
+    # No workspace configured: the SDK resolves scope from the API key.
+    assert client.create_kwargs[0]["workspace_id"] is None
     provider.shutdown()
 
 
-def test_explicit_project_id_skips_lookup(monkeypatch):
+def test_explicit_workspace_id_is_forwarded(monkeypatch):
     client = _FakeClient()
-    provider = _install(monkeypatch, client=client, config_attrs={"project_id": "explicit"})
+    provider = _install(monkeypatch, client=client, config_attrs={"workspace_id": "explicit"})
     provider.acquire("thread-1", user_id="u1")
-    assert client.create_kwargs[0]["project_id"] == "explicit"
-    provider.shutdown()
-
-
-def test_ambiguous_project_raises(monkeypatch):
-    client = _FakeClient(workspaces=[_FakeWorkspace("ws1", "W", [_FakeProject("p1", "A"), _FakeProject("p2", "B")])])
-    provider = _install(monkeypatch, client=client)
-    with pytest.raises(ValueError, match="project_id"):
-        provider.acquire("thread-1", user_id="u1")
+    assert client.create_kwargs[0]["workspace_id"] == "explicit"
     provider.shutdown()
 
 

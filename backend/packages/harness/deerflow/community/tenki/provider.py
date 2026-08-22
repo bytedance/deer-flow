@@ -11,7 +11,7 @@ appear under ``sandbox:`` in ``config.yaml`` even though they are not declared o
 the model — see this package's ``__init__`` docstring for the full set.
 
 The Tenki SDK is imported lazily (``_import_client``) so the harness — and every
-other provider — installs without ``tenki-sandbox``; the dependency is only
+other provider — installs without ``tenki``; the dependency is only
 needed once this provider is selected.
 """
 
@@ -89,7 +89,7 @@ def _import_client() -> type[Client]:
     try:
         from tenki_sandbox import Client
     except ImportError as e:  # pragma: no cover - depends on the optional dependency
-        raise ImportError("TenkiSandboxProvider requires the optional 'tenki-sandbox' dependency. Install it with: pip install 'deerflow-harness[tenki]' or pip install tenki-sandbox.") from e
+        raise ImportError("TenkiSandboxProvider requires the optional 'tenki' dependency. Install it with: pip install 'deerflow-harness[tenki]' or pip install tenki.") from e
     return Client
 
 
@@ -155,7 +155,6 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             "base_url": _opt("base_url"),
             "image": _opt("image"),  # None → Tenki account default base image
             "home_dir": _opt("home_dir") or DEFAULT_TENKI_HOME_DIR,
-            "project_id": _opt("project_id"),
             "workspace_id": _opt("workspace_id"),
             "cpu_cores": _opt("cpu_cores"),
             "memory_mb": _opt("memory_mb"),
@@ -174,32 +173,6 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             if self._client is None:
                 self._client = client
             return self._client
-
-    def _resolve_scope(self) -> tuple[str | None, str | None]:
-        """Return (project_id, workspace_id), auto-selecting when unambiguous.
-
-        Tenki's ``create`` needs a project scope. When the caller didn't set one
-        in config, pick it if the account has exactly one workspace and project;
-        otherwise raise with the choices so the operator can set ``project_id``.
-        """
-        project_id = self._config["project_id"]
-        workspace_id = self._config["workspace_id"]
-        if project_id is not None:
-            return project_id, workspace_id
-
-        identity = self._get_client().who_am_i()
-        workspaces = list(identity.workspaces or [])
-        if workspace_id is not None:
-            workspaces = [w for w in workspaces if w.id == workspace_id]
-        workspace = self._require_single(workspaces, "workspace", "workspace_id")
-        project = self._require_single(list(workspace.projects or []), "project", "project_id")
-        return project.id, workspace.id
-
-    @staticmethod
-    def _require_single(items: list[Any], kind: str, param: str) -> Any:
-        if len(items) != 1:
-            raise ValueError(f"Could not auto-select a Tenki {kind}; set sandbox.{param} in config.yaml. Found: {[(getattr(i, 'id', None), getattr(i, 'name', None)) for i in items]}")
-        return items[0]
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str | None) -> tuple[str, str]:
@@ -285,11 +258,10 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         client = self._get_client()
-        project_id, workspace_id = self._resolve_scope()
         create_kwargs: dict[str, Any] = {
             "name": self._sandbox_name(sandbox_id),
-            "project_id": project_id,
-            "workspace_id": workspace_id,
+            # None → the SDK infers the scope from the API key's workspace.
+            "workspace_id": self._config["workspace_id"],
             "sticky": self._config["sticky"],
             # Wait for readiness ourselves (below) instead of inside create():
             # create(wait=True) raises with the session handle still local to the
