@@ -1,0 +1,23 @@
+---
+description: Frontend ESLint/pre-commit constraints (component kit and src/)
+globs: frontend/src/**/*.{ts,tsx}
+alwaysApply: false
+---
+
+# Frontend lint (pre-commit)
+
+Root pre-commit runs `frontend` ESLint + Prettier on staged files. **`pnpm check`** before commit.
+
+## Rules that commonly fail on hand-written code
+
+- **`@typescript-eslint/prefer-nullish-coalescing`**: Do not use `||` when `??` is wrong for empty strings. For trimmed strings use explicit checks (`if (trimmed) { … }`, `Boolean(x)`) instead of `trim() || undefined` or `a || b` when `""` must stay distinct from `null`.
+- **`@typescript-eslint/no-empty-function`**: No `() => {}`. Use a named noop with a body (e.g. `function noopLoadMore(): void { return; }`) or make the callback optional and guard before call.
+- **Prettier**: Hooks may rewrite staged files — re-`git add` after a failed commit.
+
+## Do not rely on ESLint for registry UI
+
+`frontend/src/components/ui/` and `ai-elements/` are **ESLint-ignored**. Edit **`component/`** and **`workspace/`** instead; avoid casual edits to `ui/*` unless regenerating from registry.
+
+## Workspace kit
+
+New resource-page UI belongs in `frontend/src/components/component/`; export via `index.ts` and update `component/AGENTS.md` when adding public APIs.
