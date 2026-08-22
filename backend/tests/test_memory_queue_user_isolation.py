@@ -73,3 +73,28 @@ def test_add_nowait_keeps_different_users_separate():
 
     assert q.pending_count == 2
     assert [context.user_id for context in q._items] == ["alice", "bob"]
+
+
+def test_deermem_manager_discard_pending_updates_forwards_to_queue(tmp_path):
+    """Issue #3364: DeerMem.discard_pending_updates forwards to the queue.
+
+    The manager-owned debounce queue must drop pending updates for a deleted
+    agent (and its stored tombstone) so a lagging write cannot recreate the
+    agent directory.
+    """
+    from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
+
+    manager = DeerMem(backend_config={"storage_path": str(tmp_path)})
+    queue = manager._queue
+    with patch.object(queue, "_reset_timer"):
+        queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+        queue.add(thread_id="t2", messages=["m"], agent_name="agent-b", user_id="alice")
+
+    assert queue.pending_count == 2
+
+    removed = manager.discard_pending_updates(user_id="alice", agent_name="agent-a")
+
+    assert removed == 1
+    assert queue.pending_count == 1
+    assert [c.agent_name for c in queue._items] == ["agent-b"]
+    assert not any(c.agent_name == "agent-a" for c in queue._items)

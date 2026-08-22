@@ -552,6 +552,20 @@ async def delete_agent(name: str) -> None:
     store = get_agent_store()
 
     try:
+        # Cancel any pending debounced memory writes for this agent before
+        # removing the directory. Otherwise a lagging write can recreate the
+        # agent dir (with a stray memory.json) and block recreating a
+        # same-named agent (issue #3364).
+        from deerflow.agents.memory import get_memory_manager
+
+        manager = await asyncio.to_thread(get_memory_manager)
+        discard = getattr(manager, "discard_pending_updates", None)
+        if discard is not None:
+            discard(user_id=user_id, agent_name=name)
+    except Exception as e:
+        logger.warning(f"Failed to discard pending memory updates for agent '{name}': {e}")
+
+    try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
         outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
     except Exception as e:

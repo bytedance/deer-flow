@@ -756,6 +756,27 @@ class TestAgentsAPI:
         response = agent_client.delete("/api/agents/does-not-exist")
         assert response.status_code == 404
 
+    def test_delete_agent_discards_pending_memory_updates(self, agent_client):
+        """issue #3364：删除 agent 前必须清掉其 pending 记忆更新。
+
+        Otherwise a lagging debounced memory write can recreate the agent
+        directory (with a stray memory.json) and block recreating a
+        same-named agent.
+        """
+        from unittest.mock import MagicMock
+
+        agent_client.post("/api/agents", json={"name": "discard-er", "soul": "bye"})
+
+        manager = MagicMock()
+        with patch("deerflow.agents.memory.get_memory_manager", return_value=manager):
+            response = agent_client.delete("/api/agents/discard-er")
+            assert response.status_code == 204
+
+        manager.discard_pending_updates.assert_called_once_with(
+            user_id="test-user-autouse",
+            agent_name="discard-er",
+        )
+
     def test_delete_rejects_memory_only_directory_without_removing_facts(self, agent_client, tmp_path):
         agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "lead-agent"
         facts_dir = agent_dir / "facts"

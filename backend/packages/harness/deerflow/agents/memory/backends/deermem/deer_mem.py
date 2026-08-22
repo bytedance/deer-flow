@@ -270,6 +270,24 @@ class DeerMem(MemoryManager):
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
 
+    def discard_pending_updates(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> int:
+        """Drop pending debounced memory updates for one agent (issue #3364).
+
+        Called from the agent-deletion path before the agent directory is
+        removed, so a lagging memory write cannot recreate the directory and
+        block recreating a same-named agent. Returns the number of pending
+        updates removed.
+        """
+        queue = self._queue
+        if queue is None:
+            return 0
+        return queue.discard(user_id=user_id, agent_name=agent_name)
+
     def _prepare_update(
         self,
         messages: list[Any],
