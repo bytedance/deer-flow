@@ -2619,5 +2619,15 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     table_prefix: example_ext_          # optional: table-name prefix this extension
+#                                         # owns under its own MetaData/migration chain.
+#                                         # Keeps `alembic revision --autogenerate`, run
+#                                         # directly against a live database, from seeing
+#                                         # those tables and proposing to drop them.
+#                                         # (`make migrate-rev` diffs a throwaway SQLite
+#                                         # built from the migration chain, so it never
+#                                         # sees them in the first place.)
+#                                         # Rejected at startup if empty, or if it would
+#                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
