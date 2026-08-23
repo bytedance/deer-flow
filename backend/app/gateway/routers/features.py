@@ -7,6 +7,8 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
+from urllib.parse import urlsplit, urlunsplit
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -45,6 +47,16 @@ class SubagentBatchesFeature(BaseModel):
     max_running: int = Field(..., description="Native subagent execution slots in this Gateway process")
 
 
+class KnowledgeBaseFeature(BaseModel):
+    """Availability of tenant-shared RAGFlow knowledge management."""
+
+    enabled: bool = Field(..., description="Whether the RAGFlow knowledge routes and UI are available")
+    management_url: str | None = Field(
+        default=None,
+        description="Credential-free RAGFlow origin for unsupported management operations",
+    )
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -52,6 +64,7 @@ class FeaturesResponse(BaseModel):
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
     subagent_batches: SubagentBatchesFeature
+    knowledge_base: KnowledgeBaseFeature
 
 
 @router.get(
@@ -80,4 +93,19 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             worker_running=subagent_batch_worker_running,
             max_running=configured_subagent_max_running(),
         ),
+        knowledge_base=KnowledgeBaseFeature(
+            enabled=config.knowledge_base.enabled,
+            management_url=_knowledge_management_url(config),
+        ),
     )
+
+
+def _knowledge_management_url(config: AppConfig) -> str | None:
+    """Expose only a credential-free RAGFlow URL, never connection secrets."""
+    if not config.knowledge_base.enabled:
+        return None
+    raw_url = str(config.knowledge_base.base_url).rstrip("/")
+    parsed = urlsplit(raw_url)
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")

@@ -101,11 +101,32 @@ def _settings_from_extra(extra: Mapping[str, object]) -> _RAGFlowRetrievalSettin
 
 
 def _settings_or_error() -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
-    tool_config = get_app_config().get_tool_config("knowledge_search")
-    if tool_config is None:
+    app_config = get_app_config()
+    get_tool_config = getattr(app_config, "get_tool_config", lambda _name: None)
+    tool_config = get_tool_config("knowledge_search") or get_tool_config("list_knowledge_bases")
+    global_config = getattr(app_config, "knowledge_base", None)
+    if tool_config is None and not getattr(global_config, "enabled", False):
         return None, "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
+    if tool_config is None:
+        tool_values = {}
+    else:
+        tool_values = dict(tool_config.model_extra or {})
+    if global_config is not None:
+        for field_name in (
+            "base_url",
+            "api_key",
+            "timeout",
+            "page_size",
+            "similarity_threshold",
+            "vector_similarity_weight",
+            "top_k",
+            "max_chars_per_chunk",
+            "max_total_chars",
+        ):
+            if field_name not in tool_values and hasattr(global_config, field_name):
+                tool_values[field_name] = getattr(global_config, field_name)
     try:
-        settings = _settings_from_extra(tool_config.model_extra or {})
+        settings = _settings_from_extra(tool_values)
     except ValidationError:
         logger.warning("RAGFlow knowledge_search tool configuration is invalid")
         return None, "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
@@ -375,6 +396,27 @@ async def knowledge_search(query: str) -> str:
         return _tool_error(exc, settings)
 
 
+async def list_knowledge_bases() -> str:
+    """List accessible RAGFlow knowledge-base names without exposing UUIDs."""
+    settings, error = _settings_or_error()
+    if settings is None:
+        return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
+
+    client = _build_client(settings)
+    try:
+        datasets, resolution_error = await _resolve_datasets(client, settings)
+        if resolution_error is not None:
+            return resolution_error
+        if not datasets:
+            return "No accessible RAGFlow datasets were found."
+        lines = ["Available knowledge bases:"]
+        for dataset in datasets:
+            lines.append(f"- {dataset.name}")
+        return _redact_api_key("\n".join(lines), _api_key(settings))
+    except Exception as exc:
+        return _tool_error(exc, settings)
+
+
 def _tool_description() -> str:
     base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
     return f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. Dataset IDs are never shown to the model."
@@ -393,5 +435,21 @@ knowledge_search_tool = StructuredTool.from_function(
     coroutine=_knowledge_search_entrypoint,
     name="knowledge_search",
     description=_tool_description(),
+    parse_docstring=True,
+)
+
+
+async def _list_knowledge_bases_entrypoint() -> str:
+    """List the operator-approved RAGFlow knowledge bases by name.
+
+    Dataset UUIDs and other provider metadata are intentionally omitted.
+    """
+    return await list_knowledge_bases()
+
+
+list_knowledge_bases_tool = StructuredTool.from_function(
+    coroutine=_list_knowledge_bases_entrypoint,
+    name="list_knowledge_bases",
+    description="List the names of accessible RAGFlow knowledge bases without exposing dataset IDs.",
     parse_docstring=True,
 )

@@ -340,7 +340,123 @@ export const enUS: Translations = {
     demoChats: "Demo chats",
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
+    knowledge: "Knowledge",
     agentsDisabledTooltip: "Feature not enabled",
+    knowledgeDisabledTooltip: "Knowledge feature not enabled",
+  },
+
+  // Knowledge bases
+  knowledge: {
+    title: "Knowledge",
+    description: "Manage shared RAGFlow corpora and document parsing.",
+    sharedBannerTitle:
+      "Knowledge bases on this deployment are shared by all DeerFlow users",
+    sharedBannerDescription:
+      "Content you create or upload is visible to other users on this deployment. Deletion is admin-only because it affects everyone.",
+    featureDisabledTitle: "Knowledge is not enabled",
+    featureDisabledDescription:
+      "RAGFlow knowledge integration is not enabled on this server. Please contact your administrator.",
+    loadFailed: "Failed to load knowledge bases",
+    retry: "Retry",
+    emptyTitle: "No knowledge bases yet",
+    emptyDescription:
+      "Create the first shared knowledge base, then upload documents to parse.",
+    create: {
+      action: "New knowledge base",
+      title: "Create a shared knowledge base",
+      description:
+        "The knowledge base is created directly in RAGFlow and is visible to every DeerFlow user.",
+      name: "Name",
+      namePlaceholder: "e.g. Product documentation",
+      datasetDescription: "Description",
+      descriptionPlaceholder: "Describe its contents (optional)",
+      submit: "Create",
+      submitting: "Creating…",
+      success: "Knowledge base created",
+    },
+    dataset: {
+      documents: "{count} documents",
+      chunks: "{count} chunks",
+      open: "View documents",
+      delete: "Delete knowledge base",
+      adminOnly: "Only administrators can delete shared knowledge bases.",
+      deleteTitle: "Delete this shared knowledge base?",
+      deleteDescription:
+        "This permanently deletes the knowledge base and its documents from RAGFlow, affecting every user.",
+      deleteConfirm: "Delete",
+      deleting: "Deleting…",
+      deleteSuccess: "Knowledge base deleted",
+    },
+    status: {
+      empty: "No documents",
+      parsing: "Parsing",
+      ready: "Ready",
+      failed: "Parsing failed",
+      unparsed: "Not parsed",
+      cancelled: "Cancelled",
+    },
+    detail: {
+      back: "Back to knowledge bases",
+      notFound:
+        "This knowledge base was not found. It may have been deleted in RAGFlow.",
+      documents: "Documents",
+      noDocuments: "No documents yet",
+      noDocumentsDescription:
+        "Drop files in the upload area above. Files are never stored on DeerFlow's local disk.",
+      selectAll: "Select all documents",
+      selected: "{count} selected",
+      name: "Name",
+      size: "Size",
+      chunks: "Chunks",
+      status: "Status",
+      updated: "Updated",
+      parse: "Parse selected",
+      parsing: "Starting…",
+      delete: "Delete selected",
+      deleteTitle: "Delete the selected documents?",
+      deleteDescription:
+        "The documents will be permanently removed from the shared knowledge base, affecting every user.",
+      deleteConfirm: "Delete",
+      deleting: "Deleting…",
+      parseSuccess: "Parsing started",
+      deleteSuccess: "Documents deleted",
+    },
+    upload: {
+      title: "Upload documents",
+      description:
+        "Up to 10 files, 50 MB per file, and 100 MB total per request.",
+      dropHere: "Drop files here",
+      browse: "or click to choose files",
+      uploading: "Uploading…",
+      success: "Documents uploaded",
+      noFiles: "Choose at least one file.",
+      tooManyFiles: "Upload at most 10 files at a time.",
+      fileTooLarge: "Each file must be 50 MB or smaller.",
+      requestTooLarge: "The total upload must be 100 MB or smaller.",
+    },
+    ragflow: {
+      title: "Advanced management",
+      description:
+        "Chunk editing, parser configuration, retrieval testing, and Chat/Agent management remain in RAGFlow.",
+      items: [
+        "Chunk and metadata editing",
+        "Knowledge graph, RAPTOR, and ingestion pipeline configuration",
+        "RAGFlow Chat Assistant and Agent management",
+        "RAGFlow Chat Completion",
+        "Knowledge writes initiated by an Agent",
+      ],
+      open: "Open in RAGFlow",
+      unavailable:
+        "The RAGFlow management URL is unavailable. Contact your administrator.",
+    },
+    errors: {
+      create: "Failed to create knowledge base",
+      deleteDataset: "Failed to delete knowledge base",
+      upload: "Failed to upload documents",
+      parse: "Failed to start parsing",
+      deleteDocuments: "Failed to delete documents",
+    },
+    cancel: "Cancel",
   },
   // Sidebar projects section
   projects: {

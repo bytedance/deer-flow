@@ -104,6 +104,7 @@ export type MockAPIOptions = {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
     mcpTasksEnabled?: boolean;
+    knowledgeBaseEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -324,6 +325,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
     mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
+    knowledgeBaseEnabled: options?.features?.knowledgeBaseEnabled ?? true,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -1401,6 +1403,12 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
           mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
+          knowledge_base: {
+            enabled: featureFlags.knowledgeBaseEnabled,
+            management_url: featureFlags.knowledgeBaseEnabled
+              ? "http://ragflow.example"
+              : null,
+          },
         }),
       });
     }
