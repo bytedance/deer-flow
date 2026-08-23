@@ -497,6 +497,47 @@ Notes specific to `E2BSandboxProvider`:
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
 
+**OpenSandbox Remote Sandbox** (runs code through an OpenSandbox deployment):
+
+```yaml
+sandbox:
+   use: deerflow.community.opensandbox:OpenSandboxProvider
+   image: python:3.11
+   api_key: $OPEN_SANDBOX_API_KEY     # optional when the SDK env var is set
+   domain: localhost:8080             # OPEN_SANDBOX_DOMAIN fallback
+   protocol: http
+   request_timeout: 30                # management request timeout seconds
+   ready_timeout: 30                  # create/readiness timeout seconds
+   use_server_proxy: false            # proxy execd/file traffic through server
+   sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
+   bash_command_timeout: 600          # default remote command timeout seconds
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before destroy; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[opensandbox]"
+```
+
+The provider creates a sandbox per effective user/thread scope and parks it in
+an in-process warm pool after each turn. The same scope can reclaim it after a
+health check; another user or thread cannot. Create-time readiness and
+`/mnt/user-data/{workspace,uploads,outputs}` bootstrap failures are cleaned up
+before `acquire()` returns. Each remote owns an independent SDK transport.
+Operations renew the configured server-side lifetime, and commands without an
+explicit timeout use `bash_command_timeout`; a longer explicit timeout extends
+the renewal horizon to cover the command. Operations on one remote are
+serialized so a shorter renewal cannot overwrite an in-flight command's
+horizon. File transfer uses OpenSandbox's native filesystem API; bounded
+`find`/`grep` commands implement the directory and content-search surface.
+Downloads are restricted to `/mnt/user-data` and all file paths reject
+traversal. Multi-process discovery and ownership coordination are not yet
+implemented, so `replicas` is a per-Gateway-process soft cap.
+
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
