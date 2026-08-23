@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from langchain_core.messages import AIMessage
 from langgraph.graph.message import add_messages
 
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
@@ -800,3 +801,144 @@ class TestClarificationDisabled:
         merged = add_messages(add_messages([], [first_message]), [second_message])
 
         assert len(merged) == 1
+
+
+def _sibling_clarification_call(call_id: str = "c1") -> dict:
+    return {"name": "ask_clarification", "id": call_id, "args": {"question": "Which directory should I delete?"}}
+
+
+def _sibling_bash_call(call_id: str = "b1", command: str = "rm -rf /tmp/foo") -> dict:
+    return {"name": "bash", "id": call_id, "args": {"command": command}}
+
+
+class TestSiblingToolCallDropping:
+    """Regression tests for #4906: sibling tool calls must not execute in a clarification turn.
+
+    ``return_direct`` routing only inspects the LAST ToolMessage, and ToolNode runs every
+    entry of ``AIMessage.tool_calls`` concurrently — so when the model batches
+    ``ask_clarification`` with destructive tools, the siblings run (or the run fails to stop)
+    depending on call order. The middleware must rewrite the AIMessage to keep only the
+    clarification calls before the tools node dispatches anything.
+    """
+
+    def _state(self, *messages):
+        return {"messages": list(messages)}
+
+    # -- positive cases -----------------------------------------------------
+
+    def test_clarification_first_bash_dropped(self, middleware):
+        """[ask_clarification, bash] → only the clarification call survives."""
+        msg = AIMessage(content="", tool_calls=[_sibling_clarification_call(), _sibling_bash_call()])
+        result = middleware.after_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        updated = result["messages"][0]
+        assert [tc["name"] for tc in updated.tool_calls] == ["ask_clarification"]
+        assert updated.tool_calls[0]["id"] == "c1"
+
+    def test_bash_first_clarification_kept(self, middleware):
+        """Order independence: [bash, ask_clarification] → bash still dropped.
+
+        This is the case where legacy ``return_direct`` routing happened to end the run
+        (clarification was last), but the destructive sibling still executed first.
+        """
+        msg = AIMessage(content="", tool_calls=[_sibling_bash_call(), _sibling_clarification_call()])
+        result = middleware.after_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        updated = result["messages"][0]
+        assert [tc["name"] for tc in updated.tool_calls] == ["ask_clarification"]
+
+    def test_multiple_siblings_all_dropped(self, middleware):
+        """Every non-clarification sibling is dropped, whatever the mix."""
+        write_file = {"name": "write_file", "id": "w1", "args": {"path": "/tmp/x", "content": "x"}}
+        msg = AIMessage(content="", tool_calls=[_sibling_bash_call(), _sibling_clarification_call(), write_file])
+        result = middleware.after_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        updated = result["messages"][0]
+        assert [tc["id"] for tc in updated.tool_calls] == ["c1"]
+
+    def test_message_id_preserved_for_replacement(self, middleware):
+        """Same message id so add_messages replaces the AIMessage instead of appending."""
+        msg = AIMessage(content="", id="aimsg-1", tool_calls=[_sibling_clarification_call(), _sibling_bash_call()])
+        result = middleware.after_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        assert result["messages"][0].id == "aimsg-1"
+        merged = add_messages([msg], result["messages"])
+        assert len(merged) == 1
+        assert [tc["name"] for tc in merged[0].tool_calls] == ["ask_clarification"]
+
+    def test_openai_raw_tool_calls_metadata_synced(self, middleware):
+        """additional_kwargs['tool_calls'] (raw OpenAI payload) drops the same ids."""
+
+        def raw(call_id: str, name: str) -> dict:
+            return {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
+
+        msg = AIMessage(
+            content="",
+            tool_calls=[_sibling_clarification_call(), _sibling_bash_call()],
+            additional_kwargs={"tool_calls": [raw("c1", "ask_clarification"), raw("b1", "bash")]},
+        )
+        result = middleware.after_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        raw_ids = [r["id"] for r in result["messages"][0].additional_kwargs["tool_calls"]]
+        assert raw_ids == ["c1"]
+
+    def test_anthropic_tool_use_blocks_stripped(self, middleware):
+        """List content keeps text blocks and kept tool_use blocks; dropped ids are removed."""
+        content = [
+            {"type": "text", "text": "Let me check before deleting."},
+            {"type": "tool_use", "id": "b1", "name": "bash", "input": {"command": "rm -rf /tmp/foo"}},
+            {"type": "tool_use", "id": "c1", "name": "ask_clarification", "input": {"question": "Which directory?"}},
+        ]
+        msg = AIMessage(
+            content=content,
+            tool_calls=[_sibling_clarification_call(), _sibling_bash_call()],
+        )
+        result = middleware.after_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        new_content = result["messages"][0].content
+        assert [block.get("id") for block in new_content if block.get("type") == "tool_use"] == ["c1"]
+        assert any(block == {"type": "text", "text": "Let me check before deleting."} for block in new_content)
+
+    @pytest.mark.asyncio
+    async def test_async_parity(self, middleware):
+        """aafter_model mirrors after_model."""
+        msg = AIMessage(content="", tool_calls=[_sibling_bash_call(), _sibling_clarification_call()])
+        result = await middleware.aafter_model(self._state(msg), SimpleNamespace(context={}))
+        assert result is not None
+        assert [tc["name"] for tc in result["messages"][0].tool_calls] == ["ask_clarification"]
+
+    # -- no-op cases --------------------------------------------------------
+
+    def test_pure_clarification_turn_unchanged(self, middleware):
+        """A single ask_clarification call has nothing to drop → None."""
+        msg = AIMessage(content="", tool_calls=[_sibling_clarification_call()])
+        assert middleware.after_model(self._state(msg), SimpleNamespace(context={})) is None
+
+    def test_tools_only_turn_unchanged(self, middleware):
+        """No clarification in the turn → untouched (normal parallel execution)."""
+        msg = AIMessage(content="", tool_calls=[_sibling_bash_call("b2"), _sibling_bash_call("b3")])
+        assert middleware.after_model(self._state(msg), SimpleNamespace(context={})) is None
+
+    def test_disable_clarification_keeps_siblings(self, middleware):
+        """Suppressed runs turn clarification into a proceed ToolMessage; real actions MUST stay."""
+        msg = AIMessage(content="", tool_calls=[_sibling_clarification_call(), _sibling_bash_call()])
+        runtime = SimpleNamespace(context={"disable_clarification": True})
+        assert middleware.after_model(self._state(msg), runtime) is None
+
+    @pytest.mark.asyncio
+    async def test_disable_clarification_async_keeps_siblings(self, middleware):
+        """Async parity for the suppression bypass."""
+        msg = AIMessage(content="", tool_calls=[_sibling_clarification_call(), _sibling_bash_call()])
+        runtime = SimpleNamespace(context={"disable_clarification": True})
+        assert await middleware.aafter_model(self._state(msg), runtime) is None
+
+    def test_no_messages_returns_none(self, middleware):
+        assert middleware.after_model({"messages": []}, SimpleNamespace(context={})) is None
+
+    def test_non_ai_last_message_returns_none(self, middleware):
+        from langchain_core.messages import HumanMessage
+
+        assert middleware.after_model(self._state(HumanMessage(content="hi")), SimpleNamespace(context={})) is None
+
+    def test_ai_without_tool_calls_returns_none(self, middleware):
+        assert middleware.after_model(self._state(AIMessage(content="done")), SimpleNamespace(context={})) is None

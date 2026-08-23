@@ -12,7 +12,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.runtime import Runtime
 from langgraph.types import Command
+
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +374,10 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         agent to proceed with its best judgment instead.
         """
         runtime = getattr(request, "runtime", None)
+        return self._is_context_disabled(runtime)
+
+    def _is_context_disabled(self, runtime: Runtime | None) -> bool:
+        """Whether ``disable_clarification`` is set on a raw runtime object."""
         context = getattr(runtime, "context", None)
         if not context:
             return False
@@ -496,3 +503,64 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             return self._handle_disabled_clarification(request)
 
         return self._handle_clarification(request)
+
+    def _drop_sibling_tool_calls(self, state: AgentState, runtime: Runtime | None = None) -> dict | None:
+        """Rewrite the latest AIMessage so a clarification turn carries only ``ask_clarification`` calls.
+
+        Providers routinely batch tool calls in one ``AIMessage``. When ``ask_clarification``
+        shares a turn with other calls, two order-dependent failures happen (#4906): sibling
+        tools still execute (ToolNode dispatches every entry concurrently, and this middleware
+        only intercepts the clarification call itself), and langchain's ``return_direct``
+        router inspects only the LAST ``ToolMessage``, so the run may not stop at all when a
+        sibling lands after the question. Clarification is supposed to run before action:
+        dropping the siblings here keeps CLARIFY -> ACT ordering — the model can re-issue
+        them after the user replies. The rewrite keeps the same message id so LangGraph's
+        ``add_messages`` replaces the AIMessage in place, syncs raw provider tool-call
+        metadata via ``clone_ai_message_with_tool_calls``, and strips Anthropic-style
+        ``tool_use`` content blocks whose ids were dropped so transcripts stay consistent.
+
+        Suppressed runs (``disable_clarification``) skip the rewrite entirely: those turns
+        convert clarification into a proceed ToolMessage and MUST keep their real actions.
+        """
+        messages = state.get("messages", []) if isinstance(state, dict) else getattr(state, "messages", [])
+        if not messages:
+            return None
+
+        last_msg = messages[-1]
+        if getattr(last_msg, "type", None) != "ai":
+            return None
+
+        tool_calls = getattr(last_msg, "tool_calls", None)
+        if not tool_calls:
+            return None
+
+        # Non-interactive runs keep clarification AND its siblings; the wrap_tool_call
+        # suppression path answers each clarification call with a proceed ToolMessage.
+        if self._is_context_disabled(runtime):
+            return None
+
+        kept = [tc for tc in tool_calls if tc.get("name") == "ask_clarification"]
+        if not kept or len(kept) == len(tool_calls):
+            # No clarification to protect, or a pure-clarification turn: nothing to drop.
+            return None
+
+        dropped_ids = {tc["id"] for tc in tool_calls if tc.get("name") != "ask_clarification" and isinstance(tc.get("id"), str) and tc["id"]}
+
+        content = last_msg.content
+        if dropped_ids and isinstance(content, list):
+            content = [block for block in content if not (isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id") in dropped_ids)]
+
+        logger.info(
+            "Dropped %d sibling tool call(s) batched with ask_clarification so the interrupt is authoritative (#4906)",
+            len(dropped_ids),
+        )
+        updated = clone_ai_message_with_tool_calls(last_msg, kept, content=content)
+        return {"messages": [updated]}
+
+    @override
+    def after_model(self, state: AgentState, runtime: Runtime | None = None) -> dict | None:
+        return self._drop_sibling_tool_calls(state, runtime)
+
+    @override
+    async def aafter_model(self, state: AgentState, runtime: Runtime | None = None) -> dict | None:
+        return self._drop_sibling_tool_calls(state, runtime)
