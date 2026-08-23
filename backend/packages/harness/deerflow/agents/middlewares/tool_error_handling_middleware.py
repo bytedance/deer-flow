@@ -133,7 +133,10 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(self._maybe_stamp(result, request))
+        return normalize_tool_result(
+            self._maybe_stamp(result, request),
+            tool_call_id=str(request.tool_call.get("id") or ""),
+        )
 
     @override
     async def awrap_tool_call(
@@ -149,7 +152,10 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(self._maybe_stamp(result, request))
+        return normalize_tool_result(
+            self._maybe_stamp(result, request),
+            tool_call_id=str(request.tool_call.get("id") or ""),
+        )
 
 
 def _build_runtime_middlewares(

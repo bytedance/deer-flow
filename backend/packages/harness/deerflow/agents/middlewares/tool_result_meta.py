@@ -297,8 +297,34 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     return msg
 
 
-def normalize_tool_result(result: ToolMessage | Command) -> ToolMessage | Command:
-    """Normalize a tool result, handling Command wrappers transparently."""
+def _command_messages(result: Command) -> list | tuple | None:
+    update = result.update
+    if not isinstance(update, dict):
+        return None
+    messages = update.get("messages")
+    if isinstance(messages, ToolMessage):
+        return [messages]
+    if isinstance(messages, (list, tuple)):
+        return messages
+    return None
+
+
+def normalize_tool_result(result: ToolMessage | Command, *, tool_call_id: str = "") -> ToolMessage | Command:
+    """Normalize a tool result, handling Command wrappers transparently.
+
+    When ``tool_call_id`` is provided, only the matching ``ToolMessage`` inside a
+    Command is stamped. Other Command fields and unrelated messages are left intact.
+    Producer-supplied ``deerflow_tool_meta`` is preserved by ``normalize_tool_message``.
+    """
     if isinstance(result, ToolMessage):
         return normalize_tool_message(result)
+    messages = _command_messages(result)
+    if messages is None:
+        return result
+    for message in messages:
+        if not isinstance(message, ToolMessage):
+            continue
+        if tool_call_id and str(message.tool_call_id) != tool_call_id:
+            continue
+        normalize_tool_message(message)
     return result
