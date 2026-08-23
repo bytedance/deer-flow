@@ -41,6 +41,8 @@ fonts, images, audio, and video uncompressed at the proxy layer.
 Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
 — **loopback by default**, matching the README's documented deployment model. A bare
 `"${PORT}:2026"` binds `0.0.0.0`, which does not.
+The root `PORT` value is Docker ingress configuration only; local orchestration pins
+Next.js to `3000` so loading `.env` cannot make `make dev` wait on the wrong port.
 Nginx itself listens `default_server` on IPv4+IPv6 and the
 Gateway binds `0.0.0.0:8001` inside the container on purpose — both are container-
 internal; the published nginx port is the entire external surface, and the Gateway's
@@ -126,6 +128,12 @@ make up / down   # Build/stop the production Docker stack (browser at localhost:
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
+Production startup uses the image's pre-built Python environment with `uv run
+--no-sync`, gives the Gateway a real `/health` probe, and makes `make up` wait
+for that probe before printing its success banner. A readiness failure must
+surface Compose status and recent Gateway logs instead of claiming the stack is
+running.
+
 Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
 checkout before invoking Compose, matching the start and stop commands.
 
@@ -151,6 +159,37 @@ Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and 
 
 Host-side pnpm consumers, including the root/frontend Makefiles and local diagnostic scripts, must run through `scripts/pnpm.py`. Diagnostic scripts resolve the runner and frontend directory to absolute paths before changing the child process working directory, so they remain independent of the caller's current directory. The runner preserves direct `pnpm`/`pnpm.cmd` priority, falls back to `corepack pnpm`, and is invoked from `frontend/` so Corepack honors the package-manager version pinned by that project.
 
+### Prerequisites before `make dev`
+
+`make dev` does **not** generate config files. First-time setup order:
+
+```bash
+make config      # copy config.example.yaml -> config.yaml and extensions_config.example.json -> extensions_config.json (both gitignored)
+make install     # install frontend + backend deps and pre-commit hooks
+make dev         # then start everything
+```
+
+Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
+may be edited at runtime via the Gateway API but are gitignored, so never commit them.
+
+### Run a single test
+
+```bash
+# Backend (pytest); run one file or one test function
+cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
+cd backend && python -m pytest tests/path/to/test.py::test_func -q
+
+# Frontend (rstest)
+cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
+```
+
+### Logs
+
+- Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
+- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+  errors surface in the browser console at `localhost:3000`; backend tracebacks appear
+  in the Gateway terminal.
+
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
@@ -174,3 +213,11 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Version sources must stay in lockstep** — a release version must match identically in
+  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
+  (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
+  `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts. Before
+  bumping a version, run `scripts/bump_version.sh <ver>` (aligns all four at once) and
+  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
+  belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

@@ -59,6 +59,7 @@ export type MockSkill = {
 
 export type MockAPIOptions = {
   threads?: MockThread[];
+  createdThreadMessages?: unknown[];
   agents?: MockAgent[];
   skills?: MockSkill[];
   scheduledTasks?: Array<{
@@ -94,7 +95,9 @@ export type MockAPIOptions = {
   features?: {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
+    mcpTasksEnabled?: boolean;
   };
+  runStreamHandler?: (route: Route) => Promise<void>;
 };
 
 const DEFAULT_SKILLS: MockSkill[] = [
@@ -174,17 +177,20 @@ function branchMessagesFromTurn(messages: unknown[], targetIds: Set<string>) {
   return targetEndIndex >= 0 ? messages.slice(0, targetEndIndex + 1) : messages;
 }
 
-function mockStreamMessages(route?: Route, inputMessages?: unknown[]) {
+function mockStreamMessages(
+  route?: Route,
+  inputMessages?: unknown[],
+  responseMessage: Record<string, unknown> = {
+    type: "ai",
+    id: "msg-ai-1",
+    content: "Hello from DeerFlow!",
+  },
+) {
   const submittedMessages = inputMessages
     ? visibleInputMessages(inputMessages)
     : route
       ? visibleRunInputMessages(route)
       : [];
-  const responseMessage = {
-    type: "ai",
-    id: "msg-ai-1",
-    content: "Hello from DeerFlow!",
-  };
   if (submittedMessages.length > 0) {
     return [...submittedMessages, responseMessage];
   }
@@ -301,6 +307,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
+    mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -699,7 +706,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         thread_id: MOCK_THREAD_ID,
         title: "New Chat",
         updated_at: new Date().toISOString(),
-        messages: mockStreamMessages(),
+        messages: options?.createdThreadMessages ?? mockStreamMessages(),
       });
       return route.fulfill({
         status: 200,
@@ -1115,23 +1122,25 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   });
 
   // Run stream — returns a minimal SSE response with an AI message
-  const handleMockRunStream = (route: Route) => {
-    const threadId = runStreamThreadId(route);
-    const existingThread = threads.find(
-      (thread) => thread.thread_id === threadId,
-    );
-    const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
-    const goal = existingThread?.goal ?? fallbackGoal;
-    upsertThread({
-      thread_id: threadId,
-      title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
-      updated_at: new Date().toISOString(),
-      goal,
-      metadata: existingThread?.metadata,
-      messages: mockStreamMessages(route),
+  const handleMockRunStream =
+    options?.runStreamHandler ??
+    ((route: Route) => {
+      const threadId = runStreamThreadId(route);
+      const existingThread = threads.find(
+        (thread) => thread.thread_id === threadId,
+      );
+      const fallbackGoal = threads.find((thread) => thread.goal)?.goal ?? null;
+      const goal = existingThread?.goal ?? fallbackGoal;
+      upsertThread({
+        thread_id: threadId,
+        title: threadId === MOCK_SIDECAR_THREAD_ID ? "Side chat" : "New Chat",
+        updated_at: new Date().toISOString(),
+        goal,
+        metadata: existingThread?.metadata,
+        messages: mockStreamMessages(route),
+      });
+      return handleRunStream(route, { goal });
     });
-    return handleRunStream(route, { goal });
-  };
 
   void page.route("**/api/langgraph/runs/stream", handleMockRunStream);
   void page.route(
@@ -1165,6 +1174,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
+          mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
         }),
       });
     }
@@ -1418,18 +1428,35 @@ export function handleRunStream(
   route: Route,
   values: Record<string, unknown> = {},
   inputMessages?: unknown[],
+  options?: {
+    responseMessage?: Record<string, unknown>;
+    messageMetadata?: Record<string, unknown>;
+  },
 ) {
   const threadId = runStreamThreadId(route);
+  const responseMessage = options?.responseMessage ?? {
+    type: "ai",
+    id: "msg-ai-1",
+    content: "Hello from DeerFlow!",
+  };
   const events = [
     {
       event: "metadata",
       data: { run_id: MOCK_RUN_ID, thread_id: threadId },
     },
+    ...(options?.messageMetadata
+      ? [
+          {
+            event: "messages",
+            data: [responseMessage, options.messageMetadata],
+          },
+        ]
+      : []),
     {
       event: "values",
       data: {
         ...values,
-        messages: mockStreamMessages(route, inputMessages),
+        messages: mockStreamMessages(route, inputMessages, responseMessage),
       },
     },
     { event: "end", data: {} },

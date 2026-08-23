@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
@@ -11,6 +12,7 @@ import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
+  getStreamMetadataSnapshot,
   getStreamingMessageLookup,
   hasContent,
   hasReasoning,
@@ -787,6 +789,139 @@ test("marks the latest assistant message as streaming", () => {
       })),
     ),
   ).toBe(false);
+});
+
+test("compares stream metadata snapshots by keys and metadata identity", () => {
+  const identifiedMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: "Completed answer",
+  } as Message;
+  const anonymousMessage = {
+    type: "ai",
+    content: "Anonymous answer",
+  } as Message;
+  const identifiedMetadata = { langgraph_node: "agent" };
+  const anonymousMetadata = { langgraph_node: "agent" };
+  const messages = [identifiedMessage, anonymousMessage];
+  const snapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const equivalentSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const changedSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage
+        ? { ...identifiedMetadata }
+        : anonymousMetadata,
+  }));
+  const missingSnapshot = getStreamMetadataSnapshot(
+    [identifiedMessage],
+    () => ({ streamMetadata: identifiedMetadata }),
+  );
+
+  expect(areStreamMetadataSnapshotsEqual(snapshot, equivalentSnapshot)).toBe(
+    true,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, changedSnapshot)).toBe(
+    false,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, missingSnapshot)).toBe(
+    false,
+  );
+});
+
+test("ignores stream metadata retained from a completed turn", () => {
+  const completedMetadata = { langgraph_node: "agent", langgraph_step: 1 };
+  const activeMetadata = { langgraph_node: "agent", langgraph_step: 2 };
+  const completedMessages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+  ] as Message[];
+  const settledMetadata = getStreamMetadataSnapshot(
+    completedMessages,
+    (message) =>
+      message.id === "ai-1" ? { streamMetadata: completedMetadata } : undefined,
+  );
+  const messages = [
+    ...completedMessages,
+    {
+      id: "human-2",
+      type: "human",
+      content: "Continue",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Still generating",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages).filter(
+    (group) => group.type === "assistant",
+  );
+  const streamingMessages = getStreamingMessageLookup(
+    messages,
+    true,
+    (message) => {
+      if (message.id === "ai-1") {
+        return { streamMetadata: completedMetadata };
+      }
+      if (message.id === "ai-2") {
+        return { streamMetadata: activeMetadata };
+      }
+      return undefined;
+    },
+    settledMetadata,
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[0]?.messages ?? [],
+      streamingMessages,
+    ),
+  ).toBe(false);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[1]?.messages ?? [],
+      streamingMessages,
+    ),
+  ).toBe(true);
+});
+
+test("treats updated metadata for the same message id as active", () => {
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    content: "Partial answer",
+  } as Message;
+  const completedMetadata = { langgraph_node: "agent", langgraph_step: 1 };
+  const activeMetadata = { langgraph_node: "agent", langgraph_step: 2 };
+  const settledMetadata = getStreamMetadataSnapshot([message], () => ({
+    streamMetadata: completedMetadata,
+  }));
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      [message],
+      getStreamingMessageLookup(
+        [message],
+        true,
+        () => ({ streamMetadata: activeMetadata }),
+        settledMetadata,
+      ),
+    ),
+  ).toBe(true);
 });
 
 test("keeps previous assistant copyable while waiting for a new visible answer", () => {

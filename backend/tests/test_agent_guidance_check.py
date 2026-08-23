@@ -65,7 +65,7 @@ def test_normalized_utf8_size_uses_lf_and_counts_non_ascii_bytes() -> None:
 @pytest.mark.parametrize(
     ("path", "soft", "hard"),
     [
-        ("AGENTS.md", 12 * 1024, 16 * 1024),
+        ("AGENTS.md", 16 * 1024, 20 * 1024),
         ("backend/AGENTS.md", 24 * 1024, 32 * 1024),
         ("backend/app/gateway/AGENTS.md", 40 * 1024, 48 * 1024),
     ],
@@ -75,7 +75,7 @@ def test_budget_depends_on_directory_level(path: str, soft: int, hard: int) -> N
 
 
 def test_single_file_over_hard_limit_is_an_error(tmp_path: Path) -> None:
-    findings = checker.analyze(tmp_path, _files(**{"AGENTS.md": "x" * (16 * 1024 + 1)}))
+    findings = checker.analyze(tmp_path, _files(**{"AGENTS.md": "x" * (20 * 1024 + 1)}))
 
     assert "AG001" in _codes(findings, "error")
 
@@ -97,9 +97,9 @@ def test_effective_ancestor_chain_can_fail_when_each_file_is_valid(tmp_path: Pat
 
 
 def test_legacy_hard_violation_may_shrink_but_may_not_grow(tmp_path: Path) -> None:
-    base = _files(**{"AGENTS.md": "x" * (17 * 1024)})
-    smaller = _files(**{"AGENTS.md": "x" * (17 * 1024 - 1)})
-    grown = _files(**{"AGENTS.md": "x" * (17 * 1024 + 1)})
+    base = _files(**{"AGENTS.md": "x" * (20 * 1024)})
+    smaller = _files(**{"AGENTS.md": "x" * (20 * 1024 - 1)})
+    grown = _files(**{"AGENTS.md": "x" * (20 * 1024 + 1)})
 
     smaller_findings = checker.analyze(tmp_path, smaller, base_files=base)
     grown_findings = checker.analyze(tmp_path, grown, base_files=base)

@@ -273,3 +273,9 @@ canonical live diagnostics list.
 Changing `plugins` requires a restart. Any future contribution kind must be added to the
 public contract and host runtime in the same slice; never accept a registration method
 that the current host silently ignores.
+
+### Extension Manager Test Repositories
+
+`test_extension_manager.py` creates temporary Git repositories for local extension sources.
+Temporary commits use an empty repository-local hook directory. They must not run developer or CI Git hooks.
+Tests for hook behavior must create and invoke their own hook fixtures.

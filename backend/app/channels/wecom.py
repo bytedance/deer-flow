@@ -385,13 +385,21 @@ class WeComChannel(Channel):
         self._ws_frames[msg_id] = frame
         self._ws_stream_ids[msg_id] = stream_id
 
+        reservation = self._reserve_inbound(inbound)
+        if reservation is None:
+            self._ws_frames.pop(msg_id, None)
+            self._ws_stream_ids.pop(msg_id, None)
+            return
         try:
-            await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
-        except Exception:
-            pass
+            try:
+                await self._ws_client.reply_stream(frame, stream_id, self._working_message, False)
+            except Exception:
+                pass
 
-        inbound = await self._attach_connection_identity(inbound)
-        await self.bus.publish_inbound(inbound)
+            inbound = await self._attach_connection_identity(inbound)
+            self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            reservation.release()
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(

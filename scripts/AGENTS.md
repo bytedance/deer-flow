@@ -1,3 +1,11 @@
+## Service Startup Contracts
+
+The root `PORT` value configures Docker's published nginx ingress only; local
+orchestration pins Next.js to `3000`. Runtime commands launch from the already
+synchronized environment with `uv run --no-sync`. Production Compose probes
+Gateway `/health`, and `deploy.sh` waits for all services before reporting
+success; failures print Compose status and recent Gateway logs.
+
 ## Backend Static Analysis Commands
 
 The root `detect-thread-boundaries` target statically inventories execution

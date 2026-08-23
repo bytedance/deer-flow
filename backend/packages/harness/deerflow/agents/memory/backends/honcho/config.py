@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any
 
 _ID_RE = re.compile(r"[^a-zA-Z0-9_-]+")
@@ -48,6 +49,18 @@ class HonchoConfig:
     allow_insecure_http: bool = False
     read_fail_closed: bool = False
     storage_path: str = ""
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise ValueError("Honcho backend: timeout_seconds must be a finite value > 0")
+        if not isfinite(self.connect_timeout_seconds) or self.connect_timeout_seconds <= 0:
+            raise ValueError("Honcho backend: connect_timeout_seconds must be a finite value > 0")
+        # add()/get_context() truncate with text[:n]. n <= 0 is empty (n == 0)
+        # or a Python negative slice (n == -1 -> text[:-1]), not a length cap.
+        if self.message_char_limit <= 0:
+            raise ValueError("Honcho backend: message_char_limit must be > 0")
+        if self.max_injection_chars <= 0:
+            raise ValueError("Honcho backend: max_injection_chars must be > 0")
 
     @classmethod
     def from_backend_config(cls, backend_config: dict[str, Any] | None) -> HonchoConfig:
