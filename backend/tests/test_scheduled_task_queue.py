@@ -463,6 +463,70 @@ async def test_failed_launch_releases_child_and_advances_parent_atomically(tmp_p
         await close_engine()
 
 
+async def test_failed_manual_launch_preserves_paused_next_run_at(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        next_run_at = now + timedelta(days=1)
+        await task_repo.create(
+            task_id="task-failed-manual-launch",
+            user_id="user-1",
+            thread_id="thread-1",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Manual launch failure",
+            prompt="fail",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 9 * * *"},
+            timezone="UTC",
+            next_run_at=next_run_at,
+        )
+        await task_repo.update(
+            "task-failed-manual-launch",
+            user_id="user-1",
+            updates={"status": "paused"},
+        )
+        await run_repo.create(
+            run_record_id="task-run-failed-manual-launch",
+            task_id="task-failed-manual-launch",
+            thread_id="thread-1",
+            scheduled_for=now,
+            trigger="manual",
+            status="queued",
+        )
+        assert (
+            await run_repo.claim_queued_run(
+                "task-run-failed-manual-launch",
+                lease_owner="worker-a",
+                now=now,
+                lease_seconds=120,
+                global_max_concurrent_runs=3,
+            )
+            is not None
+        )
+
+        assert await run_repo.fail_launching_run(
+            "task-run-failed-manual-launch",
+            task_id="task-failed-manual-launch",
+            lease_owner="worker-a",
+            error="launch failed",
+            now=now,
+        )
+
+        row = (await run_repo.list_by_task("task-failed-manual-launch"))[0]
+        task = await task_repo.get("task-failed-manual-launch", user_id="user-1")
+        assert row["status"] == "failed"
+        assert task is not None
+        assert task["status"] == "paused"
+        assert task["next_run_at"] == next_run_at.isoformat()
+    finally:
+        await close_engine()
+
+
 async def test_pause_atomically_cancels_waiting_run_but_rejects_launching_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:

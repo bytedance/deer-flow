@@ -414,8 +414,7 @@ class ScheduledTaskRunRepository:
 
                 if task is not None:
                     if task.status == "paused":
-                        # Match update_after_launch(protect_paused=True): a
-                        # concurrent/later pause owns the parent presentation.
+                        # A concurrent/later pause owns the parent presentation.
                         task.lease_owner = None
                         task.lease_expires_at = None
                     else:
@@ -469,15 +468,17 @@ class ScheduledTaskRunRepository:
             if task is not None:
                 if row.trigger == "manual":
                     task_status = task.status or "enabled"
+                    next_at = task.next_run_at
                 else:
                     task_status = "failed" if task.schedule_type == "once" else "enabled"
+                    next_at = compute_next_run_at(
+                        task.schedule_type,
+                        task.schedule_spec,
+                        task.timezone,
+                        now=now,
+                    )
                 task.status = task_status
-                task.next_run_at = compute_next_run_at(
-                    task.schedule_type,
-                    task.schedule_spec,
-                    task.timezone,
-                    now=now,
-                )
+                task.next_run_at = next_at
                 task.last_run_at = now
                 task.last_run_id = None
                 task.last_thread_id = row.thread_id

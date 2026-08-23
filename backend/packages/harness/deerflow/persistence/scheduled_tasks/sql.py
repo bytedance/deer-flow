@@ -4,7 +4,7 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, text, update
+from sqlalchemy import and_, exists, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
@@ -16,7 +16,6 @@ from deerflow.utils.time import coerce_iso
 logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
-_SCHEDULER_BUDGET_LOCK_KEY = 4694001
 
 
 class ActiveScheduledTaskMutationConflict(Exception):
@@ -291,7 +290,6 @@ class ScheduledTaskRepository:
         lease_owner: str,
         lease_seconds: int,
         limit: int,
-        global_max_concurrent_runs: int | None = None,
     ) -> list[dict[str, Any]]:
         lease_expires_at = now + timedelta(seconds=lease_seconds)
         async with self._sf() as session:
@@ -301,21 +299,6 @@ class ScheduledTaskRepository:
                     ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
                 )
             )
-            if global_max_concurrent_runs is not None:
-                if session.get_bind().dialect.name == "postgresql":
-                    await session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": _SCHEDULER_BUDGET_LOCK_KEY})
-                active_runs = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(("launching", "running"))))
-                dispatch_reservations = await session.scalar(
-                    select(func.count())
-                    .select_from(ScheduledTaskRow)
-                    .where(
-                        ScheduledTaskRow.lease_owner.is_not(None),
-                        ScheduledTaskRow.lease_expires_at >= now,
-                        ~active_run_for_task,
-                    )
-                )
-                active = int(active_runs or 0) + int(dispatch_reservations or 0)
-                limit = min(limit, max(0, global_max_concurrent_runs - active))
             if limit <= 0:
                 return []
             stmt = (
@@ -413,7 +396,6 @@ class ScheduledTaskRepository:
         last_error: str | None,
         increment_run_count: bool,
         protect_terminal: bool = False,
-        protect_paused: bool = False,
         expected_lease_owner: str | None = None,
     ) -> bool:
         async with self._sf() as session:
@@ -429,12 +411,6 @@ class ScheduledTaskRepository:
                 )
                 await session.rollback()
                 return False
-            if protect_paused and row.status == "paused":
-                row.lease_owner = None
-                row.lease_expires_at = None
-                row.updated_at = datetime.now(UTC)
-                await session.commit()
-                return True
             if protect_terminal and row.status in TERMINAL_TASK_STATUSES:
                 # A fast-failing run can reach handle_run_completion (which
                 # finalizes a `once` task) before this launch-path write
