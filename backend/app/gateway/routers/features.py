@@ -1,12 +1,13 @@
 """Read-only feature-flag endpoint for the frontend bootstrap.
 
-Reports which optional, config-gated features are exposed over HTTP so the
-frontend can gate UI and avoid firing requests that the backend would reject
-with 403. Reads through ``get_config`` so edits to ``config.yaml`` take effect
-on the next request without a restart (config hot-reload boundary).
+Reports which optional features are exposed over HTTP so the frontend can gate
+UI and avoid firing requests that the backend would reject. Config-only flags
+read through ``get_config`` so edits to ``config.yaml`` take effect on the next
+request, while startup-scoped capabilities report the runtime that actually
+started.
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
@@ -28,23 +29,34 @@ class BrowserControlFeature(BaseModel):
     enabled: bool = Field(..., description="Whether the live browser routes and UI are available")
 
 
+class McpTasksFeature(BaseModel):
+    """Availability of the durable MCP task runtime."""
+
+    enabled: bool = Field(..., description="Whether durable MCP task APIs and UI are available")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
+    mcp_tasks: McpTasksFeature
 
 
 @router.get(
     "/features",
     response_model=FeaturesResponse,
     summary="List Feature Flags",
-    description="Report which optional config-gated features are enabled, so the frontend can gate UI before issuing requests.",
+    description="Report which optional features are available, so the frontend can gate UI before issuing requests.",
 )
-async def list_features(config: AppConfig = Depends(get_config)) -> FeaturesResponse:
-    """Return availability of optional, config-gated frontend features."""
+async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
+    """Return availability of optional frontend features."""
     browser = browser_capability(config)
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
+        # MCP task bindings and the submitter are startup-scoped. Report the
+        # capability that actually started rather than a hot-reloaded config
+        # value that would require a Gateway restart to take effect.
+        mcp_tasks=McpTasksFeature(enabled=bool(getattr(request.app.state, "mcp_tasks_available", False))),
     )

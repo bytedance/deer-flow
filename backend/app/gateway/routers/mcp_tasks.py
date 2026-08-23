@@ -34,6 +34,7 @@ def _list_item(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
         "updated_at": record["updated_at"],
         "error": _short_error(record.get("error")),
         "tracking_degraded": _tracking_degraded(record, threshold=threshold),
+        "cancel_requested": record.get("cancel_requested_at") is not None,
     }
 
 
@@ -42,6 +43,11 @@ def _detail(record: dict[str, Any], *, threshold: int) -> dict[str, Any]:
         **_list_item(record, threshold=threshold),
         "last_polled_at": record.get("last_polled_at"),
         "last_poll_error": _short_error(record.get("last_poll_error")),
+        "last_cancel_error": _short_error(record.get("last_cancel_error")),
+        "cancel_attempt_count": int(record.get("cancel_attempt_count") or 0),
+        "notification_status": record.get("notification_status"),
+        "notification_error": _short_error(record.get("notification_error")),
+        "notification_attempt_count": int(record.get("notification_attempt_count") or 0),
         "result": record.get("result"),
         "result_preview": record.get("result_preview"),
         "result_truncated": bool(record.get("result_truncated")),
@@ -93,3 +99,22 @@ async def get_mcp_task(
         record,
         threshold=service.tracking_degraded_after_errors,
     )
+
+
+@router.post("/{task_id}/cancel")
+@require_permission("threads", "write", owner_check=True)
+async def cancel_mcp_task(
+    thread_id: ThreadId,
+    task_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    service = get_mcp_task_service(request)
+    user_id = await _current_user_id(request)
+    record = await service.cancel_task(
+        task_id=task_id,
+        thread_id=thread_id,
+        user_id=user_id,
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="MCP task not found")
+    return _detail(record, threshold=service.tracking_degraded_after_errors)

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import override
 from uuid import uuid4
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.runtime import Runtime
@@ -231,6 +232,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             additional_kwargs={
                 "hide_from_ui": True,
                 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY: True,
+                **provenance_kwargs(ContentKind.IMAGE_PAYLOAD, "view_image"),
             },
         )
 

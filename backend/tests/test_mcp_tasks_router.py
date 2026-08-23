@@ -36,6 +36,8 @@ def _record(**overrides):
         "error": None,
         "last_poll_error": "temporary network failure",
         "consecutive_poll_error_count": 3,
+        "last_cancel_error": None,
+        "cancel_attempt_count": 0,
         "result": None,
         "result_preview": None,
         "result_truncated": False,
@@ -86,6 +88,7 @@ async def test_list_returns_only_safe_current_user_thread_fields(monkeypatch) ->
             "updated_at": "2026-08-05T00:00:05+00:00",
             "error": None,
             "tracking_degraded": True,
+            "cancel_requested": False,
         }
     ]
 
@@ -98,6 +101,11 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
                 status="completed",
                 result={"report": "ready"},
                 result_artifact={"uri": "s3://reports/1.json", "mime_type": "application/json"},
+                last_cancel_error="c" * 600,
+                cancel_attempt_count=4,
+                notification_status="retry",
+                notification_error="n" * 600,
+                notification_attempt_count=3,
             )
         ]
     )
@@ -111,6 +119,11 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
 
     assert response["result"] == {"report": "ready"}
     assert response["result_artifact"]["uri"] == "s3://reports/1.json"
+    assert response["last_cancel_error"] == "c" * 500
+    assert response["cancel_attempt_count"] == 4
+    assert response["notification_status"] == "retry"
+    assert response["notification_error"] == "n" * 500
+    assert response["notification_attempt_count"] == 3
     assert "remote_task_id" not in response
     assert "driver_data" not in response
     assert "server_name" not in response
@@ -138,3 +151,28 @@ async def test_detail_rejects_cross_user_and_cross_thread_access(monkeypatch) ->
             request=request,
         )
     assert cross_thread.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch) -> None:
+    repo = FakeRepository([_record()])
+    service = AsyncMock()
+    service.tracking_degraded_after_errors = 3
+    service.cancel_task.return_value = _record(status="working", cancel_requested_at="2026-08-05T00:00:06+00:00")
+    request = _request(repo)
+    request.app.state.mcp_task_service = service
+    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
+
+    response = await mcp_tasks.cancel_mcp_task.__wrapped__(
+        thread_id="thread-1",
+        task_id="mcp-task-1",
+        request=request,
+    )
+
+    service.cancel_task.assert_awaited_once_with(
+        task_id="mcp-task-1",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+    assert response["status"] == "working"
+    assert response["cancel_requested"] is True

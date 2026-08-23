@@ -13,6 +13,7 @@ import pytest
 from mcp.types import CallToolResult, ResourceLink, TextContent
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths
+from deerflow.constants import MCP_TMP_SUBDIR
 from deerflow.mcp import tools as mcp_tools
 
 
@@ -398,7 +399,7 @@ class TestPrepareStdioWorkspace:
         source_base_dir, tmp_dir, before = mcp_tools._prepare_stdio_workspace(paths, thread_id="t1", user_id="u1")
 
         assert source_base_dir == paths.sandbox_work_dir("t1", user_id="u1")
-        assert tmp_dir == source_base_dir / mcp_tools._MCP_TMP_SUBDIR
+        assert tmp_dir == source_base_dir / MCP_TMP_SUBDIR
         assert tmp_dir.is_dir()
         assert before == {existing: (existing.stat().st_mtime_ns, existing.stat().st_size)}
 

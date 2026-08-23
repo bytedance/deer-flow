@@ -32,7 +32,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
 )
-from app.gateway.deps import get_checkpointer, get_run_event_store
+from app.gateway.deps import get_checkpointer, get_run_event_store, get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
     build_checkpoint_state_accessor,
@@ -40,13 +40,14 @@ from app.gateway.services import (
     build_thread_checkpoint_state_accessor,
     build_thread_checkpoint_state_mutation_accessor,
     reserve_checkpoint_write,
+    strip_server_owned_state_metadata,
 )
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
 from deerflow.config.paths import Paths, get_paths
 from deerflow.config.summarization_config import ContextSize
 from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY
-from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.runtime import ThreadOperationKind, serialize_channel_values_for_api
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError, CheckpointModeReconfigurationError
 from deerflow.runtime.checkpoint_state import graph_reducer_channels, graph_state_schema, graph_writable_channels
 from deerflow.runtime.context_compaction import (
@@ -59,6 +60,7 @@ from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     build_goal_state,
     ensure_thread_checkpoint,
+    goal_thread_lock,
     read_thread_goal,
     write_thread_goal,
 )
@@ -626,6 +628,24 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
+    run_manager = get_run_manager(request)
+    try:
+        async with goal_thread_lock(thread_id):
+            async with run_manager.reserve_thread_operation(
+                thread_id,
+                kind=ThreadOperationKind.delete,
+                user_id=get_effective_user_id(),
+            ):
+                return await _delete_thread_data_with_reservation(thread_id, request)
+    except ConflictError:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread has work in flight. Delete it after the work finishes.",
+        ) from None
+
+
+async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
+    """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
@@ -1265,7 +1285,12 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         as_node=mutation_node,
         checkpoint_id=body.checkpoint_id,
     )
-    values = dict(body.values or {})
+    # These values go straight into a checkpoint, so they need the same
+    # server-owned-metadata stripping the run path gets inside normalize_input.
+    # Without it an authenticated client can persist forged provenance and
+    # transform trails, which later readers are entitled to treat as facts
+    # about what the host itself did.
+    values = strip_server_owned_state_metadata(dict(body.values or {}))
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)

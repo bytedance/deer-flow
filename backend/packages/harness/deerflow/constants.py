@@ -20,6 +20,22 @@ BROWSER_FRAMES_DIRNAME = ".browser-frames"
 # snapshot capture as an extra excluded dir name.
 TOOL_RESULTS_DIRNAME = ".tool-results"
 
+# Hidden directory under a thread workspace owned by stdio MCP runtimes. The
+# default subprocess temp directory lives at ``.mcp/tmp``; these files are
+# process-internal state rather than workspace deliverables, so the
+# workspace-changes scanner excludes the whole reserved namespace. MCP launch
+# paths and the scanner share this name so writes and filtering cannot drift.
+MCP_INTERNAL_DIRNAME = ".mcp"
+
+# Default subprocess temp subdirectory pinned into stdio MCP environments
+# (``TMPDIR``/``TMP``/``TEMP``). Both stdio launch paths (persistent sessions
+# and background task calls) import this instead of composing the suffix
+# themselves. Pinning the process temp dir here (alongside its cwd) makes
+# tools that write to ``os.tmpdir()`` / ``tempfile.gettempdir()`` land inside
+# the mounted user-data tree, where their output is resolvable by the
+# sandbox/artifact API — instead of on an unreachable host temp path.
+MCP_TMP_SUBDIR = f"{MCP_INTERNAL_DIRNAME}/tmp"
+
 # Default timeout (seconds) for MCP server bring-up: tool discovery (subprocess
 # spawn + initialize + tools/list) and persistent-session initialization. A hung
 # stdio server (e.g. npx blocked on a package download or a server that never
