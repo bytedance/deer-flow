@@ -184,6 +184,16 @@ chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
 sections shown above.
 
+`extensionsConfig` is an initial seed, not a live read-only mount. An init
+container copies it into
+`/app/backend/.deer-flow/extensions-config/extensions_config.json`, where the
+Gateway can persist MCP and skill-state API updates. With
+`persistence.home.enabled: true`, the runtime file is kept on the home PVC and
+is not overwritten by later Helm upgrades; delete that runtime file before a
+pod restart only when you intentionally want a changed `extensionsConfig` seed
+to replace it. With persistence disabled, the writable copy uses `emptyDir`
+and is reseeded whenever the Pod is replaced.
+
 ## 3. Install (from a local chart checkout)
 
 For a custom build or local development, install from the chart directory:

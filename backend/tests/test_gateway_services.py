@@ -3047,3 +3047,40 @@ async def test_start_run_rejects_invalid_thread_id_before_resolving_dependencies
 
     assert exc_info.value.status_code == 422
     assert "Invalid thread_id" in exc_info.value.detail
+
+
+def test_client_forged_user_id_is_scrubbed_for_external_callers():
+    """user_id now selects which credential user-scoped MCP auth injects, so a
+    client-forged value must never survive merge + inject on any external path
+    — including ones that end in an early return (no authenticated user)."""
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context, merge_run_context_overrides
+
+    # Forged via body.config (copied verbatim) AND body.context (merged).
+    config = build_run_config("thread-1", {"context": {"user_id": "victim"}, "configurable": {"user_id": "victim"}}, None)
+    merge_run_context_overrides(config, {"user_id": "victim"})
+
+    # External caller with no authenticated user: scrub, never restamp.
+    request = SimpleNamespace(state=SimpleNamespace(user=None, auth_source=None))
+    inject_authenticated_user_context(config, request)
+    assert "user_id" not in config["context"]
+    assert "user_id" not in config["configurable"]
+
+
+def test_client_forged_user_id_never_selects_another_users_credential():
+    """End-to-end pin through merge + inject ordering: the id user-scoped MCP
+    auth resolves from runtime context is the authenticated user, regardless of
+    what the client put in body.context/config."""
+    from types import SimpleNamespace
+
+    from app.gateway.services import build_run_config, inject_authenticated_user_context, merge_run_context_overrides
+    from deerflow.runtime.user_context import resolve_runtime_user_id
+
+    config = build_run_config("thread-1", {"context": {"user_id": "victim"}}, None)
+    merge_run_context_overrides(config, {"user_id": "victim"})
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="attacker-own-id", system_role=None, oauth_provider=None, oauth_id=None), auth_source=None))
+    inject_authenticated_user_context(config, request)
+
+    runtime = SimpleNamespace(server_info=None, context=config["context"])
+    assert resolve_runtime_user_id(runtime) == "attacker-own-id"
