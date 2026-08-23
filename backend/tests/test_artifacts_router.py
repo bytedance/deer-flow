@@ -663,11 +663,7 @@ def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
 def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> None:
     # Active content (e.g. .html) is force-downloaded. A large active file must
     # still force a download but skip the full-file SHA-256 pass (performance P1).
-    payload = (
-        "<html>"
-        + ("a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1))
-        + "</html>"
-    )
+    payload = "<html>" + ("a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)) + "</html>"
     artifact_path = tmp_path / "large.html"
     artifact_path.write_text(payload, encoding="utf-8")
     monkeypatch.setattr(
