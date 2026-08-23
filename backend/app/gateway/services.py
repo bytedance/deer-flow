@@ -591,6 +591,43 @@ def _resolve_max_recursion_limit() -> int:
         return _DEFAULT_MAX_RECURSION_LIMIT
 
 
+def _resolve_scheduler_recursion_limit() -> int:
+    """Resolve the scheduled-run recursion_limit from ``AppConfig.scheduler``.
+
+    Falls back to ``_DEFAULT_RECURSION_LIMIT`` when the app config cannot be
+    loaded so a missing ``config.yaml`` in tests still launches with the server
+    default rather than crashing dispatch. The value is clamped to
+    ``max_recursion_limit`` here, at dispatch, so an operator value above the
+    ceiling never reaches ``build_run_config`` as an unclamped value — which
+    would otherwise be misattributed as a "client" overage and emit a
+    ``clamped client recursion_limit`` warning on every scheduled run.
+    ``build_run_config`` keeps its own clamp for genuine client-supplied
+    bodies (defense in depth; its warning then only fires for real clients).
+
+    Both silent paths now emit an operator-visible warning: the pre-clamp
+    (operator value above ``max_recursion_limit``) and the config-load failure
+    fallback (``_DEFAULT_RECURSION_LIMIT`` returned instead of the operator
+    value).
+    """
+    try:
+        raw = get_app_config().scheduler.recursion_limit
+        max_limit = _resolve_max_recursion_limit()
+        if raw > max_limit:
+            logger.warning(
+                "scheduler.recursion_limit %d exceeds max_recursion_limit %d; clamped to %d for scheduled runs",
+                raw,
+                max_limit,
+                max_limit,
+            )
+        return min(raw, max_limit)
+    except Exception:
+        logger.warning(
+            "failed to load app config; falling back to recursion_limit=%d for scheduled runs",
+            _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
+
+
 def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
     """Clamp a client-supplied ``recursion_limit`` into a safe server range.
 
@@ -1420,7 +1457,7 @@ async def launch_scheduled_thread_run(
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config=None,
+        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;

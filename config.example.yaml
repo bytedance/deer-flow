@@ -2116,7 +2116,12 @@ agent_storage:
 # Scheduled Tasks Configuration
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.
-# All fields are restart-required (captured at Gateway lifespan startup).
+# Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
+# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# recursion_limit is read at dispatch and applies to the next scheduled run
+# without a Gateway restart. The default (1000) matches the web UI's
+# interactive budget so scheduled and interactive runs behave identically out
+# of the box. Values above max_recursion_limit are clamped.
 #
 # The scheduler is single-instance by default. Set multi_instance: true only
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
@@ -2124,10 +2129,12 @@ agent_storage:
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
+#   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
 #   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
@@ -2135,6 +2142,7 @@ scheduler:
   lease_seconds: 120
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 
 # ============================================================================
 # Long-running MCP Tasks Configuration
