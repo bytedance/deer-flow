@@ -339,6 +339,8 @@ def test_explicit_empty_allowed_tools_keeps_only_framework_tools():
     request = ModelRequestStub(
         [
             NamedTool("task"),
+            NamedTool("list_background_tasks"),
+            NamedTool("cancel_background_task"),
             NamedTool("read_file"),
             NamedTool("review_skill_package"),
             NamedTool("tool_search"),
@@ -352,6 +354,22 @@ def test_explicit_empty_allowed_tools_keeps_only_framework_tools():
         "review_skill_package",
         "tool_search",
         "describe_skill",
+    ]
+
+
+def test_active_skill_must_declare_background_task_business_tools():
+    restricted = _skill("task-reader", ["list_background_tasks"])
+    middleware = _middleware([restricted])
+    request = ModelRequestStub(
+        [
+            NamedTool("list_background_tasks"),
+            NamedTool("cancel_background_task"),
+        ],
+        state={"skill_context": [{"path": restricted.get_container_file_path()}]},
+    )
+
+    assert _tool_names(middleware._filter_model_request(request)) == [
+        "list_background_tasks",
     ]
 
 
