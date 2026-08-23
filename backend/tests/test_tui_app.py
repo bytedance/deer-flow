@@ -342,6 +342,22 @@ async def test_page_keys_scroll_transcript_without_moving_composer_focus():
 
 
 @pytest.mark.asyncio
+async def test_transcript_update_does_not_cancel_pending_page_scroll():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        scroll = await _fill_scrollable_transcript(app, pilot)
+        bottom = scroll.scroll_y
+
+        app.action_transcript_page_up()
+        app._dispatch(SystemMessage("output before the queued scroll is applied"))
+        await pilot.pause()
+
+        assert scroll.scroll_y < bottom
+        assert not scroll.is_vertical_scroll_end
+
+
+@pytest.mark.asyncio
 async def test_transcript_refresh_preserves_manual_scroll_until_returning_to_end():
     app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
     async with app.run_test(size=(80, 24)) as pilot:
