@@ -7,10 +7,9 @@ import re
 from collections.abc import Mapping
 
 from langchain.tools import tool
-from pydantic import SecretStr
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError
 
 from deerflow.config import get_app_config
-from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 
 from .client import RAGFlowAPIError, RAGFlowClient, RAGFlowConnectionError, RAGFlowProtocolError
 from .formatting import format_retrieval_result
@@ -21,7 +20,23 @@ _warned: set[str] = set()
 _RAGFLOW_UUID_PATTERN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
 
 
-def _api_key(settings: KnowledgeBaseConfig) -> str | None:
+class _RAGFlowRetrievalSettings(BaseModel):
+    """Validated provider settings stored on the knowledge_search tool entry."""
+
+    model_config = ConfigDict(validate_default=True)
+
+    base_url: AnyHttpUrl = Field(default="http://localhost:9380")
+    api_key: SecretStr | None = Field(default=None)
+    timeout: float = Field(default=30, gt=0, le=600)
+    page_size: int = Field(default=8, ge=1, le=100)
+    similarity_threshold: float = Field(default=0.2, ge=0, le=1)
+    vector_similarity_weight: float = Field(default=0.3, ge=0, le=1)
+    top_k: int = Field(default=256, ge=1, le=1024)
+    max_chars_per_chunk: int = Field(default=800, ge=1, le=100_000)
+    max_total_chars: int = Field(default=8000, ge=1, le=1_000_000)
+
+
+def _api_key(settings: _RAGFlowRetrievalSettings) -> str | None:
     value = settings.api_key
     if isinstance(value, SecretStr):
         value = value.get_secret_value()
@@ -37,19 +52,24 @@ def _redact(value: object, api_key: str | None) -> str:
     return _RAGFLOW_UUID_PATTERN.sub("[DATASET_ID]", text)
 
 
-def _settings_or_error() -> tuple[KnowledgeBaseConfig | None, str | None]:
-    settings = get_app_config().knowledge_base
-    if not settings.enabled:
-        return None, "Error: 知识库功能未启用，请在 config.yaml 中设置 knowledge_base.enabled: true。"
+def _settings_or_error() -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
+    tool_config = get_app_config().get_tool_config("knowledge_search")
+    if tool_config is None:
+        return None, "Error: 未配置 knowledge_search；请在 config.yaml 的 tools 列表中添加该工具及其 RAGFlow 连接参数。"
+    try:
+        settings = _RAGFlowRetrievalSettings.model_validate(tool_config.model_extra or {})
+    except ValidationError:
+        logger.warning("RAGFlow knowledge_search tool configuration is invalid")
+        return None, "Error: knowledge_search 的 RAGFlow 配置无效，请检查 config.yaml。"
     if not _api_key(settings):
         if "api_key" not in _warned:
             _warned.add("api_key")
-            logger.warning("RAGFlow API Key 未配置；请设置 knowledge_base.api_key，建议使用 $RAGFLOW_API_KEY 环境变量引用。")
-        return None, "Error: 未配置 RAGFlow API Key，请设置 knowledge_base.api_key（建议使用 $RAGFLOW_API_KEY）。"
+            logger.warning("RAGFlow API Key 未配置；请设置 tools 中 knowledge_search.api_key，建议使用 $RAGFLOW_API_KEY 环境变量引用。")
+        return None, "Error: 未配置 RAGFlow API Key，请设置 tools 中的 knowledge_search.api_key（建议使用 $RAGFLOW_API_KEY）。"
     return settings, None
 
 
-def _build_client(settings: KnowledgeBaseConfig) -> RAGFlowClient:
+def _build_client(settings: _RAGFlowRetrievalSettings) -> RAGFlowClient:
     api_key = _api_key(settings)
     if api_key is None:  # Guarded by _settings_or_error; keeps this helper total.
         raise ValueError("RAGFlow API Key is missing")
@@ -60,7 +80,7 @@ def _build_client(settings: KnowledgeBaseConfig) -> RAGFlowClient:
     )
 
 
-def _tool_error(exc: Exception, settings: KnowledgeBaseConfig) -> str:
+def _tool_error(exc: Exception, settings: _RAGFlowRetrievalSettings) -> str:
     key = _api_key(settings)
     safe_detail = _redact(exc, key)
     base_url = _redact(str(settings.base_url).rstrip("/"), key)

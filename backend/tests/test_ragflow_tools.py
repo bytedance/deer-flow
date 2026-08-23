@@ -6,7 +6,6 @@ import pytest
 import deerflow.community.ragflow.tools as ragflow_tools
 from deerflow.community.ragflow.client import RAGFlowAPIError, RAGFlowConnectionError
 from deerflow.community.ragflow.formatting import format_retrieval_result
-from deerflow.config.knowledge_base_config import KnowledgeBaseConfig
 from deerflow.config.tool_config import ToolConfig
 from deerflow.tools.tools import get_available_tools
 
@@ -37,23 +36,26 @@ def reset_warning_deduplication() -> None:
 
 def _config(
     *,
-    enabled: bool = True,
+    configured: bool = True,
     api_key: str | None = "ragflow-secret",
     base_url: str = "http://ragflow.test",
 ) -> SimpleNamespace:
+    search_config = ToolConfig(
+        name="knowledge_search",
+        group="knowledge",
+        use="deerflow.community.ragflow.tools:knowledge_search_tool",
+        base_url=base_url,
+        api_key=api_key,
+        timeout=30,
+        page_size=8,
+        similarity_threshold=0.2,
+        vector_similarity_weight=0.3,
+        top_k=256,
+        max_chars_per_chunk=800,
+        max_total_chars=8000,
+    )
     return SimpleNamespace(
-        knowledge_base=SimpleNamespace(
-            enabled=enabled,
-            base_url=base_url,
-            api_key=api_key,
-            timeout=30,
-            page_size=8,
-            similarity_threshold=0.2,
-            vector_similarity_weight=0.3,
-            top_k=256,
-            max_chars_per_chunk=800,
-            max_total_chars=8000,
-        )
+        get_tool_config=lambda name: search_config if configured and name == "knowledge_search" else None,
     )
 
 
@@ -191,13 +193,14 @@ async def test_missing_api_key_returns_guidance_and_warns_only_once(monkeypatch:
 
 
 @pytest.mark.anyio
-async def test_disabled_feature_returns_guidance_without_calling_ragflow(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_knowledge_search_config_returns_guidance_without_calling_ragflow(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(enabled=False))
+    _install(monkeypatch, fake, config=_config(configured=False))
 
     result = await ragflow_tools.list_knowledge_bases()
 
-    assert "knowledge_base.enabled: true" in result
+    assert "tools" in result
+    assert "knowledge_search" in result
 
 
 @pytest.mark.anyio
@@ -308,11 +311,14 @@ def test_formatting_applies_total_response_truncation() -> None:
     assert result.endswith("…（响应已截断）")
 
 
-def test_knowledge_base_config_has_safe_defaults_and_secret_repr() -> None:
-    config = KnowledgeBaseConfig(api_key="ragflow-secret")
+def test_retrieval_settings_load_from_knowledge_search_tool_and_hide_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
 
-    assert config.enabled is False
-    assert str(config.base_url).rstrip("/") == "http://localhost:9380"
+    config, error = ragflow_tools._settings_or_error()
+
+    assert error is None
+    assert config is not None
+    assert str(config.base_url).rstrip("/") == "http://ragflow.test"
     assert config.page_size == 8
     assert config.max_chars_per_chunk == 800
     assert config.max_total_chars == 8000
@@ -328,22 +334,28 @@ def test_agent_tool_contracts_are_async_and_model_facing() -> None:
     assert "list_knowledge_bases" in ragflow_tools.knowledge_search_tool.description
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_tool_assembly_gates_knowledge_group_with_feature_flag(enabled: bool) -> None:
-    config = SimpleNamespace(
-        tools=[
+@pytest.mark.parametrize("configured", [False, True])
+def test_tool_assembly_uses_normal_tool_presence_without_feature_flag(configured: bool) -> None:
+    tools = (
+        [
             ToolConfig(
                 name="knowledge_search",
                 group="knowledge",
                 use="deerflow.community.ragflow.tools:knowledge_search_tool",
+                base_url="http://ragflow.test",
+                api_key="ragflow-secret",
             ),
             ToolConfig(
                 name="list_knowledge_bases",
                 group="knowledge",
                 use="deerflow.community.ragflow.tools:list_knowledge_bases_tool",
             ),
-        ],
-        knowledge_base=SimpleNamespace(enabled=enabled),
+        ]
+        if configured
+        else []
+    )
+    config = SimpleNamespace(
+        tools=tools,
         sandbox=SimpleNamespace(use="example.remote:Sandbox"),
         skill_evolution=SimpleNamespace(enabled=False),
         models=[],
@@ -353,5 +365,5 @@ def test_tool_assembly_gates_knowledge_group_with_feature_flag(enabled: bool) ->
 
     names = {tool.name for tool in get_available_tools(include_mcp=False, app_config=config)}
 
-    assert ("knowledge_search" in names) is enabled
-    assert ("list_knowledge_bases" in names) is enabled
+    assert ("knowledge_search" in names) is configured
+    assert ("list_knowledge_bases" in names) is configured

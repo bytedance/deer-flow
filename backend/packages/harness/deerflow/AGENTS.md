@@ -39,10 +39,12 @@ drift.
 The optional `knowledge` tool group exposes only `list_knowledge_bases` and
 `knowledge_search`. Both call RAGFlow directly through the async `httpx` client;
 they never persist dataset metadata, expose dataset UUIDs to the model, or
-provide write operations. `knowledge_base.enabled=false` removes the whole
-group during tool assembly. Retrieval output is bounded at both the individual
-chunk and full-response levels, and every error path must redact the configured
-tenant API key before logging or returning model-visible text.
+provide write operations. Both are enabled through the normal `tools:` list.
+Provider connection and retrieval extras belong to `knowledge_search` and are
+reused by `list_knowledge_bases`; there is no top-level provider configuration.
+Retrieval output is bounded at both the individual chunk and full-response
+levels, and every error path must redact the configured tenant API key before
+logging or returning model-visible text.
 The client intentionally exposes only dataset listing and retrieval. Dataset
 creation, uploads, parsing, deletion, Gateway management routes, SSE, and
 frontend UI are outside this retrieval-only slice.

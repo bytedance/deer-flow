@@ -227,25 +227,34 @@ configured API key is tenant-scoped, so all DeerFlow users share the same
 knowledge bases.
 
 ```yaml
-knowledge_base:
-  enabled: true
-  base_url: http://localhost:9380
-  api_key: $RAGFLOW_API_KEY
-  timeout: 30
-  page_size: 8
-  similarity_threshold: 0.2
-  vector_similarity_weight: 0.3
-  top_k: 256
-  max_chars_per_chunk: 800
-  max_total_chars: 8000
+tool_groups:
+  - name: knowledge
+
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.community.ragflow.tools:knowledge_search_tool
+    base_url: http://localhost:9380
+    api_key: $RAGFLOW_API_KEY
+    timeout: 30
+    page_size: 8
+    similarity_threshold: 0.2
+    vector_similarity_weight: 0.3
+    top_k: 256
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+  - name: list_knowledge_bases
+    group: knowledge
+    use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 ```
 
-The configured `knowledge` tool group is hidden while `enabled` is false and is
-picked up on the next config access after enabling. Prefer passing explicit
-knowledge-base names to `knowledge_search`: RAGFlow can reject a cross-dataset
-query when the selected datasets use different embedding models. For Docker or
-Kubernetes, `base_url` must be reachable from the Gateway container or Pod;
-`localhost` refers to that container or Pod, not the host machine.
+Both tools are opt-in through the normal `tools:` list. Connection and retrieval
+settings belong to `knowledge_search`; `list_knowledge_bases` reads that same
+configuration. Prefer passing explicit knowledge-base names to
+`knowledge_search`: RAGFlow can reject a cross-dataset query when the selected
+datasets use different embedding models. For Docker or Kubernetes, `base_url`
+must be reachable from the Gateway container or Pod; `localhost` refers to that
+container or Pod, not the host machine.
 
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
 deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.

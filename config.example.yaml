@@ -659,29 +659,6 @@ models:
   #   pool_timeout: 30.0
 
 # ============================================================================
-# Knowledge Base (RAGFlow)
-# ============================================================================
-# Optional private-corpus retrieval backed by RAGFlow. DeerFlow stores no
-# dataset metadata or retrieval state; RAGFlow remains the sole source of truth.
-# The API key is tenant-scoped, so every DeerFlow user shares the same datasets.
-# Set RAGFLOW_API_KEY in the environment, change api_key to $RAGFLOW_API_KEY,
-# and enable this block to expose the two read-only Agent retrieval tools.
-knowledge_base:
-  enabled: false
-  base_url: http://localhost:9380  # Docker: use a host/container-reachable URL
-  api_key: null                    # Recommended when enabled: $RAGFLOW_API_KEY
-  timeout: 30
-
-  # Retrieval defaults. Prefer explicit knowledge-base names: a cross-dataset
-  # search can fail when datasets use different embedding models.
-  page_size: 8
-  similarity_threshold: 0.2
-  vector_similarity_weight: 0.3
-  top_k: 256
-  max_chars_per_chunk: 800
-  max_total_chars: 8000
-
-# ============================================================================
 # Tool Groups Configuration
 # ============================================================================
 # Define groups of tools for organization and access control
@@ -700,14 +677,26 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
-  # RAGFlow knowledge retrieval (read-only). These tools are hidden unless
-  # knowledge_base.enabled is true. Dataset UUIDs are never shown to the model.
-  - name: knowledge_search
-    group: knowledge
-    use: deerflow.community.ragflow.tools:knowledge_search_tool
-  - name: list_knowledge_bases
-    group: knowledge
-    use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
+  # RAGFlow knowledge retrieval (read-only). Uncomment both entries together.
+  # Connection and retrieval settings live on knowledge_search; the listing
+  # tool reuses them. Dataset UUIDs are never shown to the model.
+  # Prefer explicit knowledge-base names because cross-dataset retrieval can
+  # fail when datasets use different embedding models.
+  # - name: knowledge_search
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+  #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
+  #   api_key: $RAGFLOW_API_KEY
+  #   timeout: 30
+  #   page_size: 8
+  #   similarity_threshold: 0.2
+  #   vector_similarity_weight: 0.3
+  #   top_k: 256
+  #   max_chars_per_chunk: 800
+  #   max_total_chars: 8000
+  # - name: list_knowledge_bases
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
