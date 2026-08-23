@@ -118,10 +118,13 @@ class OAuthTokenManager:
     async def _fetch_token(self, oauth: McpOAuthConfig) -> _OAuthToken:
         import httpx  # pyright: ignore[reportMissingImports]
 
-        data: dict[str, str] = {
-            "grant_type": oauth.grant_type,
-            **oauth.extra_token_params,
-        }
+        # extra_token_params is spread first so the reserved fields below
+        # (grant_type, scope, audience, client_id, ...) cannot be silently
+        # overridden by an operator-supplied key — otherwise the branch logic
+        # below (which keys off oauth.grant_type) and the value actually sent
+        # to the token endpoint would disagree.
+        data: dict[str, str] = dict(oauth.extra_token_params)
+        data["grant_type"] = oauth.grant_type
 
         if oauth.scope:
             data["scope"] = oauth.scope

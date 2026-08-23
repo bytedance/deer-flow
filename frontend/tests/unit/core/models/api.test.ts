@@ -1,5 +1,7 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
+import { UnauthorizedError } from "@/core/api/errors";
+
 afterEach(() => {
   rs.unstubAllGlobals();
 });
@@ -51,6 +53,20 @@ test("loadModels rejects unsuccessful gateway responses", async () => {
   const { loadModels } = await import("@/core/models/api");
 
   await expect(loadModels()).rejects.toThrow("Model registry unavailable");
+});
+
+test("loadModels exposes the typed 401 redirect error", async () => {
+  const location = { href: "", pathname: "/workspace/chats" };
+  rs.stubGlobal("window", { location });
+  rs.stubGlobal(
+    "fetch",
+    rs.fn(async () => new Response(null, { status: 401 })),
+  );
+
+  const { loadModels } = await import("@/core/models/api");
+
+  await expect(loadModels()).rejects.toBeInstanceOf(UnauthorizedError);
+  expect(location.href).toBe("/login?next=%2Fworkspace%2Fchats");
 });
 
 test("loadModels includes the status code when statusText is empty", async () => {

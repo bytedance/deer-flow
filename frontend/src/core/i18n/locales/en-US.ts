@@ -304,6 +304,47 @@ export const enUS: Translations = {
     agentsDisabledTooltip: "Feature not enabled",
   },
 
+  backgroundTasks: {
+    label: "Background tasks",
+    title: "Background tasks",
+    description: "Long-running MCP work for this chat.",
+    active: "Active",
+    recent: "Recent",
+    empty: "No background tasks yet",
+    emptyHint: "Long-running MCP tasks started in this chat will appear here.",
+    loadFailed: "Couldn't load background tasks",
+    retry: "Try again",
+    cancel: "Cancel task",
+    cancelling: "Cancelling…",
+    cancelFailed: "Failed to cancel task",
+    cancellationRetrying: (attempt) =>
+      `Cancellation attempt ${attempt} failed; DeerFlow will keep retrying.`,
+    notificationRetrying: (attempt) =>
+      `Chat notification attempt ${attempt} failed; DeerFlow will retry with backoff.`,
+    notificationStopped:
+      "Chat notification delivery stopped after repeated or permanent failures.",
+    trackingDegraded: "Status checks are delayed; DeerFlow is still retrying.",
+    viewDetails: "View details",
+    hideDetails: "Hide details",
+    detailsFailed: "Couldn't load task details",
+    result: "Result",
+    resultArtifact: "Result artifact",
+    inputRequired: "Input required",
+    inputUnavailable:
+      "This integration cannot send your response back to the remote task yet.",
+    lastPollError: "Latest status error",
+    created: (time) => `Started ${time}`,
+    updated: (time) => `Updated ${time}`,
+    status: {
+      submitted: "Submitted",
+      working: "Working",
+      inputRequired: "Input needed",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
@@ -528,6 +569,10 @@ export const enUS: Translations = {
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
+    modelLoadFailed:
+      "Models couldn't be loaded. Model selection and token usage may be unavailable.",
+    modelLoadRetry: "Retry",
+    modelLoadRetrying: "Retrying…",
   },
 
   // Conversation
