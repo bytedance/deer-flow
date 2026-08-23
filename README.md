@@ -1025,6 +1025,24 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 When using Tavily for `web_fetch`, extracted pages without a title use their URL
 as the heading; their content remains available to the agent.
 
+### Private Knowledge Retrieval (RAGFlow)
+
+DeerFlow can optionally connect to a tenant-scoped RAGFlow deployment. The
+`knowledge_search` Agent tool resolves the configured dataset scope, groups
+datasets by embedding model, and retrieves those groups in parallel so mixed
+embedding models do not cause a provider error. Dataset IDs and API keys are
+never exposed to the model. The optional `list_knowledge_bases` tool returns
+names only.
+
+The same `knowledge_base.enabled` switch exposes the authenticated
+`/api/knowledge` management proxy and `/workspace/knowledge` UI for listing and
+creating datasets, streaming document uploads, starting parsing, and (for
+admins) deleting shared data. Uploads are forwarded directly to RAGFlow (50 MiB
+per file, 100 MiB per request, at most 10 files); DeerFlow does not persist a
+copy. Parsing progress is available through process-local SSE at
+`GET /api/knowledge/events` while a browser is subscribed. For Docker or
+Kubernetes, set `base_url` to an address reachable from the Gateway container.
+
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
 Advanced deployments can also extend the agent runtime itself by declaring `AgentMiddleware` classes under `extensions.middlewares` in `config.yaml` or `extensions_config.json`. Each entry is a `module.path:ClassName` string (zero-argument constructor) or an object `{class, kwargs}` whose `kwargs` are passed to the constructor. `kwargs` values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON. DeerFlow loads the same configured list into the lead-agent and subagent pipelines after their built-in runtime middlewares and loop/token guards, but before the terminal-response/safety/clarification tail, so enterprise forks can add domain guardrails, tool-call governance, or observability hooks without patching the built-in middleware builders. Missing packages, invalid classes, broken modules, and constructor errors fail loudly at agent creation. Treat `config.yaml` and `extensions_config.json` as trusted operator-controlled files: middleware paths are code execution, just like custom tool, model, sandbox, guardrail, MCP server, and MCP interceptor declarations. Gateway skill/MCP toggle endpoints preserve this field but do not expose an API write path for `extensions.middlewares`. Separate lead-only/subagent-only middleware lists are not supported yet.

@@ -387,6 +387,32 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and appended to the model request as a hidden message carrying both a reserved ID prefix and a server-owned metadata marker; Gateway strips that marker from untrusted input, and the middleware requires both identifiers to recognize its own message. The middleware injects inside `wrap_model_call`, so the payload never enters graph state: checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive. It also sweeps its own message out of every request before rebuilding it, so a payload stranded in an older checkpoint by an interrupted run stops being resent
 
+### RAGFlow Knowledge Retrieval
+
+The harness provides an opt-in, read-only RAGFlow integration under
+`deerflow.community.ragflow`. `knowledge_base.enabled` gates the entire
+`knowledge` tool group; the two Agent tools list tenant-shared knowledge bases
+and retrieve compact cited chunks. RAGFlow remains the sole source of truth:
+there are no DeerFlow ORM models, migrations, or mirrored knowledge metadata.
+The Gateway separately exposes authenticated, human-facing management routes
+under `/api/knowledge`; they remain absent from the Agent toolset. Dataset and
+document deletes are admin-only. Multipart uploads validate 50 MiB per-file,
+100 MiB per-request, and 10-file limits while streaming the original request
+body directly to RAGFlow without local spooling. The configured tenant API key
+must never appear in logs, tool errors, or HTTP errors. Tests live in
+`tests/test_ragflow_client.py`, `tests/test_ragflow_tools.py`, and
+`tests/test_knowledge_router.py`.
+
+`app.gateway.knowledge.watcher` owns the process-local parsing-status snapshot
+and fans one RAGFlow poll loop out through `/api/knowledge/events`. No SSE
+subscriber means no poll task. Active parsing uses
+`watch_interval_seconds`; a subscribed-but-idle watcher continues at
+`idle_interval_seconds` so parsing started outside DeerFlow can be discovered.
+Upload and parse routes explicitly wake the loop. This is deliberately not a
+distributed watcher: every Gateway process has an independent in-memory
+instance, with no Redis/database coordination. Lifecycle and event regressions
+live in `tests/test_knowledge_watcher.py`.
+
 ## Code Style
 
 - Uses `ruff` for linting and formatting

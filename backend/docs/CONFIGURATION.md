@@ -279,6 +279,37 @@ container or Pod, not the host machine.
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
 deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
 
+The optional `knowledge_base` block also enables the authenticated human-facing
+`/api/knowledge` management proxy and the `/workspace/knowledge` UI. It uses the
+same tenant-scoped RAGFlow API key, stores no dataset or document contents in
+DeerFlow, and streams multipart uploads directly to RAGFlow (50 MiB per file,
+100 MiB per request, at most 10 files). Dataset/document deletion is admin-only;
+the Agent never receives these write operations. Parsing progress is available
+as process-local SSE at `GET /api/knowledge/events` while a browser is
+subscribed. Configure the connection and watcher defaults as follows:
+
+```yaml
+knowledge_base:
+  enabled: true
+  base_url: http://localhost:9380
+  api_key: $RAGFLOW_API_KEY
+  timeout: 30
+  page_size: 8
+  similarity_threshold: 0.2
+  vector_similarity_weight: 0.3
+  top_k: 256
+  max_chars_per_chunk: 800
+  max_total_chars: 8000
+  watch_interval_seconds: 3
+  idle_interval_seconds: 15
+```
+
+When enabled, include the `list_knowledge_bases` tool entry shown above if the
+model should be able to discover configured dataset names. The frontend uses
+`GET /api/features -> knowledge_base` for UI gating and receives only a
+credential-free `management_url`; RAGFlow API keys and dataset UUIDs are never
+returned to the browser or model.
+
 ### LightRAG Knowledge Retrieval
 
 LightRAG integration is disabled by default. It is an alternative provider for

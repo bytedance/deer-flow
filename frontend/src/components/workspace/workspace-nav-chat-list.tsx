@@ -1,6 +1,11 @@
 "use client";
 
-import { BotIcon, CalendarClock, MessagesSquare } from "lucide-react";
+import {
+  BotIcon,
+  CalendarClock,
+  DatabaseIcon,
+  MessagesSquare,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -17,11 +22,13 @@ import {
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useI18n } from "@/core/i18n/hooks";
+import { useKnowledgeBaseEnabled } from "@/core/knowledge";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
+  const { enabled: knowledgeEnabled } = useKnowledgeBaseEnabled();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -32,6 +39,43 @@ export function WorkspaceNavChatList() {
               <span>{t.sidebar.chats}</span>
             </Link>
           </SidebarMenuButton>
+        </SidebarMenuItem>
+        <SidebarMenuItem>
+          {knowledgeEnabled ? (
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/knowledge")}
+              asChild
+            >
+              <Link
+                className="text-muted-foreground"
+                href="/workspace/knowledge"
+              >
+                <DatabaseIcon />
+                <span>{t.sidebar.knowledge}</span>
+              </Link>
+            </SidebarMenuButton>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="block w-full cursor-not-allowed">
+                  <SidebarMenuButton
+                    className="text-muted-foreground/50"
+                    aria-disabled
+                    aria-describedby="knowledge-disabled-reason"
+                  >
+                    <DatabaseIcon />
+                    <span>{t.sidebar.knowledge}</span>
+                  </SidebarMenuButton>
+                  <span id="knowledge-disabled-reason" className="sr-only">
+                    {t.sidebar.knowledgeDisabledTooltip}
+                  </span>
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                {t.sidebar.knowledgeDisabledTooltip}
+              </TooltipContent>
+            </Tooltip>
+          )}
         </SidebarMenuItem>
         <SidebarMenuItem>
           {agentsEnabled ? (

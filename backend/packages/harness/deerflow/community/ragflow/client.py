@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterable
 from typing import Any
 
 import httpx
@@ -64,11 +65,15 @@ class RAGFlowClient:
         *,
         params: dict[str, object] | list[tuple[str, str]] | None = None,
         json: dict[str, Any] | None = None,
+        content: AsyncIterable[bytes] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         request_headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Accept": "application/json",
         }
+        if headers:
+            request_headers.update(headers)
         client_kwargs: dict[str, Any] = {
             "base_url": f"{self.base_url}/api/v1",
             "headers": request_headers,
@@ -79,7 +84,7 @@ class RAGFlowClient:
 
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
-                response = await client.request(method, path, params=params, json=json)
+                response = await client.request(method, path, params=params, json=json, content=content)
         except httpx.TimeoutException:
             raise RAGFlowConnectionError(f"RAGFlow request timed out after {self.timeout:g} seconds.") from None
         except httpx.RequestError as exc:
@@ -156,6 +161,58 @@ class RAGFlowClient:
                 return datasets
 
         raise RAGFlowProtocolError(f"RAGFlow dataset listing exceeded {_MAX_DATASET_PAGES} pages.")
+
+    async def list_datasets_page(self, *, params: list[tuple[str, str]]) -> dict[str, Any]:
+        """Proxy one dataset-list request without persisting or reshaping it."""
+        return await self._request("GET", "/datasets", params=params)
+
+    async def create_dataset(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Create a RAGFlow dataset using the caller-provided settings."""
+        return await self._request("POST", "/datasets", json=body)
+
+    async def delete_dataset(self, dataset_id: str) -> dict[str, Any]:
+        """Delete exactly one RAGFlow dataset."""
+        return await self._request("DELETE", "/datasets", json={"ids": [dataset_id]})
+
+    async def list_documents(
+        self,
+        dataset_id: str,
+        *,
+        params: list[tuple[str, str]],
+    ) -> dict[str, Any]:
+        """Proxy one document-list request for a dataset."""
+        return await self._request("GET", f"/datasets/{dataset_id}/documents", params=params)
+
+    async def upload_documents(
+        self,
+        dataset_id: str,
+        *,
+        content_type: str,
+        content: AsyncIterable[bytes],
+    ) -> dict[str, Any]:
+        """Stream an existing multipart body directly to RAGFlow."""
+        return await self._request(
+            "POST",
+            f"/datasets/{dataset_id}/documents",
+            content=content,
+            headers={"Content-Type": content_type},
+        )
+
+    async def parse_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
+        """Start RAGFlow parsing for the selected documents."""
+        return await self._request(
+            "POST",
+            f"/datasets/{dataset_id}/chunks",
+            json={"document_ids": document_ids},
+        )
+
+    async def delete_documents(self, dataset_id: str, document_ids: list[str]) -> dict[str, Any]:
+        """Delete only the explicitly selected RAGFlow documents."""
+        return await self._request(
+            "DELETE",
+            f"/datasets/{dataset_id}/documents",
+            json={"ids": document_ids},
+        )
 
     async def retrieve(
         self,

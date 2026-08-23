@@ -151,6 +151,11 @@ config: |
     connection_string: $DATABASE_URL
   stream_bridge:
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
+  knowledge_base:
+    enabled: true
+    base_url: http://ragflow:9380
+    api_key: $RAGFLOW_API_KEY
+    # Retrieval defaults and watcher intervals are optional.
   # Tools MUST be listed explicitly - the agent gets none otherwise
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The chart
   # default in values.yaml enables the sandbox tools + web tools (web_search,
@@ -162,6 +167,7 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    - name: knowledge
   tools:
     - name: web_search
       group: web
@@ -175,6 +181,14 @@ config: |
       group: web
       use: deerflow.community.image_search.tools:image_search_tool
       max_results: 5
+    - name: knowledge_search
+      group: knowledge
+      use: deerflow.community.ragflow.tools:knowledge_search_tool
+      base_url: http://ragflow:9380
+      api_key: $RAGFLOW_API_KEY
+    - name: list_knowledge_bases
+      group: knowledge
+      use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     - name: bash
       group: bash
       use: deerflow.sandbox.tools:bash_tool

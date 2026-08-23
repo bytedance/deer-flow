@@ -252,6 +252,21 @@ config: |
   config_version: 42
   log_level: info
 
+  # Optional tenant-shared RAGFlow retrieval and human management proxy.
+  knowledge_base:
+    enabled: false
+    base_url: http://ragflow:9380
+    api_key: null
+    timeout: 30
+    page_size: 8
+    similarity_threshold: 0.2
+    vector_similarity_weight: 0.3
+    top_k: 256
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+    watch_interval_seconds: 3
+    idle_interval_seconds: 15
+
   models: []
   # Example (uncomment & set the matching secret in `secrets`):
   #   - name: gpt-4
@@ -337,6 +352,9 @@ config: |
     #   top_k: 256
     #   max_chars_per_chunk: 800
     #   max_total_chars: 8000
+    # - name: list_knowledge_bases
+    #   group: knowledge
+    #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     # Optional tenant-shared, read-only LightRAG retrieval; alternative
     # provider for the same knowledge_search tool (duplicate names keep the
     # first entry, so configure exactly one). Requires LightRAG v1.4.9+. Put

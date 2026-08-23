@@ -99,6 +99,23 @@ def get_available_tools(
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
 
+    # RAGFlow knowledge tools are opt-in as a group. Keeping the entries in the
+    # example config while filtering them here makes ``knowledge_base.enabled``
+    # the single hot-reloadable feature flag and preserves zero behavior change
+    # for existing deployments.
+    knowledge_base_config = getattr(config, "knowledge_base", None)
+    if not getattr(knowledge_base_config, "enabled", False):
+        # Preserve backwards compatibility with the original tool-scoped
+        # configuration: an explicit RAGFlow entry carrying its own endpoint
+        # and credentials remains opt-in even when the newer global switch is
+        # absent/false. Bare example entries remain hidden until enabled.
+        tool_configs = [
+            tool
+            for tool in tool_configs
+            if tool.group != "knowledge"
+            or bool(set(getattr(tool, "model_extra", {}) or {}) & {"base_url", "api_key", "datasets"})
+        ]
+
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]

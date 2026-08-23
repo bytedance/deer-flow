@@ -140,5 +140,6 @@ function nameOfSegment(
   if (!segment) return t.common.home;
   if (segment === "workspace") return t.breadcrumb.workspace;
   if (segment === "chats") return t.breadcrumb.chats;
+  if (segment === "knowledge") return t.sidebar.knowledge;
   return segment[0]?.toUpperCase() + segment.slice(1);
 }

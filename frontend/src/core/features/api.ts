@@ -11,6 +11,10 @@ export interface FeaturesResponse {
     worker_running?: boolean;
     max_running?: number;
   };
+  knowledge_base?: {
+    enabled: boolean;
+    management_url?: string | null;
+  };
 }
 
 export interface SubagentBatchesCapability {
@@ -46,5 +50,20 @@ export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesC
     repositoryAvailable: feature?.repository_available ?? legacyEnabled,
     workerRunning: feature?.worker_running ?? legacyEnabled,
     maxRunning: feature?.max_running ?? 0,
+  };
+}
+
+export async function fetchKnowledgeBaseEnabled(): Promise<boolean> {
+  return (await fetchFeatures()).knowledge_base?.enabled ?? false;
+}
+
+export async function fetchKnowledgeBaseFeature(): Promise<{
+  enabled: boolean;
+  managementUrl: string | null;
+}> {
+  const feature = (await fetchFeatures()).knowledge_base;
+  return {
+    enabled: feature?.enabled ?? false,
+    managementUrl: feature?.management_url ?? null,
   };
 }
