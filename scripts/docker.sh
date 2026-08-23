@@ -12,8 +12,46 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 DOCKER_DIR="$PROJECT_ROOT/docker"
 
-# Docker Compose command with project name
-COMPOSE_CMD="docker compose -p deer-flow-dev -f docker-compose-dev.yaml"
+# Docker Compose command with project name.
+# Use a filename relative to DOCKER_DIR (we always `cd` there) so Windows
+# Docker Desktop does not receive a Git Bash `/c/...` path it cannot open.
+# See https://github.com/bytedance/deer-flow/issues/2416
+COMPOSE_FILE="docker-compose-dev.yaml"
+COMPOSE_CMD="docker compose -p deer-flow-dev -f $COMPOSE_FILE"
+
+ensure_from_example() {
+    local dest="$1"
+    local src="$2"
+    local label="$3"
+
+    if [ -f "$dest" ]; then
+        return 0
+    fi
+    if [ -f "$src" ]; then
+        cp "$src" "$dest"
+        echo -e "${BLUE}Created ${label} from $(basename "$src")${NC}"
+        return 0
+    fi
+    echo -e "${YELLOW}✗ ${label} not found and no $(basename "$src") to copy from.${NC}"
+    echo "Create ${dest} before starting Docker."
+    exit 1
+}
+
+# Compose env_file entries fail closed on Windows when .env is missing
+# ("The specified file cannot be found" / "Le fichier spécifique est introuvable").
+prepare_compose_env() {
+    if [ ! -f "$DOCKER_DIR/$COMPOSE_FILE" ]; then
+        echo -e "${YELLOW}✗ ${COMPOSE_FILE} not found at ${DOCKER_DIR}/${COMPOSE_FILE}${NC}"
+        echo "Run this from the DeerFlow repository root, e.g. 'make docker-start'."
+        echo "Do not run 'docker compose -f docker/${COMPOSE_FILE}' from inside docker/ — that resolves to docker/docker/${COMPOSE_FILE}."
+        exit 1
+    fi
+    if [ -z "$DEER_FLOW_ROOT" ]; then
+        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    fi
+    ensure_from_example "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.example" ".env"
+    ensure_from_example "$PROJECT_ROOT/frontend/.env" "$PROJECT_ROOT/frontend/.env.example" "frontend/.env"
+}
 
 load_proxy_env_from_dotenv() {
     local env_file="$PROJECT_ROOT/.env"
@@ -207,7 +245,7 @@ start() {
             exit 1
         fi
         echo -e "${YELLOW}Mounting host Docker socket into gateway (DooD = host root-equivalent). See SECURITY.md.${NC}"
-        COMPOSE_CMD="$COMPOSE_CMD -f $DOCKER_DIR/docker-compose.dood.yaml"
+        COMPOSE_CMD="$COMPOSE_CMD -f docker-compose.dood.yaml"
     fi
 
     echo -e "${BLUE}Runtime: Gateway embedded agent runtime${NC}"
@@ -260,6 +298,7 @@ start() {
         fi
     fi
 
+    prepare_compose_env
     load_proxy_env_from_dotenv
 
     echo "Building and starting containers..."
@@ -283,12 +322,8 @@ start() {
 logs() {
     local service=""
 
-    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
-    # reading logs so Compose does not resolve mounted paths from an empty root.
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-    fi
-    
+    prepare_compose_env
+
     case "$1" in
         --frontend)
             service="frontend"
@@ -325,11 +360,7 @@ logs() {
 
 # Stop Docker development environment
 stop() {
-    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
-    # running compose down to suppress "variable is not set" warnings.
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-    fi
+    prepare_compose_env
     echo "Stopping Docker development services..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD down
     echo "Cleaning up sandbox containers..."
@@ -339,11 +370,7 @@ stop() {
 
 # Restart Docker development environment
 restart() {
-    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
-    # restarting services so Compose resolves mounted paths from this checkout.
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-    fi
+    prepare_compose_env
     echo "========================================"
     echo "  Restarting DeerFlow Docker Services"
     echo "========================================"
