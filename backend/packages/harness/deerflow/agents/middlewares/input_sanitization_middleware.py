@@ -93,6 +93,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "mcp_routing_hints",
         "available-deferred-tools",
         "goal_continuation",
+        "background_task_event",
         "file_editing_workflow",
         "guidelines",
         "output_format",
@@ -150,7 +151,7 @@ def neutralize_untrusted_tags(text: str) -> str:
 
     Shared primitive for any content that originates outside the trust boundary
     and is about to enter the model context as *data* — currently the genuine
-    user message (via :func:`_check_user_content`) and remote tool results
+    user message (via :func:`frame_untrusted_text`) and remote tool results
     (web_fetch / web_search and friends, via
     :class:`ToolResultSanitizationMiddleware`).
 
@@ -188,8 +189,8 @@ def _is_genuine_user_message(message: object) -> bool:
     return True
 
 
-def _check_user_content(text: str) -> str:
-    """Sanitize user content: escape blocked tags, then wrap in boundary markers.
+def frame_untrusted_text(text: str) -> str:
+    """Sanitize untrusted text, then wrap it in user-input boundary markers.
 
     * Empty/whitespace-only → return unchanged (no marker noise).
     * Blocked tags → HTML-escape ``<``/``>`` (e.g. ``<system>`` → ``&lt;system&gt;``).
@@ -216,6 +217,11 @@ def _check_user_content(text: str) -> str:
     # (end token creates a premature boundary inside the payload).
     text = _neutralize_boundary_tokens(text)
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
+
+
+def _check_user_content(text: str) -> str:
+    """Backward-compatible internal alias for untrusted text framing."""
+    return frame_untrusted_text(text)
 
 
 class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
