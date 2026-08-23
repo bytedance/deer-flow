@@ -78,5 +78,16 @@ describe("useBrowserStream", () => {
 
     expect(FakeWebSocket.instances).toHaveLength(2);
     expect(FakeWebSocket.instances[1]?.closeCalls).toBe(0);
+
+    act(() => {
+      FakeWebSocket.instances[1]?.disconnect();
+      void rs.advanceTimersByTime(799);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    act(() => {
+      void rs.advanceTimersByTime(1);
+    });
+    expect(FakeWebSocket.instances).toHaveLength(3);
   });
 });
