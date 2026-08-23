@@ -1,9 +1,13 @@
 """Stamp deterministic tool receipts and render the receipt ledger to the model.
 
-Ordering contract (enforced by the build-time guard in
-``tool_error_handling_middleware._build_runtime_middlewares``): this middleware
-sits immediately outer of ToolErrorHandlingMiddleware so every ToolMessage it
-sees already carries a normalized ``deerflow_tool_meta`` status.
+Ordering contract (enforced by the build-time constraints in
+``deerflow.extensions.ordering.core_ordering_constraints``): this is the
+outermost ``wrap_tool_call`` layer — Guardrail, SandboxAudit, ReadBeforeWrite,
+and ToolProgress can short-circuit or rebuild results, and an inner receipt
+layer would silently gap the ledger on those. Normal results still carry a
+normalized ``deerflow_tool_meta`` status when stamped (ToolErrorHandling runs
+on the inner return path); short-circuit messages either self-stamp the meta
+or fall back to ``message.status`` in ``make_tool_receipt``.
 
 The ledger injection mirrors DurableContextMiddleware: derived from the
 in-flight messages on every model call, appended as a hidden HumanMessage,

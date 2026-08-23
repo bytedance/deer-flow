@@ -203,6 +203,20 @@ def _build_runtime_middlewares(
         tail.append(DanglingToolCallMiddleware())
     tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
+    # ToolReceiptMiddleware is the outermost wrap_tool_call layer: Guardrail,
+    # SandboxAudit, ReadBeforeWrite, and ToolProgress can all short-circuit a
+    # call with their own ToolMessage, and SandboxAudit rebuilds medium-risk
+    # results — an inner receipt layer would miss those results and silently
+    # gap the ledger. Stamping out here still sees deerflow_tool_meta on
+    # normal results (ToolErrorHandling stamps it on the inner return path)
+    # and on self-stamped short-circuit messages; the remainder fall back to
+    # message.status (see make_tool_receipt).
+    verification_config = app_config.verification
+    if verification_config.receipts_enabled:
+        from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+
+        tail.append(ToolReceiptMiddleware(render_mode=receipts_render_mode))
+
     # Authorization uses the existing GuardrailMiddleware so execution-time
     # deny, audit, and fail-closed handling stay in one proven implementation.
     # It is appended before an explicit guardrail provider, making authorization
@@ -275,16 +289,6 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
-
-    # ToolReceiptMiddleware sits between ToolProgress (outer) and
-    # ToolErrorHandling (inner): the stamped deerflow_tool_meta status must
-    # already exist when the receipt is built.
-    verification_config = app_config.verification
-    _ToolReceiptMiddleware = None
-    if verification_config.receipts_enabled:
-        from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware as _ToolReceiptMiddleware
-
-        tail.append(_ToolReceiptMiddleware(render_mode=receipts_render_mode))
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 

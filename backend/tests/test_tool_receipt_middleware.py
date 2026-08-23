@@ -213,11 +213,89 @@ def _build(app_config_dict: dict) -> list:
     return _build_runtime_middlewares(app_config=app_config, include_uploads=False, include_dangling_tool_call_patch=False)
 
 
+def _tool_call_request(name: str, args: dict):
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "t-test"}
+    return ToolCallRequest(
+        tool_call={"name": name, "args": args, "id": "call-1"},
+        tool=None,
+        state={"messages": []},
+        runtime=runtime,
+    )
+
+
+def _compose_tool_chain(chain: list, terminal):
+    """Compose wrap_tool_call handlers outer-first, mirroring the runtime stack."""
+    handler = terminal
+    for middleware in reversed(chain):
+        next_handler = handler
+
+        def handler(req, mw=middleware, h=next_handler):
+            return mw.wrap_tool_call(req, h)
+
+    return handler
+
+
+def _tool_call_segment(middlewares: list, names: tuple[str, ...]) -> list:
+    """Extract the named wrap_tool_call middlewares in factory order."""
+    return [m for m in middlewares if type(m).__name__ in names]
+
+
+def test_composed_chain_stamps_receipt_on_blocked_write():
+    """Read-before-write (default on) short-circuits a write with its own
+    ToolMessage; the receipt layer must wrap that short-circuit or the ledger
+    silently gaps (willem-bd review)."""
+    middlewares = _build({"sandbox": {"use": "test"}})
+    chain = _tool_call_segment(middlewares, ("ToolReceiptMiddleware", "ReadBeforeWriteMiddleware", "ToolErrorHandlingMiddleware"))
+    assert [type(m).__name__ for m in chain] == ["ToolReceiptMiddleware", "ReadBeforeWriteMiddleware", "ToolErrorHandlingMiddleware"]
+    # File exists with content v1 but was never read -> the write is blocked.
+    chain[1]._content_reader = lambda _runtime, _path: "v1"
+    terminal = MagicMock(return_value=ToolMessage(content="OK", tool_call_id="call-1", name="write_file"))
+
+    result = _compose_tool_chain(chain, terminal)(_tool_call_request("write_file", {"path": "/mnt/user-data/outputs/a.txt", "content": "v2"}))
+
+    terminal.assert_not_called()
+    assert result.status == "error"
+    receipt = (result.additional_kwargs or {}).get(TOOL_RECEIPT_KEY)
+    assert receipt is not None, "blocked write must still get a receipt"
+    assert receipt["tool_name"] == "write_file" and receipt["status"] == "error"
+
+
+def test_composed_chain_stamps_receipt_on_warn_rebuilt_result():
+    """SandboxAudit rebuilds the result ToolMessage when appending a medium-risk
+    warning, dropping additional_kwargs; a receipt layer inside it would lose
+    the stamp. Outer receipt re-stamps the rebuilt message."""
+    middlewares = _build({"sandbox": {"use": "test"}})
+    chain = _tool_call_segment(middlewares, ("ToolReceiptMiddleware", "SandboxAuditMiddleware", "ToolErrorHandlingMiddleware"))
+    assert [type(m).__name__ for m in chain] == ["ToolReceiptMiddleware", "SandboxAuditMiddleware", "ToolErrorHandlingMiddleware"]
+    terminal = MagicMock(return_value=ToolMessage(content="installed", tool_call_id="call-1", name="bash"))
+
+    result = _compose_tool_chain(chain, terminal)(_tool_call_request("bash", {"command": "pip install cowsay"}))
+
+    terminal.assert_called_once()
+    assert "medium-risk" in str(result.content)  # warn note appended
+    receipt = (result.additional_kwargs or {}).get(TOOL_RECEIPT_KEY)
+    assert receipt is not None, "warn-rebuilt result must still carry a receipt"
+    assert receipt["tool_name"] == "bash"
+
+
 def test_factory_registers_receipt_middleware_outer_of_error_handling():
     middlewares = _build({"sandbox": {"use": "test"}})
     names = [type(m).__name__ for m in middlewares]
     assert "ToolReceiptMiddleware" in names
     assert names.index("ToolReceiptMiddleware") < names.index("ToolErrorHandlingMiddleware")
+
+
+def test_factory_registers_receipt_middleware_outer_of_short_circuiting_layers():
+    """Receipts must wrap every middleware that can return or rebuild a
+    ToolMessage without invoking its handler, or the ledger silently gaps."""
+    middlewares = _build({"sandbox": {"use": "test"}})
+    names = [type(m).__name__ for m in middlewares]
+    receipt_index = names.index("ToolReceiptMiddleware")
+    for short_circuiter in ("SandboxAuditMiddleware", "ReadBeforeWriteMiddleware"):
+        assert receipt_index < names.index(short_circuiter), f"ToolReceiptMiddleware must be outer of {short_circuiter}"
 
 
 def test_factory_omits_receipt_middleware_when_disabled():
