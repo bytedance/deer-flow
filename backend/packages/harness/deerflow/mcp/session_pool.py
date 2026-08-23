@@ -251,14 +251,28 @@ class MCPSessionPool:
         # that case we must NOT resurrect the session into _entries. Instead we
         # own the teardown: signal our owner task and wait for it to run
         # __aexit__ in its own task, then surface the cancellation.
+        promoted_evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]] = []
         with self._lock:
             still_ours = self._inflight.get(key) == (current_loop, ready, task, close_evt)
             if still_ours:
                 self._inflight.pop(key)
+                # Different keys can finish initialization concurrently. They
+                # all pass the Phase 1 capacity check while _entries is still
+                # empty, so enforce the cap again when each live session is
+                # promoted into the LRU registry.
+                while len(self._entries) >= self.MAX_SESSIONS:
+                    oldest_key, (_, loop, ent_task, ent_close) = next(iter(self._entries.items()))
+                    self._entries.pop(oldest_key)
+                    promoted_evicted.append((loop, ent_task, ent_close))
                 self._entries[key] = (session, current_loop, task, close_evt)
         if not still_ours:
             await self._shutdown(close_evt, task)
             raise asyncio.CancelledError("MCP session pool was closed while the session was being created")
+        for loop, ent_task, ent_close in promoted_evicted:
+            if loop is current_loop and not loop.is_closed():
+                await self._shutdown(ent_close, ent_task)
+            else:
+                self._signal_close(loop, ent_close)
         logger.info("Created persistent MCP session for %s/%s", server_name, scope_key)
         return session
 
