@@ -16,6 +16,7 @@ from deerflow.config.extensions_config import (
     McpTaskToolsetConfig,
     McpToolOverride,
     atomic_write_extensions_config,
+    extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
     normalize_mcp_transport_alias,
@@ -787,27 +788,26 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     lives here too so the whole read-modify-write is a single worker hop.
     Returns the reloaded MCP server configs for the response.
     """
-    with extensions_config_write_lock:
-        # Get the current config path (or determine where to save it)
-        config_path = ExtensionsConfig.resolve_config_path()
+    # Resolve before entering the critical section so every writer locks the
+    # same sidecar path for the complete read-modify-write cycle.
+    config_path = ExtensionsConfig.resolve_config_path()
+    if config_path is None:
+        config_path = Path.cwd().parent / "extensions_config.json"
+        logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
-        # If no config file exists, create one in the parent directory (project root)
-        if config_path is None:
-            config_path = Path.cwd().parent / "extensions_config.json"
-            logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
-
-        # Load current config to preserve skills
-        current_config = get_extensions_config()
-
+    with extensions_config_write_lock, extensions_config_file_lock(config_path):
         # Load raw (un-resolved) JSON from disk to use as the merge source.
         # This preserves $VAR placeholders in env values and top-level keys
         # like mcpInterceptors that would otherwise be lost.
         raw_servers: dict[str, dict] = {}
         raw_other_keys: dict = {}
+        raw_skills: dict[str, dict] | None = None
         if config_path is not None and config_path.exists():
             with open(config_path, encoding="utf-8") as f:
                 raw_data = json.load(f)
             raw_servers = raw_data.get("mcpServers", {})
+            if isinstance(raw_data.get("skills"), dict):
+                raw_skills = raw_data["skills"]
             # Preserve any top-level keys beyond mcpServers/skills
             for key, value in raw_data.items():
                 if key not in ("mcpServers", "skills"):
@@ -828,7 +828,10 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         # Build config data preserving all top-level keys from the original file
         config_data = dict(raw_other_keys)
         config_data["mcpServers"] = {name: server.model_dump() for name, server in merged_servers.items()}
-        config_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
+        if raw_skills is None:
+            current_config = get_extensions_config()
+            raw_skills = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
+        config_data["skills"] = raw_skills
 
         atomic_write_extensions_config(config_path, config_data)
 
@@ -843,9 +846,15 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
 
 def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
     """Update one server state while preserving the raw extensions config."""
-    with extensions_config_write_lock:
-        config_path = ExtensionsConfig.resolve_config_path()
-        if config_path is None or not config_path.exists():
+    config_path = ExtensionsConfig.resolve_config_path()
+    if config_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"MCP server '{body.server_name}' not found",
+        )
+
+    with extensions_config_write_lock, extensions_config_file_lock(config_path):
+        if not config_path.exists():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"MCP server '{body.server_name}' not found",

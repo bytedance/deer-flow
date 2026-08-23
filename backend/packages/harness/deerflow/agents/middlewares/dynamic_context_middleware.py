@@ -36,6 +36,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
@@ -281,7 +282,11 @@ class DynamicContextMiddleware(AgentMiddleware):
         stable_id = original.id or str(uuid.uuid4())
         messages: list[SystemMessage | HumanMessage] = []
 
-        reminder_kwargs = {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True}
+        reminder_kwargs = {
+            "hide_from_ui": True,
+            _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+            **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context"),
+        }
         if reminder_date is not None:
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
         messages.append(
@@ -297,7 +302,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 HumanMessage(
                     content=memory_content,
                     id=f"{stable_id}__memory",
-                    additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        **provenance_kwargs(ContentKind.MEMORY, "dynamic_context_memory"),
+                    },
                 )
             )
 

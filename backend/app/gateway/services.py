@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
+from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
@@ -34,6 +35,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -105,12 +107,16 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
-_SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
-    {
-        _DYNAMIC_CONTEXT_REMINDER_KEY,
-        _REMINDER_DATE_KEY,
-        _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
-    }
+_SERVER_OWNED_MESSAGE_METADATA_KEYS = (
+    frozenset(
+        {
+            _DYNAMIC_CONTEXT_REMINDER_KEY,
+            _REMINDER_DATE_KEY,
+            _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            TOOL_TRANSFORMS_KEY,
+        }
+    )
+    | PROVENANCE_KEYS
 )
 
 
@@ -239,6 +245,46 @@ def _strip_external_message_metadata(message: Any) -> Any:
     if additional_kwargs == message.additional_kwargs:
         return message
     return message.model_copy(update={"additional_kwargs": additional_kwargs})
+
+
+def _strip_external_metadata_from_message_like(item: Any) -> Any:
+    """Strip server-owned keys from a message, in object or raw-dict form.
+
+    Callers reach the checkpoint by two different routes and the message is a
+    ``BaseMessage`` on one and a plain dict on the other, so both shapes have
+    to be handled here rather than coercing — coercion would change what the
+    caller asked to be written.
+    """
+    if isinstance(item, BaseMessage):
+        return _strip_external_message_metadata(item)
+    if isinstance(item, dict) and isinstance(item.get("additional_kwargs"), dict):
+        additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
+        if additional_kwargs == item["additional_kwargs"]:
+            return item
+        return {**item, "additional_kwargs": additional_kwargs}
+    return item
+
+
+def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove server-owned message metadata from caller-supplied state values.
+
+    ``normalize_input`` does this for the run path. The thread-state mutation
+    route writes its values straight into a checkpoint, so without the same
+    treatment an authenticated client can persist forged provenance and
+    transform trails — and those keys exist precisely so a later reader can
+    treat them as facts about what the host did.
+
+    Every channel is walked, not just ``messages``: middleware-contributed
+    channels can carry messages too, and popping a key that was never there
+    costs nothing.
+    """
+    stripped: dict[str, Any] = {}
+    for channel, value in values.items():
+        if isinstance(value, list):
+            stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
+        else:
+            stripped[channel] = _strip_external_metadata_from_message_like(value)
+    return stripped
 
 
 def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool = False) -> dict[str, Any]:
@@ -495,12 +541,17 @@ def resolve_agent_factory(assistant_id: str | None):
     Custom agents are implemented as ``lead_agent`` + an ``agent_name``
     injected into ``configurable`` or ``context`` — see
     :func:`build_run_config`.  All ``assistant_id`` values therefore map to the
-    same factory; the routing happens inside ``make_lead_agent`` when it reads
+    same factory; the routing happens inside the assembly when it reads
     ``cfg["agent_name"]``.
-    """
-    from deerflow.agents.lead_agent.agent import make_lead_agent
 
-    return make_lead_agent
+    The result is ``assemble_lead_agent``, which returns a
+    ``LeadAgentAssembly(graph, descriptor)`` rather than a bare graph, so every
+    consumer must unwrap ``.graph``. A third-party factory that still returns a
+    bare graph keeps working: the unwrap sites are type-checked, not assumed.
+    """
+    from deerflow.agents.lead_agent.agent import assemble_lead_agent
+
+    return assemble_lead_agent
 
 
 # Lead-agent recursion budget bounds. The Gateway must NOT trust a
@@ -728,7 +779,15 @@ def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: st
         return cached[2]
     if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
         _state_accessor_graph_cache.clear()
-    graph = agent_factory(config=config)
+    agent_result = agent_factory(config=config)
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+
+        graph = unwrap_agent_graph(agent_result)
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        graph = agent_result
     _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
     return graph
 
