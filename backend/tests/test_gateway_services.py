@@ -646,15 +646,15 @@ def test_build_run_config_context_custom_agent_injects_agent_name():
     assert config["configurable"]["agent_name"] == "finalis"
 
 
-def test_resolve_agent_factory_returns_make_lead_agent():
-    """resolve_agent_factory always returns make_lead_agent regardless of assistant_id."""
+def test_resolve_agent_factory_returns_the_explicit_lead_assembly_factory():
+    """Gateway workers receive the graph and its assembly descriptor together."""
     from app.gateway.services import resolve_agent_factory
-    from deerflow.agents.lead_agent.agent import make_lead_agent
+    from deerflow.agents.lead_agent.agent import assemble_lead_agent
 
-    assert resolve_agent_factory(None) is make_lead_agent
-    assert resolve_agent_factory("lead_agent") is make_lead_agent
-    assert resolve_agent_factory("finalis") is make_lead_agent
-    assert resolve_agent_factory("custom-agent-123") is make_lead_agent
+    assert resolve_agent_factory(None) is assemble_lead_agent
+    assert resolve_agent_factory("lead_agent") is assemble_lead_agent
+    assert resolve_agent_factory("finalis") is assemble_lead_agent
+    assert resolve_agent_factory("custom-agent-123") is assemble_lead_agent
 
 
 @pytest.mark.parametrize(
@@ -725,6 +725,49 @@ def test_build_checkpoint_state_accessor_uses_frozen_mode_and_binds_runtime_pers
     assert ("checkpoint_id" in config["configurable"]) is includes_checkpoint_id
     if checkpoint_id is not None:
         assert config["configurable"]["checkpoint_id"] == checkpoint_id
+
+
+def test_build_checkpoint_state_accessor_accepts_lead_agent_assembly_factory(_stub_app_config):
+    """Checkpoint reads accept the descriptor-carrying Gateway factory result."""
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.gateway.services import build_checkpoint_state_accessor
+    from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    from deerflow.config.app_config import get_app_config
+
+    class FakeGraph:
+        checkpointer = None
+        store = None
+
+    graph = FakeGraph()
+    assembly = LeadAgentAssembly(graph=graph, descriptor=object())
+
+    def fake_factory(*, config):
+        return assembly
+
+    checkpointer = object()
+    store = object()
+    ctx = SimpleNamespace(
+        checkpointer=checkpointer,
+        store=store,
+        checkpoint_channel_mode="full",
+        app_config=get_app_config(),
+    )
+    request = SimpleNamespace(state=SimpleNamespace(checkpoint_channel_mode="full"))
+
+    with (
+        patch("app.gateway.services.get_run_context", return_value=ctx),
+        patch("app.gateway.services.resolve_agent_factory", return_value=fake_factory),
+    ):
+        accessor, _config = build_checkpoint_state_accessor(
+            request,
+            thread_id="thread-with-assembly-factory",
+        )
+
+    assert accessor.graph is graph
+    assert graph.checkpointer is checkpointer
+    assert graph.store is store
 
 
 def test_state_accessor_graph_cache_keys_on_snapshot_frequency():

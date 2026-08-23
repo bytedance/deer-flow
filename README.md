@@ -666,6 +666,7 @@ DINGTALK_CLIENT_SECRET=your_client_secret
 2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
 3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
 4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
+5. The bot supports inbound text, image, and file messages. Inbound attachment downloads are limited to 20 MB per attachment.
 
 **WeChat Setup**
 
@@ -977,8 +978,12 @@ while unrelated routers continue to load. Because the host's public paths are a 
 prefix list that extensions cannot enter, **every contributed endpoint requires an
 authenticated session** — there is currently no way for an extension to expose an
 unauthenticated route, so inbound provider webhooks and public status endpoints are out of
-scope for this release. Router startup/shutdown hooks, custom lifespans,
-Mounts, and WebSocket routes are not accepted; lifetime resources belong in
+scope for this release. Within that, an extension distinguishes an ordinary user from an
+administrator through `deerflow_extension_api.auth`: `resolve_principal(request)` returns
+the caller, `require_admin(request)` raises `PermissionError` for anyone else and fails
+closed when identity cannot be determined. Extensions receive a projection — user id, admin
+flag, internal flag, roles — never the host's auth context. Router startup/shutdown hooks,
+custom lifespans, Mounts, and WebSocket routes are not accepted; lifetime resources belong in
 `ExtensionService`, and WebSocket contributions require a future host-owned
 authentication/Origin wrapper. Lifecycle and system-model callbacks use the Gateway's
 canonical notification loop, including subagents on isolated loops.

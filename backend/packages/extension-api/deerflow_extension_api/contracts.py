@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_check
 from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
+    from deerflow_extension_api.assembly import AgentAssemblyObserver
+    from deerflow_extension_api.compaction import ContextCompactionObserver
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -192,6 +194,12 @@ class ExtensionRegistry(Protocol):
         return None
 
     def system_model_observer(self, observer: SystemModelCallObserver) -> None:
+        return None
+
+    def agent_assembly_observer(self, observer: AgentAssemblyObserver) -> None:
+        return None
+
+    def context_compaction_observer(self, observer: ContextCompactionObserver) -> None:
         return None
 
     def service(self, service: ExtensionService) -> None:

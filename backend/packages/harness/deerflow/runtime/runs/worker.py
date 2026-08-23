@@ -485,6 +485,17 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
         return _compute_agent_factory_supports_app_config(agent_factory)
 
 
+def _agent_graph(agent_result: Any) -> Any:
+    """Unwrap the lead assembly, leaving any other factory result untouched."""
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        return agent_result
+    return unwrap_agent_graph(agent_result)
+
+
 class _SubagentEventBuffer:
     """Buffer subagent ``task_*`` step events and flush them in one locked batch (#3779).
 
@@ -872,7 +883,7 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = agent_factory(**agent_factory_kwargs)
+            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
