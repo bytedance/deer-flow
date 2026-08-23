@@ -291,6 +291,19 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and injected into a hidden message carrying both a reserved ID prefix and a server-owned metadata marker for the model call; Gateway strips that marker from untrusted input, and the middleware requires both identifiers before removing the message. The `before_model` and `model` node checkpoints for that call still contain the payload; after `after_model` cleanup, subsequent checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive
 
+### RAGFlow Knowledge Retrieval
+
+The harness provides an opt-in, read-only RAGFlow integration under
+`deerflow.community.ragflow`. `knowledge_base.enabled` gates the entire
+`knowledge` tool group; the two Agent tools list tenant-shared knowledge bases
+and retrieve compact cited chunks. RAGFlow remains the sole source of truth:
+there are no DeerFlow ORM models, migrations, or mirrored knowledge metadata.
+The configured tenant API key must never appear in logs or model-visible tool
+errors, and dataset UUIDs must not enter model context. This slice deliberately
+contains no Gateway management API, watcher, SSE endpoint, or frontend UI;
+knowledge-base writes remain in RAGFlow. Tests live in
+`tests/test_ragflow_client.py` and `tests/test_ragflow_tools.py`.
+
 ## Code Style
 
 - Uses `ruff` for linting and formatting

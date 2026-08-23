@@ -218,6 +218,38 @@ models:
 
 `PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
 
+### RAGFlow Knowledge Retrieval
+
+RAGFlow integration is disabled by default. It adds two read-only Agent tools:
+`list_knowledge_bases` and `knowledge_search`. DeerFlow does not persist a copy
+of dataset or document metadata; RAGFlow is the sole source of truth. The
+configured API key is tenant-scoped, so all DeerFlow users share the same
+knowledge bases.
+
+```yaml
+knowledge_base:
+  enabled: true
+  base_url: http://localhost:9380
+  api_key: $RAGFLOW_API_KEY
+  timeout: 30
+  page_size: 8
+  similarity_threshold: 0.2
+  vector_similarity_weight: 0.3
+  top_k: 256
+  max_chars_per_chunk: 800
+  max_total_chars: 8000
+```
+
+The configured `knowledge` tool group is hidden while `enabled` is false and is
+picked up on the next config access after enabling. Prefer passing explicit
+knowledge-base names to `knowledge_search`: RAGFlow can reject a cross-dataset
+query when the selected datasets use different embedding models. For Docker or
+Kubernetes, `base_url` must be reachable from the Gateway container or Pod;
+`localhost` refers to that container or Pod, not the host machine.
+
+This integration is retrieval-only. Dataset creation, uploads, parsing, and
+deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+
 ### Tool Groups
 
 Organize tools into logical groups:

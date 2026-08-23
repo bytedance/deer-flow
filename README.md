@@ -71,6 +71,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Core Features](#core-features)
     - [Skills \& Tools](#skills--tools)
       - [Claude Code Integration](#claude-code-integration)
+    - [Private Knowledge Retrieval (RAGFlow)](#private-knowledge-retrieval-ragflow)
     - [Session Goals](#session-goals)
     - [Manual Context Compaction](#manual-context-compaction)
     - [Sub-Agents](#sub-agents)
