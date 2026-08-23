@@ -126,6 +126,59 @@ async def test_lru_eviction():
 
 
 @pytest.mark.asyncio
+async def test_concurrent_distinct_sessions_respect_capacity():
+    """Concurrent initializations must not permanently exceed the pool cap."""
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+    initialize_gate = asyncio.Event()
+    both_initializing = asyncio.Event()
+    initialize_count = 0
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return self
+
+        async def initialize(self):
+            nonlocal initialize_count
+            initialize_count += 1
+            if initialize_count == 2:
+                both_initializing.set()
+            await initialize_gate.wait()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    cms: list[CmFactory] = []
+
+    def make_cm(*_args, **_kwargs):
+        cm = CmFactory()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        connection = {"transport": "stdio", "command": "x", "args": []}
+        first = asyncio.create_task(pool.get_session("s", "t1", connection))
+        second = asyncio.create_task(pool.get_session("s", "t2", connection))
+        await asyncio.wait_for(both_initializing.wait(), timeout=1)
+        assert len(pool._entries) == 0
+        assert len(pool._inflight) == 2
+        initialize_gate.set()
+        await asyncio.gather(first, second)
+
+    try:
+        assert len(cms) == 2
+        assert len(pool._entries) == pool.MAX_SESSIONS
+        assert len(pool._inflight) == 0
+        assert sum(cm.closed for cm in cms) == 1
+    finally:
+        await pool.close_all()
+
+
+@pytest.mark.asyncio
 async def test_close_scope():
     """close_scope shuts down sessions for a specific scope key."""
     pool = MCPSessionPool()
