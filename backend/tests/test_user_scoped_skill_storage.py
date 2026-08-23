@@ -308,6 +308,49 @@ class TestPathSafety:
         with pytest.raises(ValueError, match="must stay within"):
             user_storage.validate_skill_file_path(skill_file)
 
+    def test_accepts_external_skill_directory_symlink_but_not_file_symlink(self, user_storage: UserScopedSkillStorage, tmp_path: Path, monkeypatch):
+        external_file = tmp_path / "external-skills" / "external-skill" / "SKILL.md"
+        external_file.parent.mkdir(parents=True)
+        external_file.write_text(_skill_content("external-skill"), encoding="utf-8")
+
+        linked_dir = user_storage.get_user_custom_root() / "external-skill"
+        linked_file = linked_dir / "SKILL.md"
+        original_resolve = Path.resolve
+
+        def fake_resolve(path: Path, strict: bool = False) -> Path:
+            if path == linked_file:
+                return external_file
+            if path == linked_dir:
+                return external_file.parent
+            return original_resolve(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked_dir)
+
+        assert user_storage.validate_skill_file_path(linked_file) == external_file
+
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path in {linked_dir, linked_file})
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(linked_file)
+
+    def test_rejects_file_symlink_even_when_target_stays_inside_allowed_root(self, user_storage: UserScopedSkillStorage, tmp_path: Path, monkeypatch):
+        target_file = user_storage.get_user_custom_root() / "real-skill" / "SKILL.md"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_text(_skill_content("real-skill"), encoding="utf-8")
+        linked_file = user_storage.get_user_custom_root() / "alias-skill" / "SKILL.md"
+        original_resolve = Path.resolve
+
+        def fake_resolve(path: Path, strict: bool = False) -> Path:
+            if path == linked_file:
+                return target_file
+            return original_resolve(path, strict=strict)
+
+        monkeypatch.setattr(Path, "resolve", fake_resolve)
+        monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked_file)
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(linked_file)
+
     def test_rejects_invalid_skill_name(self, user_storage: UserScopedSkillStorage):
         with pytest.raises(ValueError, match="hyphen-case"):
             user_storage.get_custom_skill_dir("../../escaped")
