@@ -77,7 +77,7 @@ export async function loadArtifactContent({
       truncated: false,
       previewBytes: 0,
       totalBytes: 0,
-      sha256: await sha256OfText(""),
+      sha256: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA-256 of empty content (keeps empty artifacts editable on non-secure origins)
     };
   }
   if (!response.ok) {
