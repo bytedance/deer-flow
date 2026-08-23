@@ -628,3 +628,53 @@ def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp
         artifacts_router._extract_file_from_skill_archive(skill_path, "SKILL.md")
 
     assert exc_info.value.status_code == 413
+def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
+    # A text artifact larger than MAX_EDITABLE_ARTIFACT_BYTES must not be hashed
+    # on every GET / Range request (performance P1 from review). The response
+    # still streams, but carries no SHA-256 ETag; the client falls back to its
+    # own hashing where crypto.subtle is available.
+    payload = b"a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)
+    artifact_path = tmp_path / "large.txt"
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path, user_id=None: artifact_path,
+    )
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/large.txt",
+        )
+
+    assert response.status_code == 200
+    assert response.headers.get("etag") is None
+    assert response.content == payload
+
+
+def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> None:
+    # Active content (e.g. .html) is force-downloaded. A large active file must
+    # still force a download but skip the full-file SHA-256 pass (performance P1).
+    payload = "<html>" + ("a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)) + "</html>"
+    artifact_path = tmp_path / "large.html"
+    artifact_path.write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path, user_id=None: artifact_path,
+    )
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.get_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/large.html",
+            _make_request(),
+        )
+    )
+
+    assert isinstance(response, FileResponse)
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("etag") is None
