@@ -104,7 +104,10 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
        ``return_direct`` router inspects all client-side tool calls of the
        last AIMessage and routes to END only when every one is
        ``return_direct``. A mixed ``[ask_clarification, bash]`` batch would
-       both run the siblings *and* loop back to the model.
+       both run the siblings *and* loop back to the model. Malformed
+       ``ask_clarification`` arguments land in ``invalid_tool_calls`` while a
+       valid sibling stays in ``tool_calls``; that still counts as a stop
+       signal and the siblings are dropped.
     2. Intercepts the remaining ``ask_clarification`` call before execution
     3. Extracts the clarification question and metadata
     4. Formats a user-friendly message
@@ -422,6 +425,13 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         routes back to the model. Rewrite the AIMessage so the tools node
         never sees the siblings.
 
+        LangChain parses each provider call independently, so a malformed
+        ``ask_clarification`` is stored on ``invalid_tool_calls`` while a
+        valid sibling remains executable on ``tool_calls``. Treat that
+        malformed call as the same stop signal: drop the siblings so the
+        tools node cannot run them. With no remaining ``tool_calls``,
+        ``create_agent`` routes to END.
+
         ``disable_clarification`` skips this rewrite: those runs must keep the
         sibling actions, because the clarification itself is turned into a
         "proceed" ToolMessage instead of an interrupt.
@@ -437,19 +447,26 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             return None
 
         tool_calls = list(last.tool_calls or [])
+        invalid_tool_calls = [tc for tc in (getattr(last, "invalid_tool_calls", None) or []) if isinstance(tc, dict)]
         clarification_calls = [tc for tc in tool_calls if tc.get("name") == ASK_CLARIFICATION_TOOL_NAME]
-        if not clarification_calls or len(clarification_calls) == len(tool_calls):
+        invalid_clarification_calls = [tc for tc in invalid_tool_calls if tc.get("name") == ASK_CLARIFICATION_TOOL_NAME]
+        if not clarification_calls and not invalid_clarification_calls:
             return None
 
-        dropped_names = [str(tc.get("name") or "unknown") for tc in tool_calls if tc.get("name") != ASK_CLARIFICATION_TOOL_NAME]
+        sibling_calls = [tc for tc in tool_calls if tc.get("name") != ASK_CLARIFICATION_TOOL_NAME]
+        if not sibling_calls:
+            return None
+
+        dropped_names = [str(tc.get("name") or "unknown") for tc in sibling_calls]
         logger.warning(
             "ask_clarification was emitted with %d sibling tool call(s); dropping %s so the turn can interrupt",
             len(dropped_names),
             dropped_names,
         )
 
-        kept_ids = {tc["id"] for tc in clarification_calls if isinstance(tc.get("id"), str) and tc["id"]}
-        kept_names = {str(tc["name"]) for tc in clarification_calls if isinstance(tc.get("name"), str) and tc["name"]}
+        kept_for_content = clarification_calls + invalid_clarification_calls
+        kept_ids = {tc["id"] for tc in kept_for_content if isinstance(tc.get("id"), str) and tc["id"]}
+        kept_names = {str(tc["name"]) for tc in kept_for_content if isinstance(tc.get("name"), str) and tc["name"]}
         new_content = _filter_content_tool_use(last.content, kept_ids, kept_names)
         patched = clone_ai_message_with_tool_calls(
             last,
