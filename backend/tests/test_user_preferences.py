@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import sqlite3
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,6 +20,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from app.gateway.auth.models import User
+from app.gateway.auth.repositories import sqlite as sqlite_repository
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
 from app.gateway.routers import user_preferences as user_preferences_router
@@ -66,8 +68,8 @@ async def _create_user(repository: SQLiteUserRepository, email: str) -> User:
 
 
 def _load_user_preferences_migration() -> ModuleType:
-    migration_path = Path(__file__).parents[1] / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "versions" / "0015_user_preferences.py"
-    spec = importlib.util.spec_from_file_location("migration_0015_user_preferences", migration_path)
+    migration_path = Path(__file__).parents[1] / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "versions" / "0014_user_preferences.py"
+    spec = importlib.util.spec_from_file_location("migration_0014_user_preferences", migration_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -169,6 +171,109 @@ async def test_concurrent_disjoint_updates_do_not_lose_fields(user_repository: S
     )
 
     stored, revision = await user_repository.get_user_preferences(str(user.id))
+    assert stored is not None
+    assert stored["notification"]["enabled"] is False
+    assert stored["tokenUsage"]["inlineMode"] == "off"
+    assert revision == 3
+
+
+class _PreferenceReadBarrier:
+    """Hold the first two preference readers on distinct SQLite snapshots."""
+
+    def __init__(self) -> None:
+        self._arrivals = 0
+        self._ready = asyncio.Event()
+        self._writer_committed = asyncio.Event()
+        self.connection_ids: set[int] = set()
+
+    async def wait(self, connection_id: int) -> bool:
+        self.connection_ids.add(connection_id)
+        self._arrivals += 1
+        position = self._arrivals
+        if self._arrivals >= 2:
+            self._ready.set()
+        await self._ready.wait()
+        if position == 2:
+            await self._writer_committed.wait()
+        return position == 1
+
+    def writer_committed(self) -> None:
+        self._writer_committed.set()
+
+
+class _BarrierSession:
+    """AsyncSession proxy that pauses after its first preference SELECT."""
+
+    def __init__(self, session, barrier: _PreferenceReadBarrier) -> None:
+        self._session = session
+        self._barrier = barrier
+        self._first_execute = True
+        self._is_first_writer = False
+
+    async def __aenter__(self):
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        return await self._session.__aexit__(exc_type, exc_value, traceback)
+
+    def __getattr__(self, name: str):
+        return getattr(self._session, name)
+
+    async def commit(self) -> None:
+        await self._session.commit()
+        if self._is_first_writer:
+            self._barrier.writer_committed()
+
+    async def execute(self, statement, *args, **kwargs):
+        if not self._first_execute:
+            return await self._session.execute(statement, *args, **kwargs)
+
+        self._first_execute = False
+        # Python's sqlite3 legacy transaction mode does not always begin a
+        # database transaction for SELECT. An explicit BEGIN makes each SELECT
+        # retain a real WAL read snapshot, matching modern transaction mode and
+        # reproducing the read-to-write upgrade race deterministically.
+        await self._session.execute(sa.text("BEGIN"))
+        result = await self._session.execute(statement, *args, **kwargs)
+        connection = await self._session.connection()
+        dbapi_connection = connection.sync_connection.connection.dbapi_connection
+        self._is_first_writer = await self._barrier.wait(id(dbapi_connection))
+        return result
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sqlite_snapshot_busy_retries_without_losing_patch(user_repository: SQLiteUserRepository, monkeypatch: pytest.MonkeyPatch) -> None:
+    user = await _create_user(user_repository, "snapshot-busy@example.com")
+    await user_repository.initialize_user_preferences(str(user.id), _full_preferences())
+
+    session_factory = get_session_factory()
+    assert session_factory is not None
+    barrier = _PreferenceReadBarrier()
+    repository = SQLiteUserRepository(lambda: _BarrierSession(session_factory(), barrier))  # type: ignore[arg-type]
+    busy_error_codes: list[int | None] = []
+    original_is_busy = sqlite_repository._is_sqlite_busy_error
+
+    def capture_busy_error(exc) -> bool:
+        busy_error_codes.append(getattr(exc.orig, "sqlite_errorcode", None))
+        return original_is_busy(exc)
+
+    monkeypatch.setattr(sqlite_repository, "_is_sqlite_busy_error", capture_busy_error)
+
+    await asyncio.gather(
+        repository.merge_user_preferences(
+            str(user.id),
+            {"notification": {"enabled": False}},
+        ),
+        repository.merge_user_preferences(
+            str(user.id),
+            {"tokenUsage": {"inlineMode": "off"}},
+        ),
+    )
+
+    stored, revision = await user_repository.get_user_preferences(str(user.id))
+    assert len(barrier.connection_ids) == 2
+    assert busy_error_codes == [sqlite3.SQLITE_BUSY_SNAPSHOT]
     assert stored is not None
     assert stored["notification"]["enabled"] is False
     assert stored["tokenUsage"]["inlineMode"] == "off"
@@ -320,6 +425,10 @@ def test_user_preferences_migration_is_idempotent_and_reversible(tmp_path: Path)
     engine = sa.create_engine(f"sqlite:///{db_path}")
     with engine.begin() as connection:
         connection.execute(sa.text("CREATE TABLE users (id VARCHAR(36) PRIMARY KEY, email VARCHAR(320) NOT NULL)"))
+        connection.execute(
+            sa.text("INSERT INTO users (id, email) VALUES (:id, :email)"),
+            {"id": "existing-user", "email": "existing@example.com"},
+        )
         context = MigrationContext.configure(connection)
         with Operations.context(context):
             migration.upgrade()
@@ -327,6 +436,24 @@ def test_user_preferences_migration_is_idempotent_and_reversible(tmp_path: Path)
 
         columns = {column["name"] for column in sa.inspect(connection).get_columns("users")}
         assert {"preferences", "preferences_revision"} <= columns
+        assert connection.execute(
+            sa.text("SELECT preferences, preferences_revision FROM users WHERE id = 'existing-user'"),
+        ).one() == (None, 0)
+
+        with Operations.context(context):
+            migration.downgrade()
+            migration.downgrade()
+
+        columns = {column["name"] for column in sa.inspect(connection).get_columns("users")}
+        assert columns == {"id", "email"}
+
+        with Operations.context(context):
+            migration.upgrade()
+            migration.upgrade()
+
+        assert connection.execute(
+            sa.text("SELECT preferences, preferences_revision FROM users WHERE id = 'existing-user'"),
+        ).one() == (None, 0)
 
         with Operations.context(context):
             migration.downgrade()

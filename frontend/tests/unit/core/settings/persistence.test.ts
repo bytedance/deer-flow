@@ -1,6 +1,7 @@
 import { expect, test } from "@rstest/core";
 
 import {
+  diffPersistedUserSettings,
   parsePersistedUserSettings,
   parsePersistedUserSettingsPatch,
   toPersistedUserSettings,
@@ -53,4 +54,24 @@ test("rejects empty patches at the same boundary as the Gateway schema", () => {
   expect(parsePersistedUserSettingsPatch({})).toBeNull();
   expect(parsePersistedUserSettingsPatch({ context: {} })).toBeNull();
   expect(parsePersistedUserSettingsPatch({ tokenUsage: {} })).toBeNull();
+});
+
+test("snapshot diffs contain only changed leaves and encode removals as null", () => {
+  expect(
+    diffPersistedUserSettings(
+      {
+        notification: { enabled: true },
+        tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+        context: { model_name: "old-model", mode: "thinking" },
+      },
+      {
+        notification: { enabled: true },
+        tokenUsage: { headerTotal: true, inlineMode: "off" },
+        context: { mode: "thinking" },
+      },
+    ),
+  ).toEqual({
+    tokenUsage: { inlineMode: "off" },
+    context: { model_name: null },
+  });
 });

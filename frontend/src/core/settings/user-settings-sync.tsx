@@ -11,12 +11,13 @@ import {
   activateBaseSettingsPersistence,
   getBaseSettingsMutationBoundary,
   getBaseSettingsMutationVersion,
-  getPendingBaseSettingsPatch,
+  getPendingBaseSettingsLeafOpId,
+  getPendingBaseSettingsPatchBatch,
   getPersistedBaseSettingsSnapshot,
   hydrateBaseSettingsFromServer,
-  savePendingBaseSettingsPatch,
   seedPendingBaseSettingsFromCurrent,
   subscribeBaseSettingsMutations,
+  withBaseSettingsWriteLock,
 } from "./store";
 import { UserSettingsSyncController } from "./sync";
 
@@ -49,7 +50,9 @@ function UserSettingsSyncLifecycle({
   enabled: boolean;
   userId: string;
 }) {
-  const [activationBoundary] = useState(getBaseSettingsMutationBoundary);
+  const [activationBoundary] = useState(() =>
+    getBaseSettingsMutationBoundary(userId),
+  );
 
   useEffect(() => {
     if (!enabled || !userId) return;
@@ -61,27 +64,33 @@ function UserSettingsSyncLifecycle({
         deactivate();
         return;
       }
-      const activationPatch =
+      const activationVolatileLeaves =
         getBaseSettingsMutationVersion() !== activationBoundary.version &&
         (activationBoundary.userId === null ||
           activationBoundary.userId === userId)
-          ? seedPendingBaseSettingsFromCurrent(userId)
-          : null;
+          ? seedPendingBaseSettingsFromCurrent(
+              userId,
+              activationBoundary.snapshot,
+              activationBoundary.durableLeafOpIds,
+            )
+          : [];
       deactivatePersistence = deactivate;
       const store = {
         getSettings: getPersistedBaseSettingsSnapshot,
         getMutationVersion: getBaseSettingsMutationVersion,
-        getPendingPatch: () =>
-          activationPatch ?? getPendingBaseSettingsPatch(userId),
-        setPendingPatch: (
-          patch: Parameters<typeof savePendingBaseSettingsPatch>[1],
-        ) => savePendingBaseSettingsPatch(userId, patch),
+        getPendingPatchBatch: () => getPendingBaseSettingsPatchBatch(userId),
+        getDurableLeafOpId: (
+          leaf: Parameters<typeof getPendingBaseSettingsLeafOpId>[1],
+        ) => getPendingBaseSettingsLeafOpId(userId, leaf),
+        withWriteLock: (task: () => Promise<void>) =>
+          withBaseSettingsWriteLock(userId, task),
         hydrate: hydrateBaseSettingsFromServer,
         subscribeMutations: subscribeBaseSettingsMutations,
       };
       controller = new UserSettingsSyncController(
         store,
         transportForUser(userId),
+        activationVolatileLeaves,
       );
       void controller.start();
     });

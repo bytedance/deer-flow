@@ -24,12 +24,23 @@
    Every active-user mutation is captured at the store boundary and enters a
    user-scoped, allowlisted local outbox before async activation or network
    observers can run. If a setting changes between `UserSettingsSync` render
-   and activation, startup also seeds a full current-state patch before
+   and activation, startup diffs the render-time snapshot and seeds only those
+   changed leaves before
    hydrating the server response, retaining that patch in memory when browser
    storage rejects the durable outbox write.
    Failed writes remain in that outbox; the next handshake folds them over the
    server read and retries before clearing, so reconnect/reload cannot silently
-   erase an unsynchronized local selection. Keep `UserSettingsSync` mounted
+   erase an unsynchronized local selection. Local and cross-tab cache changes
+   enqueue only their changed allowlisted leaves. Each user/leaf has a fixed
+   mutation slot containing an opaque operation id and a separate acknowledgement
+   slot; successful writes advance acknowledgements without deleting mutations,
+   so a later tab write remains pending even when an older request completes.
+   Storage-write failures retain the leaf in memory with the mutation id they
+   observed, allowing a later durable mutation to supersede that fallback. The
+   bootstrap handshake plus every lock-time reread, PATCH, and acknowledgement
+   run under one per-user Web Lock; when Web Locks are unavailable, sync fails
+   closed and local pending work remains untouched. Keep
+   `UserSettingsSync` mounted
    before interactive workspace content so its render-time version boundary is
    established before settings controls render.
    Authenticated fallback caches are also keyed by user. A Web Lock serializes

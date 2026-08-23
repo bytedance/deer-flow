@@ -14,17 +14,43 @@ export interface UserSettingsTransport {
   patch: (patch: PersistedUserSettingsPatch) => Promise<UserSettingsResponse>;
 }
 
+export type UserSettingsPatchLeaf =
+  | "notification.enabled"
+  | "tokenUsage.headerTotal"
+  | "tokenUsage.inlineMode"
+  | "context.model_name"
+  | "context.mode"
+  | "context.reasoning_effort";
+
+export interface VolatileUserSettingsPatchLeaf {
+  leaf: UserSettingsPatchLeaf;
+  patch: PersistedUserSettingsPatch;
+  observedDurableOpId: string | null;
+}
+
+export interface UserSettingsMutationPersistence {
+  durableLeaves: UserSettingsPatchLeaf[];
+  volatileLeaves: VolatileUserSettingsPatchLeaf[];
+}
+
 export interface UserSettingsSyncStore {
   getSettings: () => PersistedUserSettings;
   getMutationVersion: () => number;
-  getPendingPatch: () => PersistedUserSettingsPatch | null;
-  setPendingPatch: (patch: PersistedUserSettingsPatch | null) => void;
+  getPendingPatchBatch: () => {
+    patch: PersistedUserSettingsPatch;
+    acknowledge: () => boolean;
+  } | null;
+  getDurableLeafOpId: (leaf: UserSettingsPatchLeaf) => string | null;
+  withWriteLock: (task: () => Promise<void>) => Promise<boolean>;
   hydrate: (
     settings: PersistedUserSettings,
     expectedVersion: number,
   ) => boolean;
   subscribeMutations: (
-    listener: (patch: PersistedUserSettingsPatch) => void,
+    listener: (
+      patch: PersistedUserSettingsPatch,
+      persistence: UserSettingsMutationPersistence,
+    ) => void,
   ) => () => void;
 }
 
@@ -43,50 +69,62 @@ export class UserSettingsSyncController {
   private started = false;
   private bootstrapped = false;
   private writeFailed = false;
-  private pendingPatch: PersistedUserSettingsPatch | null = null;
-  private inFlightPatch: PersistedUserSettingsPatch | null = null;
+  private readonly volatileLeaves = new Map<
+    UserSettingsPatchLeaf,
+    VolatileUserSettingsPatchLeaf
+  >();
   private writeTask: Promise<void> | null = null;
   private unsubscribe: (() => void) | null = null;
 
   constructor(
     private readonly store: UserSettingsSyncStore,
     private readonly transport: UserSettingsTransport,
-  ) {}
+    initialVolatileLeaves: VolatileUserSettingsPatchLeaf[] = [],
+  ) {
+    for (const leaf of initialVolatileLeaves) {
+      this.volatileLeaves.set(leaf.leaf, leaf);
+    }
+  }
 
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
-    this.pendingPatch = this.store.getPendingPatch();
-    this.unsubscribe = this.store.subscribeMutations((patch) => {
-      this.pendingPatch = mergePersistedUserSettingsPatches(
-        this.pendingPatch,
-        patch,
-      );
+    this.unsubscribe = this.store.subscribeMutations((_patch, persistence) => {
+      for (const leaf of persistence.durableLeaves) {
+        this.volatileLeaves.delete(leaf);
+      }
+      for (const leaf of persistence.volatileLeaves) {
+        this.volatileLeaves.set(leaf.leaf, leaf);
+      }
       this.writeFailed = false;
-      this.persistOutbox();
       if (this.bootstrapped) this.scheduleWrites();
     });
+    const hydrationVersion = this.store.getMutationVersion();
 
     try {
-      const response = await this.transport.get();
-      if (this.stopped) return;
+      const acquired = await this.store.withWriteLock(async () => {
+        const response = await this.transport.get();
+        if (this.stopped) return;
 
-      const baselineResponse =
-        response.settings === null
-          ? await this.transport.initialize(this.store.getSettings())
-          : response;
-      if (this.stopped || baselineResponse.settings === null) return;
+        const baselineResponse =
+          response.settings === null
+            ? await this.transport.initialize(this.store.getSettings())
+            : response;
+        if (this.stopped || baselineResponse.settings === null) return;
 
-      const expectedVersion = this.store.getMutationVersion();
-      const desired = this.pendingPatch
-        ? applyPersistedUserSettingsPatch(
-            baselineResponse.settings,
-            this.pendingPatch,
-          )
-        : baselineResponse.settings;
-      this.store.hydrate(desired, expectedVersion);
-      this.bootstrapped = true;
-      this.scheduleWrites();
+        const desiredPatch = this.composePendingPatch(
+          this.store.getPendingPatchBatch(),
+        ).patch;
+        const desired = desiredPatch
+          ? applyPersistedUserSettingsPatch(
+              baselineResponse.settings,
+              desiredPatch,
+            )
+          : baselineResponse.settings;
+        this.store.hydrate(desired, hydrationVersion);
+        this.bootstrapped = true;
+      });
+      if (acquired) this.scheduleWrites();
     } catch {
       // Offline/auth-refresh/validation failures are intentionally non-fatal.
       // The existing localStorage-backed behavior remains available, and the
@@ -104,6 +142,26 @@ export class UserSettingsSyncController {
     while (this.writeTask) await this.writeTask;
   }
 
+  private composePendingPatch(
+    durableBatch: ReturnType<UserSettingsSyncStore["getPendingPatchBatch"]>,
+  ): {
+    patch: PersistedUserSettingsPatch | null;
+    volatileLeaves: VolatileUserSettingsPatchLeaf[];
+  } {
+    let patch = durableBatch?.patch ?? null;
+    const volatileLeaves: VolatileUserSettingsPatchLeaf[] = [];
+    for (const [leaf, volatile] of this.volatileLeaves) {
+      const currentOpId = this.store.getDurableLeafOpId(leaf);
+      if (currentOpId !== volatile.observedDurableOpId) {
+        this.volatileLeaves.delete(leaf);
+        continue;
+      }
+      patch = mergePersistedUserSettingsPatches(patch, volatile.patch);
+      volatileLeaves.push(volatile);
+    }
+    return { patch, volatileLeaves };
+  }
+
   private scheduleWrites(): void {
     if (
       this.stopped ||
@@ -114,40 +172,49 @@ export class UserSettingsSyncController {
       return;
     this.writeTask = this.drainWrites().finally(() => {
       this.writeTask = null;
-      if (this.pendingPatch) this.scheduleWrites();
+      if (
+        !this.writeFailed &&
+        (this.volatileLeaves.size > 0 ||
+          this.store.getPendingPatchBatch() !== null)
+      ) {
+        this.scheduleWrites();
+      }
     });
   }
 
   private async drainWrites(): Promise<void> {
-    while (!this.stopped && this.pendingPatch) {
-      const patch = this.pendingPatch;
-      this.pendingPatch = null;
-      this.inFlightPatch = patch;
-      this.persistOutbox();
-      try {
-        await this.transport.patch(patch);
-      } catch {
-        this.pendingPatch = mergePersistedUserSettingsPatches(
-          patch,
-          this.pendingPatch ?? {},
-        );
-        this.inFlightPatch = null;
+    while (!this.stopped) {
+      let attempted = false;
+      let requestFailed = false;
+      let acknowledgeFailed = false;
+      const acquired = await this.store.withWriteLock(async () => {
+        if (this.stopped) return;
+        const durableBatch = this.store.getPendingPatchBatch();
+        const { patch, volatileLeaves } =
+          this.composePendingPatch(durableBatch);
+        if (patch === null) return;
+        attempted = true;
+        try {
+          await this.transport.patch(patch);
+        } catch {
+          requestFailed = true;
+          return;
+        }
+        if (durableBatch !== null && !durableBatch.acknowledge()) {
+          acknowledgeFailed = true;
+          return;
+        }
+        for (const volatile of volatileLeaves) {
+          if (this.volatileLeaves.get(volatile.leaf) === volatile) {
+            this.volatileLeaves.delete(volatile.leaf);
+          }
+        }
+      });
+      if (!acquired || requestFailed || acknowledgeFailed) {
         this.writeFailed = true;
-        this.persistOutbox();
         return;
       }
-      this.inFlightPatch = null;
-      this.persistOutbox();
+      if (!attempted) return;
     }
-  }
-
-  private persistOutbox(): void {
-    const outbox = this.inFlightPatch
-      ? mergePersistedUserSettingsPatches(
-          this.inFlightPatch,
-          this.pendingPatch ?? {},
-        )
-      : this.pendingPatch;
-    this.store.setPendingPatch(outbox);
   }
 }

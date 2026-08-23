@@ -1,6 +1,6 @@
 """Add durable user-level UI preferences.
 
-Revision ID: 0015_user_preferences
+Revision ID: 0014_user_preferences
 Revises: 0013_mcp_task_notifications
 Create Date: 2026-08-23
 """
@@ -11,7 +11,7 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 
-revision: str = "0015_user_preferences"
+revision: str = "0014_user_preferences"
 down_revision: str | Sequence[str] | None = "0013_mcp_task_notifications"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None

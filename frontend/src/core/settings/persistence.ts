@@ -181,6 +181,50 @@ export function mergePersistedUserSettingsPatches(
   });
 }
 
+/**
+ * Return only the allowlisted leaf values that changed between two snapshots.
+ *
+ * In particular, do not promote a one-leaf edit into a whole-section PATCH:
+ * another tab may have a newer value for a sibling leaf in that section.
+ */
+export function diffPersistedUserSettings(
+  previous: PersistedUserSettings,
+  next: PersistedUserSettings,
+): PersistedUserSettingsPatch | null {
+  const patch: {
+    notification?: PersistedUserSettingsPatch["notification"];
+    tokenUsage?: PersistedUserSettingsPatch["tokenUsage"];
+    context?: PersistedUserSettingsPatch["context"];
+  } = {};
+
+  if (previous.notification.enabled !== next.notification.enabled) {
+    patch.notification = { enabled: next.notification.enabled };
+  }
+
+  const tokenUsage: PersistedUserSettingsPatch["tokenUsage"] = {};
+  if (previous.tokenUsage.headerTotal !== next.tokenUsage.headerTotal) {
+    tokenUsage.headerTotal = next.tokenUsage.headerTotal;
+  }
+  if (previous.tokenUsage.inlineMode !== next.tokenUsage.inlineMode) {
+    tokenUsage.inlineMode = next.tokenUsage.inlineMode;
+  }
+  if (Object.keys(tokenUsage).length > 0) patch.tokenUsage = tokenUsage;
+
+  const context: PersistedUserSettingsPatch["context"] = {};
+  if (previous.context.model_name !== next.context.model_name) {
+    context.model_name = next.context.model_name ?? null;
+  }
+  if (previous.context.mode !== next.context.mode) {
+    context.mode = next.context.mode ?? null;
+  }
+  if (previous.context.reasoning_effort !== next.context.reasoning_effort) {
+    context.reasoning_effort = next.context.reasoning_effort ?? null;
+  }
+  if (Object.keys(context).length > 0) patch.context = context;
+
+  return parsePersistedUserSettingsPatch(patch);
+}
+
 export function fromPersistedUserSettings(
   settings: PersistedUserSettings,
 ): LocalSettings {

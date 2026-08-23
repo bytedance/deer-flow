@@ -12,12 +12,13 @@ construct this after ``init_engine_from_config()`` has run.
 
 from __future__ import annotations
 
+import sqlite3
 from copy import deepcopy
 from datetime import UTC
 from uuid import UUID
 
 from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
@@ -28,6 +29,8 @@ from app.gateway.auth.repositories.base import (
     UserRepository,
 )
 from deerflow.persistence.user.model import UserRow
+
+_PREFERENCE_WRITE_MAX_ATTEMPTS = 5
 
 
 def _normalize_email(email: str) -> str:
@@ -230,33 +233,58 @@ class SQLiteUserRepository(UserRepository):
 
     async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict, int]:
         """Merge with an optimistic revision CAS supported by SQLite/Postgres."""
-        for _attempt in range(5):
+        for _attempt in range(_PREFERENCE_WRITE_MAX_ATTEMPTS):
             async with self._sf() as session:
-                row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
-                if row is None:
-                    raise UserNotFoundError(f"User {user_id} no longer exists")
-                current, revision = row
-                if current is None:
-                    raise UserPreferencesNotInitializedError(f"Preferences for user {user_id} have not been initialized")
+                dialect_name = session.get_bind().dialect.name
+                try:
+                    row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
+                    if row is None:
+                        raise UserNotFoundError(f"User {user_id} no longer exists")
+                    current, revision = row
+                    if current is None:
+                        raise UserPreferencesNotInitializedError(f"Preferences for user {user_id} have not been initialized")
 
-                merged = _merge_preferences(current, patch)
-                result = await session.execute(
-                    update(UserRow)
-                    .where(
-                        UserRow.id == user_id,
-                        UserRow.preferences_revision == revision,
+                    merged = _merge_preferences(current, patch)
+                    result = await session.execute(
+                        update(UserRow)
+                        .where(
+                            UserRow.id == user_id,
+                            UserRow.preferences_revision == revision,
+                        )
+                        .values(
+                            preferences=merged,
+                            preferences_revision=revision + 1,
+                        )
                     )
-                    .values(
-                        preferences=merged,
-                        preferences_revision=revision + 1,
-                    )
-                )
-                if result.rowcount == 1:
-                    await session.commit()
-                    return merged, int(revision) + 1
-                await session.rollback()
+                    if result.rowcount == 1:
+                        await session.commit()
+                        return merged, int(revision) + 1
+                    await session.rollback()
+                except OperationalError as exc:
+                    # In WAL mode, a transaction that SELECTed before another
+                    # writer committed cannot upgrade its stale read snapshot.
+                    # SQLite reports SQLITE_BUSY_SNAPSHOT immediately; the
+                    # connection busy_timeout cannot make that snapshot valid.
+                    # Roll back the snapshot and rerun the complete read/merge/
+                    # CAS cycle so disjoint client patches are not lost. Other
+                    # SQLite failures and every Postgres failure retain their
+                    # existing error semantics.
+                    if dialect_name != "sqlite" or not _is_sqlite_busy_error(exc):
+                        raise
+                    await session.rollback()
 
         raise UserPreferencesWriteConflict(f"Concurrent preference updates for user {user_id} did not settle")
+
+
+def _is_sqlite_busy_error(exc: OperationalError) -> bool:
+    """Match SQLITE_BUSY and its extended result codes from sqlite3."""
+    error_code = getattr(exc.orig, "sqlite_errorcode", None)
+    if isinstance(error_code, int):
+        return error_code & 0xFF == sqlite3.SQLITE_BUSY
+
+    # Python 3.12's sqlite3 exceptions expose ``sqlite_errorcode``. Keep the
+    # message fallback for compatible DBAPI adapters that omit that attribute.
+    return "database is locked" in str(exc.orig).lower()
 
 
 def _merge_preferences(current: dict, patch: dict) -> dict:

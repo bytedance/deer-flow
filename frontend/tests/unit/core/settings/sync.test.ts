@@ -4,8 +4,11 @@ import type {
   PersistedUserSettings,
   PersistedUserSettingsPatch,
 } from "@/core/settings/persistence";
+import { mergePersistedUserSettingsPatches } from "@/core/settings/persistence";
 import {
   UserSettingsSyncController,
+  type UserSettingsMutationPersistence,
+  type UserSettingsPatchLeaf,
   type UserSettingsSyncStore,
   type UserSettingsTransport,
 } from "@/core/settings/sync";
@@ -25,9 +28,16 @@ function settings(modelName = "local-model"): PersistedUserSettings {
 class FakeStore implements UserSettingsSyncStore {
   current: PersistedUserSettings;
   version = 0;
-  pendingPatch: PersistedUserSettingsPatch | null = null;
+  lockAvailable = true;
   hydrateCalls: PersistedUserSettings[] = [];
-  private listeners = new Set<(patch: PersistedUserSettingsPatch) => void>();
+  private nextOperationId = 0;
+  private operations = new Map<number, PersistedUserSettingsPatch>();
+  private listeners = new Set<
+    (
+      patch: PersistedUserSettingsPatch,
+      persistence: UserSettingsMutationPersistence,
+    ) => void
+  >();
 
   constructor(initial: PersistedUserSettings) {
     this.current = structuredClone(initial);
@@ -35,10 +45,39 @@ class FakeStore implements UserSettingsSyncStore {
 
   getSettings = () => structuredClone(this.current);
   getMutationVersion = () => this.version;
-  getPendingPatch = () => structuredClone(this.pendingPatch);
-  setPendingPatch = (patch: PersistedUserSettingsPatch | null) => {
-    this.pendingPatch = structuredClone(patch);
+  getPendingPatchBatch = () => {
+    const entries = [...this.operations.entries()];
+    if (entries.length === 0) return null;
+    const patch = entries.reduce<PersistedUserSettingsPatch | null>(
+      (merged, [, operation]) =>
+        mergePersistedUserSettingsPatches(merged, operation),
+      null,
+    )!;
+    return {
+      patch: structuredClone(patch),
+      acknowledge: () => {
+        for (const [id] of entries) this.operations.delete(id);
+        return true;
+      },
+    };
   };
+  getDurableLeafOpId: (leaf: UserSettingsPatchLeaf) => string | null = (
+    _leaf,
+  ) => null;
+  withWriteLock = async (task: () => Promise<void>) => {
+    if (!this.lockAvailable) return false;
+    await task();
+    return true;
+  };
+
+  get pendingPatch(): PersistedUserSettingsPatch | null {
+    return this.getPendingPatchBatch()?.patch ?? null;
+  }
+
+  set pendingPatch(patch: PersistedUserSettingsPatch | null) {
+    this.operations.clear();
+    if (patch !== null) this.appendPendingPatch(patch);
+  }
 
   hydrate = (next: PersistedUserSettings, expectedVersion: number) => {
     if (expectedVersion !== this.version) return false;
@@ -48,13 +87,31 @@ class FakeStore implements UserSettingsSyncStore {
   };
 
   subscribeMutations = (
-    listener: (patch: PersistedUserSettingsPatch) => void,
+    listener: (
+      patch: PersistedUserSettingsPatch,
+      persistence: UserSettingsMutationPersistence,
+    ) => void,
   ) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
 
   mutate(patch: PersistedUserSettingsPatch) {
+    this.appendPendingPatch(patch);
+    const durableLeaves: UserSettingsPatchLeaf[] = [];
+    if (patch.context?.model_name !== undefined) {
+      durableLeaves.push("context.model_name");
+    }
+    if (patch.tokenUsage?.inlineMode !== undefined) {
+      durableLeaves.push("tokenUsage.inlineMode");
+    }
+    this.notifyMutation(patch, { durableLeaves, volatileLeaves: [] });
+  }
+
+  notifyMutation(
+    patch: PersistedUserSettingsPatch,
+    persistence: UserSettingsMutationPersistence,
+  ) {
     this.version += 1;
     if (patch.context?.model_name !== undefined) {
       this.current.context.model_name = patch.context.model_name ?? undefined;
@@ -62,7 +119,13 @@ class FakeStore implements UserSettingsSyncStore {
     if (patch.tokenUsage?.inlineMode !== undefined) {
       this.current.tokenUsage.inlineMode = patch.tokenUsage.inlineMode;
     }
-    for (const listener of this.listeners) listener(patch);
+    for (const listener of this.listeners) {
+      listener(patch, persistence);
+    }
+  }
+
+  appendPendingPatch(patch: PersistedUserSettingsPatch) {
+    this.operations.set(++this.nextOperationId, structuredClone(patch));
   }
 }
 
@@ -167,6 +230,127 @@ test("replays a newer local mutation instead of applying a stale hydrate respons
   controller.stop();
 });
 
+test("rereads a later durable leaf after GET even without a storage event", async () => {
+  let resolveGet!: (value: {
+    settings: PersistedUserSettings;
+    revision: number;
+  }) => void;
+  const getPromise = new Promise<{
+    settings: PersistedUserSettings;
+    revision: number;
+  }>((resolve) => {
+    resolveGet = resolve;
+  });
+  const store = new FakeStore(settings("initial"));
+  const transport = transportWithServer(settings("server"));
+  transport.get = rs.fn(() => getPromise);
+  const controller = new UserSettingsSyncController(store, transport);
+  const starting = controller.start();
+
+  store.mutate({ context: { model_name: "durable-p" } });
+  store.appendPendingPatch({ context: { model_name: "durable-q" } });
+  store.current.context.model_name = "durable-q";
+  resolveGet({ settings: settings("server"), revision: 1 });
+  await starting;
+  await controller.whenIdle();
+
+  expect(store.current.context.model_name).toBe("durable-q");
+  expect(transport.patch).toHaveBeenCalledWith({
+    context: { model_name: "durable-q" },
+  });
+  controller.stop();
+});
+
+test("rejects a stale GET after a newer mutation was already acknowledged", async () => {
+  let resolveGet!: (value: {
+    settings: PersistedUserSettings;
+    revision: number;
+  }) => void;
+  const getPromise = new Promise<{
+    settings: PersistedUserSettings;
+    revision: number;
+  }>((resolve) => {
+    resolveGet = resolve;
+  });
+  const store = new FakeStore(settings("initial"));
+  const transport = transportWithServer(settings("old-server"));
+  transport.get = rs.fn(() => getPromise);
+  const controller = new UserSettingsSyncController(store, transport);
+  const starting = controller.start();
+
+  store.mutate({ context: { model_name: "newer-local" } });
+  expect(store.getPendingPatchBatch()?.acknowledge()).toBe(true);
+  resolveGet({ settings: settings("old-server"), revision: 1 });
+  await starting;
+  await controller.whenIdle();
+
+  expect(store.current.context.model_name).toBe("newer-local");
+  expect(store.hydrateCalls).toHaveLength(0);
+  expect(transport.patch).not.toHaveBeenCalled();
+  controller.stop();
+});
+
+test("holds the write lock while bootstrap folds a preexisting outbox over GET", async () => {
+  const store = new FakeStore(settings("pending"));
+  store.pendingPatch = { context: { model_name: "pending" } };
+  let lockTail = Promise.resolve();
+  const withSharedLock = async (task: () => Promise<void>) => {
+    const previous = lockTail;
+    let release!: () => void;
+    lockTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await task();
+      return true;
+    } finally {
+      release();
+    }
+  };
+  store.withWriteLock = withSharedLock;
+  let resolveGet!: (value: {
+    settings: PersistedUserSettings;
+    revision: number;
+  }) => void;
+  const getPromise = new Promise<{
+    settings: PersistedUserSettings;
+    revision: number;
+  }>((resolve) => {
+    resolveGet = resolve;
+  });
+  let markGetStarted!: () => void;
+  const getStarted = new Promise<void>((resolve) => {
+    markGetStarted = resolve;
+  });
+  const transport = transportWithServer(settings("old-server"));
+  transport.get = rs.fn(() => {
+    markGetStarted();
+    return getPromise;
+  });
+  const controller = new UserSettingsSyncController(store, transport);
+  const starting = controller.start();
+  await getStarted;
+
+  let otherTabAcknowledged = false;
+  const otherTabWrite = withSharedLock(async () => {
+    otherTabAcknowledged = true;
+    expect(store.getPendingPatchBatch()?.acknowledge()).toBe(true);
+  });
+  await Promise.resolve();
+  expect(otherTabAcknowledged).toBe(false);
+
+  resolveGet({ settings: settings("old-server"), revision: 1 });
+  await Promise.all([starting, otherTabWrite]);
+  await controller.whenIdle();
+
+  expect(otherTabAcknowledged).toBe(true);
+  expect(store.hydrateCalls).toEqual([settings("pending")]);
+  expect(store.current.context.model_name).toBe("pending");
+  expect(transport.patch).not.toHaveBeenCalled();
+  controller.stop();
+});
+
 test("does not let an older PATCH response roll back a newer local edit", async () => {
   let resolveFirstPatch!: (value: {
     settings: PersistedUserSettings;
@@ -188,6 +372,7 @@ test("does not let an older PATCH response roll back a newer local edit", async 
   });
   const controller = new UserSettingsSyncController(store, transport);
   await controller.start();
+  await controller.whenIdle();
 
   store.mutate({ context: { model_name: "older-edit" } });
   store.mutate({ context: { model_name: "newest" } });
@@ -222,6 +407,145 @@ test("keeps the local edit when a background PATCH fails", async () => {
   controller.stop();
 });
 
+test("fails closed and retains pending work when the write lock is unavailable", async () => {
+  const store = new FakeStore(settings("initial"));
+  store.pendingPatch = { context: { model_name: "pending" } };
+  store.lockAvailable = false;
+  const transport = transportWithServer(settings("server"));
+  const controller = new UserSettingsSyncController(store, transport);
+
+  await controller.start();
+  await controller.whenIdle();
+
+  expect(transport.patch).not.toHaveBeenCalled();
+  expect(store.pendingPatch).toEqual({
+    context: { model_name: "pending" },
+  });
+  controller.stop();
+});
+
+test("serializes an older durable write before a later volatile write", async () => {
+  const tabA = new FakeStore(settings("initial"));
+  const tabB = new FakeStore(settings("initial"));
+  let durableSlot: {
+    opId: string;
+    patch: PersistedUserSettingsPatch;
+  } | null = null;
+  let acknowledgedOpId: string | null = null;
+  let lockTail = Promise.resolve();
+  const withSharedLock = async (task: () => Promise<void>) => {
+    const previous = lockTail;
+    let release!: () => void;
+    lockTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      await task();
+      return true;
+    } finally {
+      release();
+    }
+  };
+  for (const store of [tabA, tabB]) {
+    store.getPendingPatchBatch = () => {
+      const captured = durableSlot;
+      if (captured === null || captured.opId === acknowledgedOpId) return null;
+      return {
+        patch: structuredClone(captured.patch),
+        acknowledge: () => {
+          acknowledgedOpId = captured.opId;
+          return true;
+        },
+      };
+    };
+    store.getDurableLeafOpId = (leaf) =>
+      leaf === "context.model_name" ? (durableSlot?.opId ?? null) : null;
+    store.withWriteLock = withSharedLock;
+  }
+
+  let releaseOlderWrite!: () => void;
+  const olderWriteBlocked = new Promise<void>((resolve) => {
+    releaseOlderWrite = resolve;
+  });
+  let markOlderWriteStarted!: () => void;
+  const olderWriteStarted = new Promise<void>((resolve) => {
+    markOlderWriteStarted = resolve;
+  });
+  const server = settings("server");
+  const patchCalls: PersistedUserSettingsPatch[] = [];
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  const patch = async (nextPatch: PersistedUserSettingsPatch) => {
+    patchCalls.push(structuredClone(nextPatch));
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    try {
+      if (nextPatch.context?.model_name === "durable-q") {
+        markOlderWriteStarted();
+        await olderWriteBlocked;
+      }
+      if (nextPatch.context?.model_name !== undefined) {
+        server.context.model_name = nextPatch.context.model_name ?? undefined;
+      }
+      return {
+        settings: structuredClone(server),
+        revision: patchCalls.length + 1,
+      };
+    } finally {
+      inFlight -= 1;
+    }
+  };
+  const transport = (): UserSettingsTransport => ({
+    get: async () => ({ settings: structuredClone(server), revision: 1 }),
+    initialize: async (local) => ({ settings: local, revision: 1 }),
+    patch,
+  });
+  const controllerA = new UserSettingsSyncController(tabA, transport());
+  const controllerB = new UserSettingsSyncController(tabB, transport());
+  await Promise.all([controllerA.start(), controllerB.start()]);
+  await Promise.all([controllerA.whenIdle(), controllerB.whenIdle()]);
+
+  durableSlot = {
+    opId: "q",
+    patch: { context: { model_name: "durable-q" } },
+  };
+  tabA.notifyMutation(durableSlot.patch, {
+    durableLeaves: ["context.model_name"],
+    volatileLeaves: [],
+  });
+  await olderWriteStarted;
+  tabB.notifyMutation(
+    { context: { model_name: "volatile-p" } },
+    {
+      durableLeaves: [],
+      volatileLeaves: [
+        {
+          leaf: "context.model_name",
+          patch: { context: { model_name: "volatile-p" } },
+          observedDurableOpId: "q",
+        },
+      ],
+    },
+  );
+  await Promise.resolve();
+
+  expect(patchCalls).toEqual([{ context: { model_name: "durable-q" } }]);
+  expect(maximumInFlight).toBe(1);
+
+  releaseOlderWrite();
+  await Promise.all([controllerA.whenIdle(), controllerB.whenIdle()]);
+
+  expect(patchCalls).toEqual([
+    { context: { model_name: "durable-q" } },
+    { context: { model_name: "volatile-p" } },
+  ]);
+  expect(maximumInFlight).toBe(1);
+  expect(server.context.model_name).toBe("volatile-p");
+  controllerA.stop();
+  controllerB.stop();
+});
+
 test("persists an in-flight write before a reload can interrupt it", async () => {
   const store = new FakeStore(settings("initial"));
   let resolvePatch!: (value: {
@@ -248,6 +572,43 @@ test("persists an in-flight write before a reload can interrupt it", async () =>
   controller.stop();
   resolvePatch({ settings: settings("survives-reload"), revision: 2 });
   await controller.whenIdle();
+});
+
+test("acknowledging an in-flight batch preserves a patch appended by another tab", async () => {
+  let resolveFirstPatch!: (value: {
+    settings: PersistedUserSettings;
+    revision: number;
+  }) => void;
+  const firstRequest = new Promise<{
+    settings: PersistedUserSettings;
+    revision: number;
+  }>((resolve) => {
+    resolveFirstPatch = resolve;
+  });
+  const store = new FakeStore(settings("initial"));
+  const transport = transportWithServer(settings("server"));
+  transport.patch = rs
+    .fn()
+    .mockImplementationOnce(() => firstRequest)
+    .mockResolvedValue({ settings: settings("updated"), revision: 3 });
+  const controller = new UserSettingsSyncController(store, transport);
+  await controller.start();
+  await controller.whenIdle();
+
+  store.mutate({ context: { model_name: "tab-a" } });
+  await Promise.resolve();
+  store.appendPendingPatch({ context: { model_name: "tab-b-newer" } });
+  resolveFirstPatch({ settings: settings("tab-a"), revision: 2 });
+  await controller.whenIdle();
+
+  expect(transport.patch).toHaveBeenNthCalledWith(1, {
+    context: { model_name: "tab-a" },
+  });
+  expect(transport.patch).toHaveBeenNthCalledWith(2, {
+    context: { model_name: "tab-b-newer" },
+  });
+  expect(store.pendingPatch).toBeNull();
+  controller.stop();
 });
 
 test("replays a failed write before a later GET can overwrite the local choice", async () => {
