@@ -75,42 +75,14 @@ filesystem cleanup, so the raw value is never interpolated into a host path;
 new runs, workspace/sandbox operations, and other state-producing mutations
 remain blocked.
 
-**Message feed seq for client ordering** (#4666): a checkpoint carries no seq of
-its own and loses messages to summarization, so a client merging a `values` frame
-with the seq-ordered thread feed cannot place a message the checkpoint kept once
-the feed's loaded page window (`GET /messages/page`, `limit=50`) no longer reaches
-back to it. `RunEventStore.get_message_seqs(thread_id, identities)` resolves the
-seq the store already assigned, keyed by
-`runtime/events/message_identity.py::message_identity` — the backend half of the
-identity rule `frontend/src/core/threads/hooks.ts::messageIdentity` applies (tool
-messages by `tool_call_id`; `X` / `X__user` human copies collapse to one). The two
-halves must stay in sync: a mismatch is silent, degrading placement rather than
-raising. `worker.py::_MessageSeqStamper` attaches the result as
-`additional_kwargs.deerflow_seq` when a root `values` frame is serialized —
-subgraph frames are not stamped, and nothing is written back to the checkpoint.
-The stamper is built once per run so goal continuations reuse its cache; only a
-frame introducing unresolved identities costs a query, which in practice is the
-compaction frame alone (measured: 1 lookup across 25 frames).
-
-Streaming is not the only way a client obtains the checkpoint, and it is not even
-the common one: opening a conversation reads it over REST, and a client that never
-joins a live run would otherwise get no placement information at all. `GET
-/threads/{id}/state` and `POST /threads/{id}/history` therefore stamp their
-serialized messages through `runtime/events/message_seq.py::stamp_messages_with_seq`,
-the request-scoped counterpart of the stamper — everything a checkpoint still holds
-is already persisted, so one batched lookup resolves the whole list and there is
-nothing to retry later. Both reads resolve the store through
-`threads.py::_optional_run_event_store` rather than `get_run_event_store`, because
-seq is placement metadata: a deployment without a feed must still be able to read a
-thread. Leaving these two endpoints unstamped is what kept #4666 reproducing after
-the streaming fix — the merge fell back to the nearest shared anchor, which after
-summarization sits deep inside the loaded page, and the rescued first user turn
-rendered behind the newest question (measured: row 320 of 389 on a reproducing
-thread). `deerflow_seq` is
-server-owned and joins `_SERVER_OWNED_MESSAGE_METADATA_KEYS` in
-`services.py::normalize_input`, because a replayed message carrying it back would
-write a thread-scoped seq into the checkpoint that a fork re-seeds and reassigns
-(#4380).
+**Message feed seq** (#4666): streaming `values` frames, `GET
+/threads/{id}/state`, and `POST /threads/{id}/history` stamp serialized
+messages with `additional_kwargs.deerflow_seq` so clients can place
+checkpoint-kept messages against the paged feed; the REST reads resolve the
+store via `threads.py::_optional_run_event_store` (a feed-less deployment
+still reads threads), and `services.py::normalize_input` strips the
+server-owned key from client input (#4380). Mechanism and identity rule:
+`packages/harness/deerflow/runtime/AGENTS.md`.
 
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
@@ -126,56 +98,18 @@ source of truth for both writers and the scanner), and the worker threads the
 configured `tool_output.storage_subdir` through the snapshot capture as an
 extra excluded dir name so custom storage locations stay excluded too.
 
-**Run delivery receipts**: `RunJournal` records each non-empty artifact update
-once per tool `Command` for the terminal `run.delivery` event. When a command
-contains multiple messages, a unique tool name resolved from matching
-`ToolMessage` entries supplies attribution; additional command messages do not
-duplicate artifact paths or counts. If multiple different tool names resolve
-for one flat artifact update, the paths remain counted but unattributed because
-the command does not carry a per-path mapping. `RunJournal` callbacks set
-`run_inline=True`: they do only in-memory bookkeeping or schedule async writes,
-and staying on the run's event-loop thread serializes parallel tool callbacks
-before terminal delivery recording and flushing. Each worker creates a separate
-journal per run before cancellable/fallible preflight work, so checkpoint
-compatibility failures and cancellation while waiting for prior finalization
-still emit a zero-delivery receipt. The worker flushes ordinary journal events,
-idempotently persists the run-scoped receipt, and only then persists the staged
-terminal run status. A receipt failure is retried on a short bounded schedule
-while the owning worker still knows the real outcome and holds the lease. The
-worker derives delivery requirements from the run's workspace snapshots rather
-than a client request option: every regular file created or modified under
-`/mnt/user-data/outputs` is a candidate produced artifact. Internal
-process-feedback files are not candidates: the snapshot capture excludes the
-scanner's `EXCLUDED_DIR_NAMES` (including the default tool-output
-externalization subdir) plus the configured `tool_output.storage_subdir`, so a
-run that only externalized oversized tool outputs does not fail delivery. At
-least one candidate must be covered by a path attributed by the journal to
-`present_files`; presenting only an unrelated pre-existing path does not
-satisfy delivery.
-Receipts for such runs add `produced_paths`, `presented_paths`, `matched_paths`,
-`verification`, `stage`, and `satisfied` to the Slice 1 fact fields. Missing a
-matching presentation becomes a run error; a successful presentation is also
-downgraded to error if its receipt cannot be durably verified. Runs without
-changed outputs preserve ordinary chat behavior and the original receipt shape.
-Orphan recovery first
-atomically claims an expired lease, then uses the same singleton write to
-backfill a zero-delivery receipt. This ordering prevents a stale recovery scan
-from overwriting a live run's later detailed receipt; an event-store outage
-does not undo the terminal takeover. An existing detailed receipt is preserved
-when a worker crashed after writing it. Event stores
-serialize `put_if_absent` with ordinary thread writers: memory and JSONL provide
-the documented single-process guarantee, while the DB store adds per-thread
-in-process locks and PostgreSQL advisory locks for cross-process writers.
-Moving journal construction ahead of preflight is receipt-only on early failure
-paths: a separate boundary flag preserves the previous completion-data
-semantics, so checkpoint incompatibility or cancellation while waiting for an
-older finalizing run does not persist an empty completion snapshot. Worker tests
-pin one accumulated receipt across multiple goal-continuation `_stream_once`
-calls; journal tests drive LangChain's real async callback dispatcher against a
-single journal to pin serialized, deduplicated parallel tool callbacks.
-Multi-worker deployments therefore require `run_events.backend: db` for shared,
-ordered delivery events; the startup gate rejects process-local memory and
-JSONL event stores when `GATEWAY_WORKERS > 1`.
+**Run delivery receipts**: the worker derives delivery requirements from the
+run's workspace snapshots rather than a client request option (files
+created/modified under `/mnt/user-data/outputs`, minus internal
+process-feedback exclusions) and idempotently persists a run-scoped
+`run.delivery` receipt before the terminal run status; missing or
+unverifiable `present_files` coverage downgrades the run to error, while runs
+without changed outputs keep ordinary chat behavior. Journal mechanics
+(callback attribution, receipt idempotency and retries, orphan recovery):
+`packages/harness/deerflow/runtime/AGENTS.md`. Multi-worker deployments
+require `run_events.backend: db` for shared, ordered delivery events; the
+startup gate rejects process-local memory and JSONL event stores when
+`GATEWAY_WORKERS > 1`.
 
 **RunManager / RunStore contract**:
 - LangGraph-compatible run requests validate their supported subset before creating a run. `runtime/stream_modes.py` is the shared backend contract for public stream modes and the worker's `graph.astream` mapping; the public `messages-tuple` mode maps to LangGraph's internal `messages` mode, while public `messages`, `events`, and other unsupported modes are rejected instead of being dropped or replaced with `values`. `app/gateway/run_models.py::RunCreateRequest` is shared by HTTP and internal scheduled launch paths, retains only truthful compatibility defaults for unimplemented options (`if_not_exists="create"` plus `None` placeholders), returns 422 for unsupported values including `on_completion="complete"`, `on_completion="continue"`, and `multitask_strategy="enqueue"`, and forbids undeclared SDK options so fields such as `checkpoint_during` and `durability` cannot be silently discarded. A placeholder must still accept the stock SDK's own default: `langgraph_sdk` drops only `None` from its run payload, so `stream_resumable=False` reaches every request and means "non-resumable", which is what DeerFlow serves — rejecting it 422'd every IM channel run (#4466). `tests/test_run_request_validation.py::test_gateway_accepts_langgraph_sdk_default_payload` pins the real SDK payload against this boundary; channel tests mock the SDK client and cannot catch this class of drift.
