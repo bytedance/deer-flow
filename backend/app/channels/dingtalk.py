@@ -659,7 +659,7 @@ class DingTalkChannel(Channel):
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
             with self._file_write_lock:
-                seen = {entry.name for entry in uploads_dir.iterdir() if entry.is_file()}
+                seen = {entry.name for entry in uploads_dir.iterdir()}
                 unique_name = claim_unique_filename(safe_filename, seen)
                 # write_upload_file_no_symlink refuses a symlinked destination:
                 # uploads dirs can be mounted into local sandboxes, so a sandbox
