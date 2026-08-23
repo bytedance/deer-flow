@@ -29,8 +29,7 @@ const webServers = skipWebServer
       // the landing at `/`. `next dev` (not `next build`) reads the flag at
       // runtime, and a separate distDir avoids clobbering the full build's `.next`.
       {
-        command:
-          "./node_modules/.bin/next dev -p 3100 -c next.config.static-e2e.mjs",
+        command: "./node_modules/.bin/next dev -p 3100",
         url: staticBaseURL,
         reuseExistingServer: !process.env.CI,
         timeout: 120_000,
@@ -38,6 +37,7 @@ const webServers = skipWebServer
           SKIP_ENV_VALIDATION: "1",
           DEER_FLOW_AUTH_DISABLED: "1",
           NEXT_PUBLIC_STATIC_WEBSITE_ONLY: "true",
+          PLAYWRIGHT_STATIC_WEBSITE: "1",
         },
       },
     ];
