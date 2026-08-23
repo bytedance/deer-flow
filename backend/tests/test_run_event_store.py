@@ -992,6 +992,83 @@ class TestGetMessageSeqs:
         finally:
             await close_engine()
 
+    @pytest.mark.anyio
+    async def test_db_store_only_decodes_rows_that_can_match(self, tmp_path, monkeypatch):
+        """Rows that cannot hold a wanted identity must not be fetched and
+        JSON-decoded in Python.
+
+        The ``content`` column carries full tool outputs, so on the long
+        threads this lookup exists for (a `/state` or `/history` read of a
+        compacted thread), decoding every message row is heavy I/O plus N
+        JSON parses — and a wanted identity absent from the feed (a message
+        still streaming) would defeat any early-exit and force exactly that
+        full scan. The candidate rows are prefiltered in SQL instead."""
+        import json as real_json
+        from types import SimpleNamespace
+
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store import db as db_module
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'seqs.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            s = DbRunEventStore(get_session_factory())
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.human.input",
+                category="message",
+                content={"type": "human", "id": "u1__user", "content": "hello"},
+            )
+            for i in range(3):
+                await s.put(
+                    thread_id="t1",
+                    run_id="r1",
+                    event_type="llm.ai.output",
+                    category="message",
+                    content={"type": "ai", "id": f"unrelated-{i}", "content": "big tool output " * 100},
+                )
+
+            decoded: list[str] = []
+
+            def counting_loads(raw, *args, **kwargs):
+                decoded.append(raw)
+                return real_json.loads(raw, *args, **kwargs)
+
+            monkeypatch.setattr(db_module, "json", SimpleNamespace(loads=counting_loads, dumps=real_json.dumps, JSONDecodeError=real_json.JSONDecodeError))
+
+            # "message:in-flight" is not in the feed: without the SQL
+            # prefilter it would defeat the early exit and decode all rows.
+            assert await s.get_message_seqs("t1", ["message:u1", "message:in-flight"]) == {"message:u1": 1}
+            assert len(decoded) == 1
+        finally:
+            await close_engine()
+
+    @pytest.mark.anyio
+    async def test_db_store_resolves_an_id_the_sql_prefilter_cannot_express(self, tmp_path):
+        """An id carrying LIKE wildcards or JSON-escaped characters cannot be
+        matched as a raw substring of the stored JSON — the lookup must fall
+        back to the full scan for the whole wanted set, not silently miss."""
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'seqs.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            s = DbRunEventStore(get_session_factory())
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.human.input",
+                category="message",
+                content={"type": "human", "id": 'odd%wild"card', "content": "hello"},
+            )
+
+            assert await s.get_message_seqs("t1", ['message:odd%wild"card']) == {'message:odd%wild"card': 1}
+        finally:
+            await close_engine()
+
 
 class TestAttachMessageSeq:
     """The one stamping expression shared by the worker's `_MessageSeqStamper`

@@ -9,10 +9,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.models.run_event import RunEventRow
@@ -104,6 +105,30 @@ class DbRunEventStore(RunEventStore):
         """
         user = get_current_user()
         return str(user.id) if user is not None else None
+
+    #: Characters json.dumps escapes in the stored content (``ensure_ascii``
+    #: is False, so non-ASCII survives verbatim and stays matchable).
+    _LIKE_UNSAFE_ID = re.compile(r'["\\\x00-\x1f]')
+
+    @classmethod
+    def _prefilter_substrings(cls, wanted: set[str]) -> list[str] | None:
+        """Return the raw ids to LIKE-match in ``content``, or ``None`` to full-scan.
+
+        An identity is ``kind:raw_id`` and the raw id appears verbatim in the
+        stored JSON string (``u1`` is a substring of a re-keyed ``u1__user``
+        copy too), so a row not containing any wanted id cannot resolve any
+        wanted identity. An id json.dumps would escape breaks that verbatim
+        guarantee — one such id falls the whole set back to the full scan
+        rather than silently missing it. LIKE wildcards are escaped, not
+        rejected.
+        """
+        ids = []
+        for identity in wanted:
+            _kind, _sep, raw_id = identity.partition(":")
+            if not raw_id or cls._LIKE_UNSAFE_ID.search(raw_id):
+                return None
+            ids.append(raw_id)
+        return ids
 
     @staticmethod
     async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
@@ -402,12 +427,21 @@ class DbRunEventStore(RunEventStore):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.get_message_seqs")
         # ``content`` is a TEXT column holding a JSON *string* (see
         # ``_content_to_db``), not a JSON column, so the identity fields cannot
-        # be projected in SQL — the rows are decoded here instead. Only the two
-        # columns the lookup needs are selected, and the scan is bounded to this
-        # thread's message rows.
+        # be projected in SQL — matching rows are decoded here instead. The
+        # ``content`` column carries full tool outputs, and a wanted identity
+        # absent from the feed (a message still streaming) defeats the early
+        # exit below — so without a prefilter a `/state`/`/history` read of a
+        # long thread pays a full fetch-and-decode of every message row. The
+        # LIKE prefilter keeps that cost in SQL: only rows containing a wanted
+        # id as a raw substring are fetched (false positives are re-checked by
+        # ``message_identity``; ids the prefilter cannot express fall back to
+        # the full scan).
         stmt = select(RunEventRow.seq, RunEventRow.content).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message").order_by(RunEventRow.seq)
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
+        prefilter_ids = self._prefilter_substrings(wanted)
+        if prefilter_ids is not None:
+            stmt = stmt.where(or_(*[RunEventRow.content.like(f"%{i.replace('%', '\\%').replace('_', '\\_')}%", escape="\\") for i in prefilter_ids]))
 
         found: dict[str, int] = {}
         async with self._sf() as session:
