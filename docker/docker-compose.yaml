@@ -58,8 +58,10 @@ services:
       sh -c "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf
       && nginx -g 'daemon off;'"
     depends_on:
-      - frontend
-      - gateway
+      frontend:
+        condition: service_started
+      gateway:
+        condition: service_healthy
     networks:
       - deer-flow
     restart: unless-stopped
@@ -105,7 +107,10 @@ services:
     command: sh -c "cd backend && PYTHONPATH=. uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
       - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
-      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json:ro
+      # Writable on purpose: the Gateway edits this file at runtime (MCP
+      # enable/disable, PUT/PATCH /api/mcp/config, skill updates). config.yaml
+      # above stays read-only because no API writes it.
+      - ${DEER_FLOW_EXTENSIONS_CONFIG_PATH}:/app/backend/extensions_config.json
       - ../skills:/app/skills:ro
       - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
       # DooD: the host Docker socket is NOT mounted by default. It is added only
@@ -144,6 +149,12 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; response = urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=3); raise SystemExit(0 if response.status == 200 else 1)"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     networks:
       - deer-flow
     restart: unless-stopped

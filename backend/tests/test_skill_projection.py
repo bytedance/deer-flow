@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import errno
 import shutil
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -100,19 +99,36 @@ def test_nested_skill_frontmatter_is_supporting_data_inside_parent_package(proje
     assert (nested_view / "SKILL.md").is_file()
 
 
-def test_projection_falls_back_to_copy_when_hardlink_is_unavailable(projection_env, monkeypatch) -> None:
+def test_projection_copies_instead_of_hardlinking_source_files(projection_env) -> None:
     env = projection_env
     source = _write_skill(env.skills_root / "public", "demo-skill")
-
-    def _cross_device_link(*_args, **_kwargs):
-        raise OSError(errno.EXDEV, "cross-device link")
-
-    monkeypatch.setattr("deerflow.skills.projection.os.link", _cross_device_link)
     projected = rebuild_skill_projections(env.storage)
     target = projected.public / "demo-skill" / "SKILL.md"
 
     assert target.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
     assert target.stat().st_ino != source.stat().st_ino
+
+    target.write_text("MUTATED\n", encoding="utf-8")
+    assert source.read_text(encoding="utf-8") != "MUTATED\n"
+
+
+def test_view_tampering_triggers_automatic_repair_on_ensure(projection_env) -> None:
+    env = projection_env
+    source = _write_skill(env.skills_root / "public", "demo-skill")
+    projected = rebuild_skill_projections(env.storage)
+    target = projected.public / "demo-skill" / "SKILL.md"
+
+    target.write_text("MUTATED\n", encoding="utf-8")
+    ensure_skill_projections(env.storage)
+    assert target.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
+
+    env.storage.write_custom_skill("demo-user", "SKILL.md", _skill_content("demo-user", "original"))
+    projected = rebuild_skill_projections(env.storage)
+    user_target = projected.custom / "demo-user" / "SKILL.md"
+
+    user_target.write_text("MUTATED_USER\n", encoding="utf-8")
+    ensure_skill_projections(env.storage)
+    assert user_target.read_text(encoding="utf-8") == _skill_content("demo-user", "original")
 
 
 def test_atomic_custom_skill_rewrite_refreshes_projection(projection_env) -> None:
@@ -276,6 +292,30 @@ def test_targeted_removal_failure_clears_drifted_projection_scope(projection_env
     namespace.write_text("drifted file", encoding="utf-8")
 
     with pytest.raises(NotADirectoryError):
+        with skill_projection_mutation(env.storage, "public", remove_names=("helper",)):
+            env.extensions.skills["helper"] = SkillStateConfig(enabled=False)
+
+    assert list(projected.public.iterdir()) == []
+    assert not manifest.exists()
+
+
+def test_targeted_removal_drift_check_raises_when_underlying_unlink_swallows_error(projection_env, monkeypatch) -> None:
+    """Explicit drift check raises NotADirectoryError even if underlying unlink would swallow ENOENT (Windows semantics)."""
+    env = projection_env
+    _write_skill(env.skills_root / "public" / "team", "helper")
+    projected = rebuild_skill_projections(env.storage)
+    manifest = projected.public.parent / ".projection-manifest.json"
+    namespace = projected.public / "team"
+    shutil.rmtree(namespace)
+    namespace.write_text("drifted file", encoding="utf-8")
+
+    from deerflow.skills import projection as projection_module
+
+    # Simulate Windows Path.unlink(missing_ok=True) semantics where file-in-path
+    # returns ENOENT and is swallowed, so underlying removal would not raise ENOTDIR.
+    monkeypatch.setattr(projection_module, "_remove_projection_entry", lambda _target: None)
+
+    with pytest.raises(NotADirectoryError, match="Projection namespace drifted to a file"):
         with skill_projection_mutation(env.storage, "public", remove_names=("helper",)):
             env.extensions.skills["helper"] = SkillStateConfig(enabled=False)
 
@@ -527,10 +567,10 @@ def test_boot_factory_failure_cleanup_waits_for_concurrent_public_rebuild(projec
     cleanup_finished = Event()
     real_write_manifest = projection_module._write_manifest
 
-    def _delayed_write_manifest(scope_root, signature):
+    def _delayed_write_manifest(*args, **kwargs):
         before_manifest.set()
         assert release_rebuild.wait(timeout=5)
-        real_write_manifest(scope_root, signature)
+        real_write_manifest(*args, **kwargs)
 
     monkeypatch.setattr(projection_module, "_write_manifest", _delayed_write_manifest)
     monkeypatch.setattr(

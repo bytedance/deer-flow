@@ -84,10 +84,16 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, exe
         logger.error(f"[trace={trace_id}] Deferred cleanup failed for execution {execution_id}: {exc}")
 
 
-def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> None:
+_deferred_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> asyncio.Task[None]:
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled execution {execution_id}")
     cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(execution_id, trace_id, max_polls))
+    _deferred_cleanup_tasks.add(cleanup_task)
+    cleanup_task.add_done_callback(_deferred_cleanup_tasks.discard)
     cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, execution_id=execution_id))
+    return cleanup_task
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:

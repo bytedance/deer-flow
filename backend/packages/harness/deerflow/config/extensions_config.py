@@ -1,20 +1,30 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import errno
 import json
 import logging
 import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import (
+    DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+    MCP_TASK_NAME_MAX_LENGTH,
+    MCP_TASK_SERVER_NAME_MAX_LENGTH,
+)
 
 logger = logging.getLogger(__name__)
+
+_non_atomic_fallback_targets: set[Path] = set()
+_non_atomic_fallback_targets_lock = threading.Lock()
 
 
 def normalize_mcp_transport_alias(data: Any) -> Any:
@@ -62,6 +72,66 @@ class McpToolOverride(BaseModel):
     model_config = ConfigDict(extra="allow")
 
 
+class McpTaskToolsetConfig(BaseModel):
+    """One ordinary submit/status/cancel contract exposed by an MCP server.
+
+    Tool names are the exact raw names advertised by that server. The
+    presentation prefix added by ``langchain-mcp-adapters`` is deliberately not
+    part of this durable binding.
+    """
+
+    name: str = Field(
+        min_length=1,
+        max_length=MCP_TASK_NAME_MAX_LENGTH,
+        description="Stable local name shown for tasks from this toolset",
+    )
+    submit_tool: str = Field(min_length=1, description="Raw MCP tool name used to submit work")
+    status_tool: str = Field(min_length=1, description="Raw MCP tool name used to poll work")
+    cancel_tool: str = Field(min_length=1, description="Raw MCP tool name used to cancel work")
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name")
+    @classmethod
+    def _validate_name_is_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("MCP task toolset name must not be empty")
+        return value
+
+
+class McpUserScopedAuthConfig(BaseModel):
+    """Per-user credential injection for a shared MCP server (HTTP/SSE transports).
+
+    Maps DeerFlow user ids to credential header values so that one configured
+    MCP server can serve several users, each authenticated to the remote
+    service with their own credential. The credential for the authenticated
+    user is injected into every tool call by the built-in user-scoped auth
+    interceptor; the server entry's static ``headers`` are only used for
+    startup tool discovery.
+
+    Values support the same ``$ENV_VAR`` resolution as the rest of this file,
+    so raw secrets can stay in the process environment.
+    """
+
+    enabled: bool = Field(default=True, description="Whether user-scoped credential injection is enabled")
+    header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
+    users: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of DeerFlow user id to full credential header value (e.g. 'Bearer <token>'); values support $ENV_VAR references",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when the calling user has no mapped credential (or the mapped value resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("header")
+    @classmethod
+    def _validate_header_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("user_auth.header must not be empty")
+        return value
+
+
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
 
@@ -96,6 +166,10 @@ class McpServerConfig(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
+    user_auth: McpUserScopedAuthConfig | None = Field(
+        default=None,
+        description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
@@ -105,15 +179,20 @@ class McpServerConfig(BaseModel):
     )
     tool_call_timeout: float | None = Field(
         default=None,
-        description="Timeout in seconds for individual stdio MCP tool calls. HTTP/SSE servers use transport-level timeouts. None means no timeout.",
+        description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
-            "and persistent stdio session initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung "
-            "server cannot block agent construction indefinitely. None means no timeout."
+            "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
+            "initialization. Defaults to DEFAULT_MCP_SESSION_INIT_TIMEOUT so a hung server cannot block agent "
+            "construction or the task poller indefinitely. None means no timeout."
         ),
+    )
+    task_toolsets: list[McpTaskToolsetConfig] = Field(
+        default_factory=list,
+        description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
     )
     model_config = ConfigDict(extra="allow")
 
@@ -130,6 +209,18 @@ class McpServerConfig(BaseModel):
         spelling works, with ``type`` taking precedence when both are provided.
         """
         return normalize_mcp_transport_alias(data)
+
+    @model_validator(mode="after")
+    def _validate_task_tool_bindings(self) -> "McpServerConfig":
+        claimed: dict[str, str] = {}
+        for toolset in self.task_toolsets:
+            for role in ("submit_tool", "status_tool", "cancel_tool"):
+                raw_name = getattr(toolset, role)
+                previous = claimed.get(raw_name)
+                if previous is not None:
+                    raise ValueError(f"MCP task tool {raw_name!r} must be unique across task_toolsets and roles; it is configured as both {previous} and {toolset.name}.{role}")
+                claimed[raw_name] = f"{toolset.name}.{role}"
+        return self
 
 
 def resolve_effective_mcp_routing(server_config: McpServerConfig | None, original_tool_name: str) -> dict[str, Any]:
@@ -167,6 +258,15 @@ class ExtensionsConfig(BaseModel):
         description="Map of skill name to state configuration",
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
+        for server_name, server in self.mcp_servers.items():
+            if not server.task_toolsets:
+                continue
+            if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
+                raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
+        return self
 
     def to_file_dict(self) -> dict[str, Any]:
         """Serialize in the public extensions_config.json shape."""
@@ -364,8 +464,47 @@ def _fsync_directory_best_effort(directory: Path) -> None:
             logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
 
 
+def _overwrite_in_place(target_path: Path, source_path: Path) -> None:
+    """Copy *source_path* onto *target_path* without unlinking the destination inode.
+
+    Fallback for destinations that cannot be replaced by rename — see
+    :func:`atomic_write_extensions_config`. This deliberately truncates the
+    live file, so a crash mid-write leaves it short; the caller only reaches
+    this path when the atomic route is impossible.
+    """
+    payload = source_path.read_bytes()
+    with open(target_path, "wb") as target_file:
+        target_file.write(payload)
+        target_file.flush()
+        os.fsync(target_file.fileno())
+
+
+def _log_non_atomic_fallback(target_path: Path) -> None:
+    """Warn once per target when a bind mount forces the unsafe write path."""
+    warning_key = target_path.resolve(strict=False)
+    with _non_atomic_fallback_targets_lock:
+        first_fallback = warning_key not in _non_atomic_fallback_targets
+        _non_atomic_fallback_targets.add(warning_key)
+
+    logger.log(
+        logging.WARNING if first_fallback else logging.DEBUG,
+        "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
+        target_path,
+    )
+
+
 def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
-    """Write extensions config without exposing a truncated or partial file."""
+    """Write extensions config without exposing a truncated or partial file.
+
+    Falls back to a non-atomic in-place overwrite when the destination is a
+    bind-mounted file: Docker mounts ``extensions_config.json`` as its own
+    mount point, and the kernel refuses to rename over a mount point with
+    ``EBUSY`` regardless of whether the mount is read-only. Without the
+    fallback every Gateway write to this file fails in the production
+    compose stack (MCP enable/disable, ``PUT``/``PATCH /api/mcp/config``,
+    skill updates), contradicting the documented promise that the file is
+    editable at runtime through the API.
+    """
     path = Path(path)
     target_path = path.resolve(strict=False) if path.is_symlink() else path
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -393,7 +532,13 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
 
-        os.replace(temporary_path, target_path)
+        try:
+            os.replace(temporary_path, target_path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                raise
+            _log_non_atomic_fallback(target_path)
+            _overwrite_in_place(target_path, temporary_path)
         _fsync_directory_best_effort(target_path.parent)
     finally:
         if temporary_path is not None:
@@ -439,6 +584,47 @@ def get_extensions_config() -> ExtensionsConfig:
 #: has no event-loop affinity, so writers running on different loops still
 #: exclude each other.
 extensions_config_write_lock = threading.Lock()
+
+
+@contextmanager
+def extensions_config_file_lock(path: Path) -> Iterator[None]:
+    """Exclude read-modify-write cycles in other Gateway processes.
+
+    ``extensions_config_write_lock`` serializes threads in this process. This
+    sidecar advisory lock extends the same critical section across worker
+    processes and separate embedded clients that share the config directory.
+    Callers must hold both locks around the complete read, merge, write, and
+    reload cycle; locking only the final atomic replace still permits lost
+    updates.
+    """
+    target_path = Path(path)
+    target_path = target_path.resolve(strict=False) if target_path.is_symlink() else target_path.absolute()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_path.parent / f".{target_path.name}.lock"
+
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:

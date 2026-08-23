@@ -46,12 +46,14 @@ import {
   type TokenUsageInlineMode,
 } from "@/core/messages/usage-model";
 import {
+  areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
   extractTextFromMessage,
   getAssistantTurnCopyData,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
+  getStreamMetadataSnapshot,
   getStreamingMessageLookup,
   hasContent,
   hasPresentFiles,
@@ -59,6 +61,7 @@ import {
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
   type MessageGroup as ThreadMessageGroup,
+  type StreamMetadataSnapshot,
 } from "@/core/messages/utils";
 import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
 import {
@@ -98,6 +101,11 @@ import { VirtualMessageList } from "./virtual-message-list";
 
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
+
+type SettledStreamMetadataState = {
+  threadId: string;
+  snapshot: StreamMetadataSnapshot;
+};
 
 function sameStrings(previous: readonly string[], next: readonly string[]) {
   return (
@@ -506,14 +514,44 @@ export function MessageList({
     },
     [showTokenDebugSummaries, tokenDebugStepsByMessageId],
   );
+  const [settledStreamMetadataState, setSettledStreamMetadataState] =
+    useState<SettledStreamMetadataState>();
+  useEffect(() => {
+    if (thread.isLoading) {
+      return;
+    }
+    const snapshot = getStreamMetadataSnapshot(
+      messages,
+      thread.getMessagesMetadata,
+    );
+    setSettledStreamMetadataState((previous) => {
+      if (
+        previous?.threadId === threadId &&
+        areStreamMetadataSnapshotsEqual(previous.snapshot, snapshot)
+      ) {
+        return previous;
+      }
+      return { threadId, snapshot };
+    });
+  }, [messages, thread.getMessagesMetadata, thread.isLoading, threadId]);
+  const settledStreamMetadata =
+    settledStreamMetadataState?.threadId === threadId
+      ? settledStreamMetadataState.snapshot
+      : undefined;
   const streamingMessages = useMemo(
     () =>
       getStreamingMessageLookup(
         messages,
         thread.isLoading,
         thread.getMessagesMetadata,
+        settledStreamMetadata,
       ),
-    [messages, thread.getMessagesMetadata, thread.isLoading],
+    [
+      messages,
+      settledStreamMetadata,
+      thread.getMessagesMetadata,
+      thread.isLoading,
+    ],
   );
 
   const humanInputState = useMemo(

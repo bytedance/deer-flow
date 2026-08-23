@@ -14,7 +14,7 @@ from app.channels import buzz_nostr
 from app.channels.base import Channel
 from app.channels.buzz import EDIT_MAX_BYTES, MAX_CACHED_CHANNELS, MAX_CHANNEL_SUBSCRIPTIONS, MAX_RESUBSCRIBE_ATTEMPTS, MEMBERSHIP_LOOKBACK_SECONDS, BuzzChannel, _chunk_text
 from app.channels.manager import CHANNEL_CAPABILITIES
-from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMessage
+from app.channels.message_bus import InboundMessage, InboundMessageType, InboundQueueFullError, MessageBus, OutboundMessage
 from app.channels.run_policy import CHANNEL_RUN_POLICY
 from app.channels.service import _CHANNEL_CREDENTIAL_KEYS, _CHANNEL_REGISTRY
 
@@ -215,6 +215,23 @@ def test_mentioned_allowed_author_is_published():
     assert msg.text == "hello"  # own leading @mention stripped
     assert msg.metadata["event_id"] == ev["id"] and msg.workspace_id == "buzz.example.com"
     assert msg.msg_type == InboundMessageType.CHAT
+
+
+def test_full_intake_escapes_relay_frame_handler_without_advancing_watermark():
+    async def run():
+        ch = _channel()
+        ch.bus = MessageBus(inbound_queue_maxsize=1)
+        ch._publish = ch.bus.publish_inbound
+        ch._keys = buzz_nostr.parse_private_key(SK3_HEX)
+        await ch.bus.publish_inbound(InboundMessage(channel_name="test", chat_id="busy", user_id="busy", text="busy"))
+        ev = _event(created_at=1700000101)
+
+        with pytest.raises(InboundQueueFullError):
+            await ch.handle_relay_frame(json.dumps(["EVENT", "sub1", ev]))
+
+        assert CHANNEL not in ch._seen_created_at
+
+    asyncio.run(run())
 
 
 def test_disallowed_author_is_dropped():

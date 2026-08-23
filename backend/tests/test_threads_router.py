@@ -19,6 +19,7 @@ from app.gateway.routers import thread_runs, threads
 from deerflow.config.paths import Paths
 from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
+from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 
 _ISO_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
@@ -54,11 +55,15 @@ class _PermissiveThreadMetaStore(MemoryThreadMetaStore):
 
 
 class _ThreadTestRunManager:
+    def __init__(self):
+        self.reservations: list[tuple[str, dict]] = []
+
     async def list_by_thread(self, _thread_id: str, *, user_id=None, limit: int = 100) -> list:
         return []
 
     @asynccontextmanager
     async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+        self.reservations.append((_thread_id, _kwargs))
         yield
 
 
@@ -363,6 +368,7 @@ def test_delete_thread_route_cleans_thread_directory(tmp_path):
     (paths.sandbox_work_dir("thread-route", user_id=user_id) / "notes.txt").write_text("hello", encoding="utf-8")
 
     app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
     with patch("app.gateway.routers.threads.get_paths", return_value=paths):
@@ -380,6 +386,7 @@ def test_delete_thread_route_closes_browser_session(tmp_path):
     paths = Paths(tmp_path)
 
     app = make_authed_test_app()
+    app.state.run_manager = _ThreadTestRunManager()
     app.include_router(threads.router)
 
     manager = SimpleNamespace(close_session=AsyncMock(return_value=True))
@@ -440,6 +447,70 @@ def test_delete_thread_route_cleans_legacy_metadata_without_resolving_unsafe_pat
     assert response.status_code == 200
     assert "Skipped local data cleanup" in response.json()["message"]
     assert asyncio.run(store.aget(THREADS_NS, legacy_thread_id)) is None
+
+
+def test_delete_thread_route_reserves_exclusive_thread_operation():
+    app, store, _checkpointer = _build_thread_app()
+    asyncio.run(
+        store.aput(
+            THREADS_NS,
+            "thread-delete-reservation",
+            {
+                "thread_id": "thread-delete-reservation",
+                "status": "idle",
+                "created_at": "",
+                "updated_at": "",
+                "metadata": {},
+            },
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.delete("/api/threads/thread-delete-reservation")
+
+    assert response.status_code == 200
+    assert len(app.state.run_manager.reservations) == 1
+    reserved_user_id = app.state.run_manager.reservations[0][1]["user_id"]
+    assert app.state.run_manager.reservations == [
+        (
+            "thread-delete-reservation",
+            {
+                "kind": ThreadOperationKind.delete,
+                "user_id": reserved_user_id,
+            },
+        )
+    ]
+    assert reserved_user_id is not None
+
+
+def test_delete_thread_route_rejects_active_thread_operation_without_deleting_metadata():
+    class RejectingRunManager(_ThreadTestRunManager):
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+            raise ConflictError("Thread already has active work")
+            yield  # pragma: no cover - required by asynccontextmanager
+
+    app, store, _checkpointer = _build_thread_app()
+    app.state.run_manager = RejectingRunManager()
+    asyncio.run(
+        store.aput(
+            THREADS_NS,
+            "thread-active-delete",
+            {
+                "thread_id": "thread-active-delete",
+                "status": "idle",
+                "created_at": "",
+                "updated_at": "",
+                "metadata": {},
+            },
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.delete("/api/threads/thread-active-delete")
+
+    assert response.status_code == 409
+    assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
 
 
 def test_legacy_thread_metadata_mutation_is_rejected():

@@ -27,7 +27,9 @@ image:
 gateway:
   replicas: 1               # Safe default. Postgres + the Redis stream bridge are
                             # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+                            # work (cancel/dedup/reconcile). Scheduler multi_instance
+                             # recovery is safe only when its config prerequisites are met;
+                             # max_concurrent_runs is shared across Pods in that mode.
   # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
   # shutdown work: channel stop (~5s) + memory queue drain
   # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
@@ -198,8 +200,9 @@ redis:
     existingSecret: ""
 
 # -- Persistent volume for runtime state (.deer-flow): sqlite DB, memory,
-#    custom agents, and per-thread user-data. Also mounted (PVC mode) into
-#    provisioner-spawned sandbox Pods.
+#    custom agents, mutable extensions_config.json, and per-thread user-data.
+#    Also mounted (PVC mode) into provisioner-spawned sandbox Pods. When
+#    disabled, Gateway runtime state uses a pod-local emptyDir instead.
 persistence:
   home:
     enabled: true
@@ -240,7 +243,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 33
+  config_version: 34
   log_level: info
 
   models: []
@@ -336,6 +339,10 @@ config: |
       group: bash
       use: deerflow.sandbox.tools:bash_tool
 
-# -- DeerFlow extensions_config.json content (MCP servers + skill state).
+# -- Initial DeerFlow extensions_config.json content (MCP servers + skill
+#    state). The Gateway copies this ConfigMap seed into its writable home
+#    volume only when no runtime file exists. With persistence enabled, API
+#    updates and the original seed survive pod replacement and Helm upgrades;
+#    remove the runtime file explicitly if a later seed should replace it.
 extensionsConfig: |
   {"mcpServers":{},"skills":{}}

@@ -1399,6 +1399,19 @@ async def test_aget_store_failure_is_graceful():
 
 
 @pytest.mark.anyio
+async def test_get_can_surface_store_failure_for_lifecycle_callers():
+    """Lifecycle code must distinguish a missing run from an unavailable store."""
+    from unittest.mock import AsyncMock
+
+    store = MemoryRunStore()
+    store.get = AsyncMock(side_effect=RuntimeError("db down"))
+    mgr = RunManager(store=store)
+
+    with pytest.raises(RuntimeError, match="db down"):
+        await mgr.get("some-id", raise_on_store_error=True)
+
+
+@pytest.mark.anyio
 async def test_list_by_thread_store_failure_is_graceful():
     """If the store raises, list_by_thread should return only in-memory runs."""
     from unittest.mock import AsyncMock
