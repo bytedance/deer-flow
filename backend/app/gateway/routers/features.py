@@ -7,6 +7,8 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
+from urllib.parse import urlsplit, urlunsplit
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
@@ -54,6 +56,16 @@ class ConversationReferencesFeature(BaseModel):
     max_references: int = Field(..., description="Maximum conversation references accepted on one run request")
 
 
+class KnowledgeBaseFeature(BaseModel):
+    """Availability of tenant-shared RAGFlow knowledge management."""
+
+    enabled: bool = Field(..., description="Whether the RAGFlow knowledge routes and UI are available")
+    management_url: str | None = Field(
+        default=None,
+        description="Credential-free RAGFlow origin for unsupported management operations",
+    )
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -62,6 +74,7 @@ class FeaturesResponse(BaseModel):
     mcp_tasks: McpTasksFeature
     subagent_batches: SubagentBatchesFeature
     conversation_references: ConversationReferencesFeature
+    knowledge_base: KnowledgeBaseFeature
 
 
 @router.get(
@@ -97,4 +110,19 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             enabled=conversation_references_enabled(config),
             max_references=MAX_CONVERSATION_REFERENCES,
         ),
+        knowledge_base=KnowledgeBaseFeature(
+            enabled=config.knowledge_base.enabled,
+            management_url=_knowledge_management_url(config),
+        ),
     )
+
+
+def _knowledge_management_url(config: AppConfig) -> str | None:
+    """Expose only a credential-free RAGFlow URL, never connection secrets."""
+    if not config.knowledge_base.enabled:
+        return None
+    raw_url = str(config.knowledge_base.base_url).rstrip("/")
+    parsed = urlsplit(raw_url)
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", "")).rstrip("/")

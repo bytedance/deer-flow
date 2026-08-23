@@ -17,6 +17,8 @@ def _app_with_config(
     subagent_batches_available: bool = False,
     subagent_batch_repo_available: bool | None = None,
     conversation_references_enabled: bool = False,
+    knowledge_base_enabled: bool = False,
+    knowledge_base_url: str = "http://ragflow.example",
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -34,6 +36,10 @@ def _app_with_config(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
+        knowledge_base=SimpleNamespace(
+            enabled=knowledge_base_enabled,
+            base_url=knowledge_base_url,
+        ),
     )
     app.dependency_overrides[get_config] = lambda: fake_config
     return app
@@ -54,6 +60,7 @@ def test_features_reports_agents_api_enabled() -> None:
             "max_running": 3,
         },
         "conversation_references": {"enabled": False, "max_references": 3},
+        "knowledge_base": {"enabled": False, "management_url": None},
     }
 
 
@@ -72,6 +79,7 @@ def test_features_reports_agents_api_disabled() -> None:
             "max_running": 3,
         },
         "conversation_references": {"enabled": False, "max_references": 3},
+        "knowledge_base": {"enabled": False, "management_url": None},
     }
 
 
@@ -80,6 +88,47 @@ def test_features_reports_conversation_references_when_the_tool_is_configured() 
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["conversation_references"] == {"enabled": True, "max_references": 3}
+
+
+def test_features_reports_knowledge_base_enabled() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, knowledge_base_enabled=True)) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"] == {
+        "enabled": True,
+        "management_url": "http://ragflow.example",
+    }
+
+
+def test_features_does_not_expose_credentials_embedded_in_ragflow_url() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=True,
+            knowledge_base_url="http://user:password@ragflow.example",
+        )
+    ) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"] == {"enabled": True, "management_url": None}
+    assert "password" not in response.text
+
+
+def test_features_strips_ragflow_url_query_and_fragment() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            knowledge_base_enabled=True,
+            knowledge_base_url="http://ragflow.example/prefix?api_key=secret#fragment",
+        )
+    ) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["knowledge_base"] == {
+        "enabled": True,
+        "management_url": "http://ragflow.example/prefix",
+    }
+    assert "secret" not in response.text
 
 
 def test_features_reports_mcp_tasks_startup_capability() -> None:

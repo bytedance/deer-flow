@@ -15,6 +15,10 @@ export interface FeaturesResponse {
     enabled?: boolean;
     max_references?: number;
   };
+  knowledge_base?: {
+    enabled: boolean;
+    management_url?: string | null;
+  };
 }
 
 export interface ConversationReferencesCapability {
@@ -70,5 +74,20 @@ export async function fetchConversationReferencesCapability(): Promise<Conversat
       maxReferences > 0
         ? maxReferences
         : 0,
+  };
+}
+
+export async function fetchKnowledgeBaseEnabled(): Promise<boolean> {
+  return (await fetchFeatures()).knowledge_base?.enabled ?? false;
+}
+
+export async function fetchKnowledgeBaseFeature(): Promise<{
+  enabled: boolean;
+  managementUrl: string | null;
+}> {
+  const feature = (await fetchFeatures()).knowledge_base;
+  return {
+    enabled: feature?.enabled ?? false,
+    managementUrl: feature?.management_url ?? null,
   };
 }
