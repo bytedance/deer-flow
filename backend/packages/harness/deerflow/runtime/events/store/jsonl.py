@@ -157,13 +157,17 @@ class JsonlRunEventStore(RunEventStore):
             return record
 
     async def put_batch(self, events):
-        """Persist a batch of events atomically per-thread.
+        """Persist a batch of events under a per-thread write lock.
 
         All seq numbers for the batch are reserved under a single per-thread
-        write lock and every record is appended in one file write so a
-        mid-batch failure cannot leave a partial set of records on disk that
-        a retry would then duplicate. Callers (e.g. worker.py's flush-retry
-        path) may safely re-buffer the entire batch on failure.
+        write lock. Records are grouped by run_id and appended to their own
+        run files while that lock is held. If a write fails and rollback
+        succeeds, already-appended groups for the current thread are restored
+        so callers (e.g. worker.py's flush-retry path) may safely re-buffer
+        that thread's batch. When a batch contains multiple thread IDs, thread
+        groups are processed sequentially, so a later failure does not roll
+        back earlier thread groups. This rollback does not make a multi-file
+        batch crash-atomic.
         """
         if not events:
             return []
@@ -226,10 +230,11 @@ class JsonlRunEventStore(RunEventStore):
                     "created_at": ev.get("created_at") or datetime.now(UTC).isoformat(),
                 }
                 records.append(record)
-            path = self._run_file(thread_id, batch[0]["run_id"])
-            # Single append/write per thread. If this raises, no records were
-            # persisted; the caller's re-buffer reproduces no duplicates.
-            await asyncio.to_thread(self._append_records, path, records)
+            records_by_run: dict[str, list[dict[str, Any]]] = {}
+            for record in records:
+                records_by_run.setdefault(record["run_id"], []).append(record)
+            run_batches = [(self._run_file(thread_id, run_id), run_records) for run_id, run_records in records_by_run.items()]
+            await asyncio.to_thread(self._append_record_groups, run_batches)
             return records
 
     def _append_records(self, path: Path, records: list[dict[str, Any]]) -> None:
@@ -237,6 +242,30 @@ class JsonlRunEventStore(RunEventStore):
         lines = "".join(json.dumps(r, default=str, ensure_ascii=False) + "\n" for r in records)
         with open(path, "a", encoding="utf-8") as f:
             f.write(lines)
+
+    def _append_record_groups(self, groups: list[tuple[Path, list[dict[str, Any]]]]) -> None:
+        """Append run groups and restore their original sizes if one fails."""
+        original_sizes: dict[Path, int | None] = {}
+        try:
+            for path, records in groups:
+                original_sizes[path] = path.stat().st_size if path.exists() else None
+                self._append_records(path, records)
+        except Exception:
+            for path, original_size in original_sizes.items():
+                try:
+                    if original_size is None:
+                        if path.exists():
+                            path.unlink()
+                    else:
+                        with open(path, "r+b") as f:
+                            f.truncate(original_size)
+                except OSError:
+                    logger.error(
+                        "Failed to roll back JSONL batch append for %s; retrying the batch may create duplicate records",
+                        path,
+                        exc_info=True,
+                    )
+            raise
 
     async def list_messages(self, thread_id, *, limit=50, before_seq=None, after_seq=None, user_id: str | None | _AutoSentinel = AUTO):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)

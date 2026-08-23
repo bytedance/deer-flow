@@ -35,6 +35,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
@@ -113,6 +114,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            TOOL_RECEIPT_KEY,
             TOOL_TRANSFORMS_KEY,
         }
     )
@@ -301,10 +303,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content``, dynamic-context reminder markers, and the
-    transient view-image context marker are server-owned. External callers
-    cannot supply them; trusted internal channel calls may preserve metadata
-    they added before invoking this boundary.
+    ``original_user_content``, dynamic-context reminder markers, the
+    transient view-image context marker, and tool receipts are server-owned.
+    External callers cannot supply them; trusted internal channel calls may
+    preserve metadata they added before invoking this boundary.
     """
     if raw_input is None:
         return {}
@@ -499,6 +501,18 @@ def inject_authenticated_user_context(
         for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
             configurable.pop(key, None)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
+    # ``user_id`` is server-owned for EXTERNAL callers: it now selects which
+    # user's credential user-scoped MCP auth injects, so a client-forged value
+    # must never survive any early return below — scrub it here and restamp it
+    # only from ``request.state.user``. Internal callers (IM channels, the
+    # scheduler) are the deliberate exception: they authenticate their own end
+    # users and supply that identity in run context (PR #3294), which the
+    # internal-role branch below preserves.
+    user = getattr(getattr(request, "state", None), "user", None)
+    if auth_source != AUTH_SOURCE_INTERNAL and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        runtime_context.pop("user_id", None)
+        if isinstance(configurable, dict):
+            configurable.pop("user_id", None)
     runtime_context["is_internal"] = auth_source == AUTH_SOURCE_INTERNAL
     if auth_source == AUTH_SOURCE_INTERNAL and request_context is not None:
         channel_user_id = request_context.get("channel_user_id")

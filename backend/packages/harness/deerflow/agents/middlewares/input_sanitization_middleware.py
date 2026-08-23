@@ -31,12 +31,10 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
-
-_SUMMARY_MESSAGE_NAME = "summary"
 
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 #
@@ -174,21 +172,6 @@ def neutralize_untrusted_tags(text: str) -> str:
     return _neutralize_boundary_tokens(text)
 
 
-def _is_genuine_user_message(message: object) -> bool:
-    """Return True for real user messages, excluding system-injected HumanMessages.
-
-    ``hide_from_ui`` is also used by hidden UI replies from HumanInputCard, so
-    only skip hidden HumanMessages that do not carry a valid user response.
-    """
-    if not isinstance(message, HumanMessage):
-        return False
-    if message.name == _SUMMARY_MESSAGE_NAME:
-        return False
-    if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
-        return False
-    return True
-
-
 def frame_untrusted_text(text: str) -> str:
     """Sanitize untrusted text, then wrap it in user-input boundary markers.
 
@@ -303,7 +286,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         messages = list(request.messages)
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
-            if not _is_genuine_user_message(msg):
+            if not is_genuine_user_message(msg):
                 if isinstance(msg, HumanMessage):
                     logger.debug(
                         "_process_request: skipping non-genuine HumanMessage at pos=%d name=%s hide_from_ui=%s content_preview=%.80r",
