@@ -114,6 +114,12 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
         self.max_concurrent = _clamp_subagent_limit(max_concurrent)
         self.max_total = _clamp_total_subagent_limit(max_total)
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "max_concurrent": self.max_concurrent,
+            "max_total": self.max_total,
+        }
+
     def _truncate_task_calls(self, state: AgentState, runtime: Runtime | None = None) -> dict | None:
         messages = state.get("messages", [])
         if not messages:

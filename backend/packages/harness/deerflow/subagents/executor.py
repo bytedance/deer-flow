@@ -543,6 +543,13 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        # What this subagent was assembled from, published to extension
+        # observers at the end of ``_create_agent``. The prompt and skill set
+        # are captured while ``_build_initial_state`` renders them because
+        # neither is recoverable from the compiled graph afterwards.
+        self.assembly_descriptor: Any | None = None
+        self._assembled_system_prompt = self.config.system_prompt or ""
+        self._assembled_skills: list[Any] = []
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
@@ -604,14 +611,97 @@ class SubagentExecutor:
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
-        return create_agent(
+        bound_tools = list(tools if tools is not None else self.tools)
+        agent = create_agent(
             model=model,
-            tools=tools if tools is not None else self.tools,
+            tools=bound_tools,
             middleware=middlewares,
             system_prompt=None,
             state_schema=ThreadState,
             checkpointer=False,
         )
+        self._describe_assembly(
+            app_config=app_config,
+            tools=bound_tools,
+            middlewares=middlewares,
+            deferred_setup=deferred_setup,
+            extensions=extensions if extensions is not None else self.extensions,
+        )
+        return agent
+
+    def _describe_assembly(
+        self,
+        *,
+        app_config: Any,
+        tools: list[Any],
+        middlewares: list[Any],
+        deferred_setup: "DeferredToolSetup | None",
+        extensions: Any | None,
+    ) -> None:
+        """Record and publish what this subagent was assembled from.
+
+        Fail-open: a subagent that cannot describe itself must still run.
+        Building the descriptor hashes every tool's description and JSON
+        schema and probes every middleware, so it is skipped entirely when no
+        observer is registered to receive it.
+        """
+        if not getattr(extensions, "has_agent_assembly_observers", False):
+            return
+
+        from types import SimpleNamespace
+
+        from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+        from deerflow.extensions.notify import notify_agent_assembled
+
+        try:
+            get_model_config = getattr(app_config, "get_model_config", None)
+            model_config = get_model_config(self.model_name) if callable(get_model_config) else None
+            if model_config is None:
+                # A name the profile table does not know still has an identity;
+                # a missing profile must not blank out the whole descriptor.
+                model_config = SimpleNamespace(
+                    model=self.model_name,
+                    use="unknown",
+                    supports_thinking=False,
+                    supports_reasoning_effort=False,
+                    supports_vision=False,
+                )
+            deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
+            descriptor = build_assembly_descriptor(
+                namespace="deerflow",
+                agent_name=self.config.name,
+                requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
+                effective_model=self.model_name,
+                model_config=model_config,
+                thinking_enabled=False,
+                reasoning_effort=None,
+                rendered_base_prompt=self._assembled_system_prompt,
+                prompt_template_id="deerflow-subagent-v1",
+                tools=tools,
+                middlewares=middlewares,
+                deferred_names=deferred_names,
+                enabled_skills=self._assembled_skills,
+                effective_policies={
+                    "max_turns": self.config.max_turns,
+                    "timeout_seconds": self.config.timeout_seconds,
+                    "tool_allowlist": self.config.tools,
+                    "tool_denylist": self.config.disallowed_tools,
+                    "deferred_tools": {
+                        "enabled": bool(deferred_names),
+                        "catalog_hash": (deferred_setup.catalog_hash if deferred_setup is not None else None),
+                    },
+                },
+            )
+        except Exception:
+            logger.warning(
+                "[trace=%s] Could not describe subagent %s assembly",
+                self.trace_id,
+                self.config.name,
+                exc_info=True,
+            )
+            return
+        self.assembly_descriptor = descriptor
+        notify_agent_assembled(descriptor, extensions)
 
     def _consume_guard_stop_reason(self) -> str | None:
         """Pop and return the guard-cap stop reason set during the last run.
@@ -685,6 +775,7 @@ class SubagentExecutor:
         # loaded through read_file. Their allowed-tools declarations are applied
         # dynamically by SkillToolPolicyMiddleware, not eagerly here.
         skills = await self._load_skills()
+        self._assembled_skills = list(skills)
         self._available_skill_names = {skill.name for skill in skills}
 
         resolved_app_config = self.app_config or get_app_config()
@@ -773,7 +864,8 @@ class SubagentExecutor:
 
         messages: list[Any] = []
         if system_parts:
-            messages.append(SystemMessage(content="\n\n".join(system_parts)))
+            self._assembled_system_prompt = "\n\n".join(system_parts)
+            messages.append(SystemMessage(content=self._assembled_system_prompt))
 
         # Then the actual task
         messages.append(HumanMessage(content=task))

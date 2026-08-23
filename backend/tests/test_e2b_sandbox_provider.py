@@ -2173,6 +2173,54 @@ def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeyp
     assert set(manifest["files"]) == {"outputs/live.txt"}
 
 
+def test_sync_outputs_to_host_preserves_trailing_space_in_filename(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    # "report " (trailing space) is a legal Linux filename; the NUL-delimited
+    # listing preserves it, but a .strip() on each entry would truncate it.
+    listing = "5\t2.000000000\t/home/user/outputs/report \x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/report ": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-space")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    expected = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "report "
+    assert expected.exists()
+    assert expected.read_bytes() == b"hello"
+
+
+def test_sync_outputs_to_host_skips_mtime_restoration_on_overflow(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    # os.utime raises OverflowError (not OSError) when the ns value is out of
+    # range; the exact threshold is platform-dependent (macOS clamps, Linux
+    # raises), so force the failure deterministically and assert the file is
+    # still written and the manifest still updated.
+    listing = "5\t1720000000.1234567890\t/home/user/outputs/far-future.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/far-future.txt": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-overflow")
+
+    e2b_provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    def _raise_overflow(path, times=None, ns=None):
+        raise OverflowError("timestamp out of range")
+
+    monkeypatch.setattr(e2b_provider_mod.os, "utime", _raise_overflow)
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    paths = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    target = paths / "user-data" / "outputs" / "far-future.txt"
+    assert target.exists()
+    assert target.read_bytes() == b"hello"
+    manifest = json.loads((paths / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert manifest["files"]["outputs/far-future.txt"]["remote_size"] == 5
+
+
 def test_sync_outputs_to_host_discards_manifest_from_another_sandbox(monkeypatch, tmp_path):
     p = _make_provider()
     _setup_paths(monkeypatch, tmp_path)
