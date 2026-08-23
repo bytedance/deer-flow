@@ -17,6 +17,7 @@ concurrent runs on different repos from clobbering each other's token.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -59,7 +60,8 @@ def test_local_sandbox_env_overlay_reaches_subprocess(monkeypatch: pytest.Monkey
         captured["env"] = env
         return ("", "", 0, False)
 
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(fake_run_posix))
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": "/usr/bin", "EXISTING": "kept"})
 
@@ -82,7 +84,8 @@ def test_local_sandbox_no_env_passes_sanitized_environ(monkeypatch: pytest.Monke
         captured["env"] = env
         return ("", "", 0, False)
 
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(fake_run_posix))
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": "/usr/bin", "OPENAI_API_KEY": "sk-leak"})
 

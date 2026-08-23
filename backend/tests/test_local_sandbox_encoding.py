@@ -1,13 +1,20 @@
 import builtins
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, _BoundedPipeCapture
 
 
 def _open(base, file, mode="r", *args, **kwargs):
     if "b" in mode:
         return base(file, mode, *args, **kwargs)
     return base(file, mode, *args, encoding=kwargs.pop("encoding", "gbk"), **kwargs)
+
+
+def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding():
+    capture = _BoundedPipeCapture(encoding="cp1252")
+    capture.append("caf\u00e9".encode("cp1252"))
+
+    assert capture.read() == "caf\u00e9"
 
 
 def test_read_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):

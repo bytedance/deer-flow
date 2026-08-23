@@ -1,4 +1,5 @@
 import errno
+import locale
 import logging
 import ntpath
 import os
@@ -34,8 +35,9 @@ _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
 class _BoundedPipeCapture:
     """Drain a subprocess pipe while keeping only bounded output in memory."""
 
-    def __init__(self, *, limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES) -> None:
+    def __init__(self, *, limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES, encoding: str = "utf-8") -> None:
         self._limit_bytes = limit_bytes
+        self._encoding = encoding
         self._chunks: list[bytes] = []
         self._kept_bytes = 0
         self._total_bytes = 0
@@ -58,7 +60,7 @@ class _BoundedPipeCapture:
             total_bytes = self._total_bytes
             kept_bytes = self._kept_bytes
 
-        output = data.decode("utf-8", errors="replace")
+        output = data.decode(self._encoding, errors="replace")
         if truncated:
             notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
             output += notice
@@ -150,8 +152,8 @@ class LocalSandbox(Sandbox):
                 pass
 
     @staticmethod
-    def _start_pipe_drain(fd: int, name: str) -> tuple[_BoundedPipeCapture, threading.Thread]:
-        capture = _BoundedPipeCapture()
+    def _start_pipe_drain(fd: int, name: str, *, encoding: str = "utf-8") -> tuple[_BoundedPipeCapture, threading.Thread]:
+        capture = _BoundedPipeCapture(encoding=encoding)
         thread = threading.Thread(target=LocalSandbox._drain_pipe, args=(fd, capture), name=name, daemon=True)
         thread.start()
         return capture, thread
@@ -548,8 +550,9 @@ class LocalSandbox(Sandbox):
                     # The write fd may already be closed by the exception cleanup above.
                     pass
 
-        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain")
-        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain")
+        encoding = locale.getencoding()
+        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain", encoding=encoding)
+        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain", encoding=encoding)
 
         try:
             try:
