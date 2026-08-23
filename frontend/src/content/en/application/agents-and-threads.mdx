@@ -30,7 +30,7 @@ Custom agents are created and managed through:
 - **The App UI**: open the Agents section in the settings panel.
 - **The Gateway API**: `POST /api/agents` with the agent definition.
 
-The slug (`name`) is automatically derived from the `display_name` and must be unique. The system checks for conflicts and appends a suffix if needed (`/api/agents/check`).
+You provide a unique ASCII `name` matching `^[A-Za-z0-9-]+` (stored lowercase). Use `/api/agents/check` to verify availability before creation.
 
 Agent configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
 
@@ -41,7 +41,6 @@ To restrict a custom agent to specific skills:
 ```yaml
 # agents/my-researcher/config.yaml
 name: my-researcher
-display_name: My Researcher
 skills:
   - deep-research
   - academic-paper-review
