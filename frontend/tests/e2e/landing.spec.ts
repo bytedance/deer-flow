@@ -30,7 +30,7 @@ test.describe("Landing page", () => {
     });
   }
 
-  test("Get Started link navigates to workspace", async ({ page }) => {
+  test("Get Started link navigates to workspace", async ({ page }, testInfo) => {
     mockLangGraphAPI(page);
 
     await page.goto("/");
@@ -38,8 +38,16 @@ test.describe("Landing page", () => {
     const getStarted = page.getByRole("link", { name: /get started/i });
     await getStarted.click();
 
-    // Should redirect to /workspace/chats/new
-    await page.waitForURL("**/workspace/chats/new");
-    await expect(page).toHaveURL(/\/workspace\/chats\/new/);
+    if (testInfo.project.name === "static-website") {
+      // In static mode `/workspace` redirects to the demo thread, not /chats/new.
+      await page.waitForURL("**/workspace/chats/21cfea46-34bd-4aa6-9e1f-3009452fbeb9");
+      await expect(page).toHaveURL(
+        /\/workspace\/chats\/21cfea46-34bd-4aa6-9e1f-3009452fbeb9/,
+      );
+    } else {
+      // Full deployment: `/` redirects into the app, Get Started opens a new chat.
+      await page.waitForURL("**/workspace/chats/new");
+      await expect(page).toHaveURL(/\/workspace\/chats\/new/);
+    }
   });
 });
