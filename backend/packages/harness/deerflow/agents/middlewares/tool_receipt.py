@@ -81,18 +81,46 @@ def make_tool_receipt(tool_call: dict, message: ToolMessage) -> dict:
 
 
 def extract_tool_receipts(messages: list) -> list[ToolReceipt]:
-    """Collect stamped receipts in message order, assigning display ids r1..rN."""
+    """Collect stamped receipts in message order, assigning display ids r1..rN.
+
+    Receipt dicts come back out of persisted checkpoints, so their shape is
+    validated before use: a malformed entry (missing/wrongly-typed fields, or
+    extra keys) is skipped rather than crashing the render path or being
+    treated as runtime-stamped evidence.
+    """
     receipts: list[ToolReceipt] = []
     for message in messages:
         if not isinstance(message, ToolMessage):
             continue
         receipt = (message.additional_kwargs or {}).get(TOOL_RECEIPT_KEY)
-        if not isinstance(receipt, dict):
+        if not _is_valid_receipt(receipt):
             continue
-        entry = dict(receipt)
-        entry["id"] = f"r{len(receipts) + 1}"
-        receipts.append(ToolReceipt(**entry))  # type: ignore[typeddict-item]
+        receipts.append(
+            ToolReceipt(
+                id=f"r{len(receipts) + 1}",
+                tool_call_id=receipt["tool_call_id"],
+                tool_name=receipt["tool_name"],
+                status=receipt["status"],
+                args_sha256=receipt["args_sha256"],
+                output_sha256=receipt["output_sha256"],
+                output_bytes=receipt["output_bytes"],
+                created_at=receipt["created_at"],
+            )
+        )
     return receipts
+
+
+_RECEIPT_STR_FIELDS = ("tool_call_id", "tool_name", "status", "args_sha256", "output_sha256", "created_at")
+
+
+def _is_valid_receipt(receipt: object) -> bool:
+    """Structural check for a persisted receipt (types only, not provenance)."""
+    if not isinstance(receipt, dict):
+        return False
+    if any(not isinstance(receipt.get(field), str) for field in _RECEIPT_STR_FIELDS):
+        return False
+    output_bytes = receipt.get("output_bytes")
+    return isinstance(output_bytes, int) and not isinstance(output_bytes, bool)
 
 
 def render_tool_receipts(receipts: list[ToolReceipt], *, max_chars: int = _RENDER_CHAR_BUDGET) -> str:

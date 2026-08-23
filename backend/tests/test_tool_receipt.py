@@ -88,3 +88,33 @@ def test_render_budget_keeps_newest_receipts_with_original_ids():
     assert "[r12] tool-12" in text
     assert "[r1] tool-1" not in text
     assert "older receipts omitted" in text
+
+
+def test_extract_skips_malformed_receipts():
+    """Persisted/foreign receipt payloads must not crash or enter the ledger."""
+    good = _stamped_msg("ok", tool_call_id="tc-good", name="bash")
+    malformed = []
+    for payload in [
+        "not-a-dict",
+        {},  # missing every field
+        {"tool_call_id": "tc-1"},  # partial shape
+        {**make_tool_receipt({"name": "t", "id": "tc-2", "args": {}}, _msg("x", tool_call_id="tc-2", name="t")), "output_bytes": "2"},  # wrong type
+    ]:
+        message = _msg("bad", tool_call_id="tc-bad", name="bash")
+        message.additional_kwargs[TOOL_RECEIPT_KEY] = payload
+        malformed.append(message)
+    # A future-schema receipt (extra keys, valid core shape) must not crash
+    # extraction either — its known fields are picked, unknown keys ignored.
+    forward_compat = _msg("newer", tool_call_id="tc-newer", name="bash")
+    forward_compat.additional_kwargs[TOOL_RECEIPT_KEY] = {
+        **make_tool_receipt({"name": "bash", "id": "tc-newer", "args": {}}, forward_compat),
+        "layer2_field": {"nested": True},
+    }
+
+    receipts = extract_tool_receipts([*malformed, good, forward_compat])
+
+    assert [r["tool_call_id"] for r in receipts] == ["tc-good", "tc-newer"]
+    assert [r["id"] for r in receipts] == ["r1", "r2"]
+    # And the render path never sees a shape it can KeyError on.
+    rendered = render_tool_receipts(receipts)
+    assert "[r1] bash" in rendered and "[r2] bash" in rendered

@@ -75,6 +75,21 @@ def test_wrap_tool_call_failure_does_not_break_result():
     assert middleware.wrap_tool_call(request, lambda req: message) is message
 
 
+def test_wrap_tool_call_overwrites_tool_supplied_receipt():
+    """The receipt key is runtime-owned: a tool cannot forge its own evidence."""
+    middleware = ToolReceiptMiddleware()
+    request = _request()
+    forged = {"tool_call_id": "tc-1", "tool_name": "bash", "status": "success", "args_sha256": "f" * 16, "output_sha256": "f" * 16, "output_bytes": 999, "created_at": "1970-01-01T00:00:00+00:00"}
+    message = _result(request)
+    message.additional_kwargs[TOOL_RECEIPT_KEY] = forged
+
+    result = middleware.wrap_tool_call(request, lambda req: message)
+
+    receipt = result.additional_kwargs[TOOL_RECEIPT_KEY]
+    assert receipt["output_bytes"] == 2  # recomputed from the real content, not 999
+    assert receipt["created_at"] != "1970-01-01T00:00:00+00:00"
+
+
 def test_wrap_model_call_injects_hidden_ledger():
     middleware = ToolReceiptMiddleware()
     request = MagicMock()
@@ -144,6 +159,50 @@ def test_delegation_only_mode_renders_when_processing_subagent_result():
     middleware.wrap_model_call(request, handler)
     ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui")]
     assert len(ledger_messages) == 1 and "r1" in ledger_messages[0].content
+
+
+def test_delegation_only_mode_ignores_delegations_from_earlier_turns():
+    """A completed delegation must not keep the ledger rendering once a new
+    genuine user turn has started — that would defeat the token-saving mode."""
+    middleware = ToolReceiptMiddleware(render_mode="delegation_only")
+    old_subagent_result = ToolMessage(
+        content="Task Succeeded. Result: done [r1]",
+        tool_call_id="tc-task",
+        name="task",
+        additional_kwargs={"subagent_status": "completed"},
+    )
+    request = _delegation_only_request([HumanMessage(content="first question"), _stamped_message(), old_subagent_result, AIMessage(content="report [r1]"), HumanMessage(content="unrelated follow-up")])
+    seen = {}
+
+    def handler(req):
+        seen["request"] = req
+        return MagicMock()
+
+    middleware.wrap_model_call(request, handler)
+    assert seen["request"] is request  # old delegation is outside the current turn
+
+
+def test_delegation_only_mode_scopes_past_hidden_framework_messages():
+    """Hidden framework injections (reminders, the ledger itself) are not user
+    turns: a subagent result after them still counts as the current turn."""
+    middleware = ToolReceiptMiddleware(render_mode="delegation_only")
+    reminder = HumanMessage(content="<system_reminder>todo</system_reminder>", additional_kwargs={"hide_from_ui": True})
+    subagent_result = ToolMessage(
+        content="Task Succeeded. Result: done",
+        tool_call_id="tc-task",
+        name="task",
+        additional_kwargs={"subagent_status": "completed"},
+    )
+    request = _delegation_only_request([HumanMessage(content="go"), reminder, _stamped_message(), subagent_result])
+    captured = {}
+
+    def handler(req):
+        captured["messages"] = req.messages
+        return MagicMock()
+
+    middleware.wrap_model_call(request, handler)
+    ledger_messages = [m for m in captured["messages"] if isinstance(m, HumanMessage) and m.additional_kwargs.get("hide_from_ui") and "Tool receipts" in str(m.content)]
+    assert len(ledger_messages) == 1
 
 
 def _build(app_config_dict: dict) -> list:

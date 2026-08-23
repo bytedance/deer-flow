@@ -23,7 +23,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
+from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_genuine_user_message
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, extract_tool_receipts, make_tool_receipt, render_tool_receipts
 
 logger = logging.getLogger(__name__)
@@ -53,9 +53,11 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
     def _stamp_message(self, message: ToolMessage, request: ToolCallRequest) -> None:
         try:
             kwargs = dict(message.additional_kwargs or {})
-            if TOOL_RECEIPT_KEY not in kwargs:
-                kwargs[TOOL_RECEIPT_KEY] = make_tool_receipt(request.tool_call, message)
-                message.additional_kwargs = kwargs
+            # The receipt key is runtime-owned: always overwrite, never preserve
+            # a pre-existing value — a tool could otherwise forge its own
+            # "evidence" and have it rendered as runtime-stamped provenance.
+            kwargs[TOOL_RECEIPT_KEY] = make_tool_receipt(request.tool_call, message)
+            message.additional_kwargs = kwargs
         except Exception:
             # Never block tool execution — but a systematic stamping failure must
             # be visible, or the ledger silently goes incomplete and citations lie.
@@ -102,8 +104,19 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
             return True
         # delegation_only: render only while a subagent result is being
         # processed (a task ToolMessage carries subagent_status in its
-        # additional_kwargs — see subagents/status_contract.py).
-        for message in request.messages:
+        # additional_kwargs — see subagents/status_contract.py). Scoped to the
+        # current turn: only messages after the latest genuine user message
+        # count, otherwise one completed delegation would keep the ledger
+        # rendering on every later ordinary turn and defeat the token saving.
+        # Without any genuine user message there is no turn boundary (e.g.
+        # scheduled/internal invocations), so the whole stream is in scope.
+        messages = list(request.messages)
+        latest_user_index = -1
+        for index, message in enumerate(messages):
+            if is_genuine_user_message(message):
+                latest_user_index = index
+        turn_messages = messages[latest_user_index + 1 :] if latest_user_index >= 0 else messages
+        for message in turn_messages:
             if isinstance(message, ToolMessage) and (message.additional_kwargs or {}).get("subagent_status"):
                 return True
         return False
