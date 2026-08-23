@@ -11,7 +11,7 @@
 # Prerequisites:
 #   - Kubernetes cluster + kubeconfig are only required when using provisioner mode.
 #
-# Access: http://localhost:2026
+# Access: http://localhost:2026 or http://127.0.0.1:2026
 
 services:
   # ── Redis Stream Bridge ────────────────────────────────────────────────
@@ -138,6 +138,10 @@ services:
       - WATCHPACK_POLLING=true
       - CI=true
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      # next dev only allows localhost by default. The compose entry publishes
+      # nginx on BIND_HOST=127.0.0.1, so opening that URL 403s /_next/* and
+      # freezes /setup on "Loading…". See #4957.
+      - DEER_FLOW_DEV_ALLOWED_ORIGINS=${DEER_FLOW_DEV_ALLOWED_ORIGINS:-127.0.0.1,::1}
     env_file:
       - ../frontend/.env
     networks:
