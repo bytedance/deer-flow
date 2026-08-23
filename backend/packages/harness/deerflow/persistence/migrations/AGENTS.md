@@ -36,5 +36,6 @@ This invokes `alembic revision --autogenerate` against the live ORM models. Revi
 - `migrations/versions/0010_run_cancel_request.py` — adds the nullable `runs.cancel_action` / `cancel_requested_at` handoff used by non-owning workers; chains after `0009_webhook_dedupe`
 - `migrations/versions/0011_mcp_tasks.py` — creates the durable long-running MCP task table and its user/server/remote uniqueness constraint
 - `migrations/versions/0012_mcp_task_results.py` — adds bounded result preview/truncation/artifact fields for ordinary task drivers
+- `migrations/versions/0013_mcp_task_notifications.py` — adds durable Agent-run notification snapshots, delivery leases, idempotency fields, and the separate bounded-retry attempt counter
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)
