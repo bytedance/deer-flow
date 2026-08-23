@@ -195,7 +195,17 @@ export class UserSettingsSyncController {
         if (patch === null) return;
         attempted = true;
         try {
-          await this.transport.patch(patch);
+          const response = await this.transport.patch(patch);
+          if (response.settings === null) {
+            const recovered = await this.transport.initialize(
+              this.store.getSettings(),
+            );
+            if (recovered.settings === null) {
+              throw new Error(
+                "User settings recovery did not initialize a record",
+              );
+            }
+          }
         } catch {
           requestFailed = true;
           return;

@@ -29,8 +29,10 @@ from app.gateway.routers.user_preferences import (
     UserPreferencesInitializeRequest,
     UserPreferencesPatchRequest,
     get_user_preferences,
+    patch_user_preferences,
 )
 from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+from deerflow.persistence.user.model import UserRow
 
 
 def _full_preferences(*, model_name: str = "model-a") -> dict:
@@ -65,6 +67,14 @@ async def _create_user(repository: SQLiteUserRepository, email: str) -> User:
     user = User(id=uuid4(), email=email, password_hash="hash")
     await repository.create_user(user)
     return user
+
+
+async def _overwrite_stored_preferences(user_id: str, settings: dict) -> None:
+    session_factory = get_session_factory()
+    assert session_factory is not None
+    async with session_factory() as session:
+        await session.execute(sa.update(UserRow).where(UserRow.id == user_id).values(preferences=settings))
+        await session.commit()
 
 
 def _load_user_preferences_migration() -> ModuleType:
@@ -355,6 +365,55 @@ async def test_route_derives_owner_from_authenticated_request(monkeypatch: pytes
     repository.get_user_preferences.assert_awaited_once_with(str(user.id))
     assert response.settings is not None
     assert response.settings.context.model_name == "owner-model"
+
+
+@pytest.mark.asyncio
+async def test_get_resets_an_invalid_persisted_record(
+    user_repository: SQLiteUserRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await _create_user(user_repository, "invalid-get@example.com")
+    await user_repository.initialize_user_preferences(str(user.id), _full_preferences())
+    await _overwrite_stored_preferences(str(user.id), {"context": {}})
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=user, auth_source=AUTH_SOURCE_SESSION),
+        cookies={},
+        headers={},
+    )
+    monkeypatch.setattr(user_preferences_router, "get_current_user_from_request", AsyncMock(return_value=user))
+    monkeypatch.setattr(user_preferences_router, "get_user_repository", lambda: user_repository)
+
+    response = await get_user_preferences(request)  # type: ignore[arg-type]
+
+    assert response.settings is None
+    assert response.revision == 2
+    assert await user_repository.get_user_preferences(str(user.id)) == (None, 2)
+
+
+@pytest.mark.asyncio
+async def test_patch_resets_an_invalid_merged_record_for_client_reinitialization(
+    user_repository: SQLiteUserRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await _create_user(user_repository, "invalid-patch@example.com")
+    await user_repository.initialize_user_preferences(str(user.id), _full_preferences())
+    await _overwrite_stored_preferences(str(user.id), {"context": {}})
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=user, auth_source=AUTH_SOURCE_SESSION),
+        cookies={},
+        headers={},
+    )
+    monkeypatch.setattr(user_preferences_router, "get_current_user_from_request", AsyncMock(return_value=user))
+    monkeypatch.setattr(user_preferences_router, "get_user_repository", lambda: user_repository)
+
+    response = await patch_user_preferences(
+        UserPreferencesPatchRequest.model_validate({"context": {"mode": "pro"}}),
+        request,  # type: ignore[arg-type]
+    )
+
+    assert response.settings is None
+    assert response.revision == 3
+    assert await user_repository.get_user_preferences(str(user.id)) == (None, 3)
 
 
 @pytest.mark.asyncio

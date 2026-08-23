@@ -275,6 +275,30 @@ class SQLiteUserRepository(UserRepository):
 
         raise UserPreferencesWriteConflict(f"Concurrent preference updates for user {user_id} did not settle")
 
+    async def reset_user_preferences_if_revision(self, user_id: str, revision: int) -> tuple[dict | None, int]:
+        """Clear a corrupt record without erasing a concurrent valid update."""
+        async with self._sf() as session:
+            result = await session.execute(
+                update(UserRow)
+                .where(
+                    UserRow.id == user_id,
+                    UserRow.preferences_revision == revision,
+                )
+                .values(
+                    preferences=None,
+                    preferences_revision=revision + 1,
+                )
+            )
+            if result.rowcount == 1:
+                await session.commit()
+                return None, revision + 1
+
+            row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
+            if row is None:
+                raise UserNotFoundError(f"User {user_id} no longer exists")
+            settings, current_revision = row
+            return deepcopy(settings), int(current_revision)
+
 
 def _is_sqlite_busy_error(exc: OperationalError) -> bool:
     """Match SQLITE_BUSY and its extended result codes from sqlite3."""

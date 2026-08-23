@@ -30,7 +30,13 @@
    storage rejects the durable outbox write.
    Failed writes remain in that outbox; the next handshake folds them over the
    server read and retries before clearing, so reconnect/reload cannot silently
-   erase an unsynchronized local selection. Local and cross-tab cache changes
+   erase an unsynchronized local selection. A server record that fails current
+   schema validation is also recoverable: the
+   Gateway revision-conditionally clears the corrupt value, and a PATCH response
+   carrying that absent record makes the controller reinitialize from its full
+   current local state before acknowledging the pending mutation. This keeps a
+   repair from silently dropping the edit that discovered the corrupt record.
+   Local and cross-tab cache changes
    enqueue only their changed allowlisted leaves. Each user/leaf has a fixed
    mutation slot containing an opaque operation id and a separate acknowledgement
    slot; successful writes advance acknowledgements without deleting mutations,

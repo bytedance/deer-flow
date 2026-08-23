@@ -401,6 +401,9 @@ original local-only settings behavior. Authenticated fallback caches are keyed
 by account. On browsers with cross-tab Web Locks, only one authenticated
 account can claim the old unscoped cache; without that lock, DeerFlow safely
 skips the ambiguous legacy import instead of copying it across accounts.
+If an older or manually edited server record no longer matches the current
+settings schema, DeerFlow clears only that observed revision and rebuilds it
+from the browser's complete current fallback without dropping a pending edit.
 
 #### LangGraph Studio (Optional)
 

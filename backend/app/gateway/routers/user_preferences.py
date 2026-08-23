@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError, model_validator
 
 from app.gateway.auth.repositories.base import (
     UserNotFoundError,
     UserPreferencesNotInitializedError,
     UserPreferencesWriteConflict,
+    UserRepository,
 )
 from app.gateway.deps import get_current_user_from_request, get_user_repository
 
 router = APIRouter(prefix="/api/user-preferences", tags=["user-preferences"])
+logger = logging.getLogger(__name__)
 
 MAX_USER_PREFERENCES_BYTES = 2048
 EXPECTED_USER_ID_HEADER = "X-DeerFlow-Expected-User-Id"
@@ -134,6 +137,17 @@ def _response(settings: dict | None, revision: int) -> UserPreferencesResponse:
     return UserPreferencesResponse(settings=validated, revision=revision)
 
 
+async def _validated_response(repository: UserRepository, user_id: str, settings: dict | None, revision: int) -> UserPreferencesResponse:
+    """Return a valid record, or clear a corrupt revision for reinitialization."""
+    for _attempt in range(3):
+        try:
+            return _response(settings, revision)
+        except ValidationError:
+            logger.warning("Resetting invalid persisted user preferences for user %s at revision %s", user_id, revision)
+            settings, revision = await repository.reset_user_preferences_if_revision(user_id, revision)
+    return _response(settings, revision)
+
+
 def _translate_repository_error(exc: Exception) -> HTTPException:
     if isinstance(exc, UserNotFoundError):
         return HTTPException(status_code=404, detail="User not found")
@@ -163,11 +177,12 @@ async def _get_guarded_user(request: Request):
 async def get_user_preferences(request: Request) -> UserPreferencesResponse:
     """Return preferences for the authenticated user only."""
     user = await _get_guarded_user(request)
+    repository = get_user_repository()
     try:
-        settings, revision = await get_user_repository().get_user_preferences(str(user.id))
+        settings, revision = await repository.get_user_preferences(str(user.id))
+        return await _validated_response(repository, str(user.id), settings, revision)
     except Exception as exc:
         raise _translate_repository_error(exc) from exc
-    return _response(settings, revision)
 
 
 @router.put("", response_model=UserPreferencesResponse)
@@ -177,14 +192,22 @@ async def initialize_user_preferences(
 ) -> UserPreferencesResponse:
     """First-writer-wins import of the legacy local base settings."""
     user = await _get_guarded_user(request)
+    repository = get_user_repository()
     try:
-        settings, revision = await get_user_repository().initialize_user_preferences(
+        settings, revision = await repository.initialize_user_preferences(
             str(user.id),
             body.settings.to_storage_dict(),
         )
+        response = await _validated_response(repository, str(user.id), settings, revision)
+        if response.settings is None:
+            settings, revision = await repository.initialize_user_preferences(
+                str(user.id),
+                body.settings.to_storage_dict(),
+            )
+            return _response(settings, revision)
+        return response
     except Exception as exc:
         raise _translate_repository_error(exc) from exc
-    return _response(settings, revision)
 
 
 @router.patch("", response_model=UserPreferencesResponse)
@@ -194,11 +217,12 @@ async def patch_user_preferences(
 ) -> UserPreferencesResponse:
     """Deep-merge an allowlisted patch for the authenticated user."""
     user = await _get_guarded_user(request)
+    repository = get_user_repository()
     try:
-        settings, revision = await get_user_repository().merge_user_preferences(
+        settings, revision = await repository.merge_user_preferences(
             str(user.id),
             body.to_storage_patch(),
         )
+        return await _validated_response(repository, str(user.id), settings, revision)
     except Exception as exc:
         raise _translate_repository_error(exc) from exc
-    return _response(settings, revision)

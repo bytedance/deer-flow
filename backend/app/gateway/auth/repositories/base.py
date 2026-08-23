@@ -128,3 +128,8 @@ class UserRepository(ABC):
     async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict, int]:
         """Atomically deep-merge a validated partial preference update."""
         raise NotImplementedError
+
+    @abstractmethod
+    async def reset_user_preferences_if_revision(self, user_id: str, revision: int) -> tuple[dict | None, int]:
+        """Clear an invalid preference record unless another writer replaced it."""
+        raise NotImplementedError

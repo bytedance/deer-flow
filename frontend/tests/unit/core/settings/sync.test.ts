@@ -407,6 +407,32 @@ test("keeps the local edit when a background PATCH fails", async () => {
   controller.stop();
 });
 
+test("reinitializes a corrupt server record before acknowledging its discovering PATCH", async () => {
+  const store = new FakeStore(settings("initial"));
+  const transport = transportWithServer(settings("server"));
+  transport.patch = rs.fn(async () => ({ settings: null, revision: 2 }));
+  transport.initialize = rs.fn(async (local: PersistedUserSettings) => ({
+    settings: structuredClone(local),
+    revision: 3,
+  }));
+  const controller = new UserSettingsSyncController(store, transport);
+  await controller.start();
+
+  store.mutate({ context: { model_name: "recovered-edit" } });
+  await controller.whenIdle();
+
+  expect(transport.patch).toHaveBeenCalledWith({
+    context: { model_name: "recovered-edit" },
+  });
+  expect(transport.initialize).toHaveBeenCalledWith(
+    expect.objectContaining({
+      context: expect.objectContaining({ model_name: "recovered-edit" }),
+    }),
+  );
+  expect(store.pendingPatch).toBeNull();
+  controller.stop();
+});
+
 test("fails closed and retains pending work when the write lock is unavailable", async () => {
   const store = new FakeStore(settings("initial"));
   store.pendingPatch = { context: { model_name: "pending" } };
