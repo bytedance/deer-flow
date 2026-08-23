@@ -822,8 +822,9 @@ def test_apply_mounts_deadline_uses_configured_value(monkeypatch, tmp_path, capl
         (None, 120),
         ("120s", 120),
         ("abc", 120),
+        (float("inf"), 120),
     ],
-    ids=["zero", "negative", "large_negative", "none", "suffix", "alpha"],
+    ids=["zero", "negative", "large_negative", "none", "suffix", "alpha", "infinity"],
 )
 def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, caplog, raw, expected):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")

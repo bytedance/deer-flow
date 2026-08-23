@@ -352,7 +352,7 @@ class E2BSandboxProvider(SandboxProvider):
             return _MOUNT_PASS_DEADLINE_SECONDS
         try:
             value = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             logger.warning(
                 "E2BSandboxProvider: non-numeric mount_upload_deadline_seconds=%r; falling back to %ds",
                 raw,
