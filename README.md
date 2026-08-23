@@ -82,7 +82,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
   - [Scheduled Tasks](#scheduled-tasks)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
-  - [⚠️ Security Notice](#️-security-notice)
+  - [⚠️ Security Notice](#-security-notice)
     - [Improper Deployment May Introduce Security Risks](#improper-deployment-may-introduce-security-risks)
     - [Security Recommendations](#security-recommendations)
   - [Contributing](#contributing)

@@ -78,7 +78,7 @@ DeerFlow intègre désormais le toolkit de recherche et de crawling intelligent 
   - [Tâches planifiées (Scheduled Tasks)](#tâches-planifiées-scheduled-tasks)
   - [Atelier terminal (TUI)](#atelier-terminal-tui)
   - [Documentation](#documentation)
-  - [⚠️ Avertissement de sécurité](#️-avertissement-de-sécurité)
+  - [⚠️ Avertissement de sécurité](#-avertissement-de-sécurité)
   - [Contribuer](#contribuer)
   - [Licence](#licence)
   - [Remerciements](#remerciements)
