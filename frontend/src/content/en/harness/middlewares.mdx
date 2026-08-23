@@ -235,15 +235,13 @@ The basic structure is:
 from langchain.agents.middleware import AgentMiddleware
 
 class MyMiddleware(AgentMiddleware):
-    async def on_start(self, state, config):
-        # Runs before the model call
-        # Modify state or config here
-        return state, config
+    def before_model(self, state, runtime) -> dict | None:
+        """Runs before each model call."""
+        return None
 
-    async def on_end(self, state, config):
-        # Runs after the model call
-        # Inspect or modify the result
-        return state, config
+    def after_model(self, state, runtime) -> dict | None:
+        """Runs after each model call."""
+        return None
 ```
 
 Custom middlewares are passed to `make_lead_agent` via the `custom_middlewares` parameter in `build_middlewares`. They are injected immediately before `ClarificationMiddleware` at the end of the chain.
