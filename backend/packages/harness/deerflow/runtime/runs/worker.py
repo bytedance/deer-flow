@@ -73,7 +73,7 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
-from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
+from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.trace_context import (
     DEERFLOW_TRACE_METADATA_KEY,
     is_trace_id_from_request_header,
@@ -2456,11 +2456,18 @@ class _MessageSeqStamper:
     it at the tail is already its correct position.
     """
 
-    __slots__ = ("_store", "_thread_id", "_seqs", "_missing")
+    __slots__ = ("_store", "_thread_id", "_user_id", "_seqs", "_missing")
 
     def __init__(self, event_store: Any, thread_id: str) -> None:
         self._store = event_store
         self._thread_id = thread_id
+        # Soft-resolved once at build time, like the worker's write paths: a
+        # launch path that never inherits the auth contextvar (e.g. a
+        # null-owner scheduled task) writes rows with no user_id, so the
+        # lookup filters by the same id the writes stamped — or not at all —
+        # instead of the db store's strict AUTO default raising per frame.
+        user = get_current_user()
+        self._user_id: str | None = str(user.id) if user is not None else None
         self._seqs: dict[str, int] = {}
         self._missing: set[str] = set()
 
@@ -2475,7 +2482,7 @@ class _MessageSeqStamper:
         unresolved = {i for i in identities if i is not None and i not in self._seqs and i not in self._missing}
         if unresolved:
             try:
-                found = await self._store.get_message_seqs(self._thread_id, sorted(unresolved))
+                found = await self._store.get_message_seqs(self._thread_id, sorted(unresolved), user_id=self._user_id)
             except Exception:
                 # Placement is an enhancement: a client without seq falls back
                 # to its own ordering rule. Never fail the frame over it.

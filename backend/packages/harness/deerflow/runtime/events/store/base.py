@@ -150,7 +150,13 @@ class RunEventStore(abc.ABC):
         """Count displayable messages (category=message) in a thread."""
 
     @abc.abstractmethod
-    async def get_message_seqs(self, thread_id: str, identities: Sequence[str]) -> dict[str, int]:
+    async def get_message_seqs(
+        self,
+        thread_id: str,
+        identities: Sequence[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, int]:
         """Return ``{identity: seq}`` for messages already persisted in this thread.
 
         A checkpoint carries no seq of its own and loses messages to

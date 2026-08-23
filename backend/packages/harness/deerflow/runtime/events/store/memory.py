@@ -181,7 +181,7 @@ class MemoryRunEventStore(RunEventStore):
     async def count_messages(self, thread_id):
         return len(self._messages.get(thread_id, []))
 
-    async def get_message_seqs(self, thread_id, identities):
+    async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
         wanted = set(identities)
         if not wanted:
             return {}

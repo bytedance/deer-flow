@@ -320,7 +320,7 @@ class JsonlRunEventStore(RunEventStore):
         all_events = await asyncio.to_thread(self._read_thread_events, thread_id)
         return sum(1 for e in all_events if e.get("category") == "message")
 
-    async def get_message_seqs(self, thread_id, identities):
+    async def get_message_seqs(self, thread_id, identities, *, user_id: str | None | _AutoSentinel = AUTO):
         wanted = set(identities)
         if not wanted:
             return {}

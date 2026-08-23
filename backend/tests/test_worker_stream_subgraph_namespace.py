@@ -674,9 +674,9 @@ class TestMessageSeqStamping:
         calls: list[list[str]] = []
         original = store.get_message_seqs
 
-        async def counting(thread_id, identities):
+        async def counting(thread_id, identities, **kwargs):
             calls.append(list(identities))
-            return await original(thread_id, identities)
+            return await original(thread_id, identities, **kwargs)
 
         store.get_message_seqs = counting  # type: ignore[method-assign]
         stamper = _MessageSeqStamper(store, "t1")
@@ -695,3 +695,50 @@ class TestMessageSeqStamping:
             )
 
         assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.no_auto_user
+    async def test_stamping_survives_a_launch_path_without_user_context(self, tmp_path):
+        """A launch path that never inherits the auth contextvar (e.g. a
+        null-owner scheduled task) must not silently disable stamping.
+
+        The db store's ``user_id=AUTO`` default raises without a user in
+        context, and ``stamp``'s except clause would swallow that into a
+        per-frame warning — a graceful degrade that turns the fix off in
+        exactly the background runs that need it. The stamper therefore
+        soft-resolves the id once, when it is built, the same way the
+        worker's write paths beside it do (unset → no filter)."""
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'seqs.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            store = DbRunEventStore(get_session_factory())
+            # Written without a user in context, as the worker's own
+            # human_message put does on such a path: the row's user_id is NULL.
+            await store.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.human.input",
+                category="message",
+                content={"type": "human", "id": "u1__user", "content": "MARK-FIRST"},
+            )
+
+            bridge = _FakeBridge()
+            await _publish_stream_item(
+                bridge=bridge,
+                run_id="run-1",
+                mode="values",
+                chunk={"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]},
+                namespace=(),
+                file_tool_chunk_batcher=None,
+                subagent_events=_FakeSubagentEvents(),
+                seq_stamper=_MessageSeqStamper(store, "t1"),
+            )
+
+            _run, _event, payload = bridge.published[0]
+            assert payload["messages"][0]["additional_kwargs"]["deerflow_seq"] == 1
+        finally:
+            await close_engine()
