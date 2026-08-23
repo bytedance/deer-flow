@@ -14,6 +14,7 @@ import {
 } from "@/core/settings/api";
 import {
   activateBaseSettingsPersistence,
+  getOutstandingBaseSettingsVolatileLeaves,
   getPersistedBaseSettingsSnapshot,
   getPendingBaseSettingsPatch,
   getPendingBaseSettingsPatchBatch,
@@ -128,6 +129,65 @@ test("an edit made while legacy activation waits is outboxed before server hydra
   });
 });
 
+test("an activation-gap cache hydration is not replayed as a local mutation", async () => {
+  const before = getPersistedBaseSettingsSnapshot();
+  let releaseLock: (() => void) | undefined;
+  let lockRequested = false;
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      request: (_name: string, _options: object, callback: () => unknown) => {
+        if (_name !== "deerflow.user-settings-legacy-migration") {
+          return Promise.resolve(callback());
+        }
+        lockRequested = true;
+        return new Promise<unknown>((resolve) => {
+          releaseLock = () => resolve(callback());
+        });
+      },
+    },
+  });
+  const hydratedCache = {
+    ...before,
+    context: { ...before.context, model_name: "other-tab-hydration" },
+  };
+  const newerServer = {
+    ...before,
+    context: { ...before.context, model_name: "newer-server" },
+  };
+  mockedFetchUserSettings.mockResolvedValue({
+    settings: newerServer,
+    revision: 4,
+  });
+  mockedPatchUserSettings.mockResolvedValue({
+    settings: newerServer,
+    revision: 5,
+  });
+
+  render(<UserSettingsSync enabled userId="user-a" />);
+  await waitFor(() => expect(lockRequested).toBe(true));
+  localStorage.setItem(
+    "deerflow.user-settings-cache.user-a",
+    JSON.stringify(hydratedCache),
+  );
+  window.dispatchEvent(
+    new StorageEvent("storage", {
+      key: "deerflow.user-settings-cache.user-a",
+      storageArea: localStorage,
+    }),
+  );
+  releaseLock?.();
+
+  await waitFor(() =>
+    expect(mockedFetchUserSettings).toHaveBeenCalledWith("user-a"),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(mockedPatchUserSettings).not.toHaveBeenCalled();
+  expect(getPersistedBaseSettingsSnapshot().context.model_name).toBe(
+    "newer-server",
+  );
+});
+
 test("an activation-gap edit survives when browser storage rejects outbox writes", async () => {
   updateLocalSettings("tokenUsage", { inlineMode: "per_turn" });
   rs.spyOn(localStorage, "setItem").mockImplementation(() => {
@@ -178,6 +238,141 @@ test("an activation-gap edit survives when browser storage rejects outbox writes
     }),
   );
   expect(getPersistedBaseSettingsSnapshot().tokenUsage.inlineMode).toBe("off");
+});
+
+test("a volatile pre-bootstrap edit survives an account switch and remount", async () => {
+  for (const userId of ["user-a", "user-b"]) {
+    localStorage.setItem(
+      `deerflow.user-settings-cache.${userId}`,
+      JSON.stringify({
+        notification: { enabled: true },
+        tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+        context: {},
+      }),
+    );
+  }
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  rs.spyOn(localStorage, "setItem").mockImplementation((key, value) => {
+    if (key.startsWith("deerflow.user-settings-pending.leaf.")) {
+      throw new DOMException("Blocked", "SecurityError");
+    }
+    originalSetItem(key, value);
+  });
+  let releaseBootstrapLock: (() => void) | undefined;
+  let bootstrapLockRequested = false;
+  let shouldBlockAlice = true;
+  Object.defineProperty(navigator, "locks", {
+    configurable: true,
+    value: {
+      request: (_name: string, _options: object, callback: () => unknown) => {
+        if (shouldBlockAlice && _name.endsWith(".user-a")) {
+          shouldBlockAlice = false;
+          bootstrapLockRequested = true;
+          return new Promise<unknown>((resolve) => {
+            releaseBootstrapLock = () => resolve(callback());
+          });
+        }
+        return Promise.resolve(callback());
+      },
+    },
+  });
+  mockedFetchUserSettings.mockImplementation(async (userId) => ({
+    settings: {
+      notification: { enabled: true },
+      tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+      context: userId === "user-a" ? {} : { model_name: "bob-model" },
+    },
+    revision: 1,
+  }));
+  mockedPatchUserSettings.mockResolvedValue({
+    settings: {
+      notification: { enabled: true },
+      tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+      context: { model_name: "alice-volatile" },
+    },
+    revision: 2,
+  });
+
+  const view = render(<UserSettingsSync enabled userId="user-a" />);
+  await waitFor(() => expect(bootstrapLockRequested).toBe(true));
+  updateLocalSettings("context", { model_name: "alice-volatile" });
+  expect(getPendingBaseSettingsPatch("user-a")).toBeNull();
+  expect(getOutstandingBaseSettingsVolatileLeaves("user-a")).toHaveLength(1);
+
+  view.rerender(<UserSettingsSync enabled userId="user-b" />);
+  releaseBootstrapLock?.();
+  await waitFor(() =>
+    expect(mockedFetchUserSettings).toHaveBeenCalledWith("user-b"),
+  );
+  expect(getOutstandingBaseSettingsVolatileLeaves("user-a")).toHaveLength(1);
+  view.rerender(<UserSettingsSync enabled userId="user-a" />);
+
+  await waitFor(() =>
+    expect(mockedFetchUserSettings).toHaveBeenCalledWith("user-a"),
+  );
+  await waitFor(() =>
+    expect(mockedPatchUserSettings).toHaveBeenCalledWith("user-a", {
+      context: { model_name: "alice-volatile" },
+    }),
+  );
+});
+
+test("a failed volatile write is retried after the sync controller remounts", async () => {
+  installSerialWebLocks();
+  localStorage.setItem(
+    "deerflow.user-settings-cache.user-a",
+    JSON.stringify({
+      notification: { enabled: true },
+      tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+      context: {},
+    }),
+  );
+  const originalSetItem = localStorage.setItem.bind(localStorage);
+  rs.spyOn(localStorage, "setItem").mockImplementation((key, value) => {
+    if (key.startsWith("deerflow.user-settings-pending.leaf.")) {
+      throw new DOMException("Blocked", "SecurityError");
+    }
+    originalSetItem(key, value);
+  });
+  mockedFetchUserSettings.mockResolvedValue({
+    settings: {
+      notification: { enabled: true },
+      tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+      context: {},
+    },
+    revision: 1,
+  });
+  mockedPatchUserSettings
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue({
+      settings: {
+        notification: { enabled: true },
+        tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+        context: { model_name: "retry-after-remount" },
+      },
+      revision: 2,
+    });
+
+  const firstView = render(<UserSettingsSync enabled userId="user-a" />);
+  await waitFor(() =>
+    expect(mockedFetchUserSettings).toHaveBeenCalledWith("user-a"),
+  );
+  updateLocalSettings("context", { model_name: "retry-after-remount" });
+  await waitFor(() => expect(mockedPatchUserSettings).toHaveBeenCalledTimes(1));
+  firstView.unmount();
+
+  const secondView = render(<UserSettingsSync enabled userId="user-a" />);
+
+  await waitFor(() => expect(mockedPatchUserSettings).toHaveBeenCalledTimes(2));
+  expect(mockedPatchUserSettings).toHaveBeenLastCalledWith("user-a", {
+    context: { model_name: "retry-after-remount" },
+  });
+
+  secondView.unmount();
+  render(<UserSettingsSync enabled userId="user-a" />);
+  await waitFor(() => expect(mockedFetchUserSettings).toHaveBeenCalledTimes(3));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(mockedPatchUserSettings).toHaveBeenCalledTimes(2);
 });
 
 test("activation seeding cannot overwrite a later durable leaf hidden behind a storage event", async () => {
@@ -553,6 +748,235 @@ test("a local leaf edit preserves a newer sibling leaf from another tab", async 
   );
   unsubscribe();
   deactivate();
+});
+
+test("a stale same-value edit is diffed against the latest shared cache", async () => {
+  localStorage.setItem(
+    "deerflow.user-settings-cache.user-a",
+    JSON.stringify({
+      notification: { enabled: true },
+      tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+      context: {},
+    }),
+  );
+  const deactivate = await activateBaseSettingsPersistence("user-a");
+  const listener = rs.fn();
+  const unsubscribe = subscribeBaseSettingsMutations(listener);
+  localStorage.setItem(
+    "deerflow.user-settings-cache.user-a",
+    JSON.stringify({
+      notification: { enabled: false },
+      tokenUsage: { headerTotal: false, inlineMode: "off" },
+      context: { model_name: "newer-sibling" },
+    }),
+  );
+
+  updateLocalSettings("tokenUsage", { inlineMode: "per_turn" });
+
+  expect(
+    JSON.parse(
+      localStorage.getItem("deerflow.user-settings-cache.user-a") ?? "null",
+    ),
+  ).toEqual({
+    notification: { enabled: false },
+    tokenUsage: { headerTotal: false, inlineMode: "per_turn" },
+    context: { model_name: "newer-sibling" },
+  });
+  expect(listener).toHaveBeenCalledWith(
+    { tokenUsage: { inlineMode: "per_turn" } },
+    {
+      durableLeaves: ["tokenUsage.inlineMode"],
+      volatileLeaves: [],
+    },
+  );
+  unsubscribe();
+  deactivate();
+});
+
+test("consecutive volatile leaf edits preserve earlier in-memory values", async () => {
+  localStorage.setItem(
+    "deerflow.user-settings-cache.storage-blocked-user",
+    JSON.stringify({
+      notification: { enabled: true },
+      tokenUsage: { headerTotal: true, inlineMode: "per_turn" },
+      context: {},
+    }),
+  );
+  const deactivate = await activateBaseSettingsPersistence(
+    "storage-blocked-user",
+  );
+  rs.spyOn(localStorage, "setItem").mockImplementation(() => {
+    throw new DOMException("Blocked", "SecurityError");
+  });
+
+  updateLocalSettings("tokenUsage", { inlineMode: "off" });
+  updateLocalSettings("notification", { enabled: false });
+
+  expect(getPersistedBaseSettingsSnapshot()).toEqual({
+    notification: { enabled: false },
+    tokenUsage: { headerTotal: true, inlineMode: "off" },
+    context: {},
+  });
+  deactivate();
+});
+
+test("an acknowledged edit remains in the baseline when only its cache write fails", async () => {
+  installSerialWebLocks();
+  const cacheKey = "deerflow.user-settings-cache.cache-failure-user";
+  const initialSettings = {
+    notification: { enabled: true },
+    tokenUsage: { headerTotal: true, inlineMode: "per_turn" as const },
+    context: {},
+  };
+  localStorage.setItem(cacheKey, JSON.stringify(initialSettings));
+  mockedFetchUserSettings.mockResolvedValue({
+    settings: initialSettings,
+    revision: 1,
+  });
+  mockedPatchUserSettings.mockResolvedValue({
+    settings: initialSettings,
+    revision: 2,
+  });
+
+  render(<UserSettingsSync enabled userId="cache-failure-user" />);
+  await waitFor(() =>
+    expect(mockedFetchUserSettings).toHaveBeenCalledWith("cache-failure-user"),
+  );
+  await waitFor(() =>
+    expect(getPersistedBaseSettingsSnapshot()).toEqual(initialSettings),
+  );
+
+  const originalSetItem = Storage.prototype.setItem.bind(localStorage);
+  const newerCrossTabSettings = {
+    notification: { enabled: true },
+    tokenUsage: { headerTotal: false, inlineMode: "per_turn" },
+    context: { model_name: "newer-cross-tab-sibling" },
+  };
+  let crossTabWriteInjected = false;
+  let cacheWriteFailures = 1;
+  rs.spyOn(localStorage, "setItem").mockImplementation((key, value) => {
+    if (
+      key.startsWith("deerflow.user-settings-pending.leaf.") &&
+      !crossTabWriteInjected
+    ) {
+      crossTabWriteInjected = true;
+      originalSetItem(cacheKey, JSON.stringify(newerCrossTabSettings));
+    }
+    if (key === cacheKey && cacheWriteFailures > 0) {
+      cacheWriteFailures -= 1;
+      throw new DOMException("Blocked", "QuotaExceededError");
+    }
+    originalSetItem(key, value);
+  });
+
+  updateLocalSettings("tokenUsage", { inlineMode: "off" });
+  await waitFor(() =>
+    expect(mockedPatchUserSettings).toHaveBeenCalledWith("cache-failure-user", {
+      tokenUsage: { inlineMode: "off" },
+    }),
+  );
+  await waitFor(() =>
+    expect(getPendingBaseSettingsPatch("cache-failure-user")).toBeNull(),
+  );
+  expect(JSON.parse(localStorage.getItem(cacheKey) ?? "null")).toEqual(
+    newerCrossTabSettings,
+  );
+
+  updateLocalSettings("notification", { enabled: false });
+
+  await waitFor(() => expect(mockedPatchUserSettings).toHaveBeenCalledTimes(2));
+  expect(mockedPatchUserSettings).toHaveBeenLastCalledWith(
+    "cache-failure-user",
+    { notification: { enabled: false } },
+  );
+  const expectedSettings = {
+    notification: { enabled: false },
+    tokenUsage: { headerTotal: false, inlineMode: "off" },
+    context: { model_name: "newer-cross-tab-sibling" },
+  };
+  expect(getPersistedBaseSettingsSnapshot()).toEqual(expectedSettings);
+  expect(JSON.parse(localStorage.getItem(cacheKey) ?? "null")).toEqual(
+    expectedSettings,
+  );
+});
+
+test("a successful cache write rebases its leaf over a newer cross-tab sibling", async () => {
+  installSerialWebLocks();
+  const userId = "cache-rebase-user";
+  const cacheKey = `deerflow.user-settings-cache.${userId}`;
+  const initialSettings = {
+    notification: { enabled: true },
+    tokenUsage: { headerTotal: true, inlineMode: "per_turn" as const },
+    context: {},
+  };
+  const newerCrossTabSettings = {
+    notification: { enabled: true },
+    tokenUsage: { headerTotal: false, inlineMode: "per_turn" as const },
+    context: { model_name: "newer-cross-tab-sibling" },
+  };
+  localStorage.setItem(cacheKey, JSON.stringify(initialSettings));
+  mockedFetchUserSettings.mockResolvedValue({
+    settings: initialSettings,
+    revision: 1,
+  });
+  mockedPatchUserSettings.mockResolvedValue({
+    settings: initialSettings,
+    revision: 2,
+  });
+
+  render(<UserSettingsSync enabled userId={userId} />);
+  await waitFor(() =>
+    expect(mockedFetchUserSettings).toHaveBeenCalledWith(userId),
+  );
+  await waitFor(() =>
+    expect(getPersistedBaseSettingsSnapshot()).toEqual(initialSettings),
+  );
+
+  const originalSetItem = Storage.prototype.setItem.bind(localStorage);
+  let crossTabWriteInjected = false;
+  rs.spyOn(localStorage, "setItem").mockImplementation((key, value) => {
+    if (
+      key.startsWith("deerflow.user-settings-pending.leaf.") &&
+      !crossTabWriteInjected
+    ) {
+      crossTabWriteInjected = true;
+      originalSetItem(cacheKey, JSON.stringify(newerCrossTabSettings));
+    }
+    originalSetItem(key, value);
+  });
+
+  updateLocalSettings("tokenUsage", { inlineMode: "off" });
+
+  const firstExpectedSettings = {
+    notification: { enabled: true },
+    tokenUsage: { headerTotal: false, inlineMode: "off" },
+    context: { model_name: "newer-cross-tab-sibling" },
+  };
+  expect(getPersistedBaseSettingsSnapshot()).toEqual(firstExpectedSettings);
+  expect(JSON.parse(localStorage.getItem(cacheKey) ?? "null")).toEqual(
+    firstExpectedSettings,
+  );
+  await waitFor(() =>
+    expect(mockedPatchUserSettings).toHaveBeenCalledWith(userId, {
+      tokenUsage: { inlineMode: "off" },
+    }),
+  );
+  await waitFor(() => expect(getPendingBaseSettingsPatch(userId)).toBeNull());
+
+  updateLocalSettings("notification", { enabled: false });
+
+  await waitFor(() => expect(mockedPatchUserSettings).toHaveBeenCalledTimes(2));
+  expect(mockedPatchUserSettings).toHaveBeenLastCalledWith(userId, {
+    notification: { enabled: false },
+  });
+  const finalExpectedSettings = {
+    ...firstExpectedSettings,
+    notification: { enabled: false },
+  };
+  expect(getPersistedBaseSettingsSnapshot()).toEqual(finalExpectedSettings);
+  expect(JSON.parse(localStorage.getItem(cacheKey) ?? "null")).toEqual(
+    finalExpectedSettings,
+  );
 });
 
 test("acknowledging one durable batch cannot clear a later tab operation", () => {

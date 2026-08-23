@@ -24,31 +24,38 @@
    Every active-user mutation is captured at the store boundary and enters a
    user-scoped, allowlisted local outbox before async activation or network
    observers can run. If a setting changes between `UserSettingsSync` render
-   and activation, startup diffs the render-time snapshot and seeds only those
-   changed leaves before
-   hydrating the server response, retaining that patch in memory when browser
-   storage rejects the durable outbox write.
+   and activation, a six-leaf local-mutation journal seeds only those local
+   edits before hydrating the server response; storage events and server
+   hydration never enter that journal. Browser-storage failures additionally
+   retain the affected leaf in a user-scoped process-memory outbox across sync
+   controller remounts. A successful write acknowledges only the exact
+   volatile operation it sent, while a newer durable operation for that leaf
+   supersedes the older in-memory value. If only the full fallback-cache write
+   fails, its differing leaves remain in a separate per-user memory overlay
+   after the server outbox is acknowledged. Setters fold that overlay over the
+   latest shared cache, preserving the acknowledged local values without
+   hiding newer cross-tab sibling leaves; a successful cache write or newer
+   same-leaf durable operation clears the corresponding overlay.
    Failed writes remain in that outbox; the next handshake folds them over the
    server read and retries before clearing, so reconnect/reload cannot silently
-   erase an unsynchronized local selection. A server record that fails current
-   schema validation is also recoverable: the
-   Gateway revision-conditionally clears the corrupt value, and a PATCH response
-   carrying that absent record makes the controller reinitialize from its full
-   current local state, then reapply the pending patch before acknowledging it.
-   The replay is required because another device can win the first-writer-wins
-   initialization race with settings that do not include this tab's edit. This
-   keeps a repair from silently dropping the edit that discovered the corrupt
-   record.
-   Local and cross-tab cache changes
-   enqueue only their changed allowlisted leaves. Each user/leaf has a fixed
+   erase an unsynchronized local selection. Local setters diff against the
+   latest user cache plus its durable and in-memory pending leaves and enqueue
+   only changed leaves. Immediately before their full fallback-cache write,
+   they re-read that cache and fold the authoritative local leaf plus all
+   pending leaves over it; the same merged snapshot becomes the in-process
+   base, so a sibling changed between outbox and cache writes is not rolled
+   back;
+   cross-tab cache events update local state without echoing a second write.
+   Each user/leaf has a fixed
    mutation slot containing an opaque operation id and a separate acknowledgement
    slot; successful writes advance acknowledgements without deleting mutations,
    so a later tab write remains pending even when an older request completes.
    Storage-write failures retain the leaf in memory with the mutation id they
    observed, allowing a later durable mutation to supersede that fallback. The
    bootstrap handshake plus every lock-time reread, PATCH, and acknowledgement
-   run under one per-user Web Lock; when Web Locks are unavailable, sync fails
-   closed and local pending work remains untouched. Keep
+   run under one per-user Web Lock. When Web Locks are unavailable, an existing
+   server record can still hydrate the local fallback, while initialization and
+   writes fail closed and pending work remains untouched. Keep
    `UserSettingsSync` mounted
    before interactive workspace content so its render-time version boundary is
    established before settings controls render.

@@ -11,12 +11,56 @@ Lives in the harness persistence package so it is picked up by
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, text
+from sqlalchemy.engine.interfaces import Dialect
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
 from deerflow.persistence.base import Base
+
+
+class MalformedUserPreferences:
+    """Opaque marker returned when a legacy SQLite JSON value cannot decode."""
+
+    __slots__ = ()
+
+    def __deepcopy__(self, memo: dict[int, object]) -> MalformedUserPreferences:
+        return self
+
+
+MALFORMED_USER_PREFERENCES = MalformedUserPreferences()
+
+
+class LenientUserPreferencesJSON(TypeDecorator[object]):
+    """JSON storage that contains malformed preference rows at the read edge."""
+
+    impl = JSON
+    cache_ok = True
+
+    def result_processor(
+        self,
+        dialect: Dialect,
+        coltype: object,
+    ) -> Callable[[Any], Any] | None:
+        # TypeDecorator.process_result_value runs only *after* the inner JSON
+        # decoder, so it cannot catch malformed legacy SQLite text. Wrap that
+        # decoder directly for this one non-critical preference column; valid
+        # JSON and all bind/write behavior still use SQLAlchemy's JSON type.
+        impl_processor = self.impl_instance.result_processor(dialect, coltype)
+        if impl_processor is None:
+            return None
+
+        def process(value: Any) -> Any:
+            try:
+                return impl_processor(value)
+            except (TypeError, ValueError):
+                return MALFORMED_USER_PREFERENCES
+
+        return process
 
 
 class UserRow(Base):
@@ -53,7 +97,7 @@ class UserRow(Base):
     # or thread/workspace-scoped data. NULL distinguishes "never migrated" from
     # a stored preference object so the frontend can perform a one-time import
     # from its legacy localStorage value.
-    preferences: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    preferences: Mapped[object | None] = mapped_column(LenientUserPreferencesJSON(), nullable=True)
     preferences_revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (

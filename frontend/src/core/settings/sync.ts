@@ -23,6 +23,7 @@ export type UserSettingsPatchLeaf =
   | "context.reasoning_effort";
 
 export interface VolatileUserSettingsPatchLeaf {
+  version: number;
   leaf: UserSettingsPatchLeaf;
   patch: PersistedUserSettingsPatch;
   observedDurableOpId: string | null;
@@ -41,6 +42,9 @@ export interface UserSettingsSyncStore {
     acknowledge: () => boolean;
   } | null;
   getDurableLeafOpId: (leaf: UserSettingsPatchLeaf) => string | null;
+  acknowledgeVolatileLeaves: (
+    leaves: readonly VolatileUserSettingsPatchLeaf[],
+  ) => void;
   withWriteLock: (task: () => Promise<void>) => Promise<boolean>;
   hydrate: (
     settings: PersistedUserSettings,
@@ -110,21 +114,18 @@ export class UserSettingsSyncController {
           response.settings === null
             ? await this.transport.initialize(this.store.getSettings())
             : response;
-        if (this.stopped || baselineResponse.settings === null) return;
-
-        const desiredPatch = this.composePendingPatch(
-          this.store.getPendingPatchBatch(),
-        ).patch;
-        const desired = desiredPatch
-          ? applyPersistedUserSettingsPatch(
-              baselineResponse.settings,
-              desiredPatch,
-            )
-          : baselineResponse.settings;
-        this.store.hydrate(desired, hydrationVersion);
-        this.bootstrapped = true;
+        this.hydrateResponse(baselineResponse, hydrationVersion);
       });
-      if (acquired) this.scheduleWrites();
+      if (acquired) {
+        this.scheduleWrites();
+        return;
+      }
+
+      // Web Locks are optional browser functionality. Without them, keep the
+      // cross-device read path available but leave PUT/PATCH fail-closed so
+      // two tabs cannot race an outbox acknowledgement.
+      const response = await this.transport.get();
+      this.hydrateResponse(response, hydrationVersion);
     } catch {
       // Offline/auth-refresh/validation failures are intentionally non-fatal.
       // The existing localStorage-backed behavior remains available, and the
@@ -142,6 +143,21 @@ export class UserSettingsSyncController {
     while (this.writeTask) await this.writeTask;
   }
 
+  private hydrateResponse(
+    response: UserSettingsResponse,
+    hydrationVersion: number,
+  ): void {
+    if (this.stopped || response.settings === null) return;
+    const desiredPatch = this.composePendingPatch(
+      this.store.getPendingPatchBatch(),
+    ).patch;
+    const desired = desiredPatch
+      ? applyPersistedUserSettingsPatch(response.settings, desiredPatch)
+      : response.settings;
+    this.store.hydrate(desired, hydrationVersion);
+    this.bootstrapped = true;
+  }
+
   private composePendingPatch(
     durableBatch: ReturnType<UserSettingsSyncStore["getPendingPatchBatch"]>,
   ): {
@@ -150,15 +166,18 @@ export class UserSettingsSyncController {
   } {
     let patch = durableBatch?.patch ?? null;
     const volatileLeaves: VolatileUserSettingsPatchLeaf[] = [];
+    const supersededLeaves: VolatileUserSettingsPatchLeaf[] = [];
     for (const [leaf, volatile] of this.volatileLeaves) {
       const currentOpId = this.store.getDurableLeafOpId(leaf);
       if (currentOpId !== volatile.observedDurableOpId) {
         this.volatileLeaves.delete(leaf);
+        supersededLeaves.push(volatile);
         continue;
       }
       patch = mergePersistedUserSettingsPatches(patch, volatile.patch);
       volatileLeaves.push(volatile);
     }
+    this.store.acknowledgeVolatileLeaves(supersededLeaves);
     return { patch, volatileLeaves };
   }
 
@@ -220,6 +239,7 @@ export class UserSettingsSyncController {
           acknowledgeFailed = true;
           return;
         }
+        this.store.acknowledgeVolatileLeaves(volatileLeaves);
         for (const volatile of volatileLeaves) {
           if (this.volatileLeaves.get(volatile.leaf) === volatile) {
             this.volatileLeaves.delete(volatile.leaf);

@@ -409,12 +409,13 @@ once. Local storage remains the offline fallback. Thread overrides, browser
 notification permission/system state, workspace data, and credentials stay
 local and are never accepted by this API. Auth-disabled deployments keep the
 original local-only settings behavior. Authenticated fallback caches are keyed
-by account. On browsers with cross-tab Web Locks, only one authenticated
-account can claim the old unscoped cache; without that lock, DeerFlow safely
-skips the ambiguous legacy import instead of copying it across accounts.
-If an older or manually edited server record no longer matches the current
-settings schema, DeerFlow clears only that observed revision and rebuilds it
-from the browser's complete current fallback without dropping a pending edit.
+by account, and cross-tab synchronization forwards only leaves changed by a
+local action so an older cache snapshot cannot clear newer server values. A
+schema-invalid stored record is exposed as absent and repaired by the next
+complete settings import. On browsers with cross-tab Web Locks, only one
+authenticated account can claim the old unscoped cache; without that lock,
+DeerFlow still reads existing server settings but skips ambiguous legacy import
+and preference writes.
 
 #### LangGraph Studio (Optional)
 

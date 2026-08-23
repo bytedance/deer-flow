@@ -10,9 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from app.gateway.auth.repositories.base import (
     UserNotFoundError,
+    UserPreferencesInvalidError,
     UserPreferencesNotInitializedError,
     UserPreferencesWriteConflict,
-    UserRepository,
 )
 from app.gateway.deps import get_current_user_from_request, get_user_repository
 
@@ -132,20 +132,25 @@ class UserPreferencesResponse(_StrictModel):
     revision: int = Field(ge=0)
 
 
-def _response(settings: dict | None, revision: int) -> UserPreferencesResponse:
-    validated = UserPreferences.model_validate(settings) if settings is not None else None
+def _stored_preferences_are_valid(settings: object) -> bool:
+    try:
+        UserPreferences.model_validate(settings)
+    except ValidationError:
+        return False
+    return True
+
+
+def _response(settings: object | None, revision: int) -> UserPreferencesResponse:
+    try:
+        validated = UserPreferences.model_validate(settings) if settings is not None else None
+    except ValidationError:
+        # A stale deployment or a manual database edit can leave JSON that no
+        # longer matches the public allowlist. Treat it like an absent record
+        # while preserving the revision; the normal PUT path then repairs it
+        # with a revision-CAS instead of trapping this session in a 500 loop.
+        logger.warning("Ignoring schema-invalid stored user preferences at revision %s", revision)
+        validated = None
     return UserPreferencesResponse(settings=validated, revision=revision)
-
-
-async def _validated_response(repository: UserRepository, user_id: str, settings: dict | None, revision: int) -> UserPreferencesResponse:
-    """Return a valid record, or clear a corrupt revision for reinitialization."""
-    for _attempt in range(3):
-        try:
-            return _response(settings, revision)
-        except ValidationError:
-            logger.warning("Resetting invalid persisted user preferences for user %s at revision %s", user_id, revision)
-            settings, revision = await repository.reset_user_preferences_if_revision(user_id, revision)
-    return _response(settings, revision)
 
 
 def _translate_repository_error(exc: Exception) -> HTTPException:
@@ -153,6 +158,8 @@ def _translate_repository_error(exc: Exception) -> HTTPException:
         return HTTPException(status_code=404, detail="User not found")
     if isinstance(exc, UserPreferencesNotInitializedError):
         return HTTPException(status_code=409, detail="User preferences must be initialized before partial updates")
+    if isinstance(exc, UserPreferencesInvalidError):
+        return HTTPException(status_code=409, detail="Stored user preferences are invalid; initialize them before partial updates")
     if isinstance(exc, UserPreferencesWriteConflict):
         return HTTPException(status_code=409, detail="Concurrent user-preference update; retry the request")
     raise exc
@@ -180,7 +187,7 @@ async def get_user_preferences(request: Request) -> UserPreferencesResponse:
     repository = get_user_repository()
     try:
         settings, revision = await repository.get_user_preferences(str(user.id))
-        return await _validated_response(repository, str(user.id), settings, revision)
+        return _response(settings, revision)
     except Exception as exc:
         raise _translate_repository_error(exc) from exc
 
@@ -197,15 +204,9 @@ async def initialize_user_preferences(
         settings, revision = await repository.initialize_user_preferences(
             str(user.id),
             body.settings.to_storage_dict(),
+            existing_is_valid=_stored_preferences_are_valid,
         )
-        response = await _validated_response(repository, str(user.id), settings, revision)
-        if response.settings is None:
-            settings, revision = await repository.initialize_user_preferences(
-                str(user.id),
-                body.settings.to_storage_dict(),
-            )
-            return _response(settings, revision)
-        return response
+        return _response(settings, revision)
     except Exception as exc:
         raise _translate_repository_error(exc) from exc
 
@@ -222,7 +223,8 @@ async def patch_user_preferences(
         settings, revision = await repository.merge_user_preferences(
             str(user.id),
             body.to_storage_patch(),
+            current_is_valid=_stored_preferences_are_valid,
         )
-        return await _validated_response(repository, str(user.id), settings, revision)
+        return _response(settings, revision)
     except Exception as exc:
         raise _translate_repository_error(exc) from exc

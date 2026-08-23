@@ -64,6 +64,7 @@ class FakeStore implements UserSettingsSyncStore {
   getDurableLeafOpId: (leaf: UserSettingsPatchLeaf) => string | null = (
     _leaf,
   ) => null;
+  acknowledgeVolatileLeaves = () => undefined;
   withWriteLock = async (task: () => Promise<void>) => {
     if (!this.lockAvailable) return false;
     await task();
@@ -461,6 +462,22 @@ test("fails closed and retains pending work when the write lock is unavailable",
   controller.stop();
 });
 
+test("hydrates existing server settings when the write lock is unavailable", async () => {
+  const store = new FakeStore(settings("local"));
+  store.lockAvailable = false;
+  const transport = transportWithServer(settings("server"));
+  const controller = new UserSettingsSyncController(store, transport);
+
+  await controller.start();
+  await controller.whenIdle();
+
+  expect(transport.get).toHaveBeenCalledTimes(1);
+  expect(transport.initialize).not.toHaveBeenCalled();
+  expect(transport.patch).not.toHaveBeenCalled();
+  expect(store.current.context.model_name).toBe("server");
+  controller.stop();
+});
+
 test("serializes an older durable write before a later volatile write", async () => {
   const tabA = new FakeStore(settings("initial"));
   const tabB = new FakeStore(settings("initial"));
@@ -558,6 +575,7 @@ test("serializes an older durable write before a later volatile write", async ()
       durableLeaves: [],
       volatileLeaves: [
         {
+          version: 1,
           leaf: "context.model_name",
           patch: { context: { model_name: "volatile-p" } },
           observedDurableOpId: "q",

@@ -16,6 +16,7 @@ import {
   mergePersistedUserSettingsPatches,
   parsePersistedUserSettings,
   parsePersistedUserSettingsPatch,
+  toFullUserSettingsPatch,
   toPersistedUserSettings,
   type PersistedUserSettings,
   type PersistedUserSettingsPatch,
@@ -51,8 +52,33 @@ let baseSettings: LocalSettings = DEFAULT_LOCAL_SETTINGS;
 let baseSettingsLoaded = false;
 let storageListenerRegistered = false;
 let baseSettingsMutationVersion = 0;
+let baseSettingsLocalMutationVersion = 0;
+let volatileMutationVersion = 0;
+let cacheWriteMutationVersion = 0;
 let activeBaseSettingsUserId: string | null = null;
 let baseSettingsActivationVersion = 0;
+const latestLocalMutationByLeaf = new Map<
+  UserSettingsPatchLeaf,
+  {
+    version: number;
+    userId: string | null;
+    patch: PersistedUserSettingsPatch;
+  }
+>();
+const outstandingVolatileMutationsByUser = new Map<
+  string,
+  Map<UserSettingsPatchLeaf, VolatileUserSettingsPatchLeaf>
+>();
+interface OutstandingUserSettingsCacheWriteLeaf {
+  version: number;
+  leaf: UserSettingsPatchLeaf;
+  patch: PersistedUserSettingsPatch;
+  observedDurableOpId: string | null;
+}
+const outstandingUserSettingsCacheWritesByUser = new Map<
+  string,
+  Map<UserSettingsPatchLeaf, OutstandingUserSettingsCacheWriteLeaf>
+>();
 
 function emitChange() {
   for (const listener of listeners) {
@@ -66,6 +92,16 @@ function emitBaseSettingsMutation(
 ): void {
   if (patch === null) return;
   baseSettingsMutationVersion += 1;
+  if (persist) {
+    baseSettingsLocalMutationVersion += 1;
+    for (const { leaf, patch: leafPatch } of splitPendingPatchLeaves(patch)) {
+      latestLocalMutationByLeaf.set(leaf, {
+        version: baseSettingsLocalMutationVersion,
+        userId: activeBaseSettingsUserId,
+        patch: leafPatch,
+      });
+    }
+  }
   const persistence =
     persist && activeBaseSettingsUserId !== null
       ? appendPendingBaseSettingsPatch(activeBaseSettingsUserId, patch)
@@ -107,14 +143,155 @@ function readUserSettingsCache(userId: string): PersistedUserSettings | null {
   }
 }
 
-function saveBaseSettingsCache(settings: LocalSettings): void {
+function getOutstandingUserSettingsCacheWriteLeaves(
+  userId: string,
+): OutstandingUserSettingsCacheWriteLeaf[] {
+  const outstanding = outstandingUserSettingsCacheWritesByUser.get(userId);
+  if (outstanding === undefined) return [];
+  for (const [leaf, cacheWrite] of outstanding) {
+    if (
+      getPendingBaseSettingsLeafOpId(userId, leaf) !==
+      cacheWrite.observedDurableOpId
+    ) {
+      outstanding.delete(leaf);
+    }
+  }
+  if (outstanding.size === 0) {
+    outstandingUserSettingsCacheWritesByUser.delete(userId);
+    return [];
+  }
+  return [...outstanding.values()];
+}
+
+function acknowledgeUserSettingsCacheWriteLeaves(
+  userId: string,
+  leaves: readonly OutstandingUserSettingsCacheWriteLeaf[],
+): void {
+  const outstanding = outstandingUserSettingsCacheWritesByUser.get(userId);
+  if (outstanding === undefined) return;
+  for (const cacheWrite of leaves) {
+    if (outstanding.get(cacheWrite.leaf)?.version === cacheWrite.version) {
+      outstanding.delete(cacheWrite.leaf);
+    }
+  }
+  if (outstanding.size === 0) {
+    outstandingUserSettingsCacheWritesByUser.delete(userId);
+  }
+}
+
+function rememberFailedUserSettingsCacheWrite(
+  userId: string,
+  cached: PersistedUserSettings | null,
+  desired: PersistedUserSettings,
+  authoritativePatch?: PersistedUserSettingsPatch | null,
+): void {
+  const patch =
+    authoritativePatch !== undefined
+      ? authoritativePatch
+      : cached === null
+        ? toFullUserSettingsPatch(desired)
+        : diffPersistedUserSettings(cached, desired);
+  const outstanding =
+    authoritativePatch === undefined
+      ? new Map<UserSettingsPatchLeaf, OutstandingUserSettingsCacheWriteLeaf>()
+      : new Map(outstandingUserSettingsCacheWritesByUser.get(userId));
+  if (patch !== null) {
+    for (const { leaf, patch: leafPatch } of splitPendingPatchLeaves(patch)) {
+      outstanding.set(leaf, {
+        version: ++cacheWriteMutationVersion,
+        leaf,
+        patch: leafPatch,
+        observedDurableOpId: getPendingBaseSettingsLeafOpId(userId, leaf),
+      });
+    }
+  }
+  if (outstanding.size === 0) {
+    outstandingUserSettingsCacheWritesByUser.delete(userId);
+  } else {
+    outstandingUserSettingsCacheWritesByUser.set(userId, outstanding);
+  }
+}
+
+function applyPendingUserSettings(
+  userId: string,
+  settings: PersistedUserSettings,
+): PersistedUserSettings {
+  let effective = settings;
+  for (const cacheWrite of getOutstandingUserSettingsCacheWriteLeaves(userId)) {
+    effective = applyPersistedUserSettingsPatch(effective, cacheWrite.patch);
+  }
+  const pending = getPendingBaseSettingsPatch(userId);
+  if (pending !== null) {
+    effective = applyPersistedUserSettingsPatch(effective, pending);
+  }
+  for (const volatile of getOutstandingBaseSettingsVolatileLeaves(userId)) {
+    effective = applyPersistedUserSettingsPatch(effective, volatile.patch);
+  }
+  return effective;
+}
+
+function readEffectiveUserSettingsCache(
+  userId: string,
+): PersistedUserSettings | null {
+  const cached = readUserSettingsCache(userId);
+  return cached === null ? null : applyPendingUserSettings(userId, cached);
+}
+
+function latestBaseSettingsForMutation(): LocalSettings {
+  if (activeBaseSettingsUserId === null) return baseSettings;
+  const persisted = readEffectiveUserSettingsCache(activeBaseSettingsUserId);
+  return persisted === null
+    ? baseSettings
+    : fromPersistedUserSettings(persisted);
+}
+
+function saveUserSettingsCache(
+  userId: string,
+  persisted: PersistedUserSettings,
+  authoritativePatch?: PersistedUserSettingsPatch | null,
+): PersistedUserSettings {
+  const previous = readUserSettingsCache(userId);
+  let desired = persisted;
+  if (authoritativePatch !== undefined) {
+    desired = previous ?? persisted;
+    if (authoritativePatch !== null) {
+      desired = applyPersistedUserSettingsPatch(desired, authoritativePatch);
+    }
+    desired = applyPendingUserSettings(userId, desired);
+  }
+  const outstanding = getOutstandingUserSettingsCacheWriteLeaves(userId);
+  if (
+    safeLocalStorage.setItem(
+      userSettingsCacheStorageKey(userId),
+      JSON.stringify(desired),
+    )
+  ) {
+    acknowledgeUserSettingsCacheWriteLeaves(userId, outstanding);
+  } else {
+    rememberFailedUserSettingsCacheWrite(
+      userId,
+      previous,
+      desired,
+      authoritativePatch,
+    );
+  }
+  return desired;
+}
+
+function saveBaseSettingsCache(
+  settings: LocalSettings,
+  authoritativePatch?: PersistedUserSettingsPatch | null,
+): LocalSettings {
   if (activeBaseSettingsUserId === null) {
     saveLocalSettings(settings);
-    return;
+    return settings;
   }
-  safeLocalStorage.setItem(
-    userSettingsCacheStorageKey(activeBaseSettingsUserId),
-    JSON.stringify(toPersistedUserSettings(settings)),
+  return fromPersistedUserSettings(
+    saveUserSettingsCache(
+      activeBaseSettingsUserId,
+      toPersistedUserSettings(settings),
+      authoritativePatch,
+    ),
   );
 }
 
@@ -199,11 +376,9 @@ export async function activateBaseSettingsPersistence(
       readUserSettingsCache(userId) ??
       claimedLegacy ??
       toPersistedUserSettings(DEFAULT_LOCAL_SETTINGS);
-    safeLocalStorage.setItem(
-      userSettingsCacheStorageKey(userId),
-      JSON.stringify(persisted),
-    );
   }
+  persisted = applyPendingUserSettings(userId, persisted);
+  persisted = saveUserSettingsCache(userId, persisted);
 
   if (
     activeBaseSettingsUserId === userId &&
@@ -271,8 +446,10 @@ function handleStorage(event: StorageEvent) {
     if (event.key !== userSettingsCacheStorageKey(activeBaseSettingsUserId)) {
       return;
     }
-    const persisted = readUserSettingsCache(activeBaseSettingsUserId);
-    if (persisted === null) return;
+    const cached = readUserSettingsCache(activeBaseSettingsUserId);
+    if (cached === null) return;
+    let persisted = applyPendingUserSettings(activeBaseSettingsUserId, cached);
+    persisted = saveUserSettingsCache(activeBaseSettingsUserId, persisted);
     const previous = toPersistedUserSettings(baseSettings);
     baseSettings = fromPersistedUserSettings(persisted);
     emitBaseSettingsMutation(
@@ -324,13 +501,11 @@ export function getBaseSettingsMutationVersion(): number {
 export function getBaseSettingsMutationBoundary(userId: string): {
   version: number;
   userId: string | null;
-  snapshot: PersistedUserSettings;
   durableLeafOpIds: Record<UserSettingsPatchLeaf, string | null>;
 } {
   return {
-    version: baseSettingsMutationVersion,
+    version: baseSettingsLocalMutationVersion,
     userId: activeBaseSettingsUserId,
-    snapshot: getPersistedBaseSettingsSnapshot(),
     durableLeafOpIds: Object.fromEntries(
       PENDING_PATCH_LEAVES.map((leaf) => [
         leaf,
@@ -346,8 +521,11 @@ export function hydrateBaseSettingsFromServer(
 ): boolean {
   ensureBaseSettingsLoaded();
   if (expectedVersion !== baseSettingsMutationVersion) return false;
-  baseSettings = fromPersistedUserSettings(settings);
-  saveBaseSettingsCache(baseSettings);
+  const effective =
+    activeBaseSettingsUserId === null
+      ? settings
+      : applyPendingUserSettings(activeBaseSettingsUserId, settings);
+  baseSettings = saveBaseSettingsCache(fromPersistedUserSettings(effective));
   emitChange();
   return true;
 }
@@ -602,16 +780,61 @@ export function appendPendingBaseSettingsPatch(
         JSON.stringify({ opId, patch: leafPatch }),
       )
     ) {
+      outstandingVolatileMutationsByUser.get(userId)?.delete(leaf);
       persistence.durableLeaves.push(leaf);
     } else {
-      persistence.volatileLeaves.push({
+      const volatile = {
+        version: ++volatileMutationVersion,
         leaf,
         patch: leafPatch,
         observedDurableOpId,
-      });
+      };
+      let outstanding = outstandingVolatileMutationsByUser.get(userId);
+      if (outstanding === undefined) {
+        outstanding = new Map();
+        outstandingVolatileMutationsByUser.set(userId, outstanding);
+      }
+      outstanding.set(leaf, volatile);
+      persistence.volatileLeaves.push(volatile);
     }
   }
   return persistence;
+}
+
+export function getOutstandingBaseSettingsVolatileLeaves(
+  userId: string,
+): VolatileUserSettingsPatchLeaf[] {
+  const outstanding = outstandingVolatileMutationsByUser.get(userId);
+  if (outstanding === undefined) return [];
+  for (const [leaf, volatile] of outstanding) {
+    if (
+      getPendingBaseSettingsLeafOpId(userId, leaf) !==
+      volatile.observedDurableOpId
+    ) {
+      outstanding.delete(leaf);
+    }
+  }
+  if (outstanding.size === 0) {
+    outstandingVolatileMutationsByUser.delete(userId);
+    return [];
+  }
+  return [...outstanding.values()];
+}
+
+export function acknowledgeBaseSettingsVolatileLeaves(
+  userId: string,
+  leaves: readonly VolatileUserSettingsPatchLeaf[],
+): void {
+  const outstanding = outstandingVolatileMutationsByUser.get(userId);
+  if (outstanding === undefined) return;
+  for (const volatile of leaves) {
+    if (outstanding.get(volatile.leaf)?.version === volatile.version) {
+      outstanding.delete(volatile.leaf);
+    }
+  }
+  if (outstanding.size === 0) {
+    outstandingVolatileMutationsByUser.delete(userId);
+  }
 }
 
 export function savePendingBaseSettingsPatch(
@@ -634,24 +857,25 @@ export function savePendingBaseSettingsPatch(
   appendPendingBaseSettingsPatch(userId, patch);
 }
 
-export function seedPendingBaseSettingsFromCurrent(
+export function seedPendingBaseSettingsMutationsSince(
   userId: string,
-  baseline: PersistedUserSettings,
+  boundaryVersion: number,
   boundaryLeafOpIds: Record<UserSettingsPatchLeaf, string | null>,
 ): VolatileUserSettingsPatchLeaf[] {
-  const patch = diffPersistedUserSettings(
-    baseline,
-    getPersistedBaseSettingsSnapshot(),
-  );
-  if (patch === null) return [];
   let eligiblePatch: PersistedUserSettingsPatch | null = null;
-  for (const { leaf, patch: leafPatch } of splitPendingPatchLeaves(patch)) {
+  for (const [leaf, mutation] of latestLocalMutationByLeaf) {
+    if (
+      mutation.version <= boundaryVersion ||
+      (mutation.userId !== null && mutation.userId !== userId)
+    ) {
+      continue;
+    }
     if (
       getPendingBaseSettingsLeafOpId(userId, leaf) === boundaryLeafOpIds[leaf]
     ) {
       eligiblePatch = mergePersistedUserSettingsPatches(
         eligiblePatch,
-        leafPatch,
+        mutation.patch,
       );
     }
   }
@@ -674,24 +898,16 @@ export const updateLocalSettings: LocalSettingsSetter = (key, value) => {
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
 
-  const previous = toPersistedUserSettings(baseSettings);
-  const locallyMerged = mergeSettingsSection(baseSettings, key, value);
+  const mutationBaseline = latestBaseSettingsForMutation();
+  const previous = toPersistedUserSettings(mutationBaseline);
+  const locallyMerged = mergeSettingsSection(mutationBaseline, key, value);
   const patch = diffPersistedUserSettings(
     previous,
     toPersistedUserSettings(locallyMerged),
   );
-  const latestPersisted =
-    activeBaseSettingsUserId === null
-      ? null
-      : readUserSettingsCache(activeBaseSettingsUserId);
-  baseSettings =
-    patch !== null && latestPersisted !== null
-      ? fromPersistedUserSettings(
-          applyPersistedUserSettingsPatch(latestPersisted, patch),
-        )
-      : locallyMerged;
+  baseSettings = locallyMerged;
   emitBaseSettingsMutation(patch);
-  saveBaseSettingsCache(baseSettings);
+  baseSettings = saveBaseSettingsCache(baseSettings, patch);
   emitChange();
 };
 
@@ -703,24 +919,16 @@ export function updateThreadSettings<K extends keyof LocalSettings>(
   ensureBaseSettingsLoaded();
   ensureStorageListenerRegistered();
 
-  const previous = toPersistedUserSettings(baseSettings);
-  const locallyMerged = mergeSettingsSection(baseSettings, key, value);
+  const mutationBaseline = latestBaseSettingsForMutation();
+  const previous = toPersistedUserSettings(mutationBaseline);
+  const locallyMerged = mergeSettingsSection(mutationBaseline, key, value);
   const patch = diffPersistedUserSettings(
     previous,
     toPersistedUserSettings(locallyMerged),
   );
-  const latestPersisted =
-    activeBaseSettingsUserId === null
-      ? null
-      : readUserSettingsCache(activeBaseSettingsUserId);
-  baseSettings =
-    patch !== null && latestPersisted !== null
-      ? fromPersistedUserSettings(
-          applyPersistedUserSettingsPatch(latestPersisted, patch),
-        )
-      : locallyMerged;
+  baseSettings = locallyMerged;
   emitBaseSettingsMutation(patch);
-  saveBaseSettingsCache(baseSettings);
+  baseSettings = saveBaseSettingsCache(baseSettings, patch);
 
   if (
     key === "context" &&

@@ -1,6 +1,7 @@
 """User repository interface for abstracting database operations."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 
 from app.gateway.auth.models import User
 
@@ -17,6 +18,10 @@ class UserNotFoundError(LookupError):
 
 class UserPreferencesNotInitializedError(LookupError):
     """Raised when a partial preference update precedes initialization."""
+
+
+class UserPreferencesInvalidError(LookupError):
+    """Raised when a stored preference record fails the public schema."""
 
 
 class UserPreferencesWriteConflict(RuntimeError):
@@ -115,21 +120,28 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def get_user_preferences(self, user_id: str) -> tuple[dict | None, int]:
+    async def get_user_preferences(self, user_id: str) -> tuple[object | None, int]:
         """Return the user's persisted UI preferences and revision."""
         raise NotImplementedError
 
     @abstractmethod
-    async def initialize_user_preferences(self, user_id: str, settings: dict) -> tuple[dict, int]:
-        """Persist settings only when the user has no preference record yet."""
+    async def initialize_user_preferences(
+        self,
+        user_id: str,
+        settings: dict,
+        *,
+        existing_is_valid: Callable[[object], bool] | None = None,
+    ) -> tuple[dict, int]:
+        """Persist settings when absent, or repair a schema-invalid record."""
         raise NotImplementedError
 
     @abstractmethod
-    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict | None, int]:
-        """Atomically merge a patch, or clear a structurally corrupt record."""
-        raise NotImplementedError
-
-    @abstractmethod
-    async def reset_user_preferences_if_revision(self, user_id: str, revision: int) -> tuple[dict | None, int]:
-        """Clear an invalid preference record unless another writer replaced it."""
+    async def merge_user_preferences(
+        self,
+        user_id: str,
+        patch: dict,
+        *,
+        current_is_valid: Callable[[object], bool] | None = None,
+    ) -> tuple[dict, int]:
+        """Atomically deep-merge a validated partial preference update."""
         raise NotImplementedError

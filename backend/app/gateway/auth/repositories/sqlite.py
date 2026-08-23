@@ -12,18 +12,23 @@ construct this after ``init_engine_from_config()`` has run.
 
 from __future__ import annotations
 
+import asyncio
+import random
 import sqlite3
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import UTC
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import Text, cast, func, or_, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import (
     UserNotFoundError,
+    UserPreferencesInvalidError,
     UserPreferencesNotInitializedError,
     UserPreferencesWriteConflict,
     UserRepository,
@@ -31,6 +36,9 @@ from app.gateway.auth.repositories.base import (
 from deerflow.persistence.user.model import UserRow
 
 _PREFERENCE_WRITE_MAX_ATTEMPTS = 5
+_PREFERENCE_WRITE_RETRY_BASE_SECONDS = 0.005
+_PREFERENCE_WRITE_RETRY_MAX_SECONDS = 0.05
+_SQL_NULL_PREFERENCES = object()
 
 
 def _normalize_email(email: str) -> str:
@@ -50,6 +58,40 @@ def _normalize_email(email: str) -> str:
     existing mixed-case rows keep resolving, without a destructive bulk rewrite.
     """
     return email.lower()
+
+
+def _preferences_are_uninitialized() -> ColumnElement[bool]:
+    """Match both SQL NULL and the JSON literal ``null`` portably.
+
+    SQLAlchemy's generic JSON type serializes Python ``None`` as JSON ``null``
+    by default, and both values deserialize back to ``None``. PostgreSQL's
+    ``json`` type has no equality operator, so compare its text representation
+    instead of using ``UserRow.preferences == JSON.NULL``. The primary-key
+    predicate on the caller keeps this cast off any broad table scan.
+    """
+    return or_(
+        UserRow.preferences.is_(None),
+        cast(UserRow.preferences, Text) == "null",
+    )
+
+
+def _user_preferences_select(user_id: str):
+    """Select preferences with an explicit SQL-NULL marker.
+
+    PostgreSQL drivers decode both SQL NULL and JSON ``null`` to Python None.
+    Keeping the database predicate beside the value preserves that distinction
+    independently of DBAPI JSON decoding.
+    """
+    return select(
+        UserRow.preferences,
+        UserRow.preferences_revision,
+        UserRow.preferences.is_(None).label("preferences_is_sql_null"),
+    ).where(UserRow.id == user_id)
+
+
+def _unpack_user_preferences_row(row) -> tuple[object, int]:
+    preferences, revision, is_sql_null = row
+    return (_SQL_NULL_PREFERENCES if is_sql_null else preferences), int(revision)
 
 
 class SQLiteUserRepository(UserRepository):
@@ -189,16 +231,24 @@ class SQLiteUserRepository(UserRepository):
             row = result.scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
 
-    async def get_user_preferences(self, user_id: str) -> tuple[dict | None, int]:
-        stmt = select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id)
+    async def get_user_preferences(self, user_id: str) -> tuple[object | None, int]:
+        stmt = _user_preferences_select(user_id)
         async with self._sf() as session:
             row = (await session.execute(stmt)).one_or_none()
         if row is None:
             raise UserNotFoundError(f"User {user_id} no longer exists")
-        preferences, revision = row
-        return deepcopy(preferences), int(revision)
+        preferences, revision = _unpack_user_preferences_row(row)
+        if preferences is _SQL_NULL_PREFERENCES:
+            preferences = None
+        return deepcopy(preferences), revision
 
-    async def initialize_user_preferences(self, user_id: str, settings: dict) -> tuple[dict, int]:
+    async def initialize_user_preferences(
+        self,
+        user_id: str,
+        settings: dict,
+        *,
+        existing_is_valid: Callable[[object], bool] | None = None,
+    ) -> tuple[dict, int]:
         """Set the first preference record without overwriting another client.
 
         The conditional update is the cross-process arbiter: two tabs or Gateway
@@ -206,48 +256,93 @@ class SQLiteUserRepository(UserRepository):
         reads and returns the winner's server value.
         """
         candidate = deepcopy(settings)
-        async with self._sf() as session:
-            result = await session.execute(
-                update(UserRow)
-                .where(UserRow.id == user_id, UserRow.preferences.is_(None))
-                .values(
-                    preferences=candidate,
-                    preferences_revision=UserRow.preferences_revision + 1,
-                )
-            )
-            if result.rowcount == 0:
-                row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
-                if row is None:
-                    raise UserNotFoundError(f"User {user_id} no longer exists")
-                existing, revision = row
-                if existing is None:
-                    # A concurrent transaction may have lost before committing;
-                    # let a normal retry from the client resolve that rare race.
-                    raise UserPreferencesWriteConflict(f"Preferences for user {user_id} are being initialized")
-                return deepcopy(existing), int(revision)
-
-            row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one()
-            await session.commit()
-            stored, revision = row
-            return deepcopy(stored), int(revision)
-
-    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict | None, int]:
-        """Merge with an optimistic revision CAS supported by SQLite/Postgres.
-
-        A structurally corrupt JSON value cannot be deep-merged safely. Clear
-        it in the same CAS write so the client receives the normal absent-record
-        recovery signal instead of a server error.
-        """
-        for _attempt in range(_PREFERENCE_WRITE_MAX_ATTEMPTS):
+        for attempt in range(_PREFERENCE_WRITE_MAX_ATTEMPTS):
             async with self._sf() as session:
                 dialect_name = session.get_bind().dialect.name
                 try:
-                    row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
+                    result = await session.execute(
+                        update(UserRow)
+                        .where(UserRow.id == user_id, _preferences_are_uninitialized())
+                        .values(
+                            preferences=candidate,
+                            preferences_revision=UserRow.preferences_revision + 1,
+                        )
+                    )
+                    if result.rowcount == 0:
+                        row = (await session.execute(_user_preferences_select(user_id))).one_or_none()
+                        if row is None:
+                            raise UserNotFoundError(f"User {user_id} no longer exists")
+                        existing, revision = _unpack_user_preferences_row(row)
+                        if existing is _SQL_NULL_PREFERENCES or existing is None:
+                            # A concurrent transaction may have lost before committing;
+                            # let a normal retry from the client resolve that rare race.
+                            raise UserPreferencesWriteConflict(f"Preferences for user {user_id} are being initialized")
+                        if existing_is_valid is not None and not existing_is_valid(existing):
+                            repaired = await session.execute(
+                                update(UserRow)
+                                .where(
+                                    UserRow.id == user_id,
+                                    UserRow.preferences_revision == revision,
+                                )
+                                .values(
+                                    preferences=candidate,
+                                    preferences_revision=revision + 1,
+                                )
+                            )
+                            if repaired.rowcount != 1:
+                                await session.rollback()
+                                winner_row = (await session.execute(_user_preferences_select(user_id))).one_or_none()
+                                if winner_row is None:
+                                    raise UserNotFoundError(f"User {user_id} no longer exists")
+                                winner, winner_revision = _unpack_user_preferences_row(winner_row)
+                                if winner is _SQL_NULL_PREFERENCES or winner is None:
+                                    raise UserPreferencesWriteConflict(f"Preferences for user {user_id} are being initialized")
+                                if existing_is_valid(winner):
+                                    return deepcopy(winner), winner_revision
+                                raise UserPreferencesWriteConflict(f"Preferences for user {user_id} changed while being repaired")
+                            await session.commit()
+                            return candidate, revision + 1
+                        return deepcopy(existing), revision
+
+                    row = (await session.execute(_user_preferences_select(user_id))).one()
+                    await session.commit()
+                    stored, revision = _unpack_user_preferences_row(row)
+                    return deepcopy(stored), revision
+                except OperationalError as exc:
+                    # A stale SQLite WAL snapshot cannot be upgraded after a
+                    # competing initializer/repair commits. Restart the whole
+                    # transaction so this client can observe and return the
+                    # first writer's value. Other database errors keep their
+                    # existing semantics.
+                    if dialect_name != "sqlite" or not _is_sqlite_busy_snapshot_error(exc):
+                        raise
+                    await session.rollback()
+
+            if attempt + 1 < _PREFERENCE_WRITE_MAX_ATTEMPTS:
+                await _sleep_before_preference_retry(attempt)
+
+        raise UserPreferencesWriteConflict(f"Concurrent preference initialization for user {user_id} did not settle")
+
+    async def merge_user_preferences(
+        self,
+        user_id: str,
+        patch: dict,
+        *,
+        current_is_valid: Callable[[object], bool] | None = None,
+    ) -> tuple[dict, int]:
+        """Merge with an optimistic revision CAS supported by SQLite/Postgres."""
+        for attempt in range(_PREFERENCE_WRITE_MAX_ATTEMPTS):
+            async with self._sf() as session:
+                dialect_name = session.get_bind().dialect.name
+                try:
+                    row = (await session.execute(_user_preferences_select(user_id))).one_or_none()
                     if row is None:
                         raise UserNotFoundError(f"User {user_id} no longer exists")
-                    current, revision = row
-                    if current is None:
+                    current, revision = _unpack_user_preferences_row(row)
+                    if current is _SQL_NULL_PREFERENCES or current is None:
                         raise UserPreferencesNotInitializedError(f"Preferences for user {user_id} have not been initialized")
+                    if current_is_valid is not None and not current_is_valid(current):
+                        raise UserPreferencesInvalidError(f"Preferences for user {user_id} do not match the current schema")
 
                     merged = _merge_preferences(current, patch)
                     result = await session.execute(
@@ -263,7 +358,7 @@ class SQLiteUserRepository(UserRepository):
                     )
                     if result.rowcount == 1:
                         await session.commit()
-                        return merged, int(revision) + 1
+                        return merged, revision + 1
                     await session.rollback()
                 except OperationalError as exc:
                     # In WAL mode, a transaction that SELECTed before another
@@ -274,62 +369,42 @@ class SQLiteUserRepository(UserRepository):
                     # CAS cycle so disjoint client patches are not lost. Other
                     # SQLite failures and every Postgres failure retain their
                     # existing error semantics.
-                    if dialect_name != "sqlite" or not _is_sqlite_busy_error(exc):
+                    if dialect_name != "sqlite" or not _is_sqlite_busy_snapshot_error(exc):
                         raise
                     await session.rollback()
 
+            if attempt + 1 < _PREFERENCE_WRITE_MAX_ATTEMPTS:
+                await _sleep_before_preference_retry(attempt)
+
         raise UserPreferencesWriteConflict(f"Concurrent preference updates for user {user_id} did not settle")
 
-    async def reset_user_preferences_if_revision(self, user_id: str, revision: int) -> tuple[dict | None, int]:
-        """Clear a corrupt record without erasing a concurrent valid update."""
-        async with self._sf() as session:
-            result = await session.execute(
-                update(UserRow)
-                .where(
-                    UserRow.id == user_id,
-                    UserRow.preferences_revision == revision,
-                )
-                .values(
-                    preferences=None,
-                    preferences_revision=revision + 1,
-                )
-            )
-            if result.rowcount == 1:
-                await session.commit()
-                return None, revision + 1
 
-            row = (await session.execute(select(UserRow.preferences, UserRow.preferences_revision).where(UserRow.id == user_id))).one_or_none()
-            if row is None:
-                raise UserNotFoundError(f"User {user_id} no longer exists")
-            settings, current_revision = row
-            return deepcopy(settings), int(current_revision)
+def _is_sqlite_busy_snapshot_error(exc: OperationalError) -> bool:
+    """Retry only an immediately returned stale WAL snapshot error.
+
+    Ordinary SQLITE_BUSY already waited for the configured SQLite busy timeout;
+    another application-level retry loop could turn one 30-second wait into
+    roughly 150 seconds. Adapters that omit the extended result code stay
+    fail-closed because their generic "database is locked" text cannot safely
+    distinguish BUSY_SNAPSHOT from a completed busy-timeout wait.
+    """
+    return getattr(exc.orig, "sqlite_errorcode", None) == sqlite3.SQLITE_BUSY_SNAPSHOT
 
 
-def _is_sqlite_busy_error(exc: OperationalError) -> bool:
-    """Match SQLITE_BUSY and its extended result codes from sqlite3."""
-    error_code = getattr(exc.orig, "sqlite_errorcode", None)
-    if isinstance(error_code, int):
-        return error_code & 0xFF == sqlite3.SQLITE_BUSY
-
-    # Python 3.12's sqlite3 exceptions expose ``sqlite_errorcode``. Keep the
-    # message fallback for compatible DBAPI adapters that omit that attribute.
-    return "database is locked" in str(exc.orig).lower()
+async def _sleep_before_preference_retry(attempt: int) -> None:
+    """Yield with bounded exponential jitter before retrying a preference CAS."""
+    ceiling = min(
+        _PREFERENCE_WRITE_RETRY_BASE_SECONDS * (2**attempt),
+        _PREFERENCE_WRITE_RETRY_MAX_SECONDS,
+    )
+    await asyncio.sleep(random.uniform(ceiling / 2, ceiling))
 
 
-def _merge_preferences(current: object, patch: dict) -> dict | None:
-    """Deep-merge allowlisted sections, or flag an unsafe stored shape."""
-    if not isinstance(current, dict):
-        return None
-
+def _merge_preferences(current: dict, patch: dict) -> dict:
+    """Deep-merge allowlisted sections; JSON null clears optional fields."""
     merged = deepcopy(current)
     for section, values in patch.items():
-        if not isinstance(values, dict):
-            return None
-        if section not in merged:
-            merged[section] = {}
-        target = merged[section]
-        if not isinstance(target, dict):
-            return None
+        target = merged.setdefault(section, {})
         for key, value in values.items():
             if value is None:
                 target.pop(key, None)

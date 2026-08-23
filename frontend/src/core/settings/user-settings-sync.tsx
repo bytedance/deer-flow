@@ -8,14 +8,16 @@ import {
   patchUserSettings,
 } from "./api";
 import {
+  acknowledgeBaseSettingsVolatileLeaves,
   activateBaseSettingsPersistence,
   getBaseSettingsMutationBoundary,
   getBaseSettingsMutationVersion,
+  getOutstandingBaseSettingsVolatileLeaves,
   getPendingBaseSettingsLeafOpId,
   getPendingBaseSettingsPatchBatch,
   getPersistedBaseSettingsSnapshot,
   hydrateBaseSettingsFromServer,
-  seedPendingBaseSettingsFromCurrent,
+  seedPendingBaseSettingsMutationsSince,
   subscribeBaseSettingsMutations,
   withBaseSettingsWriteLock,
 } from "./store";
@@ -64,16 +66,16 @@ function UserSettingsSyncLifecycle({
         deactivate();
         return;
       }
-      const activationVolatileLeaves =
-        getBaseSettingsMutationVersion() !== activationBoundary.version &&
-        (activationBoundary.userId === null ||
-          activationBoundary.userId === userId)
-          ? seedPendingBaseSettingsFromCurrent(
-              userId,
-              activationBoundary.snapshot,
-              activationBoundary.durableLeafOpIds,
-            )
-          : [];
+      if (
+        activationBoundary.userId === null ||
+        activationBoundary.userId === userId
+      ) {
+        seedPendingBaseSettingsMutationsSince(
+          userId,
+          activationBoundary.version,
+          activationBoundary.durableLeafOpIds,
+        );
+      }
       deactivatePersistence = deactivate;
       const store = {
         getSettings: getPersistedBaseSettingsSnapshot,
@@ -82,6 +84,9 @@ function UserSettingsSyncLifecycle({
         getDurableLeafOpId: (
           leaf: Parameters<typeof getPendingBaseSettingsLeafOpId>[1],
         ) => getPendingBaseSettingsLeafOpId(userId, leaf),
+        acknowledgeVolatileLeaves: (
+          leaves: Parameters<typeof acknowledgeBaseSettingsVolatileLeaves>[1],
+        ) => acknowledgeBaseSettingsVolatileLeaves(userId, leaves),
         withWriteLock: (task: () => Promise<void>) =>
           withBaseSettingsWriteLock(userId, task),
         hydrate: hydrateBaseSettingsFromServer,
@@ -90,7 +95,7 @@ function UserSettingsSyncLifecycle({
       controller = new UserSettingsSyncController(
         store,
         transportForUser(userId),
-        activationVolatileLeaves,
+        getOutstandingBaseSettingsVolatileLeaves(userId),
       );
       void controller.start();
     });
