@@ -479,6 +479,7 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+    branchLabel: (title: string, parentTitle: string) => string;
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;

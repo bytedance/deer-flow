@@ -592,6 +592,7 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",

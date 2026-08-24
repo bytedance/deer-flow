@@ -55,6 +55,7 @@ import {
   usePinThread,
   useRenameThread,
 } from "@/core/threads/hooks";
+import { flattenThreadBranches } from "@/core/threads/thread-branch-tree";
 import { buildThreadListModel } from "@/core/threads/thread-list-model";
 import type { AgentThread, AgentThreadState } from "@/core/threads/types";
 import {
@@ -103,6 +104,15 @@ export function RecentChatList() {
       ? [...threadListModel.displayedThreads, activeThread]
       : threadListModel.displayedThreads;
   }, [threadIdFromPath, threadListModel]);
+  const branchList = useMemo(() => {
+    const entries = flattenThreadBranches(displayedThreads);
+    return {
+      entriesById: new Map(
+        entries.map((entry) => [entry.thread.thread_id, entry]),
+      ),
+      threads: entries.map((entry) => entry.thread),
+    };
+  }, [displayedThreads]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -291,12 +301,22 @@ export function RecentChatList() {
               <VirtualThreadList
                 estimateSize={36}
                 gap={4}
-                items={displayedThreads}
+                items={branchList.threads}
                 scrollParentSelector='[data-sidebar="content"]'
                 renderItem={(thread) => {
                   const isActive = pathOfThread(thread) === pathname;
                   const channelSource = channelSourceOfThread(thread);
                   const pinned = isThreadPinned(thread);
+                  const branchEntry = branchList.entriesById.get(
+                    thread.thread_id,
+                  );
+                  const parentTitle = branchEntry?.parentThread
+                    ? titleOfThread(branchEntry.parentThread)
+                    : null;
+                  const title = titleOfThread(thread);
+                  const branchLabel = parentTitle
+                    ? t.chats.branchLabel(title, parentTitle)
+                    : undefined;
                   return (
                     <SidebarMenuItem
                       key={thread.thread_id}
@@ -304,9 +324,31 @@ export function RecentChatList() {
                     >
                       <SidebarMenuButton isActive={isActive} asChild>
                         <Link
+                          aria-label={branchLabel}
                           className="text-muted-foreground min-w-0 whitespace-nowrap group-hover/side-menu-item:overflow-hidden"
+                          data-branch-depth={
+                            branchEntry && branchEntry.depth > 0
+                              ? branchEntry.depth
+                              : undefined
+                          }
+                          data-branch-parent-id={
+                            branchEntry?.parentThread?.thread_id
+                          }
                           href={pathOfThread(thread)}
+                          title={branchLabel}
                         >
+                          {branchEntry && branchEntry.depth > 0 && (
+                            <span
+                              aria-hidden="true"
+                              className="text-muted-foreground/70 shrink-0 font-mono text-[10px] leading-none"
+                              data-testid="thread-branch-stem"
+                              style={{
+                                marginLeft: `${Math.min(branchEntry.depth - 1, 1) * 8}px`,
+                              }}
+                            >
+                              {branchEntry.isLastSibling ? "└─" : "├─"}
+                            </span>
+                          )}
                           <ThreadChannelIcon source={channelSource} />
                           {pinned && (
                             <Pin
@@ -314,9 +356,7 @@ export function RecentChatList() {
                               className="text-muted-foreground size-3.5 shrink-0"
                             />
                           )}
-                          <span className="min-w-0 truncate">
-                            {titleOfThread(thread)}
-                          </span>
+                          <span className="min-w-0 truncate">{title}</span>
                           {channelSource && (
                             <span
                               className="bg-muted text-muted-foreground ml-auto inline-flex h-5 max-w-14 shrink-0 items-center rounded-md px-1.5 text-[10px] font-medium"
