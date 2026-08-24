@@ -677,16 +677,18 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
-  # RAGFlow knowledge retrieval (read-only). Uncomment both entries together.
-  # Connection and retrieval settings live on knowledge_search; the listing
-  # tool reuses them. Dataset UUIDs are never shown to the model.
-  # Prefer explicit knowledge-base names because cross-dataset retrieval can
-  # fail when datasets use different embedding models.
+  # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
+  # `datasets` is an operator-controlled allowlist of exact RAGFlow dataset
+  # names. The Agent cannot enumerate the tenant catalog or change this scope.
+  # Bind only datasets with compatible embedding models. Names are resolved at
+  # search time, and dataset UUIDs are never shown to the model.
   # - name: knowledge_search
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:knowledge_search_tool
   #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
   #   api_key: $RAGFLOW_API_KEY
+  #   datasets:
+  #     - HR Policies  # Replace with an exact dataset name from RAGFlow
   #   timeout: 30
   #   page_size: 8
   #   similarity_threshold: 0.2
@@ -694,9 +696,6 @@ tools:
   #   top_k: 256
   #   max_chars_per_chunk: 800
   #   max_total_chars: 8000
-  # - name: list_knowledge_bases
-  #   group: knowledge
-  #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search

@@ -36,15 +36,19 @@ drift.
 
 ### RAGFlow Knowledge Retrieval (`community/ragflow/`)
 
-The optional `knowledge` tool group exposes only `list_knowledge_bases` and
-`knowledge_search`. Both call RAGFlow directly through the async `httpx` client;
-they never persist dataset metadata, expose dataset UUIDs to the model, or
-provide write operations. Both are enabled through the normal `tools:` list.
-Provider connection and retrieval extras belong to `knowledge_search` and are
-reused by `list_knowledge_bases`; there is no top-level provider configuration.
+The optional `knowledge` tool group exposes one `knowledge_search(query)` tool.
+Its normal `tools:` entry owns the provider connection, retrieval extras, and a
+required operator allowlist of exact dataset names; there is no top-level
+provider configuration or tenant-wide listing tool. The provider uses the
+synchronous `configure_for_tool_entry` assembly hook to copy bound names into
+the model-visible tool description without network IO. Each invocation resolves
+those names through filtered RAGFlow requests and sends a non-empty
+`dataset_ids` list to retrieval. It never persists dataset metadata, exposes
+RAGFlow dataset UUIDs to the model, or provides write operations.
 Retrieval output is bounded at both the individual chunk and full-response
-levels, and every error path must redact the configured tenant API key before
-logging or returning model-visible text.
+levels. Provider-authored model-visible text is English. Every path must redact
+the configured tenant API key; dataset-UUID redaction is error-only so normal
+content does not corrupt legitimate checksums, trace IDs, or UUID fields.
 The client intentionally exposes only dataset listing and retrieval. Dataset
 creation, uploads, parsing, deletion, Gateway management routes, SSE, and
 frontend UI are outside this retrieval-only slice.

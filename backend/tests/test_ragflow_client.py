@@ -12,12 +12,22 @@ from deerflow.community.ragflow.client import (
 
 
 @pytest.mark.anyio
-async def test_list_datasets_builds_authenticated_request() -> None:
+async def test_list_datasets_filters_by_bound_name_in_one_request() -> None:
+    requests: list[httpx.Request] = []
+
     async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
         assert request.method == "GET"
-        assert request.url == httpx.URL("http://ragflow.test/api/v1/datasets?page=1&page_size=100")
+        assert request.url == httpx.URL("http://ragflow.test/api/v1/datasets?name=HR+Policies")
         assert request.headers["Authorization"] == "Bearer ragflow-secret"
-        return httpx.Response(200, json={"code": 0, "data": [{"id": "dataset-1", "name": "Policies"}]})
+        return httpx.Response(
+            200,
+            json={
+                "code": 0,
+                "data": [{"id": "dataset-1", "name": "HR Policies"}],
+                "total_datasets": 101,
+            },
+        )
 
     client = RAGFlowClient(
         base_url="http://ragflow.test/",
@@ -26,36 +36,12 @@ async def test_list_datasets_builds_authenticated_request() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    assert await client.list_datasets() == [{"id": "dataset-1", "name": "Policies"}]
+    assert await client.list_datasets(name="HR Policies") == [{"id": "dataset-1", "name": "HR Policies"}]
+    assert len(requests) == 1
 
 
 @pytest.mark.anyio
-async def test_list_datasets_follows_pagination_until_total_is_reached() -> None:
-    requested_pages: list[int] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        page = int(request.url.params["page"])
-        requested_pages.append(page)
-        if page == 1:
-            data = [{"id": f"dataset-{index}", "name": f"Dataset {index}"} for index in range(100)]
-        else:
-            data = [{"id": "dataset-100", "name": "Dataset 100"}]
-        return httpx.Response(200, json={"code": 0, "data": data, "total_datasets": 101})
-
-    client = RAGFlowClient(
-        base_url="http://ragflow.test",
-        api_key="ragflow-secret",
-        transport=httpx.MockTransport(handler),
-    )
-
-    datasets = await client.list_datasets()
-
-    assert requested_pages == [1, 2]
-    assert len(datasets) == 101
-
-
-@pytest.mark.anyio
-async def test_retrieve_builds_expected_payload() -> None:
+async def test_retrieve_always_sends_nonempty_dataset_ids() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"
         assert request.url == httpx.URL("http://ragflow.test/api/v1/retrieval")
@@ -88,11 +74,13 @@ async def test_retrieve_builds_expected_payload() -> None:
 
 
 @pytest.mark.anyio
-async def test_retrieve_omits_dataset_ids_when_unspecified() -> None:
+async def test_retrieve_rejects_empty_dataset_ids_before_request() -> None:
+    called = False
+
     async def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        assert "dataset_ids" not in payload
-        return httpx.Response(200, json={"code": 0, "data": {"chunks": []}})
+        nonlocal called
+        called = True
+        return httpx.Response(500)
 
     client = RAGFlowClient(
         base_url="http://ragflow.test",
@@ -100,7 +88,10 @@ async def test_retrieve_omits_dataset_ids_when_unspecified() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    await client.retrieve("fallback search", dataset_ids=None)
+    with pytest.raises(ValueError, match="dataset_ids must contain at least one dataset ID"):
+        await client.retrieve("fallback search", dataset_ids=[])
+
+    assert called is False
 
 
 @pytest.mark.anyio
@@ -118,7 +109,7 @@ async def test_nonzero_api_code_is_normalized_and_redacts_api_key() -> None:
     )
 
     with pytest.raises(RAGFlowAPIError) as exc_info:
-        await client.list_datasets()
+        await client.list_datasets(name="HR Policies")
 
     assert exc_info.value.code == 102
     assert "invalid credential" in str(exc_info.value)
@@ -127,7 +118,7 @@ async def test_nonzero_api_code_is_normalized_and_redacts_api_key() -> None:
 
 
 @pytest.mark.anyio
-async def test_timeout_is_normalized_without_leaking_api_key(caplog: pytest.LogCaptureFixture) -> None:
+async def test_timeout_is_english_and_does_not_leak_api_key(caplog: pytest.LogCaptureFixture) -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out with ragflow-secret", request=request)
 
@@ -139,11 +130,11 @@ async def test_timeout_is_normalized_without_leaking_api_key(caplog: pytest.LogC
     )
 
     with pytest.raises(RAGFlowConnectionError) as exc_info:
-        await client.list_datasets()
+        await client.list_datasets(name="HR Policies")
 
+    assert str(exc_info.value) == "RAGFlow request timed out after 2 seconds."
     assert "ragflow-secret" not in str(exc_info.value)
     assert "ragflow-secret" not in caplog.text
-    assert "超时" in str(exc_info.value)
 
 
 @pytest.mark.anyio
@@ -158,14 +149,14 @@ async def test_http_error_body_cannot_echo_api_key() -> None:
     )
 
     with pytest.raises(RAGFlowProtocolError) as exc_info:
-        await client.list_datasets()
+        await client.list_datasets(name="HR Policies")
 
-    assert "HTTP 401" in str(exc_info.value)
+    assert str(exc_info.value) == "RAGFlow request failed (HTTP 401)."
     assert "ragflow-secret" not in str(exc_info.value)
 
 
 @pytest.mark.anyio
-async def test_invalid_json_response_is_normalized() -> None:
+async def test_invalid_json_response_is_normalized_in_english() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="not-json")
 
@@ -175,12 +166,12 @@ async def test_invalid_json_response_is_normalized() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    with pytest.raises(RAGFlowProtocolError, match="JSON"):
-        await client.list_datasets()
+    with pytest.raises(RAGFlowProtocolError, match="RAGFlow returned invalid JSON"):
+        await client.list_datasets(name="HR Policies")
 
 
 @pytest.mark.anyio
-async def test_list_datasets_rejects_unexpected_data_shape() -> None:
+async def test_list_datasets_rejects_unexpected_data_shape_in_english() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"code": 0, "data": {"id": "not-a-list"}})
 
@@ -190,5 +181,5 @@ async def test_list_datasets_rejects_unexpected_data_shape() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    with pytest.raises(RAGFlowProtocolError, match="知识库列表"):
-        await client.list_datasets()
+    with pytest.raises(RAGFlowProtocolError, match="invalid dataset list"):
+        await client.list_datasets(name="HR Policies")

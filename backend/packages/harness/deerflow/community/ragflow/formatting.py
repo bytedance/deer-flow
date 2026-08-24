@@ -40,33 +40,34 @@ def format_retrieval_result(
 ) -> str:
     """Format one RAGFlow retrieval response into compact cited text.
 
-    RAGFlow v0.26 documentation calls the dataset field ``kb_id`` while the
-    deployed API may return ``dataset_id``. Both are accepted, but neither UUID
-    is ever emitted to the model.
+    RAGFlow normalizes response chunk fields before returning them from the
+    REST endpoint (for example, ``kb_id`` becomes ``dataset_id``). Only those
+    public response field names are consumed, and dataset IDs are mapped back
+    to the operator-configured names before anything reaches the model.
     """
     raw_chunks = result.get("chunks")
     if not isinstance(raw_chunks, list):
         raw_chunks = []
     chunks = [chunk for chunk in raw_chunks if isinstance(chunk, Mapping)]
     if not chunks:
-        return "未检索到相关内容。"
+        return "No relevant content found."
 
     aggregates = _document_aggregates(result.get("doc_aggs"))
     document_names_by_id = {str(item["doc_id"]): str(item["doc_name"]) for item in aggregates if item.get("doc_id") and item.get("doc_name")}
 
     entries: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
-        dataset_id = chunk.get("dataset_id") or chunk.get("kb_id")
-        dataset_name = dataset_names_by_id.get(str(dataset_id), "未知知识库")
+        dataset_id = chunk.get("dataset_id")
+        dataset_name = dataset_names_by_id.get(str(dataset_id), "Unknown dataset")
 
-        document_id = chunk.get("document_id") or chunk.get("doc_id")
-        document_name = chunk.get("document_keyword") or chunk.get("document_name")
+        document_id = chunk.get("document_id")
+        document_name = chunk.get("document_keyword")
         if not document_name and document_id:
             document_name = document_names_by_id.get(str(document_id))
-        document_name = str(document_name or "未知文档")
+        document_name = str(document_name or "Unknown document")
 
         similarity = _score(chunk.get("similarity"))
-        score_suffix = f"  (相关度 {similarity:.2f})" if similarity is not None else ""
+        score_suffix = f"  (score {similarity:.2f})" if similarity is not None else ""
         content = str(chunk.get("content") or "").strip()
         content = _truncate(content, max_chars_per_chunk)
         entries.append(f"[{index}] {dataset_name} / {document_name}{score_suffix}\n{content}")
@@ -79,12 +80,13 @@ def format_retrieval_result(
                 continue
             count = item.get("count")
             count_text = str(count) if isinstance(count, int) and not isinstance(count, bool) else "?"
-            summaries.append(f"{name} ({count_text} 段)")
+            unit = "chunk" if count == 1 else "chunks"
+            summaries.append(f"{name} ({count_text} {unit})")
         if summaries:
-            entries.append(f"命中文档：{', '.join(summaries)}")
+            entries.append(f"Matched documents: {', '.join(summaries)}")
 
     formatted = "\n\n".join(entries)
-    truncation_marker = "…（响应已截断）"
+    truncation_marker = "… (response truncated)"
     if len(formatted) <= max_total_chars:
         return formatted
     if max_total_chars <= len(truncation_marker):

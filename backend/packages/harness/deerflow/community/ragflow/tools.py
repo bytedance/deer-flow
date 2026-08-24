@@ -1,13 +1,14 @@
-"""Read-only Agent tools for RAGFlow knowledge retrieval."""
+"""Read-only Agent tool for operator-scoped RAGFlow knowledge retrieval."""
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Mapping
 
-from langchain.tools import tool
-from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError
+from langchain_core.tools import StructuredTool
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from deerflow.config import get_app_config
 
@@ -25,6 +26,7 @@ class _RAGFlowRetrievalSettings(BaseModel):
 
     model_config = ConfigDict(validate_default=True)
 
+    datasets: list[str] = Field(min_length=1, max_length=100)
     base_url: AnyHttpUrl = Field(default="http://localhost:9380")
     api_key: SecretStr | None = Field(default=None)
     timeout: float = Field(default=30, gt=0, le=600)
@@ -34,6 +36,29 @@ class _RAGFlowRetrievalSettings(BaseModel):
     top_k: int = Field(default=256, ge=1, le=1024)
     max_chars_per_chunk: int = Field(default=800, ge=1, le=100_000)
     max_total_chars: int = Field(default=8000, ge=1, le=1_000_000)
+
+    @field_validator("datasets")
+    @classmethod
+    def _normalize_dataset_names(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for name in value:
+            clean_name = name.strip()
+            if not clean_name or len(clean_name) > 256:
+                raise ValueError("dataset names must contain between 1 and 256 characters")
+            if clean_name not in seen:
+                normalized.append(clean_name)
+                seen.add(clean_name)
+        if not normalized:
+            raise ValueError("at least one dataset name is required")
+        return normalized
+
+    @field_validator("base_url")
+    @classmethod
+    def _reject_url_userinfo(cls, value: AnyHttpUrl) -> AnyHttpUrl:
+        if value.username is not None or value.password is not None:
+            raise ValueError("base_url must not contain username or password information")
+        return value
 
 
 def _api_key(settings: _RAGFlowRetrievalSettings) -> str | None:
@@ -45,34 +70,43 @@ def _api_key(settings: _RAGFlowRetrievalSettings) -> str | None:
     return None
 
 
-def _redact(value: object, api_key: str | None) -> str:
+def _redact_api_key(value: object, api_key: str | None) -> str:
     text = str(value)
     if api_key:
         text = text.replace(api_key, "[REDACTED]")
-    return _RAGFLOW_UUID_PATTERN.sub("[DATASET_ID]", text)
+    return text
+
+
+def _redact_error(value: object, api_key: str | None) -> str:
+    """Redact provider credentials and opaque dataset IDs on error paths."""
+    return _RAGFLOW_UUID_PATTERN.sub("[DATASET_ID]", _redact_api_key(value, api_key))
+
+
+def _settings_from_extra(extra: Mapping[str, object]) -> _RAGFlowRetrievalSettings:
+    return _RAGFlowRetrievalSettings.model_validate(dict(extra))
 
 
 def _settings_or_error() -> tuple[_RAGFlowRetrievalSettings | None, str | None]:
     tool_config = get_app_config().get_tool_config("knowledge_search")
     if tool_config is None:
-        return None, "Error: 未配置 knowledge_search；请在 config.yaml 的 tools 列表中添加该工具及其 RAGFlow 连接参数。"
+        return None, "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
     try:
-        settings = _RAGFlowRetrievalSettings.model_validate(tool_config.model_extra or {})
+        settings = _settings_from_extra(tool_config.model_extra or {})
     except ValidationError:
         logger.warning("RAGFlow knowledge_search tool configuration is invalid")
-        return None, "Error: knowledge_search 的 RAGFlow 配置无效，请检查 config.yaml。"
+        return None, "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
     if not _api_key(settings):
         if "api_key" not in _warned:
             _warned.add("api_key")
-            logger.warning("RAGFlow API Key 未配置；请设置 tools 中 knowledge_search.api_key，建议使用 $RAGFLOW_API_KEY 环境变量引用。")
-        return None, "Error: 未配置 RAGFlow API Key，请设置 tools 中的 knowledge_search.api_key（建议使用 $RAGFLOW_API_KEY）。"
+            logger.warning("RAGFlow API key is not configured; set knowledge_search.api_key in config.yaml, preferably via $RAGFLOW_API_KEY.")
+        return None, "Error: RAGFlow API key is not configured; set knowledge_search.api_key in config.yaml (prefer $RAGFLOW_API_KEY)."
     return settings, None
 
 
 def _build_client(settings: _RAGFlowRetrievalSettings) -> RAGFlowClient:
     api_key = _api_key(settings)
     if api_key is None:  # Guarded by _settings_or_error; keeps this helper total.
-        raise ValueError("RAGFlow API Key is missing")
+        raise ValueError("RAGFlow API key is missing")
     return RAGFlowClient(
         base_url=str(settings.base_url).rstrip("/"),
         api_key=api_key,
@@ -82,127 +116,155 @@ def _build_client(settings: _RAGFlowRetrievalSettings) -> RAGFlowClient:
 
 def _tool_error(exc: Exception, settings: _RAGFlowRetrievalSettings) -> str:
     key = _api_key(settings)
-    safe_detail = _redact(exc, key)
-    base_url = _redact(str(settings.base_url).rstrip("/"), key)
+    safe_detail = _redact_error(exc, key)
+    base_url = _redact_error(str(settings.base_url).rstrip("/"), key)
 
     if isinstance(exc, RAGFlowAPIError):
         logger.warning("RAGFlow API rejected a read-only tool request (code=%s)", exc.code)
         return f"Error: {safe_detail}"
     if isinstance(exc, RAGFlowConnectionError):
         logger.warning("RAGFlow connection failed for %s (%s)", base_url, type(exc).__name__)
-        return f"Error: 无法连接 RAGFlow ({base_url}): {safe_detail}"
+        return f"Error: Unable to connect to RAGFlow ({base_url}): {safe_detail}"
     if isinstance(exc, RAGFlowProtocolError):
         logger.warning("RAGFlow returned an invalid response for a read-only tool request (%s)", type(exc).__name__)
-        return f"Error: RAGFlow 请求失败: {safe_detail}"
+        return f"Error: RAGFlow request failed: {safe_detail}"
 
     logger.warning("Unexpected RAGFlow read-only tool failure (%s)", type(exc).__name__)
-    return "Error: RAGFlow 检索发生未知错误，请稍后重试。"
+    return "Error: An unexpected RAGFlow retrieval error occurred; try again later."
 
 
-def _valid_datasets(datasets: list[dict]) -> list[tuple[str, str, Mapping[str, object]]]:
-    valid: list[tuple[str, str, Mapping[str, object]]] = []
+def _exact_dataset_matches(datasets: list[dict], bound_name: str) -> list[tuple[str, str]]:
+    matches: list[tuple[str, str]] = []
+    seen_ids: set[str] = set()
     for dataset in datasets:
         dataset_id = dataset.get("id")
         name = dataset.get("name")
-        if not isinstance(dataset_id, str) or not dataset_id or not isinstance(name, str) or not name.strip():
+        if not isinstance(dataset_id, str) or not dataset_id or name != bound_name or dataset_id in seen_ids:
             continue
-        valid.append((dataset_id, name.strip(), dataset))
-    return valid
+        matches.append((dataset_id, bound_name))
+        seen_ids.add(dataset_id)
+    return matches
 
 
-async def list_knowledge_bases() -> str:
-    """List accessible RAGFlow knowledge bases without exposing their UUIDs."""
-    settings, error = _settings_or_error()
-    if settings is None:
-        return error or "Error: 知识库配置无效。"
-
-    try:
-        datasets = _valid_datasets(await _build_client(settings).list_datasets())
-    except Exception as exc:
-        return _tool_error(exc, settings)
-
-    if not datasets:
-        return "当前没有可用的知识库。"
-
-    lines = ["可用知识库："]
-    for _, name, dataset in datasets:
-        description = dataset.get("description")
-        description_text = f" — {description.strip()}" if isinstance(description, str) and description.strip() else ""
-        document_count = dataset.get("document_count")
-        count_text = f"（{document_count} 个文档）" if isinstance(document_count, int) and not isinstance(document_count, bool) else ""
-        lines.append(f"- {name}{description_text}{count_text}")
-    return _redact("\n".join(lines), _api_key(settings))
+def _missing_dataset_error(names: list[str], api_key: str | None) -> str:
+    if len(names) == 1:
+        message = f"Error: Configured RAGFlow dataset was not found: {names[0]}. It may have been deleted or renamed; check knowledge_search.datasets in config.yaml."
+    else:
+        message = f"Error: Configured RAGFlow datasets were not found: {', '.join(names)}. They may have been deleted or renamed; check knowledge_search.datasets in config.yaml."
+    return _redact_error(message, api_key)
 
 
-async def knowledge_search(query: str, knowledge_bases: list[str] | None = None) -> str:
-    """Search RAGFlow and return compact chunks with stable citation markers."""
+def _ambiguous_dataset_error(names: list[str], api_key: str | None) -> str:
+    label = "name is" if len(names) == 1 else "names are"
+    return _redact_error(
+        f"Error: Configured RAGFlow dataset {label} ambiguous: {', '.join(names)}. Check knowledge_search.datasets in config.yaml.",
+        api_key,
+    )
+
+
+async def _resolve_configured_datasets(
+    client: RAGFlowClient,
+    settings: _RAGFlowRetrievalSettings,
+) -> tuple[list[str] | None, dict[str, str] | None, str | None]:
+    batches = await asyncio.gather(*(client.list_datasets(name=name) for name in settings.datasets))
+
+    dataset_ids: list[str] = []
+    names_by_id: dict[str, str] = {}
+    missing: list[str] = []
+    ambiguous: list[str] = []
+    for bound_name, datasets in zip(settings.datasets, batches, strict=True):
+        matches = _exact_dataset_matches(datasets, bound_name)
+        if not matches:
+            missing.append(bound_name)
+            continue
+        if len(matches) > 1:
+            ambiguous.append(bound_name)
+            continue
+        dataset_id, dataset_name = matches[0]
+        dataset_ids.append(dataset_id)
+        names_by_id[dataset_id] = dataset_name
+
+    key = _api_key(settings)
+    if missing:
+        return None, None, _missing_dataset_error(missing, key)
+    if ambiguous:
+        return None, None, _ambiguous_dataset_error(ambiguous, key)
+    return dataset_ids, names_by_id, None
+
+
+async def knowledge_search(query: str) -> str:
+    """Search the operator-configured RAGFlow dataset allowlist."""
     query = query.strip()
     if not query:
-        return "Error: 查询内容不能为空。"
-    if knowledge_bases is not None and not any(isinstance(name, str) and name.strip() for name in knowledge_bases):
-        return "Error: knowledge_bases 为空；请至少指定一个知识库，或省略该参数进行全库兜底检索。"
+        return "Error: query must not be empty."
 
     settings, error = _settings_or_error()
     if settings is None:
-        return error or "Error: 知识库配置无效。"
+        return error or "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
 
     client = _build_client(settings)
     try:
-        datasets = _valid_datasets(await client.list_datasets())
-        names_by_id = {dataset_id: name for dataset_id, name, _ in datasets}
+        dataset_ids, names_by_id, resolution_error = await _resolve_configured_datasets(client, settings)
+        if resolution_error is not None:
+            return resolution_error
+        if not dataset_ids or names_by_id is None:  # Defensive; settings require at least one binding.
+            return "Error: No configured RAGFlow datasets could be resolved; check knowledge_search.datasets in config.yaml."
 
-        retrieve_options: dict[str, object] = {
-            "page_size": settings.page_size,
-            "similarity_threshold": settings.similarity_threshold,
-            "vector_similarity_weight": settings.vector_similarity_weight,
-            "top_k": settings.top_k,
-        }
-        if knowledge_bases is not None:
-            ids_by_casefolded_name = {name.casefold(): dataset_id for dataset_id, name, _ in datasets}
-            requested_names = [name.strip() for name in knowledge_bases if isinstance(name, str) and name.strip()]
-            unknown_names = [name for name in requested_names if name.casefold() not in ids_by_casefolded_name]
-            if unknown_names:
-                available = ", ".join(name for _, name, _ in datasets) or "（无）"
-                return _redact(
-                    f"Error: 未知知识库：{', '.join(unknown_names)}。当前可用知识库：{available}。",
-                    _api_key(settings),
-                )
-
-            dataset_ids: list[str] = []
-            for name in requested_names:
-                dataset_id = ids_by_casefolded_name[name.casefold()]
-                if dataset_id not in dataset_ids:
-                    dataset_ids.append(dataset_id)
-            retrieve_options["dataset_ids"] = dataset_ids
-
-        result = await client.retrieve(query, **retrieve_options)
+        result = await client.retrieve(
+            query,
+            dataset_ids=dataset_ids,
+            page_size=settings.page_size,
+            similarity_threshold=settings.similarity_threshold,
+            vector_similarity_weight=settings.vector_similarity_weight,
+            top_k=settings.top_k,
+        )
         formatted = format_retrieval_result(
             result,
             dataset_names_by_id=names_by_id,
             max_chars_per_chunk=settings.max_chars_per_chunk,
             max_total_chars=settings.max_total_chars,
         )
-        return _redact(formatted, _api_key(settings))
+        # API-key redaction remains mandatory on success. UUID redaction is
+        # deliberately error-only so valid checksums and trace IDs survive.
+        return _redact_api_key(formatted, _api_key(settings))
     except Exception as exc:
         return _tool_error(exc, settings)
 
 
-@tool("list_knowledge_bases", parse_docstring=True)
-async def list_knowledge_bases_tool() -> str:
-    """List all private knowledge bases available to this DeerFlow deployment."""
-    return await list_knowledge_bases()
+def _tool_description(dataset_names: list[str], api_key: str | None) -> str:
+    base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
+    if not dataset_names:
+        return f"{base} Dataset access is controlled by knowledge_search.datasets in config.yaml."
+    visible_names = [_redact_api_key(name, api_key) for name in dataset_names]
+    return f"{base} This tool is restricted to these configured datasets: {', '.join(visible_names)}."
 
 
-@tool("knowledge_search", parse_docstring=True)
-async def knowledge_search_tool(query: str, knowledge_bases: list[str] | None = None) -> str:
-    """Search private RAGFlow knowledge bases for relevant source chunks.
+class _ConfiguredKnowledgeSearchTool(StructuredTool):
+    """Structured tool whose model description is derived from its config entry."""
 
-    If you are unsure which knowledge bases exist, call
-    ``list_knowledge_bases`` first. Prefer explicit knowledge-base names because
-    searching all bases can fail when they use different embedding models.
+    def configure_for_tool_entry(self, extra: Mapping[str, object]) -> StructuredTool:
+        configured = self.model_copy(deep=False)
+        try:
+            settings = _settings_from_extra(extra)
+        except ValidationError:
+            configured.description = _tool_description([], None)
+        else:
+            configured.description = _tool_description(settings.datasets, _api_key(settings))
+        return configured
+
+
+async def _knowledge_search_entrypoint(query: str) -> str:
+    """Search the RAGFlow datasets selected by the deployment operator.
 
     Args:
-        query: Specific question or search terms to retrieve from private documents.
-        knowledge_bases: Knowledge-base names to search. Omit only as a fallback search across all bases.
+        query: Specific question or search terms to retrieve from the configured private documents.
     """
-    return await knowledge_search(query, knowledge_bases)
+    return await knowledge_search(query)
+
+
+knowledge_search_tool = _ConfiguredKnowledgeSearchTool.from_function(
+    coroutine=_knowledge_search_entrypoint,
+    name="knowledge_search",
+    description=_tool_description([], None),
+    parse_docstring=True,
+)

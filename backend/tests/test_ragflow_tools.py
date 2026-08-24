@@ -1,4 +1,6 @@
 import logging
+from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,16 +13,24 @@ from deerflow.tools.tools import get_available_tools
 
 
 class FakeRAGFlowClient:
-    def __init__(self, *, datasets: list[dict] | None = None, retrieval: dict | None = None, error: Exception | None = None) -> None:
-        self.datasets = datasets or []
+    def __init__(
+        self,
+        *,
+        datasets_by_name: Mapping[str, list[dict]] | None = None,
+        retrieval: dict | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.datasets_by_name = dict(datasets_by_name or {})
         self.retrieval = retrieval or {"chunks": [], "doc_aggs": [], "total": 0}
         self.error = error
+        self.list_calls: list[str] = []
         self.retrieve_calls: list[tuple[str, dict]] = []
 
-    async def list_datasets(self) -> list[dict]:
+    async def list_datasets(self, *, name: str) -> list[dict]:
         if self.error is not None:
             raise self.error
-        return self.datasets
+        self.list_calls.append(name)
+        return self.datasets_by_name.get(name, [])
 
     async def retrieve(self, query: str, **kwargs: object) -> dict:
         if self.error is not None:
@@ -39,20 +49,26 @@ def _config(
     configured: bool = True,
     api_key: str | None = "ragflow-secret",
     base_url: str = "http://ragflow.test",
+    datasets: list[str] | None = None,
 ) -> SimpleNamespace:
+    extra: dict[str, object] = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "timeout": 30,
+        "page_size": 8,
+        "similarity_threshold": 0.2,
+        "vector_similarity_weight": 0.3,
+        "top_k": 256,
+        "max_chars_per_chunk": 800,
+        "max_total_chars": 8000,
+    }
+    if datasets is not None:
+        extra["datasets"] = datasets
     search_config = ToolConfig(
         name="knowledge_search",
         group="knowledge",
         use="deerflow.community.ragflow.tools:knowledge_search_tool",
-        base_url=base_url,
-        api_key=api_key,
-        timeout=30,
-        page_size=8,
-        similarity_threshold=0.2,
-        vector_similarity_weight=0.3,
-        top_k=256,
-        max_chars_per_chunk=800,
-        max_total_chars=8000,
+        **extra,
     )
     return SimpleNamespace(
         get_tool_config=lambda name: search_config if configured and name == "knowledge_search" else None,
@@ -60,33 +76,17 @@ def _config(
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, fake: FakeRAGFlowClient, *, config: SimpleNamespace | None = None) -> None:
-    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: config or _config())
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: config or _config(datasets=["HR Policies"]))
     monkeypatch.setattr(ragflow_tools, "_build_client", lambda settings: fake)
 
 
 @pytest.mark.anyio
-async def test_list_knowledge_bases_returns_names_without_uuids(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_knowledge_search_resolves_configured_names_and_always_passes_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
-        datasets=[
-            {"id": "dataset-secret-1", "name": "HR Policies", "description": "Employee handbook", "document_count": 3},
-            {"id": "dataset-secret-2", "name": "Engineering", "description": "", "document_count": 7},
-        ]
-    )
-    _install(monkeypatch, fake)
-
-    result = await ragflow_tools.list_knowledge_bases()
-
-    assert "HR Policies" in result
-    assert "Employee handbook" in result
-    assert "3 个文档" in result
-    assert "Engineering" in result
-    assert "dataset-secret" not in result
-
-
-@pytest.mark.anyio
-async def test_knowledge_search_resolves_names_to_ids_and_formats_citations(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(
-        datasets=[{"id": "dataset-1", "name": "HR Policies", "description": "", "document_count": 1}],
+        datasets_by_name={
+            "HR Policies": [{"id": "dataset-1", "name": "HR Policies"}],
+            "Engineering": [{"id": "dataset-2", "name": "Engineering"}],
+        },
         retrieval={
             "chunks": [
                 {
@@ -101,15 +101,16 @@ async def test_knowledge_search_resolves_names_to_ids_and_formats_citations(monk
             "total": 1,
         },
     )
-    _install(monkeypatch, fake)
+    _install(monkeypatch, fake, config=_config(datasets=["HR Policies", "Engineering"]))
 
-    result = await ragflow_tools.knowledge_search("annual leave", ["HR Policies"])
+    result = await ragflow_tools.knowledge_search("annual leave")
 
+    assert fake.list_calls == ["HR Policies", "Engineering"]
     assert fake.retrieve_calls == [
         (
             "annual leave",
             {
-                "dataset_ids": ["dataset-1"],
+                "dataset_ids": ["dataset-1", "dataset-2"],
                 "page_size": 8,
                 "similarity_threshold": 0.2,
                 "vector_similarity_weight": 0.3,
@@ -117,90 +118,109 @@ async def test_knowledge_search_resolves_names_to_ids_and_formats_citations(monk
             },
         )
     ]
-    assert "[1] HR Policies / handbook.pdf  (相关度 0.87)" in result
+    assert "[1] HR Policies / handbook.pdf  (score 0.87)" in result
     assert "Annual leave" in result
-    assert "命中文档：handbook.pdf (1 段)" in result
+    assert "Matched documents: handbook.pdf (1 chunk)" in result
     assert "dataset-1" not in result
 
 
 @pytest.mark.anyio
-async def test_knowledge_search_accepts_case_insensitive_dataset_names(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets=[{"id": "dataset-1", "name": "HR Policies"}])
+async def test_knowledge_search_uses_exact_name_filtered_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_name={
+            "HR Policies": [
+                {"id": "dataset-wrong", "name": "HR Policies Archive"},
+                {"id": "dataset-1", "name": "HR Policies"},
+            ]
+        }
+    )
     _install(monkeypatch, fake)
 
-    await ragflow_tools.knowledge_search("leave", ["hr policies"])
+    await ragflow_tools.knowledge_search("leave")
 
+    assert fake.list_calls == ["HR Policies"]
     assert fake.retrieve_calls[0][1]["dataset_ids"] == ["dataset-1"]
 
 
 @pytest.mark.anyio
-async def test_knowledge_search_unknown_name_returns_available_names(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets=[{"id": "dataset-1", "name": "HR Policies"}])
-    _install(monkeypatch, fake)
+async def test_missing_bound_dataset_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient()
+    _install(monkeypatch, fake, config=_config(datasets=["Finance"]))
 
-    result = await ragflow_tools.knowledge_search("leave", ["Finance"])
+    result = await ragflow_tools.knowledge_search("leave")
 
-    assert "Finance" in result
-    assert "HR Policies" in result
+    assert result == ("Error: Configured RAGFlow dataset was not found: Finance. It may have been deleted or renamed; check knowledge_search.datasets in config.yaml.")
+    assert fake.list_calls == ["Finance"]
     assert fake.retrieve_calls == []
 
 
 @pytest.mark.anyio
-async def test_unknown_dataset_error_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets=[{"id": "dataset-1", "name": "HR Policies"}])
-    _install(monkeypatch, fake)
+async def test_missing_bound_dataset_error_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient()
+    _install(monkeypatch, fake, config=_config(datasets=["ragflow-secret archive"]))
 
-    result = await ragflow_tools.knowledge_search("leave", ["ragflow-secret"])
+    result = await ragflow_tools.knowledge_search("leave")
 
     assert "ragflow-secret" not in result
     assert "[REDACTED]" in result
 
 
 @pytest.mark.anyio
-async def test_knowledge_search_without_names_does_not_pass_dataset_ids(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets=[{"id": "dataset-1", "name": "HR Policies"}])
-    _install(monkeypatch, fake)
+async def test_ambiguous_bound_dataset_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_name={
+            "Policies": [
+                {"id": "dataset-1", "name": "Policies"},
+                {"id": "dataset-2", "name": "Policies"},
+            ]
+        }
+    )
+    _install(monkeypatch, fake, config=_config(datasets=["Policies"]))
 
-    await ragflow_tools.knowledge_search("fallback", None)
+    result = await ragflow_tools.knowledge_search("leave")
 
-    assert "dataset_ids" not in fake.retrieve_calls[0][1]
-
-
-@pytest.mark.anyio
-async def test_knowledge_search_rejects_explicit_empty_dataset_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets=[{"id": "dataset-1", "name": "HR Policies"}])
-    _install(monkeypatch, fake)
-
-    result = await ragflow_tools.knowledge_search("leave", [])
-
-    assert "至少指定一个知识库" in result
+    assert result == "Error: Configured RAGFlow dataset name is ambiguous: Policies. Check knowledge_search.datasets in config.yaml."
     assert fake.retrieve_calls == []
 
 
 @pytest.mark.anyio
-async def test_missing_api_key_returns_guidance_and_warns_only_once(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+async def test_missing_dataset_binding_is_rejected_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(api_key=None))
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("leave")
+
+    assert result == "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
+    assert fake.list_calls == []
+
+
+@pytest.mark.anyio
+async def test_missing_api_key_returns_english_guidance_and_warns_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeRAGFlowClient()
+    _install(monkeypatch, fake, config=_config(api_key=None, datasets=["HR Policies"]))
 
     with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
-        first = await ragflow_tools.list_knowledge_bases()
-        second = await ragflow_tools.knowledge_search("leave")
+        first = await ragflow_tools.knowledge_search("leave")
+        second = await ragflow_tools.knowledge_search("benefits")
 
-    assert "未配置 RAGFlow API Key" in first
-    assert "未配置 RAGFlow API Key" in second
-    assert caplog.text.count("RAGFlow API Key") == 1
-    assert fake.retrieve_calls == []
+    assert first == "Error: RAGFlow API key is not configured; set knowledge_search.api_key in config.yaml (prefer $RAGFLOW_API_KEY)."
+    assert second == first
+    assert caplog.text.count("RAGFlow API key is not configured") == 1
+    assert fake.list_calls == []
 
 
 @pytest.mark.anyio
-async def test_missing_knowledge_search_config_returns_guidance_without_calling_ragflow(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_knowledge_search_config_returns_english_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(configured=False))
+    _install(monkeypatch, fake, config=_config(configured=False, datasets=["HR Policies"]))
 
-    result = await ragflow_tools.list_knowledge_bases()
+    result = await ragflow_tools.knowledge_search("leave")
 
-    assert "tools" in result
-    assert "knowledge_search" in result
+    assert result == "Error: knowledge_search is not configured; add its RAGFlow settings to the tools list in config.yaml."
+    assert fake.list_calls == []
 
 
 @pytest.mark.anyio
@@ -208,72 +228,142 @@ async def test_api_error_is_returned_as_readable_text(monkeypatch: pytest.Monkey
     fake = FakeRAGFlowClient(error=RAGFlowAPIError("embedding models do not match", code=102))
     _install(monkeypatch, fake)
 
-    result = await ragflow_tools.knowledge_search("leave", ["HR Policies"])
+    result = await ragflow_tools.knowledge_search("leave")
 
     assert result == "Error: embedding models do not match"
 
 
 @pytest.mark.anyio
-async def test_api_error_cannot_expose_dataset_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_error_path_redacts_dataset_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset_id = "0123456789abcdef0123456789abcdef"
     fake = FakeRAGFlowClient(error=RAGFlowAPIError(f"dataset {dataset_id} failed", code=102))
     _install(monkeypatch, fake)
 
-    result = await ragflow_tools.list_knowledge_bases()
+    result = await ragflow_tools.knowledge_search("leave")
 
     assert dataset_id not in result
     assert "[DATASET_ID]" in result
 
 
 @pytest.mark.anyio
-async def test_connection_error_is_recoverable_and_does_not_leak_key(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+async def test_success_path_preserves_legitimate_uuid_and_md5_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    uuid = "123e4567-e89b-12d3-a456-426614174000"
+    md5 = "d41d8cd98f00b204e9800998ecf8427e"
+    fake = FakeRAGFlowClient(
+        datasets_by_name={"HR Policies": [{"id": "dataset-1", "name": "HR Policies"}]},
+        retrieval={
+            "chunks": [
+                {
+                    "dataset_id": "dataset-1",
+                    "document_keyword": "checksums.txt",
+                    "content": f"Trace {uuid}; checksum {md5}.",
+                }
+            ]
+        },
+    )
+    _install(monkeypatch, fake)
+
+    result = await ragflow_tools.knowledge_search("trace")
+
+    assert uuid in result
+    assert md5 in result
+    assert "[DATASET_ID]" not in result
+
+
+@pytest.mark.anyio
+async def test_success_path_still_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_name={"HR Policies": [{"id": "dataset-1", "name": "HR Policies"}]},
+        retrieval={
+            "chunks": [
+                {
+                    "dataset_id": "dataset-1",
+                    "document_keyword": "secret.txt",
+                    "content": "Accidental echo: ragflow-secret",
+                }
+            ]
+        },
+    )
+    _install(monkeypatch, fake)
+
+    result = await ragflow_tools.knowledge_search("secret")
+
+    assert "ragflow-secret" not in result
+    assert "[REDACTED]" in result
+
+
+@pytest.mark.anyio
+async def test_connection_error_is_english_and_does_not_leak_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     fake = FakeRAGFlowClient(error=RAGFlowConnectionError("ConnectError: refused ragflow-secret"))
     _install(monkeypatch, fake)
 
     with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
-        result = await ragflow_tools.list_knowledge_bases()
+        result = await ragflow_tools.knowledge_search("leave")
 
-    assert result.startswith("Error: 无法连接 RAGFlow (http://ragflow.test):")
+    assert result == "Error: Unable to connect to RAGFlow (http://ragflow.test): ConnectError: refused [REDACTED]"
     assert "ragflow-secret" not in result
     assert "ragflow-secret" not in caplog.text
 
 
 @pytest.mark.anyio
-async def test_connection_error_redacts_key_embedded_in_base_url(
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "http://ragflow-secret@ragflow.test",
+        "http://ragflow%2Dsecret@ragflow.test",
+        "http://user:ragflow-secret@ragflow.test",
+    ],
+)
+async def test_base_url_with_plain_or_encoded_userinfo_is_rejected_without_leaking_credentials(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    base_url: str,
 ) -> None:
-    fake = FakeRAGFlowClient(error=RAGFlowConnectionError("connection refused"))
-    _install(
-        monkeypatch,
-        fake,
-        config=_config(base_url="http://ragflow-secret@ragflow.test"),
-    )
+    fake = FakeRAGFlowClient()
+    _install(monkeypatch, fake, config=_config(base_url=base_url, datasets=["HR Policies"]))
 
     with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
-        result = await ragflow_tools.list_knowledge_bases()
+        result = await ragflow_tools.knowledge_search("leave")
 
+    assert result == "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
     assert "ragflow-secret" not in result
     assert "ragflow-secret" not in caplog.text
+    assert "ragflow%2Dsecret" not in caplog.text
+    assert fake.list_calls == []
 
 
 @pytest.mark.anyio
-async def test_empty_retrieval_has_explicit_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets=[{"id": "dataset-1", "name": "HR Policies"}])
+async def test_empty_query_has_english_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient()
     _install(monkeypatch, fake)
 
-    result = await ragflow_tools.knowledge_search("nothing", ["HR Policies"])
+    result = await ragflow_tools.knowledge_search("   ")
 
-    assert result == "未检索到相关内容。"
+    assert result == "Error: query must not be empty."
+    assert fake.list_calls == []
 
 
-def test_formatting_applies_per_chunk_truncation_and_supports_kb_id() -> None:
+@pytest.mark.anyio
+async def test_empty_retrieval_has_explicit_english_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(datasets_by_name={"HR Policies": [{"id": "dataset-1", "name": "HR Policies"}]})
+    _install(monkeypatch, fake)
+
+    result = await ragflow_tools.knowledge_search("nothing")
+
+    assert result == "No relevant content found."
+
+
+def test_formatting_uses_only_normalized_chunk_fields() -> None:
     result = format_retrieval_result(
         {
             "chunks": [
                 {
                     "kb_id": "dataset-1",
-                    "document_keyword": "handbook.pdf",
+                    "doc_id": "doc-legacy",
+                    "docnm_kwd": "legacy.pdf",
                     "content": "abcdefghij",
                     "similarity": 0.5,
                 }
@@ -284,12 +374,15 @@ def test_formatting_applies_per_chunk_truncation_and_supports_kb_id() -> None:
         max_total_chars=1000,
     )
 
+    assert "Unknown dataset / Unknown document" in result
+    assert "HR Policies" not in result
+    assert "legacy.pdf" not in result
     assert "abcd…" in result
     assert "abcdefghij" not in result
     assert "dataset-1" not in result
 
 
-def test_formatting_applies_total_response_truncation() -> None:
+def test_formatting_applies_total_response_truncation_in_english() -> None:
     result = format_retrieval_result(
         {
             "chunks": [
@@ -308,16 +401,17 @@ def test_formatting_applies_total_response_truncation() -> None:
     )
 
     assert len(result) <= 120
-    assert result.endswith("…（响应已截断）")
+    assert result.endswith("… (response truncated)")
 
 
-def test_retrieval_settings_load_from_knowledge_search_tool_and_hide_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config())
+def test_retrieval_settings_load_bound_datasets_and_hide_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config(datasets=["HR Policies", "Engineering"]))
 
     config, error = ragflow_tools._settings_or_error()
 
     assert error is None
     assert config is not None
+    assert config.datasets == ["HR Policies", "Engineering"]
     assert str(config.base_url).rstrip("/") == "http://ragflow.test"
     assert config.page_size == 8
     assert config.max_chars_per_chunk == 800
@@ -325,37 +419,26 @@ def test_retrieval_settings_load_from_knowledge_search_tool_and_hide_secret(monk
     assert "ragflow-secret" not in repr(config)
 
 
-def test_agent_tool_contracts_are_async_and_model_facing() -> None:
-    assert ragflow_tools.list_knowledge_bases_tool.name == "list_knowledge_bases"
-    assert ragflow_tools.list_knowledge_bases_tool.coroutine is not None
+def test_agent_exposes_only_query_on_single_search_tool() -> None:
+    assert not hasattr(ragflow_tools, "list_knowledge_bases_tool")
+    assert not hasattr(ragflow_tools, "list_knowledge_bases")
     assert ragflow_tools.knowledge_search_tool.name == "knowledge_search"
     assert ragflow_tools.knowledge_search_tool.coroutine is not None
-    assert set(ragflow_tools.knowledge_search_tool.tool_call_schema.model_fields) == {"query", "knowledge_bases"}
-    assert "list_knowledge_bases" in ragflow_tools.knowledge_search_tool.description
+    assert set(ragflow_tools.knowledge_search_tool.tool_call_schema.model_fields) == {"query"}
 
 
-@pytest.mark.parametrize("configured", [False, True])
-def test_tool_assembly_uses_normal_tool_presence_without_feature_flag(configured: bool) -> None:
-    tools = (
-        [
-            ToolConfig(
-                name="knowledge_search",
-                group="knowledge",
-                use="deerflow.community.ragflow.tools:knowledge_search_tool",
-                base_url="http://ragflow.test",
-                api_key="ragflow-secret",
-            ),
-            ToolConfig(
-                name="list_knowledge_bases",
-                group="knowledge",
-                use="deerflow.community.ragflow.tools:list_knowledge_bases_tool",
-            ),
-        ]
-        if configured
-        else []
+def test_tool_assembly_injects_bound_dataset_names_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "_build_client", lambda settings: pytest.fail("tool assembly must not perform network IO"))
+    tool_config = ToolConfig(
+        name="knowledge_search",
+        group="knowledge",
+        use="deerflow.community.ragflow.tools:knowledge_search_tool",
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        datasets=["HR Policies", "Engineering", "ragflow-secret archive"],
     )
     config = SimpleNamespace(
-        tools=tools,
+        tools=[tool_config],
         sandbox=SimpleNamespace(use="example.remote:Sandbox"),
         skill_evolution=SimpleNamespace(enabled=False),
         models=[],
@@ -363,7 +446,17 @@ def test_tool_assembly_uses_normal_tool_presence_without_feature_flag(configured
         get_model_config=lambda name: None,
     )
 
-    names = {tool.name for tool in get_available_tools(include_mcp=False, app_config=config)}
+    tools = get_available_tools(include_mcp=False, app_config=config)
+    assembled = next(tool for tool in tools if tool.name == "knowledge_search")
 
-    assert ("knowledge_search" in names) is configured
-    assert ("list_knowledge_bases" in names) is configured
+    assert "HR Policies" in assembled.description
+    assert "Engineering" in assembled.description
+    assert "[REDACTED] archive" in assembled.description
+    assert "ragflow-secret" not in assembled.description
+    assert {tool.name for tool in tools}.isdisjoint({"list_knowledge_bases"})
+
+
+def test_ragflow_package_has_explicit_init_file() -> None:
+    package_dir = Path(ragflow_tools.__file__).resolve().parent
+
+    assert (package_dir / "__init__.py").is_file()

@@ -307,17 +307,19 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
-    # - name: knowledge  # Enable with both RAGFlow tools below.
+    # - name: knowledge  # Enable with the RAGFlow tool below.
 
   tools:
     # Optional tenant-shared, read-only RAGFlow retrieval. Put RAGFLOW_API_KEY
-    # in `secrets`; connection settings belong to knowledge_search and are
-    # reused by list_knowledge_bases.
+    # in `secrets`, then bind an operator-controlled allowlist of exact dataset
+    # names. The Agent cannot enumerate the tenant catalog.
     # - name: knowledge_search
     #   group: knowledge
     #   use: deerflow.community.ragflow.tools:knowledge_search_tool
     #   base_url: http://ragflow:9380
     #   api_key: $RAGFLOW_API_KEY
+    #   datasets:
+    #     - HR Policies
     #   timeout: 30
     #   page_size: 8
     #   similarity_threshold: 0.2
@@ -325,9 +327,6 @@ config: |
     #   top_k: 256
     #   max_chars_per_chunk: 800
     #   max_total_chars: 8000
-    # - name: list_knowledge_bases
-    #   group: knowledge
-    #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     - name: web_search
       group: web
       use: deerflow.community.ddg_search.tools:web_search_tool

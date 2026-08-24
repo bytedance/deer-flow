@@ -294,14 +294,17 @@ For models with `supports_vision: true`:
 ### RAGFlow Knowledge Retrieval
 
 The harness provides an opt-in, read-only RAGFlow integration under
-`deerflow.community.ragflow`. The normal `tools:` list enables the two Agent
-tools; RAGFlow connection and retrieval parameters live as extra fields on the
-`knowledge_search` entry and are reused by `list_knowledge_bases`. The tools
-list tenant-shared knowledge bases and retrieve compact cited chunks. RAGFlow
-remains the sole source of truth: there are no DeerFlow ORM models, migrations,
-or mirrored knowledge metadata.
+`deerflow.community.ragflow`. The normal `tools:` list enables one
+`knowledge_search(query)` Agent tool. Its entry owns the RAGFlow connection,
+retrieval parameters, and an operator-controlled allowlist of exact dataset
+names. The provider injects those names into the assembled model-visible tool
+description, resolves them lazily through name-filtered RAGFlow requests, and
+always retrieves with a non-empty `dataset_ids` list. Tenant-wide dataset
+listing is not Agent-visible. RAGFlow remains the sole source of truth: there
+are no DeerFlow ORM models, migrations, or mirrored knowledge metadata.
 The configured tenant API key must never appear in logs or model-visible tool
-errors, and dataset UUIDs must not enter model context. This slice deliberately
+errors, and RAGFlow dataset UUIDs must not enter model context. Provider-authored
+model-visible text is English. This slice deliberately
 contains no Gateway management API, watcher, SSE endpoint, or frontend UI;
 knowledge-base writes remain in RAGFlow. Tests live in
 `tests/test_ragflow_client.py` and `tests/test_ragflow_tools.py`.

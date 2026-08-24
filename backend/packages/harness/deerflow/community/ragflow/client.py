@@ -78,7 +78,7 @@ class RAGFlowClient:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.request(method, path, params=params, json=json)
         except httpx.TimeoutException:
-            raise RAGFlowConnectionError(f"请求超时（{self.timeout:g} 秒）") from None
+            raise RAGFlowConnectionError(f"RAGFlow request timed out after {self.timeout:g} seconds.") from None
         except httpx.RequestError as exc:
             detail = self._redact(exc)
             raise RAGFlowConnectionError(f"{type(exc).__name__}: {detail}") from None
@@ -91,72 +91,57 @@ class RAGFlowClient:
             if isinstance(error_payload, dict) and error_payload.get("code") not in (None, 0):
                 message = self._redact(error_payload.get("message") or f"RAGFlow API error (HTTP {response.status_code})")
                 raise RAGFlowAPIError(message, code=error_payload.get("code"))
-            raise RAGFlowProtocolError(f"RAGFlow 请求失败（HTTP {response.status_code}）")
+            raise RAGFlowProtocolError(f"RAGFlow request failed (HTTP {response.status_code}).")
 
         try:
             payload = response.json()
         except ValueError:
-            raise RAGFlowProtocolError("RAGFlow 返回了无效 JSON") from None
+            raise RAGFlowProtocolError("RAGFlow returned invalid JSON.") from None
         if not isinstance(payload, dict):
-            raise RAGFlowProtocolError("RAGFlow 返回了非对象 JSON")
+            raise RAGFlowProtocolError("RAGFlow returned a non-object JSON payload.")
 
         code = payload.get("code")
         if code != 0:
-            message = self._redact(payload.get("message") or "RAGFlow 请求失败")
+            message = self._redact(payload.get("message") or "RAGFlow request failed.")
             raise RAGFlowAPIError(message, code=code)
         return payload
 
-    async def list_datasets(self) -> list[dict[str, Any]]:
-        """List every RAGFlow dataset accessible to the configured tenant key."""
-        page = 1
-        page_size = 100
-        datasets: list[dict[str, Any]] = []
+    async def list_datasets(self, *, name: str) -> list[dict[str, Any]]:
+        """Resolve a configured dataset name without enumerating the tenant catalog."""
+        if not name.strip():
+            raise ValueError("name must not be empty")
 
-        while True:
-            params: dict[str, object] = {"page": page, "page_size": page_size}
-            payload = await self._request(
-                "GET",
-                "/datasets",
-                params=params,
-            )
-            data = payload.get("data")
-            if not isinstance(data, list):
-                raise RAGFlowProtocolError("RAGFlow 返回了无效的知识库列表")
-            batch = [item for item in data if isinstance(item, dict)]
-            datasets.extend(batch)
-
-            total = payload.get("total_datasets", payload.get("total"))
-            if isinstance(total, int) and len(datasets) >= total:
-                break
-            if len(data) < page_size:
-                break
-            page += 1
-
-        return datasets
+        payload = await self._request("GET", "/datasets", params={"name": name})
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")
+        return [item for item in data if isinstance(item, dict)]
 
     async def retrieve(
         self,
         query: str,
         *,
-        dataset_ids: list[str] | None = None,
+        dataset_ids: list[str],
         page_size: int = 8,
         similarity_threshold: float = 0.2,
         vector_similarity_weight: float = 0.3,
         top_k: int = 256,
     ) -> dict[str, Any]:
-        """Retrieve chunks, optionally scoped to specific dataset UUIDs."""
+        """Retrieve chunks from an explicit, non-empty dataset allowlist."""
+        if not dataset_ids or not all(isinstance(dataset_id, str) and dataset_id.strip() for dataset_id in dataset_ids):
+            raise ValueError("dataset_ids must contain at least one dataset ID")
+
         request_body: dict[str, object] = {
             "question": query,
+            "dataset_ids": dataset_ids,
             "page_size": page_size,
             "similarity_threshold": similarity_threshold,
             "vector_similarity_weight": vector_similarity_weight,
             "top_k": top_k,
         }
-        if dataset_ids is not None:
-            request_body["dataset_ids"] = dataset_ids
 
         payload = await self._request("POST", "/retrieval", json=request_body)
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise RAGFlowProtocolError("RAGFlow 返回了无效的检索结果")
+            raise RAGFlowProtocolError("RAGFlow returned an invalid retrieval result.")
         return data

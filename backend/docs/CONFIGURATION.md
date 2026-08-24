@@ -220,11 +220,11 @@ models:
 
 ### RAGFlow Knowledge Retrieval
 
-RAGFlow integration is disabled by default. It adds two read-only Agent tools:
-`list_knowledge_bases` and `knowledge_search`. DeerFlow does not persist a copy
-of dataset or document metadata; RAGFlow is the sole source of truth. The
-configured API key is tenant-scoped, so all DeerFlow users share the same
-knowledge bases.
+RAGFlow integration is disabled by default. It adds one read-only Agent tool,
+`knowledge_search`. DeerFlow does not persist a copy of dataset or document
+metadata; RAGFlow is the sole source of truth. The configured API key is
+tenant-scoped, while the operator-controlled `datasets` list restricts every
+Agent on this deployment to the same named subset.
 
 ```yaml
 tool_groups:
@@ -236,6 +236,9 @@ tools:
     use: deerflow.community.ragflow.tools:knowledge_search_tool
     base_url: http://localhost:9380
     api_key: $RAGFLOW_API_KEY
+    datasets:
+      - HR Policies
+      - Engineering Handbook
     timeout: 30
     page_size: 8
     similarity_threshold: 0.2
@@ -243,17 +246,20 @@ tools:
     top_k: 256
     max_chars_per_chunk: 800
     max_total_chars: 8000
-  - name: list_knowledge_bases
-    group: knowledge
-    use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
 ```
 
-Both tools are opt-in through the normal `tools:` list. Connection and retrieval
-settings belong to `knowledge_search`; `list_knowledge_bases` reads that same
-configuration. Prefer passing explicit knowledge-base names to
-`knowledge_search`: RAGFlow can reject a cross-dataset query when the selected
-datasets use different embedding models. For Docker or Kubernetes, `base_url`
-must be reachable from the Gateway container or Pod; `localhost` refers to that
+The tool is opt-in through the normal `tools:` list. `datasets` must contain one
+or more exact RAGFlow dataset names selected by the deployment operator. DeerFlow
+does not validate their existence while loading configuration; on each search it
+resolves the names with filtered RAGFlow requests and always sends the resulting
+non-empty `dataset_ids` allowlist to retrieval. A deleted or renamed dataset
+produces guidance to check `config.yaml`. Bound names are copied into the tool
+description visible to the Agent, but tenant-wide listing is not exposed.
+
+Configure only datasets with compatible embedding models because RAGFlow can
+reject cross-dataset retrieval when models differ. `base_url` must not contain
+embedded username or password information. For Docker or Kubernetes, it must be
+reachable from the Gateway container or Pod; `localhost` refers to that
 container or Pod, not the host machine.
 
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
