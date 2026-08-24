@@ -358,10 +358,11 @@ class TestPathSafety:
         external_file = external_dir / "SKILL.md"
         external_file.write_text(_skill_content("nested-skill"), encoding="utf-8")
 
-        deep_link = user_storage.get_user_custom_root() / "outer"
-        deep_link.parent.mkdir(parents=True)
+        deep_parent = user_storage.get_user_custom_root() / "outer"
+        deep_parent.mkdir(parents=True)
+        deep_link = deep_parent / "link"
         try:
-            deep_link.symlink_to(external_dir.parent, target_is_directory=True)
+            deep_link.symlink_to(external_dir, target_is_directory=True)
         except OSError as exc:
             if getattr(exc, "winerror", None) == 1314:
                 pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
