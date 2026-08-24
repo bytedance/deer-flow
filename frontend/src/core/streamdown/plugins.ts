@@ -1,6 +1,7 @@
 import { code } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
-import type { Root } from "hast";
+import type { Element, Nodes, Root } from "hast";
+import GithubSlugger from "github-slugger";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, {
@@ -79,13 +80,72 @@ const sanitizeSchema: SanitizeOptions = {
  *   before that it is inert text and cannot be sanitized.
  * - BEFORE `rehypeKatex`: KaTeX emits class/style-heavy trusted markup that
  *   the sanitize schema would strip, breaking math rendering.
- * - In the artifact chain, `rehypeSlug` also runs after this step because
- *   sanitize clobbers `id` values (`id="x"` → `id="user-content-x"`).
+ * - In the artifact chain, `rehypeScopedSlug` also runs after this step so
+ *   generated heading ids keep sanitize's `user-content-` clobber prefix
+ *   (and fragment links are translated to match).
  */
 export const rehypeSanitizeStep = [
   rehypeSanitize,
   sanitizeSchema,
 ] as RehypePlugin;
+
+/** The id prefix rehype-sanitize applies to guard against DOM clobbering. */
+const CLOBBER_PREFIX = defaultSchema.clobberPrefix ?? "user-content-";
+
+function nodeText(node: Nodes): string {
+  if (node.type === "text") {
+    return node.value;
+  }
+  if ("children" in node) {
+    return node.children.map(nodeText).join("");
+  }
+  return "";
+}
+
+/**
+ * Heading-anchor plugin for chains that run AFTER `rehypeSanitizeStep`.
+ *
+ * rehype-sanitize prefixes `id` attributes (default `user-content-`) so a
+ * hostile heading such as `## current` cannot mint an unprefixed
+ * `id="current"` — the exact DOM-clobbering shape the sanitizer guards
+ * against. A slug plugin running after sanitize must therefore keep that
+ * prefix: generated heading ids get `CLOBBER_PREFIX + slug`, and in-page
+ * fragment links (`#foo`) are translated to the prefixed anchor so they
+ * still resolve. External URLs, bare `#`, and already-prefixed fragments
+ * are left untouched; headings whose id sanitize already prefixed (raw
+ * HTML `<h2 id="x">`) keep that id.
+ */
+export function rehypeScopedSlug() {
+  const slugger = new GithubSlugger();
+  return (tree: Root) => {
+    visit(tree, "element", (node: Element) => {
+      if (!/^h[1-6]$/.test(node.tagName)) {
+        return;
+      }
+      if (node.properties?.id) {
+        return;
+      }
+      node.properties = {
+        ...node.properties,
+        id: CLOBBER_PREFIX + slugger.slug(nodeText(node)),
+      };
+    });
+    visit(tree, "element", (node: Element) => {
+      if (node.tagName !== "a") {
+        return;
+      }
+      const href = node.properties?.href;
+      if (
+        typeof href === "string" &&
+        href.length > 1 &&
+        href.startsWith("#") &&
+        !href.startsWith(`#${CLOBBER_PREFIX}`)
+      ) {
+        node.properties.href = `#${CLOBBER_PREFIX}${href.slice(1)}`;
+      }
+    });
+  };
+}
 
 const sharedRemarkPlugins = [
   [remarkGfm, { singleTilde: false }],

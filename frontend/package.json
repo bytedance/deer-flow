@@ -67,6 +67,7 @@
     "defu": "6.1.5",
     "dotenv": "^17.2.3",
     "embla-carousel-react": "^8.6.0",
+    "github-slugger": "^2.0.0",
     "gsap": "^3.13.0",
     "h3": "1.15.9",
     "hast": "^1.0.0",

@@ -52,9 +52,26 @@ test("adds GitHub-style heading anchors to artifact markdown previews", () => {
     ["[概述](#概述)", "", "## 概述"].join("\n"),
   );
 
-  expect(html).toContain('href="#%E6%A6%82%E8%BF%B0"');
-  expect(html).toContain('id="概述"');
+  // Anchors keep sanitize's user-content- clobber prefix; fragment links
+  // are translated to the prefixed id so they still resolve.
+  expect(html).toContain('href="#user-content-%E6%A6%82%E8%BF%B0"');
+  expect(html).toContain('id="user-content-概述"');
+  expect(html).not.toContain('id="概述"');
   expect(html).not.toContain("target=");
+});
+
+test("scoped heading anchors cannot mint clobberable ids", () => {
+  const html = renderArtifactMarkdown(
+    ["## current", "", "[go](#current)", "", "## forms"].join("\n"),
+  );
+
+  // `id="current"` on a heading is the DOM-clobbering shape rehype-sanitize
+  // guards against; the scoped slug must keep the user-content- prefix.
+  expect(html).toContain('id="user-content-current"');
+  expect(html).not.toContain('id="current"');
+  // In-page fragment links are translated to the prefixed anchors.
+  expect(html).toContain('href="#user-content-current"');
+  expect(html).not.toContain('href="#current"');
 });
 
 test("does not add heading anchors to the shared streamdown plugin config", () => {
