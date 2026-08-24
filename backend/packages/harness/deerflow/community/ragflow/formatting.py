@@ -40,10 +40,11 @@ def format_retrieval_result(
 ) -> str:
     """Format one RAGFlow retrieval response into compact cited text.
 
-    RAGFlow normalizes response chunk fields before returning them from the
-    REST endpoint (for example, ``kb_id`` becomes ``dataset_id``). Only those
-    public response field names are consumed, and dataset IDs are mapped back
-    to the operator-configured names before anything reaches the model.
+    Verified against RAGFlow v0.26.4 and v0.27.0: the REST retrieval endpoint
+    normalizes response chunk fields before returning them (for example,
+    ``kb_id`` becomes ``dataset_id``). Only those public response field names
+    are consumed, and dataset IDs are mapped back to the operator-configured
+    names before anything reaches the model.
     """
     raw_chunks = result.get("chunks")
     if not isinstance(raw_chunks, list):
