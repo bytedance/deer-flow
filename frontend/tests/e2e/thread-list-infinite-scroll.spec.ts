@@ -33,7 +33,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
   }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
-    await page.goto("/workspace/settings?settings=chats");
+    await page.goto("/workspace/chats/new?settings=chats");
 
     const main = page.getByTestId("chats-settings-page");
 
@@ -93,7 +93,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
 
     mockLangGraphAPI(page, { threads: THREADS });
 
-    await page.goto("/workspace/settings?settings=chats");
+    await page.goto("/workspace/chats/new?settings=chats");
 
     // Wait for the first page to render so we have a baseline count.
     await expect(
