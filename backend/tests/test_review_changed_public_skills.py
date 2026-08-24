@@ -38,6 +38,8 @@ def test_main_skips_successfully_when_no_public_skill_changed(tmp_path: Path, mo
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     monkeypatch.setattr(runner, "run_review", fail_review)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -91,6 +93,8 @@ def test_main_reviews_changed_public_skill_and_skips_deleted_skill_md(
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fake_review)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -134,6 +138,8 @@ def test_main_skips_fully_deleted_skill_package(tmp_path: Path, monkeypatch, cap
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fail_review)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -184,6 +190,8 @@ def test_main_reviews_package_when_skill_md_deleted_but_sibling_file_remains(
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fake_review)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -222,6 +230,8 @@ def test_main_reviews_package_when_only_support_file_changed(
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fake_review)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -258,6 +268,8 @@ def test_main_maps_eval_fixture_changes_to_owner_package(
 
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fake_review)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -301,6 +313,8 @@ def test_main_exits_nonzero_when_review_cli_reports_error(tmp_path: Path, monkey
         return _completed(command, returncode=1)
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
 
     exit_code = runner.main(
         [
@@ -339,6 +353,8 @@ def test_main_falls_back_to_empty_tree_when_push_before_is_missing(tmp_path: Pat
         return 0
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
     monkeypatch.setattr(runner, "run_review", fake_review)
 
     exit_code = runner.main(
