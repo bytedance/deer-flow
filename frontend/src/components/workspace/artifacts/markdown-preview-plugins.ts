@@ -1,5 +1,6 @@
 import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/streamdown";
 import {
+  rehypeClobberFragments,
   rehypeSanitizeStep,
   rehypeScopedSlug,
   streamdownPlugins,
@@ -17,7 +18,9 @@ const baseRehypePlugins = streamdownPlugins.rehypePlugins ?? [];
 // chain.
 const slugInsertionIndex = (() => {
   const sanitizeIndex = baseRehypePlugins.indexOf(rehypeSanitizeStep);
-  return sanitizeIndex === -1 ? baseRehypePlugins.length : sanitizeIndex + 1;
+  const fragmentsIndex = baseRehypePlugins.indexOf(rehypeClobberFragments);
+  const after = Math.max(sanitizeIndex, fragmentsIndex);
+  return after === -1 ? baseRehypePlugins.length : after + 1;
 })();
 
 export const artifactMarkdownPlugins = {

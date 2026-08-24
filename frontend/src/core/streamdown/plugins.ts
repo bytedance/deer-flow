@@ -110,14 +110,18 @@ function nodeText(node: Nodes): string {
  * `id="current"` — the exact DOM-clobbering shape the sanitizer guards
  * against. A slug plugin running after sanitize must therefore keep that
  * prefix: generated heading ids get `CLOBBER_PREFIX + slug`, and in-page
- * fragment links (`#foo`) are translated to the prefixed anchor so they
- * still resolve. External URLs, bare `#`, and already-prefixed fragments
- * are left untouched; headings whose id sanitize already prefixed (raw
- * HTML `<h2 id="x">`) keep that id.
+ * fragment links are translated by `rehypeClobberFragments` (which runs
+ * right after sanitize, before this plugin). Headings whose id sanitize
+ * already prefixed (raw HTML `<h2 id="x">`) keep that id.
  */
 export function rehypeScopedSlug() {
   const slugger = new GithubSlugger();
   return (tree: Root) => {
+    // Streamdown caches the unified processor by plugin name, so this
+    // attacher-level slugger instance survives across parses. Without a
+    // reset, rendering the same heading twice yields `heading` then
+    // `heading-1` (rehype-slug resets for the same reason).
+    slugger.reset();
     visit(tree, "element", (node: Element) => {
       if (!/^h[1-6]$/.test(node.tagName)) {
         return;
@@ -129,6 +133,32 @@ export function rehypeScopedSlug() {
         ...node.properties,
         id: CLOBBER_PREFIX + slugger.slug(nodeText(node)),
       };
+    });
+  };
+}
+
+/**
+ * Keeps fragment navigation consistent with rehype-sanitize's clobber
+ * prefix. Runs immediately after `rehypeSanitizeStep` in every chain:
+ *
+ * - remark-rehype already emits GFM footnote anchors PRE-prefixed
+ *   (`id="user-content-fn-1"`, `href="#user-content-fn-1"`), and sanitize
+ *   prefixes the id again — producing `user-content-user-content-fn-1`
+ *   while the href stays single-prefixed, breaking every footnote.
+ *   Ids that ended up double-prefixed are normalized back to one prefix.
+ * - Fragment links written without the prefix (`#foo`) can only resolve
+ *   against prefixed ids after sanitization, so they are translated to
+ *   `#user-content-foo`. Already-prefixed hrefs and external URLs are
+ *   untouched.
+ */
+export function rehypeClobberFragments() {
+  return (tree: Root) => {
+    const doublePrefix = `${CLOBBER_PREFIX}${CLOBBER_PREFIX}`;
+    visit(tree, "element", (node: Element) => {
+      const id = node.properties?.id;
+      if (typeof id === "string" && id.startsWith(doublePrefix)) {
+        node.properties.id = id.slice(CLOBBER_PREFIX.length);
+      }
     });
     visit(tree, "element", (node: Element) => {
       if (node.tagName !== "a") {
@@ -167,6 +197,7 @@ export const streamdownPlugins = {
   rehypePlugins: [
     rehypeRaw,
     rehypeSanitizeStep,
+    rehypeClobberFragments,
     [rehypeKatex, katexOptions],
   ] as StreamdownProps["rehypePlugins"],
 };

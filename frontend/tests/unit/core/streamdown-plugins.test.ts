@@ -74,6 +74,47 @@ test("scoped heading anchors cannot mint clobberable ids", () => {
   expect(html).not.toContain('href="#current"');
 });
 
+test("identical artifact markdown renders stable anchors across renders", () => {
+  // Streamdown caches the unified processor by plugin name, so the scoped
+  // slug's slugger survives across parses — it must reset per tree or the
+  // second render of the same heading gets a -1 suffix that keeps growing.
+  const content = ["## Stable heading", "", "## Stable heading"].join("\n");
+  const first = renderArtifactMarkdown(content);
+  const second = renderArtifactMarkdown(content);
+
+  // Streamdown parses blocks separately, so both headings get the base
+  // slug; the guard is that repeated RENDERS never grow -1/-2 suffixes.
+  expect(first).toContain('id="user-content-stable-heading"');
+  expect(second).toContain('id="user-content-stable-heading"');
+  expect(first).not.toContain("user-content-stable-heading-1");
+  expect(second).not.toContain("user-content-stable-heading-1");
+  expect(second).not.toContain("user-content-stable-heading-2");
+});
+
+test("footnote references survive the sanitize clobber prefix", () => {
+  // remark-rehype emits footnote anchors pre-prefixed (user-content-fn-1);
+  // sanitize would double-prefix the ids while leaving hrefs single-prefixed.
+  // rehypeClobberFragments normalizes ids back to one prefix and translates
+  // unprefixed fragment hrefs, so forward and back references keep resolving.
+  const html = renderSharedMarkdown(
+    [
+      "Body with a note[^1] and a second[^2].",
+      "",
+      "[^1]: First note.",
+      "[^2]: Second note.",
+    ].join("\n"),
+  );
+
+  // Streamdown renders footnote refs/backrefs as its link component
+  // (buttons), so the DOM contract is the id side: single clobber prefix on
+  // the footnote/list ids, never double, matching the reference hrefs the
+  // link component receives (#user-content-fn-1 before React mapping).
+  expect(html).not.toContain("user-content-user-content-");
+  expect(html).toContain('id="user-content-fn-1"');
+  expect(html).toContain('id="user-content-fn-2"');
+  expect(html).toContain('id="user-content-footnote-label"');
+});
+
 test("does not add heading anchors to the shared streamdown plugin config", () => {
   const html = [
     renderSharedMarkdown("## Summary"),
