@@ -164,6 +164,39 @@ class TestFilesFromKwargs:
         msg = _human("hi", files=[{"filename": ".upload-active.part", "size": 5, "path": "/mnt/user-data/uploads/.upload-active.part"}])
         assert mw._files_from_kwargs(msg) is None
 
+    def test_carries_markdown_file_metadata(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+        (uploads_dir / "report.md").write_text("# Title", encoding="utf-8")
+        msg = _human(
+            "hi",
+            files=[
+                {
+                    "filename": "report.pdf",
+                    "size": 3,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "markdown_file": "report.md",
+                }
+            ],
+        )
+        files = mw._files_from_kwargs(msg, uploads_dir)
+        assert files is not None
+        assert files[0]["markdown_file"] == "report.md"
+
+    def test_ignores_markdown_file_with_path_traversal_or_staging(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf")
+        for bad in ("../evil.md", ".upload-active.part"):
+            msg = _human(
+                "hi",
+                files=[{"filename": "report.pdf", "size": 3, "path": "/mnt/user-data/uploads/report.pdf", "markdown_file": bad}],
+            )
+            files = mw._files_from_kwargs(msg, uploads_dir)
+            assert files is not None
+            assert "markdown_file" not in files[0]
+
 
 # ---------------------------------------------------------------------------
 # _create_files_message
@@ -295,6 +328,40 @@ class TestBeforeAgent:
         assert "<current_uploads>" in updated_msg.content
         assert "report.pdf" in updated_msg.content
         assert "please analyse" in updated_msg.content
+
+    def test_lists_converted_text_companion_instead_of_binary(self, tmp_path):
+        """A binary upload with a converted .md companion points the model at
+        the readable text (Converted text path + outline from the .md)."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"pdf-binary")
+        (uploads_dir / "report.md").write_text(
+            "# Executive Summary\n\nIntro paragraph.\n\n## Findings\n\nDetails.\n",
+            encoding="utf-8",
+        )
+
+        msg = _human(
+            "please analyse",
+            files=[
+                {
+                    "filename": "report.pdf",
+                    "size": 10,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "markdown_file": "report.md",
+                }
+            ],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+        assert result is not None
+        content = result["messages"][-1].content
+        assert isinstance(content, str)
+        # the converted companion is surfaced with its virtual path
+        assert "Converted text: /mnt/user-data/uploads/report.md" in content
+        # the binary path is still listed as the upload itself
+        assert "Path: /mnt/user-data/uploads/report.pdf" in content
+        # outline headings come from the .md, not the binary
+        assert "Document outline" in content
+        assert "Executive Summary" in content
 
     def test_injects_current_uploads_tag_into_list_content(self, tmp_path):
         mw = _middleware(tmp_path)

@@ -88,6 +88,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         size_str = f"{size_kb:.1f} KB" if size_kb < 1024 else f"{size_kb / 1024:.1f} MB"
         lines.append(f"- {neutralize_untrusted_tags(file['filename'])} ({size_str})")
         lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
+        markdown_file = file.get("markdown_file")
+        if markdown_file:
+            lines.append(
+                f"  Converted text: {neutralize_untrusted_tags(f'/mnt/user-data/uploads/{markdown_file}')} "
+                "(read this instead of the binary; outline line numbers below refer to it)"
+            )
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
@@ -188,14 +194,25 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue
-            files.append(
-                {
-                    "filename": filename,
-                    "size": int(f.get("size") or 0),
-                    "path": f"/mnt/user-data/uploads/{filename}",
-                    "extension": Path(filename).suffix,
-                }
-            )
+            entry: dict = {
+                "filename": filename,
+                "size": int(f.get("size") or 0),
+                "path": f"/mnt/user-data/uploads/{filename}",
+                "extension": Path(filename).suffix,
+            }
+            # Carry the UTF-8 companion produced by document conversion (e.g.
+            # `report.md` next to `report.pdf`) so the context can point the
+            # model at the readable text instead of the binary original (#4981).
+            markdown_file = f.get("markdown_file")
+            if (
+                isinstance(markdown_file, str)
+                and markdown_file
+                and Path(markdown_file).name == markdown_file
+                and not is_upload_staging_file(markdown_file)
+            ):
+                if uploads_dir is None or (uploads_dir / markdown_file).is_file():
+                    entry["markdown_file"] = markdown_file
+            files.append(entry)
         return files if files else None
 
     @override
@@ -243,10 +260,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         context_files, omitted_files = self._select_files_for_context(new_files)
 
-        # Attach outlines to context files
+        # Attach outlines to context files. When the upload has a converted
+        # UTF-8 companion, extract the outline from that text file (the binary
+        # original is not UTF-8 readable), matching the path shown to the model.
         if uploads_dir:
             for file in context_files:
-                phys_path = uploads_dir / file["filename"]
+                md_name = file.get("markdown_file")
+                phys_path = uploads_dir / (md_name or file["filename"])
                 outline, preview = extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview

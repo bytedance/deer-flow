@@ -820,6 +820,8 @@ export interface FileInMessage {
   size: number; // bytes
   path?: string; // virtual path, may not be set during upload
   status?: "uploading" | "uploaded";
+  /** UTF-8 companion produced by document conversion (e.g. `report.md` for a PDF). */
+  markdown_file?: string;
 }
 
 /**

@@ -115,23 +115,15 @@ def _list_uploaded_files_impl(
     # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
     candidates: list[tuple[float, Path, int]] = []
     try:
-        # Collect file entries once to build the name set and iterate.
+        # Collect file entries once.
         entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_staging_file(e.name)]
-        all_names: set[str] = {e.name for e in entries}
 
         for entry in entries:
             if entry.name in current_run_filenames:
                 continue
-            # Skip .md files that are conversion artifacts of another file.
-            # Known limitation: if a user manually uploads both report.pdf and
-            # report.md, the .md is hidden as a "conversion artifact".  This is
-            # acceptable for the MVP — triggering this requires uploading files
-            # whose stems collide with converted documents, which is rare.
-            if entry.name.endswith(".md"):
-                stem = entry.name[:-3]  # remove ".md"
-                non_md_siblings = {n for n in all_names if n != entry.name and Path(n).stem == stem}
-                if non_md_siblings:
-                    continue
+            # Conversion companions (e.g. `report.md` next to `report.pdf`) are
+            # listed like any other file so the agent can discover the readable
+            # text and read it instead of the binary original (#4981).
             stat = entry.stat()
             candidates.append((stat.st_mtime, Path(entry.path), stat.st_size))
     except OSError:
@@ -157,6 +149,13 @@ def _list_uploaded_files_impl(
             "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
             "extension": neutralize_untrusted_tags(file_path.suffix),
         }
+
+        # If this file has a same-stem `.md` conversion companion, expose it so
+        # the model can read the UTF-8 text instead of a binary original (#4981).
+        if file_path.suffix.lower() != ".md":
+            md_path = file_path.with_suffix(".md")
+            if md_path.is_file():
+                file_info["converted_text"] = neutralize_untrusted_tags(f"/mnt/user-data/uploads/{md_path.name}")
 
         should_include_outline = outline_for_all or filename in outline_filenames
         if should_include_outline:
