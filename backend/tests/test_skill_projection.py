@@ -144,6 +144,29 @@ def test_atomic_custom_skill_rewrite_refreshes_projection(projection_env) -> Non
     assert target.stat().st_ino != old_inode
 
 
+def test_external_custom_skill_directory_target_update_refreshes_projection(projection_env, tmp_path: Path) -> None:
+    env = projection_env
+    external_skill_dir = tmp_path / "external-skills" / "linked-skill"
+    source = _write_skill(external_skill_dir.parent, "linked-skill", "before")
+    linked_skill_dir = env.storage.get_user_custom_root() / "linked-skill"
+    linked_skill_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        linked_skill_dir.symlink_to(external_skill_dir, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
+
+    projected = rebuild_skill_projections(env.storage)
+    target = projected.custom / "linked-skill" / "SKILL.md"
+    assert "before" in target.read_text(encoding="utf-8")
+
+    source.write_text(_skill_content("linked-skill", "after"), encoding="utf-8")
+    ensure_skill_projections(env.storage)
+
+    assert "after" in target.read_text(encoding="utf-8")
+
+
 def test_custom_content_write_keeps_unrelated_skill_visible_during_rebuild(projection_env, monkeypatch) -> None:
     env = projection_env
     env.storage.write_custom_skill("alpha", "SKILL.md", _skill_content("alpha"))

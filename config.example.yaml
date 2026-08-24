@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 34
+config_version: 35
 
 # ============================================================================
 # Logging
@@ -1411,6 +1411,26 @@ sandbox:
 #   # environment:                   # injected into every command (and as create-time env)
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 6: OpenSandbox remote Sandbox
+# Runs each sandbox through an OpenSandbox server. Released sandboxes stay in an
+# in-process warm pool and are reclaimed only by the same user/thread. Requires
+# the optional SDK: pip install "deerflow-harness[opensandbox]".
+# sandbox:
+#   use: deerflow.community.opensandbox:OpenSandboxProvider
+#   image: python:3.11
+#   # api_key: $OPEN_SANDBOX_API_KEY  # optional when the SDK env var is set
+#   # domain: localhost:8080          # optional; OPEN_SANDBOX_DOMAIN fallback
+#   # protocol: http                  # localhost only; use https for remote domains
+#   # request_timeout: 30             # management API request timeout seconds
+#   # ready_timeout: 30               # create/readiness timeout seconds
+#   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # sandbox_timeout: 14400          # remote lifetime seconds; 0 = explicit cleanup
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # replicas: 3                     # active + warm cap per gateway process
+#   # idle_timeout: 600               # warm seconds before destroy; 0 disables
+#   # environment:                    # create-time and per-command defaults
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
@@ -1487,6 +1507,21 @@ sandbox:
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
 #   # The model name must match a name defined in the `models:` section above.
+
+# ============================================================================
+# Tool Result Verification
+# ============================================================================
+# Deterministic receipts are stamped onto tool results and injected into the
+# model context so final reports can cite executed actions. Disable them only
+# if the extra provenance context is not wanted. The selective judge settings
+# are reserved for acceptance-criteria review and remain off by default.
+verification:
+  receipts_enabled: true
+  # Lead-chain ledger rendering: 'delegation_only' renders only while
+  # processing subagent results (subagent chains always render).
+  receipts_render_mode: "delegation_only"
+  judge_enabled: false
+  judge_model_name: null
 
 # ============================================================================
 # ACP Agents Configuration
@@ -2057,18 +2092,20 @@ run_events:
 # ============================================================================
 # Agent Storage Configuration
 # ============================================================================
-# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
-# separate from `database` (run/thread/event data) and from agent memory.
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) and deployment-level
+# managed subagent definitions are stored. This is separate from `database`
+# (run/thread/event data) and from agent memory.
 # Restart-required (the backend is captured at Gateway lifespan startup).
 #
-# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
-#                   Single-node only: an agent created on one node is invisible
-#                   to other nodes without a shared mount.
-# backend: db    -- A row per agent in the shared SQL persistence layer, so every
-#                   node sees the same agents. Requires database.backend to be
+# backend: file  -- Custom Agents use per-user files; managed subagents use one
+#                   JSON file each under {base_dir}/managed-subagents/ (default).
+#                   Node-local without a shared mount.
+# backend: db    -- Both definition types use the shared SQL persistence layer,
+#                   so every node sees them. Requires database.backend to be
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
-# Switching an existing install to 'db'? Import the on-disk agents once with:
+# Switching an existing install to 'db'? Import the on-disk Custom Agents and
+# managed subagents once with:
 #     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #
@@ -2081,7 +2118,12 @@ agent_storage:
 # Scheduled Tasks Configuration
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.
-# All fields are restart-required (captured at Gateway lifespan startup).
+# Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
+# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# recursion_limit is read at dispatch and applies to the next scheduled run
+# without a Gateway restart. The default (1000) matches the web UI's
+# interactive budget so scheduled and interactive runs behave identically out
+# of the box. Values above max_recursion_limit are clamped.
 #
 # The scheduler is single-instance by default. Set multi_instance: true only
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
@@ -2089,17 +2131,22 @@ agent_storage:
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
+#   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
+#   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
+#   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 
 # ============================================================================
 # Long-running MCP Tasks Configuration
@@ -2437,14 +2484,21 @@ run_ownership:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         guest:
-#           tools: {allow: ["web_search", "read_file"]}
+#           # web-only role: sandbox-dependent tools (read_file, bash, glob,
+#           # grep, write_file, ...) are omitted — with sandbox:execute denied
+#           # they could only ever return the deny error, so allow just the
+#           # non-sandbox tools.
+#           tools: {allow: ["web_search"]}
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
+#           sandbox: {allow: false}  # deny sandbox execution
 authorization:
   enabled: false
 
@@ -2619,5 +2673,15 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     table_prefix: example_ext_          # optional: table-name prefix this extension
+#                                         # owns under its own MetaData/migration chain.
+#                                         # Keeps `alembic revision --autogenerate`, run
+#                                         # directly against a live database, from seeing
+#                                         # those tables and proposing to drop them.
+#                                         # (`make migrate-rev` diffs a throwaway SQLite
+#                                         # built from the migration chain, so it never
+#                                         # sees them in the first place.)
+#                                         # Rejected at startup if empty, or if it would
+#                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any

@@ -1,8 +1,10 @@
 """Core behavior tests for task tool orchestration."""
 
 import asyncio
+import gc
 import importlib
 import inspect
+import weakref
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -259,6 +261,51 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Unknown subagent type 'general-purpose'. Available: general-purpose"
 
 
+def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = ["planner"]
+    captured = {}
+
+    def available(*, allowed_subagents):
+        captured["allowed"] = allowed_subagents
+        return ["planner"]
+
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", available)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert captured["allowed"] == ["planner"]
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: planner" in message.content
+
+
+def test_task_tool_explains_when_caller_policy_permits_no_subagents(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = []
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, allowed_subagents: [])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-empty-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: none permitted by caller policy" in message.content
+
+
 def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     """The lead run binds one immutable extension snapshot; delegation must
     carry that same object rather than re-reading the process singleton, which
@@ -481,6 +528,7 @@ def test_task_tool_rejects_non_mapping_attributes(monkeypatch):
 
 def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
 
     result = _run_task_tool(
@@ -1853,3 +1901,31 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     completed = [e for e in events if e["type"] == "task_completed"]
     assert len(completed) == 1
     assert completed[0]["usage"] is None
+
+
+@pytest.mark.asyncio
+async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
+    """Verify deferred cleanup task is retained in _deferred_cleanup_tasks and completes after GC."""
+    cleaned = []
+    orig_sleep = asyncio.sleep
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="ok"))
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleaned.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", lambda _: orig_sleep(0))
+
+    task = task_tool_module._schedule_deferred_subagent_cleanup("exec-gc", "trace-gc", 5)
+    assert task in task_tool_module._deferred_cleanup_tasks
+    weak_task = weakref.ref(task)
+    del task
+    gc.collect()
+
+    assert weak_task() is not None and weak_task() in task_tool_module._deferred_cleanup_tasks
+    for _ in range(10):
+        if cleaned:
+            break
+        await orig_sleep(0.01)
+    await orig_sleep(0.01)
+
+    assert cleaned == ["exec-gc"]
+    assert weak_task() not in task_tool_module._deferred_cleanup_tasks

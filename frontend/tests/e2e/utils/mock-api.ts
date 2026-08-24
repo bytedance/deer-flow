@@ -95,6 +95,7 @@ export type MockAPIOptions = {
   features?: {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
+    mcpTasksEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -255,8 +256,16 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       run_id: string | null;
       scheduled_for: string;
       trigger: "scheduled" | "manual";
-      status: "queued" | "running" | "success" | "failed" | "skipped";
+      status:
+        | "queued"
+        | "launching"
+        | "running"
+        | "success"
+        | "failed"
+        | "skipped"
+        | "interrupted";
       error: string | null;
+      attempt_count: number;
       started_at: string | null;
       finished_at: string | null;
       created_at: string;
@@ -306,6 +315,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
+    mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -537,6 +547,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
             trigger: "manual",
             status: "success",
             error: null,
+            attempt_count: 1,
             started_at: "2026-07-01T00:00:00+00:00",
             finished_at: "2026-07-01T00:00:00+00:00",
             created_at: "2026-07-01T00:00:00+00:00",
@@ -1172,6 +1183,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
+          mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
         }),
       });
     }

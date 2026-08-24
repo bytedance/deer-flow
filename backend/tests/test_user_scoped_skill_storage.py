@@ -308,48 +308,79 @@ class TestPathSafety:
         with pytest.raises(ValueError, match="must stay within"):
             user_storage.validate_skill_file_path(skill_file)
 
-    def test_accepts_external_skill_directory_symlink_but_not_file_symlink(self, user_storage: UserScopedSkillStorage, tmp_path: Path, monkeypatch):
+    def test_accepts_external_skill_directory_symlink_but_not_file_symlink(self, user_storage: UserScopedSkillStorage, tmp_path: Path):
         external_file = tmp_path / "external-skills" / "external-skill" / "SKILL.md"
         external_file.parent.mkdir(parents=True)
         external_file.write_text(_skill_content("external-skill"), encoding="utf-8")
 
         linked_dir = user_storage.get_user_custom_root() / "external-skill"
         linked_file = linked_dir / "SKILL.md"
-        original_resolve = Path.resolve
-
-        def fake_resolve(path: Path, strict: bool = False) -> Path:
-            if path == linked_file:
-                return external_file
-            if path == linked_dir:
-                return external_file.parent
-            return original_resolve(path, strict=strict)
-
-        monkeypatch.setattr(Path, "resolve", fake_resolve)
-        monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked_dir)
+        linked_dir.parent.mkdir(parents=True)
+        try:
+            linked_dir.symlink_to(external_file.parent, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
 
         assert user_storage.validate_skill_file_path(linked_file) == external_file
 
-        monkeypatch.setattr(Path, "is_symlink", lambda path: path in {linked_dir, linked_file})
+        file_link = user_storage.get_user_custom_root() / "file-link" / "SKILL.md"
+        file_link.parent.mkdir(parents=True)
+        try:
+            file_link.symlink_to(external_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
         with pytest.raises(ValueError, match="must stay within"):
-            user_storage.validate_skill_file_path(linked_file)
+            user_storage.validate_skill_file_path(file_link)
 
-    def test_rejects_file_symlink_even_when_target_stays_inside_allowed_root(self, user_storage: UserScopedSkillStorage, tmp_path: Path, monkeypatch):
+    def test_rejects_file_symlink_even_when_target_stays_inside_allowed_root(self, user_storage: UserScopedSkillStorage, tmp_path: Path):
         target_file = user_storage.get_user_custom_root() / "real-skill" / "SKILL.md"
         target_file.parent.mkdir(parents=True)
         target_file.write_text(_skill_content("real-skill"), encoding="utf-8")
         linked_file = user_storage.get_user_custom_root() / "alias-skill" / "SKILL.md"
-        original_resolve = Path.resolve
-
-        def fake_resolve(path: Path, strict: bool = False) -> Path:
-            if path == linked_file:
-                return target_file
-            return original_resolve(path, strict=strict)
-
-        monkeypatch.setattr(Path, "resolve", fake_resolve)
-        monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked_file)
+        linked_file.parent.mkdir(parents=True)
+        try:
+            linked_file.symlink_to(target_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
 
         with pytest.raises(ValueError, match="must stay within"):
             user_storage.validate_skill_file_path(linked_file)
+
+    def test_rejects_deeper_and_non_custom_directory_symlinks(self, user_storage: UserScopedSkillStorage, skills_root: Path, tmp_path: Path):
+        external_dir = tmp_path / "external-skills" / "nested"
+        external_dir.mkdir(parents=True)
+        external_file = external_dir / "SKILL.md"
+        external_file.write_text(_skill_content("nested-skill"), encoding="utf-8")
+
+        deep_parent = user_storage.get_user_custom_root() / "outer"
+        deep_parent.mkdir(parents=True)
+        deep_link = deep_parent / "link"
+        try:
+            deep_link.symlink_to(external_dir, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        public_link = skills_root / SkillCategory.PUBLIC.value / "external-skill"
+        public_link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            public_link.symlink_to(external_dir, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(deep_link / "SKILL.md")
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(public_link / "SKILL.md")
 
     def test_rejects_invalid_skill_name(self, user_storage: UserScopedSkillStorage):
         with pytest.raises(ValueError, match="hyphen-case"):
