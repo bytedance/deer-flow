@@ -250,9 +250,20 @@ require_compose_version
 
 
 def test_require_compose_version_falls_back_to_hyphenated_binary():
-    """When the Compose plugin is missing, probe docker-compose (hyphenated)."""
-    command = f"""
+    """Plugin missing + docker-compose 2.24: version check passes and stop uses that binary.
+
+    Regression for the half-fallback where require_compose_version accepted
+    docker-compose but COMPOSE_CMD stayed hardcoded to `docker compose`.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_file(tmp_root)
+        marker = tmp_root / "hyphenated_invoke.txt"
+
+        command = f"""
 source '{SCRIPT_PATH}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
 docker() {{
   if [ "$1" = compose ]; then
     echo "docker: unknown command" >&2
@@ -260,17 +271,27 @@ docker() {{
   fi
   command docker "$@"
 }}
-docker-compose() {{ echo '2.24.0'; }}
-require_compose_version
+docker-compose() {{
+  if [ "$1" = version ]; then
+    echo '2.24.0'
+    return 0
+  fi
+  # Real wrapper ops (down/logs/...) must hit this binary, not `docker compose`.
+  printf '%s\n' "$*" > '{marker}'
+}}
+unset DEER_FLOW_ROOT
+stop
 """
-    result = subprocess.run(
-        [BASH_EXECUTABLE, "-lc", command],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-    )
+        result = subprocess.run(
+            [BASH_EXECUTABLE, "-lc", command],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
 
-    assert result.returncode == 0, result.stdout + result.stderr
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert marker.is_file(), "stop never invoked docker-compose for the compose operation"
+        assert "down" in marker.read_text(encoding="utf-8")
 
 
 def test_require_compose_version_rejects_old_hyphenated_binary():

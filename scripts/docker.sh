@@ -16,7 +16,14 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Use a filename relative to DOCKER_DIR (we always `cd` there) so Windows
 # Docker Desktop does not receive a Git Bash `/c/...` path it cannot open.
 COMPOSE_FILE="docker-compose-dev.yaml"
-COMPOSE_CMD="docker compose -p deer-flow-dev -f $COMPOSE_FILE"
+# Selected by require_compose_version: prefer the V2 plugin, else hyphenated binary.
+# Kept as an array so "docker compose" stays two words under set -u / quoting.
+COMPOSE_BIN=(docker compose)
+
+_refresh_compose_cmd() {
+    COMPOSE_CMD="${COMPOSE_BIN[*]} -p deer-flow-dev -f ${COMPOSE_FILE}"
+}
+_refresh_compose_cmd
 
 # docker-compose-dev.yaml marks its env_file entries optional with the long-form
 # `- path: ... / required: false` syntax, understood by Compose v2.24.0 and up.
@@ -52,21 +59,29 @@ require_compose_file() {
 }
 
 # Prefer the Compose V2 plugin (`docker compose`); fall back to the legacy
-# hyphenated binary (`docker-compose`) when the plugin is missing. Direct
-# callers of either binary get no such check: see CONTRIBUTING.md.
-_compose_version_short() {
+# hyphenated binary (`docker-compose`) when the plugin is missing. Whatever
+# binary answers is retained in COMPOSE_BIN / COMPOSE_CMD so start/logs/stop/
+# restart use the same executable. Must run in the current shell (not $(...))
+# so the COMPOSE_BIN assignment survives. Direct callers get no such check:
+# see CONTRIBUTING.md.
+_probe_compose() {
     local out
 
     out="$(docker compose version --short 2>/dev/null || true)"
     if [ -n "$out" ]; then
-        printf '%s\n' "$out"
+        COMPOSE_BIN=(docker compose)
+        _refresh_compose_cmd
+        COMPOSE_VERSION_RAW="$out"
         return 0
     fi
     out="$(docker-compose version --short 2>/dev/null || true)"
     if [ -n "$out" ]; then
-        printf '%s\n' "$out"
+        COMPOSE_BIN=(docker-compose)
+        _refresh_compose_cmd
+        COMPOSE_VERSION_RAW="$out"
         return 0
     fi
+    COMPOSE_VERSION_RAW=""
     return 1
 }
 
@@ -79,8 +94,9 @@ require_compose_version() {
     min_minor="${COMPOSE_MIN_VERSION#*.}"
     min_minor="${min_minor%%.*}"
 
-    raw="$(_compose_version_short || true)"
-    raw="${raw#v}"
+    COMPOSE_VERSION_RAW=""
+    _probe_compose || true
+    raw="${COMPOSE_VERSION_RAW#v}"
     major="${raw%%.*}"
     minor="${raw#*.}"
     minor="${minor%%.*}"
