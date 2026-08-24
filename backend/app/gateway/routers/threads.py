@@ -102,6 +102,7 @@ def _checkpoint_mode_http_error(exc: Exception, thread_id: str) -> HTTPException
 _SERVER_RESERVED_METADATA_KEYS: frozenset[str] = frozenset({"owner_id", "user_id"})
 _SIDECAR_METADATA_KEY = "deerflow_sidecar"
 _BRANCH_METADATA_KEY = "deerflow_branch"
+_BRANCH_TITLE_SEQUENCE_METADATA_KEY = "branch_title_sequence"
 # Thread-scoped runtime channels a branch must NOT inherit from its parent:
 # ``sandbox.sandbox_id`` binds path mappings and the release lifecycle to the
 # *parent* thread, so copying it would make the branch read/write the parent's
@@ -112,6 +113,8 @@ _BRANCH_METADATA_KEY = "deerflow_branch"
 _BRANCH_EXCLUDED_CHANNELS = frozenset({"sandbox", "thread_data"})
 _BRANCH_HISTORY_SCAN_LIMIT = 200
 _BRANCH_HISTORY_RAW_SCAN_LIMIT = _BRANCH_HISTORY_SCAN_LIMIT * 2
+_BRANCH_TITLE_MAX_LENGTH = 256
+_BRANCH_TITLE_SEQUENCE_MAX = 9_007_199_254_740_991
 
 
 def _strip_reserved_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
@@ -329,7 +332,18 @@ async def _copy_branch_user_data(source_thread_id: str, target_thread_id: str) -
         return "failed"
 
 
-def _default_branch_display_name(source_title: Any, *, source_is_branch: bool = False) -> str | None:
+def _next_branch_title_sequence(source_sequence: Any, *, source_is_branch: bool) -> int:
+    if source_is_branch and isinstance(source_sequence, int) and not isinstance(source_sequence, bool) and 2 <= source_sequence < _BRANCH_TITLE_SEQUENCE_MAX:
+        return source_sequence + 1
+    return 2
+
+
+def _default_branch_display_name(
+    source_title: Any,
+    *,
+    source_is_branch: bool = False,
+    source_sequence: Any = None,
+) -> str | None:
     if not isinstance(source_title, str):
         return None
 
@@ -338,7 +352,19 @@ def _default_branch_display_name(source_title: Any, *, source_is_branch: bool = 
         while display_name.lower().startswith("branch:"):
             display_name = display_name[len("branch:") :].strip()
 
-    return display_name or None
+    if not display_name:
+        return None
+
+    sequence = _next_branch_title_sequence(source_sequence, source_is_branch=source_is_branch)
+    base = display_name
+    if sequence > 2:
+        source_suffix = f" ({sequence - 1})"
+        if display_name.endswith(source_suffix):
+            base = display_name[: -len(source_suffix)].rstrip()
+
+    suffix = f" ({sequence})"
+    base = base[: _BRANCH_TITLE_MAX_LENGTH - len(suffix)].rstrip()
+    return f"{base}{suffix}" if base else None
 
 
 # ---------------------------------------------------------------------------
@@ -860,7 +886,13 @@ async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request:
     display_name = body.title or _default_branch_display_name(
         source_record.get("display_name"),
         source_is_branch=source_metadata.get(_BRANCH_METADATA_KEY) is True,
+        source_sequence=source_metadata.get(_BRANCH_TITLE_SEQUENCE_METADATA_KEY),
     )
+    if not body.title and display_name is not None:
+        branch_metadata[_BRANCH_TITLE_SEQUENCE_METADATA_KEY] = _next_branch_title_sequence(
+            source_metadata.get(_BRANCH_TITLE_SEQUENCE_METADATA_KEY),
+            source_is_branch=source_metadata.get(_BRANCH_METADATA_KEY) is True,
+        )
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
 
@@ -889,6 +921,8 @@ async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request:
                 values[key] = Overwrite(list(value) if key == "messages" and isinstance(value, list) else value)
             else:
                 values[key] = value
+        if display_name is not None:
+            values["title"] = display_name
         return values
 
     # Stamp both synthetic checkpoints with the branch-creation time because

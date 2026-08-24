@@ -103,7 +103,7 @@ test.describe("Branch from turn", () => {
     const branchThreadLink = page.locator(
       `a[href="/workspace/chats/${MOCK_THREAD_ID_2}"]`,
     );
-    await expect(branchThreadLink).toContainText("Original chat");
+    await expect(branchThreadLink).toContainText("Original chat (2)");
     await expect(branchThreadLink).not.toContainText("Branch:");
   });
 });

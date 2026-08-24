@@ -1708,7 +1708,21 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
         assert response.status_code == 200, response.text
         body = response.json()
         new_thread_id = body["thread_id"]
+        nested_response = client.post(
+            f"/api/threads/{new_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert nested_response.status_code == 200, nested_response.text
+        nested_thread_id = nested_response.json()["thread_id"]
+        explicit_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"], "title": "Deliberate branch title"},
+        )
+        assert explicit_response.status_code == 200, explicit_response.text
+        explicit_thread_id = explicit_response.json()["thread_id"]
         state_response = client.get(f"/api/threads/{new_thread_id}/state")
+        nested_state_response = client.get(f"/api/threads/{nested_thread_id}/state")
+        explicit_state_response = client.get(f"/api/threads/{explicit_thread_id}/state")
         search_response = client.post("/api/threads/search", json={"limit": 10})
 
     assert body["parent_thread_id"] == source_thread_id
@@ -1717,12 +1731,23 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
     assert body["workspace_clone_mode"] == "skipped_historical_turn"
 
     assert state_response.status_code == 200, state_response.text
-    messages = state_response.json()["values"]["messages"]
+    state_values = state_response.json()["values"]
+    messages = state_values["messages"]
     assert [message["id"] for message in messages] == ["human-1", "ai-1", "human-2", "ai-2"]
     assert "Third answer" not in [message.get("content") for message in messages]
+    assert state_values["title"] == "Original chat (2)"
+    assert nested_state_response.status_code == 200, nested_state_response.text
+    assert nested_state_response.json()["values"]["title"] == "Original chat (3)"
+    assert explicit_state_response.status_code == 200, explicit_state_response.text
+    assert explicit_state_response.json()["values"]["title"] == "Deliberate branch title"
     assert search_response.status_code == 200, search_response.text
     branch_entry = next(item for item in search_response.json() if item["thread_id"] == new_thread_id)
-    assert branch_entry["values"]["title"] == "Original chat"
+    assert branch_entry["values"]["title"] == "Original chat (2)"
+    nested_entry = next(item for item in search_response.json() if item["thread_id"] == nested_thread_id)
+    assert nested_entry["values"]["title"] == "Original chat (3)"
+    explicit_entry = next(item for item in search_response.json() if item["thread_id"] == explicit_thread_id)
+    assert explicit_entry["values"]["title"] == "Deliberate branch title"
+    assert "branch_title_sequence" not in explicit_entry["metadata"]
 
 
 def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monkeypatch) -> None:
@@ -2525,10 +2550,27 @@ def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
     assert "not_a_state_field" in response.json()["detail"]
 
 
-def test_branch_display_name_strips_legacy_branch_prefix_only_for_branch_sources() -> None:
-    assert threads._default_branch_display_name("Original chat") == "Original chat"
-    assert threads._default_branch_display_name("Branch: Original chat") == "Branch: Original chat"
-    assert threads._default_branch_display_name("Branch: Branch: Original chat", source_is_branch=True) == "Original chat"
+def test_branch_display_name_adds_language_neutral_numeric_suffix() -> None:
+    assert threads._default_branch_display_name("Original chat") == "Original chat (2)"
+    assert threads._default_branch_display_name("Roadmap (2026)") == "Roadmap (2026) (2)"
+    assert threads._default_branch_display_name("Original chat (2)", source_is_branch=True, source_sequence=2) == "Original chat (3)"
+    assert threads._default_branch_display_name("Roadmap (2026)", source_is_branch=True) == "Roadmap (2026) (2)"
+    assert threads._default_branch_display_name("Roadmap (2026)", source_is_branch=True, source_sequence=2) == "Roadmap (2026) (3)"
+    assert threads._default_branch_display_name("Branch: Branch: Original chat", source_is_branch=True) == "Original chat (2)"
+    assert threads._default_branch_display_name("   ") is None
+    capped = threads._default_branch_display_name("x" * 256)
+    assert capped is not None
+    assert len(capped) == 256
+    assert capped.endswith(" (2)")
+
+
+def test_next_branch_title_sequence_accepts_only_bounded_numeric_branch_metadata() -> None:
+    assert threads._next_branch_title_sequence(2, source_is_branch=True) == 3
+    assert threads._next_branch_title_sequence(8, source_is_branch=True) == 9
+    assert threads._next_branch_title_sequence(8, source_is_branch=False) == 2
+    assert threads._next_branch_title_sequence(True, source_is_branch=True) == 2
+    assert threads._next_branch_title_sequence("8", source_is_branch=True) == 2
+    assert threads._next_branch_title_sequence(threads._BRANCH_TITLE_SEQUENCE_MAX, source_is_branch=True) == 2
 
 
 def test_branch_thread_rejects_sidecar_threads() -> None:
