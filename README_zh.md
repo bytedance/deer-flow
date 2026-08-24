@@ -246,6 +246,10 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 #### 方式一：Docker（推荐）
 
+需要 Docker Desktop / Docker Engine，以及 **Docker Compose v2.24+**
+（`docker compose version`）。更旧的 Compose 客户端无法解析
+`docker/docker-compose-dev.yaml` 里的可选 `env_file` 语法。
+
 **开发模式**（支持热更新，挂载源码）：
 
 ```bash
