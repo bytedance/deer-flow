@@ -1,3 +1,5 @@
+import pytest
+
 from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 
 
@@ -13,6 +15,7 @@ def test_policy_modes_share_tool_and_prompt_contract():
     for policy in (webhook, scheduled):
         assert "ask_clarification" not in policy.prompt_guidance
         assert "Do not wait for a human response" in policy.prompt_guidance
+        assert "interaction policy below" in policy.thinking_guidance
 
 
 def test_legacy_non_interactive_fields_resolve_without_breaking_callers():
@@ -24,3 +27,17 @@ def test_explicit_mode_takes_precedence_over_legacy_fields():
     policy = RunInteractionPolicy.resolve({"run_interaction_mode": "interactive", "non_interactive": True})
 
     assert policy.allows_clarification is True
+
+
+@pytest.mark.parametrize("invalid_mode", ["webhhook", 42])
+def test_invalid_mode_falls_back_with_warning(caplog, invalid_mode):
+    with caplog.at_level("WARNING"):
+        policy = RunInteractionPolicy.resolve({"run_interaction_mode": invalid_mode})
+
+    assert policy.mode == "interactive"
+    assert "Unknown run interaction mode" in caplog.text
+
+
+def test_policy_rejects_invalid_direct_mode():
+    with pytest.raises(ValueError, match="Unknown run interaction mode"):
+        RunInteractionPolicy(mode="webhhook")

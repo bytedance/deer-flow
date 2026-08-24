@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,7 @@ WEBHOOK_MODE = "webhook"
 SCHEDULED_MODE = "scheduled"
 AUTONOMOUS_MODE = "autonomous"
 _VALID_MODES = frozenset({INTERACTIVE_MODE, WEBHOOK_MODE, SCHEDULED_MODE, AUTONOMOUS_MODE})
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +21,10 @@ class RunInteractionPolicy:
 
     mode: str = INTERACTIVE_MODE
     allows_clarification: bool = True
+
+    def __post_init__(self) -> None:
+        if self.mode not in _VALID_MODES:
+            raise ValueError(f"Unknown run interaction mode: {self.mode!r}")
 
     @classmethod
     def resolve(cls, config: Mapping[str, Any] | None = None) -> RunInteractionPolicy:
@@ -29,13 +35,15 @@ class RunInteractionPolicy:
         new entry points can use the more explicit ``run_interaction_mode``.
         """
         values = config or {}
-        requested = values.get("run_interaction_mode")
-        if isinstance(requested, str):
-            requested = requested.strip().lower()
+        raw_requested = values.get("run_interaction_mode")
+        if isinstance(raw_requested, str):
+            requested = raw_requested.strip().lower()
         else:
             requested = None
 
         if requested not in _VALID_MODES:
+            if raw_requested is not None:
+                logger.warning("Unknown run interaction mode %r; falling back to legacy/default policy", raw_requested)
             if values.get("non_interactive"):
                 requested = SCHEDULED_MODE
             elif values.get("disable_clarification"):
@@ -82,7 +90,7 @@ Stop and report a structured blocked outcome when ambiguity affects an irreversi
     def thinking_guidance(self) -> str:
         if self.allows_clarification:
             return "- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, use `ask_clarification` FIRST - do not proceed with work.**"
-        return "- **PRIORITY CHECK: Do not wait for clarification. Use the interaction policy above: make minimal-risk, reversible assumptions, state them, and block only irreversible or high-risk ambiguity.**"
+        return "- **PRIORITY CHECK: Do not wait for clarification. Use the interaction policy below: make minimal-risk, reversible assumptions, state them, and block only irreversible or high-risk ambiguity.**"
 
     @property
     def critical_reminder(self) -> str:

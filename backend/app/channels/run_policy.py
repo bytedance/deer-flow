@@ -14,10 +14,20 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+from deerflow.agents.run_interaction_policy import (
+    AUTONOMOUS_MODE,
+    INTERACTIVE_MODE,
+    SCHEDULED_MODE,
+    WEBHOOK_MODE,
+)
 
 if TYPE_CHECKING:
     from app.channels.message_bus import InboundMessage
+
+InteractionMode = Literal["interactive", "webhook", "scheduled", "autonomous"]
+_VALID_INTERACTION_MODES = frozenset({INTERACTIVE_MODE, WEBHOOK_MODE, SCHEDULED_MODE, AUTONOMOUS_MODE})
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,13 +116,17 @@ class ChannelRunPolicy:
     """
 
     is_interactive: bool = True
-    interaction_mode: str = "interactive"
+    interaction_mode: InteractionMode = INTERACTIVE_MODE
     default_recursion_limit: int | None = None
     credentials_provider: Callable[[InboundMessage, dict[str, Any]], Awaitable[None]] | None = None
     requires_bound_identity: bool = True
     fire_and_forget: bool = False
     serialize_thread_runs: bool = False
     buffer_followups_on_busy: bool = False
+
+    def __post_init__(self) -> None:
+        if self.interaction_mode not in _VALID_INTERACTION_MODES:
+            raise ValueError(f"Unknown channel interaction mode: {self.interaction_mode!r}")
 
 
 # Channel name → policy. Channels absent from this map fall through to

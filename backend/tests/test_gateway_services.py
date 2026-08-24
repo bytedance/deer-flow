@@ -926,8 +926,8 @@ def test_non_interactive_context_override_honored_for_internal_caller():
     config = build_run_config("thread-1", None, None)
     merge_run_context_overrides(config, {"non_interactive": True, "model_name": "gpt"}, internal=True)
 
-    assert config["configurable"]["non_interactive"] is True
     assert config["context"]["non_interactive"] is True
+    assert "non_interactive" not in config.get("configurable", {})
     assert config["configurable"]["model_name"] == "gpt"
 
 

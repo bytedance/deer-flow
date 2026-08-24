@@ -395,8 +395,9 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
 #                              ``git`` push as the bot, not the host user.
 #   ``disable_clarification`` — legacy middleware defense for non-interactive
 #                              channels (GitHub webhooks).
+#   ``non_interactive``        — legacy scheduled-task policy selector.
 #   ``run_interaction_mode`` — the authoritative tool/prompt policy selector.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "run_interaction_mode"})
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "run_interaction_mode", "non_interactive"})
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -430,11 +431,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     when ``internal`` is True; for non-internal callers those keys are dropped
     from client requests by :func:`strip_internal_context_keys`.
 
-    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``, and ``run_interaction_mode``) is forwarded into
-    ``config['context']`` only, never ``configurable``. These are secrets / runtime
-    flags read by tools and middlewares from ``runtime.context``; keeping them out
-    of ``configurable`` avoids persisting a short-lived token or policy selector in
+    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``
+    and the interaction-policy flags) is forwarded into ``config['context']``
+    only, never ``configurable``. These are secrets / runtime flags read by tools
+    and middlewares from ``runtime.context``; keeping them out of
+    ``configurable`` avoids persisting a short-lived token or policy selector in
     the checkpoint store. Interaction-policy flags are accepted here only for
     trusted internal callers; the legacy ``github_token`` runtime value retains
     its existing merge behavior.
@@ -444,9 +445,8 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
     # Interaction-policy flags are runtime-only and must never be persisted in
-    # ``configurable`` checkpoint data. Keep ``non_interactive`` in the
-    # configurable set for legacy internal readers.
-    keys = _CONTEXT_CONFIGURABLE_KEYS | (_CONTEXT_INTERNAL_CALLER_KEYS - _CONTEXT_RUNTIME_ONLY_KEYS) if internal else _CONTEXT_CONFIGURABLE_KEYS
+    # ``configurable`` checkpoint data.
+    keys = _CONTEXT_CONFIGURABLE_KEYS
     for key in keys:
         if key in context:
             if isinstance(configurable, dict):
