@@ -41,3 +41,8 @@ def test_invalid_mode_falls_back_with_warning(caplog, invalid_mode):
 def test_policy_rejects_invalid_direct_mode():
     with pytest.raises(ValueError, match="Unknown run interaction mode"):
         RunInteractionPolicy(mode="webhhook")
+
+
+@pytest.mark.parametrize("mode", ["webhook", "scheduled", "autonomous"])
+def test_direct_mode_construction_uses_mode_derived_clarification_policy(mode):
+    assert RunInteractionPolicy(mode=mode).allows_clarification is False

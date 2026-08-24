@@ -20,7 +20,6 @@ class RunInteractionPolicy:
     """Describe whether a run can ask a human and how ambiguity is handled."""
 
     mode: str = INTERACTIVE_MODE
-    allows_clarification: bool = True
 
     def __post_init__(self) -> None:
         if self.mode not in _VALID_MODES:
@@ -51,7 +50,12 @@ class RunInteractionPolicy:
             else:
                 requested = INTERACTIVE_MODE
 
-        return cls(mode=requested, allows_clarification=requested == INTERACTIVE_MODE)
+        return cls(mode=requested)
+
+    @property
+    def allows_clarification(self) -> bool:
+        """Whether this mode can synchronously ask a human for a decision."""
+        return self.mode == INTERACTIVE_MODE
 
     @property
     def prompt_guidance(self) -> str:

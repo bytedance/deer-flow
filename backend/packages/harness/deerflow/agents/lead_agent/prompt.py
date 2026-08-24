@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
@@ -16,7 +17,6 @@ from deerflow.config.subagents_config import (
     clamp_total_subagents_per_run,
     effective_subagent_concurrency,
 )
-from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
