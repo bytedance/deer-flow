@@ -39,6 +39,10 @@
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
    so backend cross-tab ordering remains authoritative.
+   Settings > Subagents reads one catalog for built-in, config, and managed
+   definitions. Only administrators see managed-definition mutation controls;
+   Custom Agent settings consume the same query and preserve stale selected names
+   as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.

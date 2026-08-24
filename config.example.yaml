@@ -2092,18 +2092,20 @@ run_events:
 # ============================================================================
 # Agent Storage Configuration
 # ============================================================================
-# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
-# separate from `database` (run/thread/event data) and from agent memory.
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) and deployment-level
+# managed subagent definitions are stored. This is separate from `database`
+# (run/thread/event data) and from agent memory.
 # Restart-required (the backend is captured at Gateway lifespan startup).
 #
-# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
-#                   Single-node only: an agent created on one node is invisible
-#                   to other nodes without a shared mount.
-# backend: db    -- A row per agent in the shared SQL persistence layer, so every
-#                   node sees the same agents. Requires database.backend to be
+# backend: file  -- Custom Agents use per-user files; managed subagents use one
+#                   JSON file each under {base_dir}/managed-subagents/ (default).
+#                   Node-local without a shared mount.
+# backend: db    -- Both definition types use the shared SQL persistence layer,
+#                   so every node sees them. Requires database.backend to be
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
-# Switching an existing install to 'db'? Import the on-disk agents once with:
+# Switching an existing install to 'db'? Import the on-disk Custom Agents and
+# managed subagents once with:
 #     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #

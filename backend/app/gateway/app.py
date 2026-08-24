@@ -34,6 +34,7 @@ from app.gateway.routers import (
     runs,
     scheduled_tasks,
     skills,
+    subagents,
     suggestions,
     thread_runs,
     threads,
@@ -773,6 +774,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+
+    # Deployment-level subagent catalog and admin management.
+    app.include_router(subagents.router)
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)

@@ -283,7 +283,7 @@ class AppConfig(BaseModel):
         default_factory=AgentStorageConfig,
         description=format_field_description(
             "agent_storage",
-            field_doc="Custom agent definition storage backend ('file' for today's per-user on-disk layout, 'db' to share definitions across nodes via the SQL persistence layer).",
+            field_doc="Custom-agent and managed-subagent definition storage backend ('file' for on-disk layouts, 'db' to share definitions across nodes via SQL).",
         ),
     )
     scheduler: SchedulerConfig = Field(

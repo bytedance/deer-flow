@@ -343,6 +343,7 @@ def _build_subagent_section(
     max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     *,
     app_config: AppConfig | None = None,
+    allowed_subagents: list[str] | None = None,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -355,7 +356,12 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    if allowed_subagents is None:
+        available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    else:
+        available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    if not available_names:
+        return ""
     bash_available = "bash" in available_names
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
@@ -1003,6 +1009,7 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    allowed_subagents: list[str] | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
@@ -1011,7 +1018,7 @@ def apply_prompt_template(
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
-    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
+    subagent_section = _build_subagent_section(n, total, app_config=app_config, allowed_subagents=allowed_subagents) if subagent_enabled else ""
 
     # Add subagent reminder to critical_reminders if enabled
     reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"
