@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from deerflow.runtime.events.store.base import RunEventStore, _match_ai_message_run_id, _normalized_message_ids
+from deerflow.runtime.events.store.base import RunEventStore, match_ai_message_run_id, normalize_message_ids
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -287,7 +287,7 @@ class JsonlRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> dict[str, str]:
-        pending = _normalized_message_ids(message_ids)
+        pending = normalize_message_ids(message_ids)
         if not pending:
             return {}
 
@@ -298,7 +298,7 @@ class JsonlRunEventStore(RunEventStore):
             events = await asyncio.to_thread(self._read_thread_events, thread_id)
         result: dict[str, str] = {}
         for event in reversed(events):
-            match = _match_ai_message_run_id(event, pending)
+            match = match_ai_message_run_id(event, pending)
             if match is None:
                 continue
             message_id, run_id = match

@@ -259,7 +259,7 @@ class TestFindLatestAiMessageRunIds:
         )
 
         store.list_messages = AsyncMock(wraps=store.list_messages)
-        with patch.object(event_store_base, "_match_ai_message_run_id", wraps=event_store_base._match_ai_message_run_id) as match_event:
+        with patch.object(event_store_base, "match_ai_message_run_id", wraps=event_store_base.match_ai_message_run_id) as match_event:
             assert await store.find_latest_ai_message_run_ids("t1", {"target"}, user_id=None) == {"target": "new-run"}
         assert match_event.call_count == 1
         store.list_messages.assert_awaited_once_with("t1", limit=1000, before_seq=None, user_id=None)

@@ -2106,9 +2106,11 @@ async def persist_run_history_metadata(
     from the latest checkpoint. Legacy AI-message attributions are persisted
     alongside them for every audited AI ID, including boundary fallbacks whose
     event lookup was exhaustively empty. The full mapping is deliberate: it is
-    both the exact-attribution cache and the negative-result coverage proof, so
-    later reads query only new IDs. It grows linearly with AI messages and must
-    never contain data outside the checkpoint's materialized history.
+    both the exact-attribution cache and the negative-result coverage proof.
+    While the materialized message set at the head remains unchanged, later
+    reads query only uncached IDs. This metadata-only merge retains existing
+    entries, so compaction timing or historical migration may leave stale IDs;
+    reads ignore them because they only consult IDs in the materialized history.
     """
     duration_updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in (durations or {}).items() if valid_duration_entry(run_id, duration_seconds)}
     message_run_id_updates = {message_id: run_id for message_id, run_id in (message_run_ids or {}).items() if valid_run_message_id_entry(message_id, run_id)}

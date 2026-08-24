@@ -27,9 +27,14 @@ contract. Its default implementation walks `list_messages()` backward in
 `before_seq` cursor, and raises when a full page has no safe progressing `seq`.
 Memory and database stores use that bounded path; the JSONL store overrides it
 with one complete thread-log read because each JSONL page would otherwise
-rescan every run file. Database owner filtering is inherited on every page.
+rescan every run file. The default and JSONL paths share the public
+`normalize_message_ids()` and `match_ai_message_run_id()` helpers from
+`events/store/base.py`. Database owner filtering is inherited on every page.
 Callers may use a missing key as proof that no valid AI event exists only after
-an ordinary return, never after an exception.
+an ordinary return, never after an exception. A caller that crosses a run or
+checkpoint-write admission boundary must repeat the complete audit after
+admission; a pre-admission exact hit can be superseded by a later event just as
+a pre-admission miss can become an exact hit.
 
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types

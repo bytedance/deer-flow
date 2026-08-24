@@ -1422,7 +1422,7 @@ def test_get_thread_history_fast_path_skips_runs_already_in_checkpoint_metadata(
         )
     )
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="run-pending",
@@ -1487,7 +1487,7 @@ def test_get_thread_history_backfills_exact_mapping_when_durations_already_exist
         lookup_calls.append(message_ids)
         return {"ai-1": "exact-run"}
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return []
 
     app.state.run_manager = SimpleNamespace(
@@ -1503,7 +1503,7 @@ def test_get_thread_history_backfills_exact_mapping_when_durations_already_exist
     ai_message = response.json()[0]["values"]["messages"][1]
     assert ai_message["run_id"] == "exact-run"
     assert ai_message["additional_kwargs"]["turn_duration"] == 7
-    assert lookup_calls == [{"ai-1"}]
+    assert lookup_calls == [{"ai-1"}, {"ai-1"}]
 
     latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
     assert latest is not None
@@ -1536,7 +1536,7 @@ def test_get_thread_history_preserves_boundary_fallback_after_complete_partial_l
         assert message_ids == {"ai-2"}
         return {}
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="exact-1",
@@ -1570,20 +1570,34 @@ def test_get_thread_history_preserves_boundary_fallback_after_complete_partial_l
     assert latest is not None
     assert latest.metadata["run_message_ids"] == {"ai-1": "exact-1", "ai-2": "boundary-2"}
     assert latest.metadata["run_durations"] == {"boundary-2": 3, "exact-1": 7}
-    assert lookup_calls == [{"ai-1", "ai-2"}, {"ai-2"}]
+    assert lookup_calls == [{"ai-1", "ai-2"}, {"ai-1", "ai-2"}]
 
 
 def test_get_thread_history_removes_synthesized_boundary_when_exact_lookup_is_incomplete() -> None:
-    """Unsafe pagination cannot be treated as proof that an event is absent."""
+    """Unsafe pagination removes only attribution it cannot prove."""
     from deerflow.runtime.events.store.base import IncompleteMessageRunLookupError
 
     app, _store, checkpointer = _build_thread_app()
     thread_id = "history-incomplete-exact-attribution"
     messages = [
-        HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": "boundary-run"}),
-        AIMessage(id="ai-1", content="Answer"),
+        HumanMessage(id="human-1", content="Proven question", additional_kwargs={"run_id": "proven-run"}),
+        AIMessage(id="ai-1", content="Proven answer"),
+        HumanMessage(id="human-2", content="Legacy question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-2", content="Legacy answer"),
     ]
-    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000012", messages, step=1))
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000012",
+            messages,
+            step=1,
+            metadata={
+                "run_durations": {"proven-run": 4},
+                "run_message_ids": {"ai-1": "proven-run"},
+            },
+        )
+    )
 
     app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=AsyncMock(side_effect=IncompleteMessageRunLookupError("Run event lookup could not form a safe backward cursor")))
 
@@ -1591,9 +1605,11 @@ def test_get_thread_history_removes_synthesized_boundary_when_exact_lookup_is_in
         response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
 
     assert response.status_code == 200, response.text
-    ai_message = response.json()[0]["values"]["messages"][1]
-    assert "run_id" not in ai_message
-    assert "turn_duration" not in (ai_message.get("additional_kwargs") or {})
+    first_ai, second_ai = [message for message in response.json()[0]["values"]["messages"] if message["type"] == "ai"]
+    assert first_ai["run_id"] == "proven-run"
+    assert first_ai["additional_kwargs"]["turn_duration"] == 4
+    assert "run_id" not in second_ai
+    assert "turn_duration" not in (second_ai.get("additional_kwargs") or {})
     assert app.state.run_manager.reservations == []
 
 
@@ -1614,7 +1630,7 @@ def test_get_thread_history_caches_complete_boundary_attribution() -> None:
         lookup_calls.append(message_ids)
         return {}
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="boundary-run",
@@ -1654,8 +1670,6 @@ def test_get_thread_history_revalidates_boundary_fallback_after_reservation() ->
     only after that run flushes and releases the thread, persisting the earlier
     human-boundary fallback would make the temporary miss permanent.
     """
-    from deerflow.runtime.runs.worker import persist_run_durations
-
     app, _store, checkpointer = _build_thread_app()
     thread_id = "history-fallback-reservation-race"
     messages = [
@@ -1697,24 +1711,28 @@ def test_get_thread_history_revalidates_boundary_fallback_after_reservation() ->
             user_id=None,
             limit: int = 100,
         ) -> list[SimpleNamespace]:
-            return [
+            runs = [
                 SimpleNamespace(
                     run_id="boundary-run",
                     created_at="2026-07-05T00:00:00+00:00",
                     updated_at="2026-07-05T00:00:03+00:00",
                 )
             ]
+            if event_visible:
+                runs.append(
+                    SimpleNamespace(
+                        run_id="exact-run",
+                        created_at="2026-07-05T00:00:00+00:00",
+                        updated_at="2026-07-05T00:00:07+00:00",
+                    )
+                )
+            return runs
 
         @asynccontextmanager
         async def reserve_thread_operation(self, _thread_id: str, **kwargs):
             nonlocal event_visible
             self.reservations.append((_thread_id, kwargs))
             event_visible = True
-            await persist_run_durations(
-                checkpointer=checkpointer,
-                thread_id=thread_id,
-                durations={"exact-run": 7},
-            )
             yield
 
     app.state.run_manager = RunManager()
@@ -1738,6 +1756,173 @@ def test_get_thread_history_revalidates_boundary_fallback_after_reservation() ->
     assert latest.metadata["run_durations"]["exact-run"] == 7
 
 
+def test_get_thread_history_revalidates_exact_attribution_after_reservation() -> None:
+    """A newer exact event must replace the foreground mapping before persistence."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-exact-reservation-race"
+    messages = [
+        HumanMessage(
+            id="human-1",
+            content="Question",
+            additional_kwargs={"run_id": "boundary-run"},
+        ),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000015",
+            messages,
+            step=1,
+        )
+    )
+
+    admitted = False
+    lookup_states: list[bool] = []
+
+    async def find_latest_ai_message_run_ids(
+        _: str,
+        message_ids: set[str],
+        *,
+        user_id=None,
+    ) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        lookup_states.append(admitted)
+        return {"ai-1": "new-run" if admitted else "old-run"}
+
+    class RunManager(_ThreadTestRunManager):
+        async def list_by_thread(
+            self,
+            _thread_id: str,
+            *,
+            user_id=None,
+            limit: int = 100,
+        ) -> list[SimpleNamespace]:
+            runs = [
+                SimpleNamespace(
+                    run_id="old-run",
+                    created_at="2026-07-05T00:00:00+00:00",
+                    updated_at="2026-07-05T00:00:04+00:00",
+                )
+            ]
+            if admitted:
+                runs.append(
+                    SimpleNamespace(
+                        run_id="new-run",
+                        created_at="2026-07-05T00:00:00+00:00",
+                        updated_at="2026-07-05T00:00:08+00:00",
+                    )
+                )
+            return runs
+
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **kwargs):
+            nonlocal admitted
+            self.reservations.append((_thread_id, kwargs))
+            admitted = True
+            yield
+
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+
+    assert response.status_code == 200, response.text
+    response_ai = response.json()[0]["values"]["messages"][1]
+    assert response_ai["run_id"] == "old-run"
+    assert response_ai["additional_kwargs"]["turn_duration"] == 4
+    assert lookup_states == [False, True]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "new-run"}
+    assert latest.metadata["run_durations"]["new-run"] == 8
+
+
+def test_get_thread_history_recomputes_duration_after_reservation() -> None:
+    """A final run row must replace a stale foreground duration before persistence."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-duration-reservation-race"
+    messages = [
+        HumanMessage(
+            id="human-1",
+            content="Question",
+            additional_kwargs={"run_id": "run-1"},
+        ),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000016",
+            messages,
+            step=1,
+        )
+    )
+
+    admitted = False
+    lookup_states: list[bool] = []
+
+    async def find_latest_ai_message_run_ids(
+        _: str,
+        message_ids: set[str],
+        *,
+        user_id=None,
+    ) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        lookup_states.append(admitted)
+        return {"ai-1": "run-1"}
+
+    class RunManager(_ThreadTestRunManager):
+        async def list_by_thread(
+            self,
+            _thread_id: str,
+            *,
+            user_id=None,
+            limit: int = 100,
+        ) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(
+                    run_id="run-1",
+                    created_at="2026-07-05T00:00:00+00:00",
+                    updated_at=("2026-07-05T00:00:09+00:00" if admitted else "2026-07-05T00:00:03+00:00"),
+                )
+            ]
+
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **kwargs):
+            nonlocal admitted
+            self.reservations.append((_thread_id, kwargs))
+            admitted = True
+            yield
+
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+
+    assert response.status_code == 200, response.text
+    response_ai = response.json()[0]["values"]["messages"][1]
+    assert response_ai["run_id"] == "run-1"
+    assert response_ai["additional_kwargs"]["turn_duration"] == 3
+    assert lookup_states == [False, True]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "run-1"}
+    assert latest.metadata["run_durations"]["run-1"] == 9
+
+
 def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id() -> None:
     app, _store, checkpointer = _build_thread_app()
     thread_id = "legacy-history-run-id"
@@ -1748,7 +1933,7 @@ def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id()
     ]
     asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000001", messages, step=1))
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="boundary-run",
@@ -1787,7 +1972,7 @@ def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id()
     assert history_messages[1]["additional_kwargs"]["turn_duration"] == 7
     assert history_messages[2]["run_id"] == "boundary-run"
     assert "run_durations" not in entry["metadata"]
-    assert list_messages_calls == [thread_id]
+    assert list_messages_calls == [thread_id, thread_id]
     assert len(reservation_owner.reservations) == 1
     reserved_thread_id, reservation_kwargs = reservation_owner.reservations[0]
     assert reserved_thread_id == thread_id
@@ -1817,7 +2002,7 @@ def test_get_thread_history_finds_ai_event_beyond_ten_thousand_newer_events() ->
     ]
     asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000002", messages, step=1))
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="boundary-run",
@@ -1867,7 +2052,69 @@ def test_get_thread_history_finds_ai_event_beyond_ten_thousand_newer_events() ->
     history_messages = response.json()[0]["values"]["messages"]
     assert history_messages[1]["run_id"] == "exact-run"
     assert history_messages[1]["additional_kwargs"]["turn_duration"] == 7
-    event_store.find_latest_ai_message_run_ids.assert_awaited_once()
+    assert event_store.find_latest_ai_message_run_ids.await_count == 2
+
+
+def test_get_thread_history_sizes_initial_run_page_to_required_attributions() -> None:
+    """A long thread should batch-hydrate its common migration path."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history-run-page-sizing"
+    run_count = 101
+    messages = []
+    runs = []
+    message_run_ids: dict[str, str] = {}
+    for index in range(run_count):
+        boundary_run_id = f"boundary-{index}"
+        exact_run_id = f"exact-{index}"
+        message_id = f"ai-{index}"
+        messages.extend(
+            [
+                HumanMessage(id=f"human-{index}", content=f"Question {index}", additional_kwargs={"run_id": boundary_run_id}),
+                AIMessage(id=message_id, content=f"Answer {index}"),
+            ]
+        )
+        message_run_ids[message_id] = exact_run_id
+        runs.append(
+            SimpleNamespace(
+                run_id=exact_run_id,
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:05+00:00",
+            )
+        )
+
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000020", messages, step=1))
+
+    list_limits: list[int] = []
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        list_limits.append(limit)
+        return runs[:limit]
+
+    async def get(run_id: str, *, user_id=None) -> SimpleNamespace | None:
+        return next((run for run in runs if run.run_id == run_id), None)
+
+    get_mock = AsyncMock(side_effect=get)
+
+    async def find_latest_ai_message_run_ids(_: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        assert message_ids == set(message_run_ids)
+        return message_run_ids
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        get=get_mock,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    ai_messages = [message for message in response.json()[0]["values"]["messages"] if message["type"] == "ai"]
+    assert len(ai_messages) == run_count
+    assert ai_messages[-1]["additional_kwargs"]["turn_duration"] == 5
+    assert list_limits == [run_count, run_count]
+    get_mock.assert_not_awaited()
 
 
 def test_get_thread_history_fetches_exact_run_older_than_default_run_page() -> None:
@@ -1892,7 +2139,8 @@ def test_get_thread_history_fetches_exact_run_older_than_default_run_page() -> N
     )
     get_calls: list[str] = []
 
-    async def list_by_thread(_: str, *, user_id=None) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        assert limit == 100
         return [boundary_run]
 
     async def get(run_id: str, *, user_id=None) -> SimpleNamespace | None:
@@ -1917,7 +2165,7 @@ def test_get_thread_history_fetches_exact_run_older_than_default_run_page() -> N
     history_messages = response.json()[0]["values"]["messages"]
     assert history_messages[1]["run_id"] == exact_run.run_id
     assert history_messages[1]["additional_kwargs"]["turn_duration"] == 9
-    assert get_calls == [exact_run.run_id]
+    assert get_calls == [exact_run.run_id, exact_run.run_id]
 
 
 def test_get_thread_history_injects_turn_duration_once_per_run() -> None:

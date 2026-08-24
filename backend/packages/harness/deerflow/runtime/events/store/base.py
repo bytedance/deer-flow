@@ -23,12 +23,12 @@ class IncompleteMessageRunLookupError(RuntimeError):
     """Raised when a store cannot prove that a targeted lookup is complete."""
 
 
-def _normalized_message_ids(message_ids: set[str]) -> set[str]:
+def normalize_message_ids(message_ids: set[str]) -> set[str]:
     """Return the non-empty string IDs that can participate in a lookup."""
     return {message_id for message_id in message_ids if isinstance(message_id, str) and message_id}
 
 
-def _match_ai_message_run_id(event: object, message_ids: set[str]) -> tuple[str, str] | None:
+def match_ai_message_run_id(event: object, message_ids: set[str]) -> tuple[str, str] | None:
     """Return a target AI message ID and its valid run ID, if present."""
     if not isinstance(event, dict) or event.get("category") != "message":
         return None
@@ -140,7 +140,7 @@ class RunEventStore(abc.ABC):
         ``user_id`` follows the same explicit-caller semantics as
         :meth:`list_messages`.
         """
-        pending = _normalized_message_ids(message_ids)
+        pending = normalize_message_ids(message_ids)
         if not pending:
             return {}
 
@@ -157,7 +157,7 @@ class RunEventStore(abc.ABC):
                 break
 
             for event in reversed(page):
-                match = _match_ai_message_run_id(event, pending)
+                match = match_ai_message_run_id(event, pending)
                 if match is None:
                     continue
                 message_id, run_id = match
