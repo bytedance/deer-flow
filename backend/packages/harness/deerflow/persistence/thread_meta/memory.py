@@ -11,6 +11,7 @@ from typing import Any
 
 from langgraph.store.base import BaseStore
 
+from deerflow.persistence.json_compat import json_value_matches
 from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
@@ -107,7 +108,7 @@ class MemoryThreadMetaStore(ThreadMetaStore):
 
         records = [self._item_to_dict(item) for item in items]
         if metadata:
-            records = [record for record in records if isinstance(record.get("metadata"), dict) and all(record["metadata"].get(key) == value for key, value in metadata.items())]
+            records = [record for record in records if isinstance(record.get("metadata"), dict) and all(json_value_matches(record["metadata"], key, value) for key, value in metadata.items())]
         records.sort(key=self._sort_key, reverse=True)
         return records[offset : offset + limit]
 

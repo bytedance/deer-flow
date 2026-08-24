@@ -68,6 +68,27 @@ async def test_search_matches_nested_thread_metadata(store):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
+async def test_search_metadata_preserves_json_type_and_presence_contract(store):
+    with _as_user(USER_A):
+        await store.create("missing", metadata={})
+        await store.create("null", metadata={"value": None})
+        await store.create("bool", metadata={"value": True})
+        await store.create("int", metadata={"value": 1})
+        await store.create("float", metadata={"value": 1.0})
+
+        null_hits = await store.search(metadata={"value": None})
+        bool_hits = await store.search(metadata={"value": True})
+        int_hits = await store.search(metadata={"value": 1})
+        float_hits = await store.search(metadata={"value": 1.0})
+
+    assert [record["thread_id"] for record in null_hits] == ["null"]
+    assert [record["thread_id"] for record in bool_hits] == ["bool"]
+    assert [record["thread_id"] for record in int_hits] == ["int"]
+    assert {record["thread_id"] for record in float_hits} == {"float", "int"}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
 async def test_update_display_name_can_remove_stale_metadata(store):
     with _as_user(USER_A):
         await store.create(

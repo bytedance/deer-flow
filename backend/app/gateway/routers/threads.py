@@ -370,20 +370,13 @@ def _default_branch_title(
         if display_name.endswith(source_suffix):
             base = display_name[: -len(source_suffix)].rstrip()
 
-    used_sequences: set[int] = set()
-    for sibling in sibling_records or []:
-        sibling_metadata = sibling.get("metadata")
-        if not isinstance(sibling_metadata, dict):
-            continue
-        sibling_sequence = sibling_metadata.get(_BRANCH_TITLE_SEQUENCE_METADATA_KEY)
-        if not isinstance(sibling_sequence, int) or isinstance(sibling_sequence, bool) or not 2 <= sibling_sequence < _BRANCH_TITLE_SEQUENCE_MAX:
-            continue
-        if sibling.get("display_name") == _format_branch_display_name(base, sibling_sequence):
-            used_sequences.add(sibling_sequence)
-
-    while sequence in used_sequences and sequence < _BRANCH_TITLE_SEQUENCE_MAX:
-        sequence += 1
+    occupied_titles = {sibling.get("display_name") for sibling in sibling_records or [] if isinstance(sibling.get("display_name"), str)}
     display_name = _format_branch_display_name(base, sequence)
+    while display_name in occupied_titles:
+        if sequence >= _BRANCH_TITLE_SEQUENCE_MAX:
+            return None, None
+        sequence += 1
+        display_name = _format_branch_display_name(base, sequence)
     return display_name, sequence if display_name is not None else None
 
 

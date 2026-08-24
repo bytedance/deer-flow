@@ -1750,6 +1750,18 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
         )
         assert sibling_response.status_code == 200, sibling_response.text
         sibling_thread_id = sibling_response.json()["thread_id"]
+        explicit_collision_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"], "title": "Original chat (4)"},
+        )
+        assert explicit_collision_response.status_code == 200, explicit_collision_response.text
+        explicit_collision_thread_id = explicit_collision_response.json()["thread_id"]
+        after_explicit_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert after_explicit_response.status_code == 200, after_explicit_response.text
+        after_explicit_thread_id = after_explicit_response.json()["thread_id"]
         nested_response = client.post(
             f"/api/threads/{new_thread_id}/branches",
             json={"message_id": "ai-2", "message_ids": ["ai-2"]},
@@ -1775,6 +1787,8 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
         explicit_thread_id = explicit_response.json()["thread_id"]
         state_response = client.get(f"/api/threads/{new_thread_id}/state")
         sibling_state_response = client.get(f"/api/threads/{sibling_thread_id}/state")
+        explicit_collision_state_response = client.get(f"/api/threads/{explicit_collision_thread_id}/state")
+        after_explicit_state_response = client.get(f"/api/threads/{after_explicit_thread_id}/state")
         nested_state_response = client.get(f"/api/threads/{nested_thread_id}/state")
         renamed_branch_state_response = client.get(f"/api/threads/{renamed_branch_thread_id}/state")
         explicit_state_response = client.get(f"/api/threads/{explicit_thread_id}/state")
@@ -1793,6 +1807,10 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
     assert state_values["title"] == "Report Q4"
     assert sibling_state_response.status_code == 200, sibling_state_response.text
     assert sibling_state_response.json()["values"]["title"] == "Original chat (3)"
+    assert explicit_collision_state_response.status_code == 200, explicit_collision_state_response.text
+    assert explicit_collision_state_response.json()["values"]["title"] == "Original chat (4)"
+    assert after_explicit_state_response.status_code == 200, after_explicit_state_response.text
+    assert after_explicit_state_response.json()["values"]["title"] == "Original chat (5)"
     assert nested_state_response.status_code == 200, nested_state_response.text
     assert nested_state_response.json()["values"]["title"] == "Original chat (3)"
     assert renamed_branch_state_response.status_code == 200, renamed_branch_state_response.text
@@ -1806,6 +1824,12 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
     sibling_entry = next(item for item in search_response.json() if item["thread_id"] == sibling_thread_id)
     assert sibling_entry["values"]["title"] == "Original chat (3)"
     assert sibling_entry["metadata"]["branch_title_sequence"] == 3
+    explicit_collision_entry = next(item for item in search_response.json() if item["thread_id"] == explicit_collision_thread_id)
+    assert explicit_collision_entry["values"]["title"] == "Original chat (4)"
+    assert "branch_title_sequence" not in explicit_collision_entry["metadata"]
+    after_explicit_entry = next(item for item in search_response.json() if item["thread_id"] == after_explicit_thread_id)
+    assert after_explicit_entry["values"]["title"] == "Original chat (5)"
+    assert after_explicit_entry["metadata"]["branch_title_sequence"] == 5
     nested_entry = next(item for item in search_response.json() if item["thread_id"] == nested_thread_id)
     assert nested_entry["values"]["title"] == "Original chat (3)"
     renamed_branch_entry = next(item for item in search_response.json() if item["thread_id"] == renamed_branch_thread_id)
@@ -1815,7 +1839,7 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
     assert explicit_entry["values"]["title"] == "Deliberate branch title"
     assert "branch_title_sequence" not in explicit_entry["metadata"]
     branch_reservations = [reservation for reservation in app.state.run_manager.reservations if reservation[1]["kind"] == ThreadOperationKind.branch]
-    assert len(branch_reservations) == 5
+    assert len(branch_reservations) == 7
 
 
 def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monkeypatch) -> None:
@@ -2640,7 +2664,14 @@ def test_branch_title_adds_next_free_language_neutral_numeric_suffix() -> None:
             {"display_name": "Explicit title", "metadata": {}},
             {"display_name": "Original chat (2)", "metadata": {"branch_title_sequence": "2"}},
         ],
-    ) == ("Original chat (2)", 2)
+    ) == ("Original chat (4)", 4)
+    assert threads._default_branch_title(
+        "Original chat",
+        sibling_records=[
+            {"display_name": "Original chat (2)", "metadata": {}},
+            {"display_name": "Unrelated (3)", "metadata": {"branch_title_sequence": 3}},
+        ],
+    ) == ("Original chat (3)", 3)
     assert threads._default_branch_title("   ") == (None, None)
     capped, sequence = threads._default_branch_title("x" * 256)
     assert capped is not None
