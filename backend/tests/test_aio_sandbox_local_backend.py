@@ -147,9 +147,37 @@ def test_resolve_docker_bind_host_defaults_loopback_for_localhost(monkeypatch):
     assert _resolve_docker_bind_host() == "127.0.0.1"
 
 
-def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_for_dood(monkeypatch):
+def test_resolve_docker_bind_host_follows_host_gateway_mapping_for_dood(monkeypatch):
+    """The bind follows what host.docker.internal actually resolves to."""
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.168.64.1",
+    )
+
+    assert _resolve_docker_bind_host() == "192.168.64.1"
+
+
+def test_resolve_docker_bind_host_brackets_ipv6_host_gateway(monkeypatch):
+    """An IPv6 host-gateway mapping binds the bracketed IPv6 address."""
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "[fd00::1]",
+    )
+
+    assert _resolve_docker_bind_host() == "[fd00::1]"
+
+
+def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution_fails(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: None,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
         lambda: "192.168.64.1",
@@ -161,6 +189,10 @@ def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_for_dood(monkey
 def test_resolve_docker_bind_host_falls_back_to_static_bridge_gateway(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: None,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
         lambda: None,
@@ -204,6 +236,7 @@ def _clear_hardening_env(monkeypatch):
         "DEER_FLOW_SANDBOX_HOST",
         "DEER_FLOW_SANDBOX_BIND_HOST",
         "DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED",
+        "DEER_FLOW_SANDBOX_SECCOMP_PROFILE",
         "DEER_FLOW_SANDBOX_MEMORY",
         "DEER_FLOW_SANDBOX_CPUS",
         "DEER_FLOW_SANDBOX_PIDS_LIMIT",
@@ -295,8 +328,10 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
     assert "--cap-drop=ALL" in captured_cmd
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
-    # Default seccomp profile: the sandbox no longer runs seccomp-unconfined.
-    assert "seccomp=unconfined" not in security_opts
+    # The shipped AIO image needs seccomp=unconfined for its Chromium
+    # browser (upstream FAQ), so that option stays the default; the
+    # hardening that does not break the shipped image is kept.
+    assert "seccomp=unconfined" in security_opts
     assert captured_cmd[captured_cmd.index("--memory") + 1] == "2g"
     assert captured_cmd[captured_cmd.index("--cpus") + 1] == "2"
     assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "512"
@@ -305,7 +340,7 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
     assert "--network" not in captured_cmd
 
 
-def test_start_container_seccomp_unconfined_requires_opt_in(monkeypatch):
+def test_start_container_seccomp_can_opt_out_to_default_profile(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,
@@ -314,13 +349,56 @@ def test_start_container_seccomp_unconfined_requires_opt_in(monkeypatch):
         environment={},
     )
     _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "1")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "0")
 
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
-    assert "seccomp=unconfined" in security_opts
+    assert "seccomp=unconfined" not in security_opts
     assert "no-new-privileges" in security_opts
+
+
+def test_start_container_seccomp_profile_env_selects_custom_profile(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_PROFILE", "/etc/docker/chromium-seccomp.json")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "seccomp=/etc/docker/chromium-seccomp.json" in security_opts
+    assert "seccomp=unconfined" not in security_opts
+    assert "no-new-privileges" in security_opts
+
+
+def test_resolve_sandbox_host_address_formats_and_filters(monkeypatch):
+    import socket as socket_module
+
+    def fake_getaddrinfo(host, port):
+        if host == "v4host":
+            return [(socket_module.AF_INET, None, None, "", ("203.0.113.7", 0))]
+        if host == "v6host":
+            return [(socket_module.AF_INET6, None, None, "", ("fd00::1%eth0", 0, 0, 0))]
+        if host == "wildcard":
+            return [(socket_module.AF_INET, None, None, "", ("0.0.0.0", 0))]
+        raise OSError("no such host")
+
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.socket.getaddrinfo", fake_getaddrinfo)
+
+    from deerflow.community.aio_sandbox.local_backend import _resolve_sandbox_host_address
+
+    assert _resolve_sandbox_host_address("v4host") == "203.0.113.7"
+    # zone ids are stripped and IPv6 is bracketed for docker -p syntax
+    assert _resolve_sandbox_host_address("v6host") == "[fd00::1]"
+    # wildcard resolutions are not bindable choices
+    assert _resolve_sandbox_host_address("wildcard") is None
+    assert _resolve_sandbox_host_address("unknown.invalid") is None
 
 
 def test_start_container_resource_limits_env_override(monkeypatch):

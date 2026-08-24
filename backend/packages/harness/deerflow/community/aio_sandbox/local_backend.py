@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import shlex
+import socket
 import subprocess
 from datetime import datetime
 
@@ -203,17 +204,18 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     Non-loopback sandbox hosts (typically Docker-outside-of-Docker via
     ``host.docker.internal``) used to bind 0.0.0.0, which published the
     unauthenticated exec API on every interface of the host. They now bind
-    the Docker default bridge gateway instead: ``host.docker.internal``
-    resolves to that gateway (via ``host-gateway``, which defaults to the
-    default bridge gateway), so DooD gateways and the Docker host itself can
-    still reach the sandbox, while external network interfaces no longer see
-    the port. Operators that genuinely need the old broad bind (e.g. remote
-    clients connecting to the sandbox API directly) can restore it with
-    ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` — that re-exposes an
-    unauthenticated shell endpoint and should be paired with an external
-    firewall. When operators choose an IPv6 loopback sandbox host, bind
-    Docker to IPv6 loopback as well so the advertised sandbox URL and
-    published socket use the same address family.
+    the address the sandbox host itself resolves to: ``host.docker.internal``
+    follows the daemon's ``host-gateway-ip`` mapping (customizable, possibly
+    IPv6), so resolving it yields exactly where the gateway will connect —
+    the published port and the advertised sandbox URL always match. Only
+    when resolution fails does the default bridge gateway serve as a
+    best-effort fallback (with a warning). Operators that genuinely need the
+    old broad bind (e.g. remote clients connecting to the sandbox API
+    directly) can restore it with ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` —
+    that re-exposes an unauthenticated shell endpoint and should be paired
+    with an external firewall. When operators choose an IPv6 loopback
+    sandbox host, bind Docker to IPv6 loopback as well so the advertised
+    sandbox URL and published socket use the same address family.
     """
     explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
     if explicit_bind is not None:
@@ -230,14 +232,72 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
         return "127.0.0.1"
 
+    resolved = _resolve_sandbox_host_address(host)
+    if resolved:
+        logger.debug(
+            "Docker sandbox bind: %s (resolved from sandbox host %r, follows the daemon host-gateway mapping)",
+            resolved,
+            host,
+        )
+        return resolved
+
+    # Resolution failed (unusual — e.g. a custom hostname with no DNS entry
+    # yet). Fall back to the default bridge gateway so non-loopback setups
+    # still get a host-only bind, and tell the operator to set the explicit
+    # override when their host-gateway-ip is customized or IPv6.
     gateway = _docker_bridge_gateway_ip() or _DOCKER_BRIDGE_GATEWAY_FALLBACK
-    logger.debug("Docker sandbox bind: %s (Docker bridge gateway for non-loopback sandbox host)", gateway)
+    logger.warning(
+        "Could not resolve sandbox host %r for the Docker bind; falling back to the "
+        "default bridge gateway %s. If the daemon's host-gateway-ip is customized or "
+        "IPv6, set DEER_FLOW_SANDBOX_BIND_HOST to that address explicitly.",
+        host,
+        gateway,
+    )
     return gateway
 
 
 def _env_flag_enabled(name: str) -> bool:
     """Return True when environment variable ``name`` holds an affirmative value."""
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_flag_disabled(name: str) -> bool:
+    """Return True when ``name`` is explicitly set to a negative value.
+
+    For flags whose behavior defaults to ON, only an explicit opt-out
+    (``0``/``false``/``no``/``off``) counts as disabled; any other value,
+    including unset, keeps the default.
+    """
+    return os.environ.get(name, "").strip().lower() in {"0", "false", "no", "off"}
+
+
+def _resolve_sandbox_host_address(host: str) -> str | None:
+    """Resolve ``host`` to the bind spec Docker should publish sandboxes on.
+
+    ``host.docker.internal`` resolves to whatever the daemon's
+    ``host-gateway-ip`` maps it to (customizable and possibly IPv6), so the
+    address the gateway will actually *connect* to is exactly this
+    resolution — binding it keeps the published port and the advertised
+    sandbox URL on the same address instead of guessing the default bridge
+    IPv4. IPv6 results are bracketed for Docker's ``-p`` syntax. Returns
+    None when the name cannot be resolved.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as e:
+        logger.debug(f"Could not resolve sandbox host {host!r}: {e}")
+        return None
+    for family, _, _, _, sockaddr in infos:
+        ip = sockaddr[0]
+        if family == socket.AF_INET6:
+            # Drop any zone id (%eth0) — Docker bind specs do not accept it.
+            ip = ip.split("%", 1)[0]
+            if ip in ("::",):
+                continue
+            return f"[{ip}]"
+        if family == socket.AF_INET and ip not in ("0.0.0.0",):
+            return ip
+    return None
 
 
 def _docker_resource_limit(env_name: str, default: str) -> str | None:
@@ -650,12 +710,23 @@ class LocalContainerBackend(SandboxBackend):
         if self._runtime == "docker":
             cmd.extend(["--cap-drop=ALL", "--security-opt", "no-new-privileges"])
 
-            # Default: Docker's default seccomp profile (syscall filtering
-            # stays ON). seccomp=unconfined was previously added
-            # unconditionally, disabling syscall filtering for every sandbox;
-            # opt back in only when the sandbox image is verified to need
-            # syscalls that the default profile blocks.
-            if _env_flag_enabled("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED"):
+            # The shipped AIO image runs a Chromium-based browser that does
+            # not start under Docker's default seccomp profile — its upstream
+            # quick-start always passes seccomp=unconfined and the upstream
+            # FAQ documents the browser failing under the default profile
+            # (Chromium needs namespace-related syscalls). Keep that option
+            # as the default so the shipped image keeps working. Two ways to
+            # tighten it for a known image:
+            #   DEER_FLOW_SANDBOX_SECCOMP_PROFILE=/path/to/profile.json
+            #       → use a restricted, Chromium-compatible profile instead
+            #         (Docker's default profile plus the needed syscalls);
+            #   DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED=0
+            #       → fall back to Docker's default profile, only for images
+            #         verified to start and pass their browser checks with it.
+            seccomp_profile = os.environ.get("DEER_FLOW_SANDBOX_SECCOMP_PROFILE", "").strip()
+            if seccomp_profile:
+                cmd.extend(["--security-opt", f"seccomp={seccomp_profile}"])
+            elif not _env_flag_disabled("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED"):
                 cmd.extend(["--security-opt", "seccomp=unconfined"])
 
             if memory := _docker_resource_limit("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY):
