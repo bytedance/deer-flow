@@ -1,6 +1,5 @@
-from typing import Literal
-
 import math
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
