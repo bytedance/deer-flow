@@ -15,6 +15,7 @@ from deerflow.config.extensions_config import (
     ExtensionsConfig,
     SkillStateConfig,
     atomic_write_extensions_config,
+    extensions_config_file_lock,
     extensions_config_write_lock,
     get_extensions_config,
     reload_extensions_config,
@@ -439,11 +440,12 @@ def _write_extensions_skill_state(
     """Read-modify-write a skill's enabled state in the shared extensions_config.json.
 
     Blocking filesystem IO: always call this via ``asyncio.to_thread``. It takes
-    the public projection lock before ``extensions_config_write_lock``. The first
-    keeps the enabled-only view synchronized across workers; the second prevents
-    this router and the MCP router from interleaving writes to the shared file.
-    Both locks are held by the worker, so request cancellation cannot release
-    either lock while the write or projection rebuild is still running.
+    the public projection lock before the process-local and cross-process
+    extensions config locks. The first keeps the enabled-only view synchronized
+    across workers; the latter two prevent this router and the MCP router from
+    interleaving writes to the shared file. All locks are held by the worker, so
+    request cancellation cannot release them while the write or projection
+    rebuild is still running.
     """
     from contextlib import nullcontext
 
@@ -452,13 +454,13 @@ def _write_extensions_skill_state(
 
     removal_names = (skill_name,) if not enabled else ()
     projection_update = skill_projection_mutation(storage, "public", remove_names=removal_names) if rebuild_public_projection and isinstance(storage, LocalSkillStorage) else nullcontext()
-    with projection_update:
-        with extensions_config_write_lock:
-            config_path = ExtensionsConfig.resolve_config_path()
-            if config_path is None:
-                config_path = Path.cwd().parent / "extensions_config.json"
-                logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
+    config_path = ExtensionsConfig.resolve_config_path()
+    if config_path is None:
+        config_path = Path.cwd().parent / "extensions_config.json"
+        logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
+    with projection_update:
+        with extensions_config_write_lock, extensions_config_file_lock(config_path):
             # The projection lock is cross-process, but the singleton cache is
             # not. Existing files are therefore re-read under the lock; a new
             # file starts from a deep snapshot of the cached defaults.

@@ -161,6 +161,7 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
     service.cancel_task.return_value = _record(status="working", cancel_requested_at="2026-08-05T00:00:06+00:00")
     request = _request(repo)
     request.app.state.mcp_task_service = service
+    request.app.state.mcp_tasks_available = True
     monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
 
     response = await mcp_tasks.cancel_mcp_task.__wrapped__(
@@ -176,3 +177,44 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
     )
     assert response["status"] == "working"
     assert response["cancel_requested"] is True
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_when_worker_not_running(monkeypatch) -> None:
+    repo = FakeRepository([_record()])
+    service = AsyncMock()
+    service.tracking_degraded_after_errors = 3
+    request = _request(repo)
+    request.app.state.mcp_task_service = service
+    request.app.state.mcp_tasks_available = False
+    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await mcp_tasks.cancel_mcp_task.__wrapped__(
+            thread_id="thread-1",
+            task_id="mcp-task-1",
+            request=request,
+        )
+
+    assert excinfo.value.status_code == 503
+    service.cancel_task.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancel_rejected_when_availability_flag_missing(monkeypatch) -> None:
+    repo = FakeRepository([_record()])
+    service = AsyncMock()
+    service.tracking_degraded_after_errors = 3
+    request = _request(repo)
+    request.app.state.mcp_task_service = service
+    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
+
+    with pytest.raises(HTTPException) as excinfo:
+        await mcp_tasks.cancel_mcp_task.__wrapped__(
+            thread_id="thread-1",
+            task_id="mcp-task-1",
+            request=request,
+        )
+
+    assert excinfo.value.status_code == 503
+    service.cancel_task.assert_not_awaited()

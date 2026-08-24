@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0015_parked_attempts"
+HEAD = "0017_parked_attempts"
 
 
 def _url(tmp_path: Path) -> str:

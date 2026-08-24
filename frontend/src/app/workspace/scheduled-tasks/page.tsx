@@ -1,8 +1,10 @@
 "use client";
 
+import { TriangleAlertIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -43,6 +45,22 @@ import type {
 import { cn } from "@/lib/utils";
 
 const NONE = "—";
+
+function ReuseThreadNotice({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <Alert className="border-amber-500/50 bg-amber-500/10">
+      <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
+    </Alert>
+  );
+}
 
 function formatTimestamp(value: string | null, locale: string): string {
   if (!value) {
@@ -236,11 +254,17 @@ export default function ScheduledTasksPage() {
               </Button>
             </div>
             {contextMode === "reuse_thread" && (
-              <Input
-                value={targetThreadId}
-                onChange={(event) => setTargetThreadId(event.target.value)}
-                placeholder={st.context.threadIdPlaceholder}
-              />
+              <>
+                <Input
+                  value={targetThreadId}
+                  onChange={(event) => setTargetThreadId(event.target.value)}
+                  placeholder={st.context.threadIdPlaceholder}
+                />
+                <ReuseThreadNotice
+                  title={st.context.reuseNoticeTitle}
+                  description={st.context.reuseNoticeDescription}
+                />
+              </>
             )}
             <Input
               value={title}
@@ -440,6 +464,12 @@ export default function ScheduledTasksPage() {
                       ? `${st.detail.thread}: ${selectedTask.thread_id ?? NONE}`
                       : `${st.detail.lastThread}: ${selectedTask.last_thread_id ?? NONE}`}
                   </div>
+                  {selectedTask.context_mode === "reuse_thread" && (
+                    <ReuseThreadNotice
+                      title={st.context.reuseNoticeTitle}
+                      description={st.context.reuseNoticeDescription}
+                    />
+                  )}
                   <div className="text-muted-foreground text-sm">
                     {st.detail.schedule}:{" "}
                     {scheduleTypeLabel(selectedTask.schedule_type)}
