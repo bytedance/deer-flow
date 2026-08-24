@@ -2193,7 +2193,9 @@ export function useThreadStream({
             filename: info.filename,
             size: info.size,
             path: info.virtual_path,
-            ...(info.markdown_file ? { markdown_file: info.markdown_file } : {}),
+            ...(info.markdown_file
+              ? { markdown_file: info.markdown_file }
+              : {}),
             status: "uploaded" as const,
           }),
         );
