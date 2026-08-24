@@ -3,6 +3,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
@@ -64,7 +66,7 @@ def test_load_skills_discovers_nested_skills_and_sets_container_paths(tmp_path: 
     assert team_skill.get_container_file_path() == "/mnt/skills/custom/team/helper/SKILL.md"
 
 
-def test_local_storage_accepts_external_custom_skill_directory_symlink(tmp_path: Path, monkeypatch):
+def test_local_storage_accepts_external_custom_skill_directory_symlink(tmp_path: Path):
     skills_root = tmp_path / "skills"
     external_file = tmp_path / "external-skills" / "external-skill" / "SKILL.md"
     external_file.parent.mkdir(parents=True)
@@ -72,17 +74,13 @@ def test_local_storage_accepts_external_custom_skill_directory_symlink(tmp_path:
 
     linked_dir = skills_root / "custom" / "external-skill"
     linked_file = linked_dir / "SKILL.md"
-    original_resolve = Path.resolve
-
-    def fake_resolve(path: Path, strict: bool = False) -> Path:
-        if path == linked_file:
-            return external_file
-        if path == linked_dir:
-            return external_file.parent
-        return original_resolve(path, strict=strict)
-
-    monkeypatch.setattr(Path, "resolve", fake_resolve)
-    monkeypatch.setattr(Path, "is_symlink", lambda path: path == linked_dir)
+    linked_dir.parent.mkdir(parents=True)
+    try:
+        linked_dir.symlink_to(external_file.parent, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
 
     storage = LocalSkillStorage(host_path=str(skills_root))
 
