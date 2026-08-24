@@ -34,6 +34,7 @@ from app.gateway.routers import (
     runs,
     scheduled_tasks,
     skills,
+    subagents,
     suggestions,
     thread_runs,
     threads,
@@ -324,6 +325,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                    queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                 )
@@ -773,6 +775,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+
+    # Deployment-level subagent catalog and admin management.
+    app.include_router(subagents.router)
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)

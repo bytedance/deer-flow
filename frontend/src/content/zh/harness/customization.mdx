@@ -25,19 +25,21 @@ DeerFlow 的可插拔架构意味着系统的大多数部分都可以在不 fork
 2. 在构建 Agent 时通过 `custom_middlewares` 参数传入你的中间件。
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from deerflow.agents.thread_state import ThreadState
+from langgraph.runtime import Runtime
 
-class AuditMiddleware(AgentMiddleware):
-    async def on_start(self, state: ThreadState, config):
-        # 在每次模型调用前运行
+
+class AuditMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """在每次模型调用前运行。"""
         print(f"[审计] 轮次开始：上下文中有 {len(state.messages)} 条消息")
-        return state, config
+        return None
 
-    async def on_end(self, state: ThreadState, config):
-        # 在每次模型调用后运行
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """在每次模型调用后运行。"""
         print(f"[审计] 轮次结束：最后一条消息类型 = {state.messages[-1].type}")
-        return state, config
+        return None
 ```
 
 自定义中间件在链末尾 `ClarificationMiddleware` 之前注入，后者始终最后运行。

@@ -10,6 +10,23 @@ export const DEFAULT_MODEL_VALUE = "__default__";
 export const INHERIT_VALUE = "__inherit__";
 
 export type ThinkingSelection = "__inherit__" | "on" | "off";
+export type SubagentAccessSelection = "all" | "none" | "selected";
+
+export function allowedSubagentsToSelection(
+  value: string[] | null | undefined,
+): SubagentAccessSelection {
+  if (value == null) return "all";
+  return value.length === 0 ? "none" : "selected";
+}
+
+export function selectionToAllowedSubagents(
+  selection: SubagentAccessSelection,
+  selectedNames: string[],
+): string[] | null {
+  if (selection === "all") return null;
+  if (selection === "none") return [];
+  return selectedNames;
+}
 
 /**
  * Map a persisted ``thinking_enabled`` (``true`` / ``false`` / ``null``) to the

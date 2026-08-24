@@ -46,9 +46,9 @@ Lead Agent 使用内置 `task` 工具将工作委派给子 Agent：
 
 ```
 task(
-  agent="general-purpose",
-  task="研究 Acme Corp 的前 5 个竞争对手并总结其定价",
-  context="专注于 B2B SaaS 定价模型"
+  description="研究竞争对手",
+  prompt="研究 Acme Corp 的前 5 个竞争对手并总结其 B2B SaaS 定价",
+  subagent_type="general-purpose"
 )
 ```
 
@@ -94,6 +94,20 @@ subagents:
 ```
 
 按 Agent 覆盖优先于全局 `timeout_seconds`、`max_turns` 和 `token_budget` 设置。
+
+## 设置页管理与 Custom Agent 调用范围
+
+管理员可以在**设置 → 子智能体**中添加可复用的工作智能体。每个设置页管理的子智能体可以定义派遣说明、系统提示词、模型、工具、技能、最大轮次、超时和启用状态。内置项和 `config.yaml` 项也会显示在同一个目录中，但保持只读。
+
+默认 Lead Agent 可以看到全部已启用的运行时子智能体。页面创建的每个 Custom Agent 可以在自身设置中进一步收窄调用范围：
+
+- **全部已启用子智能体**：不增加额外限制。
+- **不允许使用子智能体**：即使请求开启了委派，也不能重新打开。
+- **仅允许选中的子智能体**：提示词只展示所选名称，`task` 工具也只接受这些名称。
+
+运行开始时，允许列表会作为快照写入 run metadata，`task` 工具会再次进行服务端校验，因此客户端不能通过直接填写隐藏名称绕过限制。运行时优先级为**内置 → `config.yaml` → 设置页管理**。如果运维之后在 `config.yaml` 中加入同名项，设置页管理的条目仍会保留并显示冲突提示，但会从运行时目录中排除。`subagents.agents.<name>` 的显式覆盖仍保持最高优先级，并会在设置目录中提示。
+
+设置页管理的定义跟随 Custom Agent 现有的存储后端：`agent_storage.backend: file` 会在 `DEER_FLOW_HOME/managed-subagents/` 下为每个定义写一个原子 JSON 文件；`agent_storage.backend: db` 会写入共享应用数据库，供多实例部署共同读取。当前版本是部署级全局数据，不按用户隔离。
 
 ## 委派限制
 

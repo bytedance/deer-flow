@@ -22,6 +22,7 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.delegation_ledger import extract_delegations, render_delegation_ledger
+from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages
 from deerflow.agents.middlewares.skill_context import extract_skills, render_skill_context
 from deerflow.agents.thread_state import _DELEGATION_LEDGER_MAX_ENTRIES, TERMINAL_STATUSES
 from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
@@ -58,13 +59,6 @@ def _bound_text(text: str, cap: int) -> str:
     if tail == 0:
         return text[:cap]
     return f"{text[:head]}{omitted_marker}{text[-tail:]}"
-
-
-def _insert_after_leading_system_messages(messages: list, injected: list) -> list:
-    index = 0
-    while index < len(messages) and isinstance(messages[index], SystemMessage):
-        index += 1
-    return [*messages[:index], *injected, *messages[index:]]
 
 
 def _render_durable_context_data(summary_text: str | None, ledger: list, skills: list) -> str:
@@ -256,7 +250,7 @@ class DurableContextMiddleware(AgentMiddleware[AgentState]):
         )
         if not data_block:
             return request
-        messages = _insert_after_leading_system_messages(
+        messages = insert_after_leading_system_messages(
             list(request.messages),
             [
                 SystemMessage(

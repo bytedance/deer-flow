@@ -12,6 +12,7 @@ from pathlib import Path
 from langchain.tools import tool
 
 from deerflow.agents.thread_state import ThreadDataState
+from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
@@ -1416,6 +1417,15 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
+    # Phase 3: enforce sandbox:execute authorization before acquiring. On deny
+    # a SandboxAuthorizationError propagates up through the tool so the agent's
+    # tool-error handling returns a friendly message (RFC §9). Skipped on the
+    # reuse path above (already authorized when first acquired).
+    authorize_sandbox_execution(
+        context=runtime.context or {},
+        app_config=safe_app_config(),
+    )
+
     provider = get_sandbox_provider()
     sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
 
@@ -1462,6 +1472,13 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
+
+    # Phase 3: enforce sandbox:execute authorization before acquiring (async
+    # counterpart of the sync gate in ``ensure_sandbox_initialized``).
+    authorize_sandbox_execution(
+        context=runtime.context or {},
+        app_config=safe_app_config(),
+    )
 
     provider = get_sandbox_provider()
     sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
