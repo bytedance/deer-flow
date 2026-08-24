@@ -1,4 +1,9 @@
 import builtins
+import os
+import subprocess
+import sys
+
+import pytest
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, _BoundedPipeCapture
@@ -15,6 +20,57 @@ def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding()
     capture.append("caf\u00e9".encode("cp1252"))
 
     assert capture.read() == "caf\u00e9"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows text-mode encoding semantics")
+@pytest.mark.parametrize(
+    ("python_args", "python_utf8"),
+    [([], "0"), ([], "1"), (["-X", "utf8"], "0")],
+    ids=["locale-code-page", "PYTHONUTF8", "-X-utf8"],
+)
+def test_windows_capture_matches_subprocess_text_mode_encoding(python_args, python_utf8):
+    probe = r"""
+import subprocess
+import sys
+
+from deerflow.sandbox.local.local_sandbox import LocalSandbox
+
+reference = subprocess.Popen([sys.executable, "-c", ""], stdout=subprocess.PIPE, text=True)
+encoding = reference.stdout.encoding
+reference.communicate()
+
+for expected in ("caf\u00e9", "\u4f60\u597d", "\u65e5\u672c\u8a9e", "\u041f\u0440\u0438\u0432\u0435\u0442"):
+    try:
+        payload = expected.encode(encoding)
+    except UnicodeEncodeError:
+        continue
+    if any(byte >= 0x80 for byte in payload):
+        break
+else:
+    raise AssertionError(f"no non-ASCII probe text for {encoding}")
+
+stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+    [sys.executable, "-c", f"import sys; sys.stdout.buffer.write(bytes.fromhex('{payload.hex()}'))"],
+    10,
+)
+assert stdout == expected, (encoding, stdout)
+assert stderr == ""
+assert returncode == 0
+assert timed_out is False
+"""
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = python_utf8
+
+    result = subprocess.run(
+        [sys.executable, *python_args, "-c", probe],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_read_file_uses_utf8_on_windows_locale(tmp_path, monkeypatch):
