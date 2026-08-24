@@ -1327,6 +1327,7 @@ sandbox:
 ```yaml
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+   prewarm: true # optional: overlap likely sandbox work with the first model call
 ```
 
 For AIO images on the supported semver line (`1.9.3` through the recommended
@@ -1347,6 +1348,12 @@ affected creation plane is quarantined, bounded best-effort session cleanup
 is attempted, and the container is recycled instead of being returned to the
 warm pool. Session-level cleanup does not clear that quarantine because a
 timed-out create may commit after cleanup has already returned.
+
+`prewarm` is disabled by default. When enabled, DeerFlow starts an AIO sandbox
+only for user turns with a code fence, path, shell command, or traceback, then
+the first sandbox tool reuses that in-flight startup. Turns that do not use a
+sandbox return the completed prewarm to the provider's warm pool. The option is
+ignored by non-AIO providers.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml
