@@ -144,3 +144,14 @@ async def test_update_rejects_unknown_model(_agent_env) -> None:
     with pytest.raises(HTTPException) as excinfo:
         await update_agent("researcher", AgentUpdateRequest(model="ghost-model"))
     assert excinfo.value.status_code == 422
+
+
+async def test_allowed_subagents_round_trip_and_explicit_null_clears(_agent_env) -> None:
+    created = await create_agent_endpoint(AgentCreateRequest(name="delegator", allowed_subagents=["planner"]))
+    assert created.allowed_subagents == ["planner"]
+
+    denied = await update_agent("delegator", AgentUpdateRequest(allowed_subagents=[]))
+    assert denied.allowed_subagents == []
+
+    unrestricted = await update_agent("delegator", AgentUpdateRequest(allowed_subagents=None))
+    assert unrestricted.allowed_subagents is None

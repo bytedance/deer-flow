@@ -200,8 +200,9 @@ redis:
     existingSecret: ""
 
 # -- Persistent volume for runtime state (.deer-flow): sqlite DB, memory,
-#    custom agents, and per-thread user-data. Also mounted (PVC mode) into
-#    provisioner-spawned sandbox Pods.
+#    custom agents, mutable extensions_config.json, and per-thread user-data.
+#    Also mounted (PVC mode) into provisioner-spawned sandbox Pods. When
+#    disabled, Gateway runtime state uses a pod-local emptyDir instead.
 persistence:
   home:
     enabled: true
@@ -242,7 +243,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 34
+  config_version: 35
   log_level: info
 
   models: []
@@ -288,6 +289,12 @@ config: |
 
   memory:
     storage_path: memory.json
+
+  verification:
+    receipts_enabled: true
+    receipts_render_mode: "delegation_only"
+    judge_enabled: false
+    judge_model_name: null
 
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash
@@ -338,6 +345,10 @@ config: |
       group: bash
       use: deerflow.sandbox.tools:bash_tool
 
-# -- DeerFlow extensions_config.json content (MCP servers + skill state).
+# -- Initial DeerFlow extensions_config.json content (MCP servers + skill
+#    state). The Gateway copies this ConfigMap seed into its writable home
+#    volume only when no runtime file exists. With persistence enabled, API
+#    updates and the original seed survive pod replacement and Helm upgrades;
+#    remove the runtime file explicitly if a later seed should replace it.
 extensionsConfig: |
   {"mcpServers":{},"skills":{}}

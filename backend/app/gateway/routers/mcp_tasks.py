@@ -110,6 +110,12 @@ async def cancel_mcp_task(
 ) -> dict[str, Any]:
     service = get_mcp_task_service(request)
     user_id = await _current_user_id(request)
+    if not getattr(request.app.state, "mcp_tasks_available", False):
+        # The service exists whenever SQL persistence is configured, but the
+        # background loop that owns the remote cancel call only runs when
+        # mcp_tasks.enabled=true. Recording cancel_requested_at without a
+        # worker would acknowledge a cancellation nobody will ever perform.
+        raise HTTPException(status_code=503, detail="MCP task cancellation worker is not running")
     record = await service.cancel_task(
         task_id=task_id,
         thread_id=thread_id,

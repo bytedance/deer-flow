@@ -4,24 +4,24 @@ import asyncio
 import logging
 import socket
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict
+from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
-# Shared so the has_active_runs fast path and the unique-index race path return
-# byte-identical outcomes for the same "task already has an active run" condition.
+# Shared so the active-row fast path and the atomic-admission conflict path
+# return byte-identical outcomes for the same active-occurrence condition.
 _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
-_SKIP_ACTIVE_RUN_ERROR = "skipped: a previous run of this task is still active"
 _RESTART_RECOVERY_ERROR = "interrupted: gateway restarted before the run reached a terminal state"
 _LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its run lease"
+_QUEUE_TIMEOUT_ERROR = "scheduled task queue wait timeout exceeded"
 
 
 class ScheduledTaskService:
@@ -34,6 +34,7 @@ class ScheduledTaskService:
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
+        queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
     ) -> None:
@@ -43,6 +44,7 @@ class ScheduledTaskService:
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
+        self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
@@ -56,27 +58,22 @@ class ScheduledTaskService:
                 self._skip_next_lease_reconciliation = False
             else:
                 await self._reconcile_active_state(now=now)
-            claimed = await self._task_repo.claim_due_tasks(
-                now=now,
-                lease_owner=self._lease_owner,
-                lease_seconds=self._lease_seconds,
-                limit=self._max_concurrent_runs,
-                global_max_concurrent_runs=self._max_concurrent_runs,
-            )
         else:
-            # In single-instance mode the count and claim do not need a shared
-            # database lock. Multi-instance mode performs both inside the
-            # repository's short Postgres advisory-lock transaction above.
-            active = await self._task_run_repo.count_active_runs()
-            budget = self._max_concurrent_runs - active
-            if budget <= 0:
-                return
-            claimed = await self._task_repo.claim_due_tasks(
+            await self._task_run_repo.recover_expired_launch_claims(
+                error=_LEASE_RECOVERY_ERROR,
                 now=now,
-                lease_owner=self._lease_owner,
-                lease_seconds=self._lease_seconds,
-                limit=budget,
             )
+        await self._expire_waiting_runs(now=now)
+        await self._drain_queue(now=now)
+        # Admission and execution capacity are separate. Due occurrences are
+        # persisted even when all execution slots are busy; claim_queued_run()
+        # applies the global launch budget under the database lock.
+        claimed = await self._task_repo.claim_due_tasks(
+            now=now,
+            lease_owner=self._lease_owner,
+            lease_seconds=self._lease_seconds,
+            limit=self._max_concurrent_runs,
+        )
         for task in claimed:
             await self.dispatch_task(task, now=now, trigger="scheduled")
 
@@ -108,14 +105,6 @@ class ScheduledTaskService:
             return "running"
         if trigger == "manual" and task.get("status") == "paused":
             return "paused"
-        return "enabled"
-
-    @staticmethod
-    def _task_status_for_skip(task: dict[str, Any]) -> str:
-        if task["schedule_type"] == "once":
-            # The single occurrence was lost to an overlapping run; "completed"
-            # would claim an execution that never happened.
-            return "failed"
         return "enabled"
 
     async def dispatch_task(
@@ -163,55 +152,11 @@ class ScheduledTaskService:
                 "thread_id": execution_thread_id,
                 "error": str(exc),
             }
-        # "skip" must hold for fresh-thread runs too, where every run gets a new
-        # thread and the same-thread multitask ConflictError below can never
-        # fire. Checked before creating this dispatch's own run row so the row
-        # does not count itself as the active run. A manual trigger against an
-        # active run is rejected outright (409 at the router) instead of being
-        # recorded as a skipped occurrence — nothing was scheduled to happen.
-        #
-        # This has_active_runs check is a non-atomic fast path: it runs in its
-        # own session and is separated from the create() below by await points,
-        # so two concurrent dispatches (double-click / client retry / a manual
-        # trigger racing the poller) can both observe no active run. The DB is
-        # the atomic arbiter — the partial unique index uq_scheduled_task_run_active
-        # rejects the second active insert, surfaced as ActiveScheduledRunConflict
-        # and collapsed to the SAME outcome as this fast path just below.
-        overlap_skip = task.get("overlap_policy", "skip") == "skip"
-        if overlap_skip and await self._task_run_repo.has_active_runs(task["id"]):
-            if trigger == "manual":
-                return self._active_run_conflict_result(execution_thread_id)
-            return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
-
-        # Global concurrent-run budget check for manual triggers.  The poller
-        # enforces max_concurrent_runs via count_active_runs() before
-        # claim_due_tasks(); a manual trigger bypasses that path and must apply
-        # the same cap so it cannot push the active count above the limit.
-        # Like the poller's count this is a non-atomic fast path; the partial
-        # unique index uq_scheduled_task_run_active is the atomic arbiter that
-        # rejects a second active insert for the *same task*, but there is no
-        # DB-level constraint that caps the global count, so we treat this as a
-        # best-effort guard consistent with how the poller enforces the budget.
-        if trigger == "manual" and self._max_concurrent_runs > 0:
-            active = await self._task_run_repo.count_active_runs()
-            if active >= self._max_concurrent_runs:
-                return {
-                    "outcome": "conflict",
-                    "task_run_id": None,
-                    "run_id": None,
-                    "thread_id": execution_thread_id,
-                    "error": "global concurrent-run limit reached",
-                }
-        if self._multi_instance and trigger == "manual":
-            task = await self._task_repo.claim_dispatch_lease(
-                task["id"],
-                lease_owner=self._lease_owner,
-                now=now,
-                lease_seconds=self._lease_seconds,
-            )
-            if task is None:
-                return self._active_run_conflict_result(execution_thread_id)
-            expected_lease_owner = self._lease_owner
+        active = await self._task_run_repo.get_active_run(task["id"])
+        if active is not None:
+            if trigger == "scheduled":
+                await self._release_admission_lease(task, trigger=trigger)
+            return self._existing_active_result(active, execution_thread_id, trigger=trigger)
 
         task_run_id = f"task-run-{uuid.uuid4().hex}"
         try:
@@ -222,28 +167,81 @@ class ScheduledTaskService:
                 scheduled_for=now,
                 trigger=trigger,
                 status="queued",
+                coordinate_with_task=True,
+                expected_task_user_id=task.get("user_id"),
+                expected_task_status=task.get("status") if trigger == "manual" else None,
+                expected_task_updated_at=task.get("updated_at") if trigger == "manual" else None,
+                expected_task_lease_owner=self._lease_owner if trigger == "scheduled" else None,
+                release_task_lease_status="enabled" if trigger == "scheduled" else None,
             )
         except ActiveScheduledRunConflict:
-            # Lost the create race for the task's single active slot: a
-            # concurrent dispatch passed the same fast-path check and inserted
-            # its active row first. Identical outcome to the fast path above.
-            if trigger == "manual":
+            active = await self._task_run_repo.get_active_run(task["id"])
+            if trigger == "scheduled":
+                await self._release_admission_lease(task, trigger=trigger)
+            if active is None:
                 return self._active_run_conflict_result(execution_thread_id)
-            return await self._record_scheduled_skip(task, thread_id=execution_thread_id, now=now, trigger=trigger)
+            return self._existing_active_result(active, execution_thread_id, trigger=trigger)
+        except ScheduledTaskAdmissionRejected as exc:
+            if exc.reason == "not_found":
+                return {
+                    "outcome": "not_found",
+                    "task_run_id": None,
+                    "run_id": None,
+                    "thread_id": execution_thread_id,
+                    "error": "scheduled task no longer exists",
+                }
+            return {
+                "outcome": "conflict",
+                "task_run_id": None,
+                "run_id": None,
+                "thread_id": execution_thread_id,
+                "error": "scheduled task changed before trigger admission",
+            }
+
+        # Scheduled admission inserted the queue row and released its parent
+        # lease in one transaction. Manual admission verified that this task
+        # snapshot was still current under the same parent lock.
+        queued = {
+            "id": task_run_id,
+            "task_id": task["id"],
+            "thread_id": execution_thread_id,
+            "trigger": trigger,
+        }
+        return await self._attempt_queued_run(task, queued, now=now)
+
+    async def _release_admission_lease(self, task: dict[str, Any], *, trigger: str) -> None:
+        status = "enabled" if trigger == "scheduled" else (task.get("status") or "enabled")
+        await self._task_repo.release_dispatch_lease(
+            task["id"],
+            expected_lease_owner=self._lease_owner if trigger == "scheduled" else None,
+            status=status,
+        )
+
+    async def _attempt_queued_run(
+        self,
+        task: dict[str, Any],
+        queued: dict[str, Any],
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        task_run_id = queued["id"]
+        execution_thread_id = queued["thread_id"]
+        trigger = queued["trigger"]
+        claimed = await self._task_run_repo.claim_queued_run(
+            task_run_id,
+            lease_owner=self._lease_owner,
+            now=now,
+            lease_seconds=self._lease_seconds,
+            global_max_concurrent_runs=self._max_concurrent_runs,
+        )
+        if claimed is None:
+            return self._queued_result(task_run_id, execution_thread_id)
+
         # Track whether _launch_run has produced a live run. A bookkeeping
-        # failure AFTER launch (the queued->running write, or the parent task
-        # update) must NOT be recorded as "failed": "failed" is outside the
-        # partial unique index uq_scheduled_task_run_active, so it would release
-        # the task's single active slot and the next dispatch would launch a
-        # duplicate run. Once launch succeeds we keep the row "running" and
-        # retain the launched run_id regardless of bookkeeping errors.
+        # failure after launch must retain the non-terminal slot so a later
+        # poll cannot start the same occurrence twice.
         launched_run_id: str | None = None
         launched_thread_id: str | None = None
-        # Flip immediately after _launch_run returns, before any further code
-        # that can raise (e.g. result["run_id"] on a malformed result). The
-        # retention branch keys off this flag, not `launched_run_id is not
-        # None`, so a launch that succeeded but whose result-unpacking raised
-        # still takes the retention path instead of the release-the-slot path.
         launch_succeeded = False
         try:
             result = await self._launch_run(
@@ -267,14 +265,11 @@ class ScheduledTaskService:
                 now=now,
             )
             task_status = self._task_status_for_launch(task, trigger=trigger)
-            await self._task_run_repo.update_status(
-                task_run_id,
-                status="running",
+            await self._record_launched_run(
+                task_run_id=task_run_id,
+                task_id=task["id"],
                 run_id=launched_run_id,
                 started_at=now,
-                # A fast-failing run can reach handle_run_completion before this
-                # write resumes; never clobber its terminal status.
-                protect_terminal=True,
             )
             await self._task_repo.update_after_launch(
                 task["id"],
@@ -288,7 +283,6 @@ class ScheduledTaskService:
                 # Same race as the run-row write above: a fast-failing run's
                 # completion hook may have already finalized a `once` task.
                 protect_terminal=True,
-                expected_lease_owner=expected_lease_owner,
             )
             return {
                 "outcome": "launched",
@@ -298,19 +292,13 @@ class ScheduledTaskService:
                 "error": None,
             }
         except Exception as exc:
-            if not launch_succeeded and self._is_overlap_conflict(exc) and trigger == "scheduled" and task.get("overlap_policy", "skip") == "skip":
-                # Pre-launch overlap conflict (e.g. same-thread multitask): no
-                # run was started, so recording a skip and releasing the slot is
-                # safe. Guarded by ``not launch_succeeded`` because a run that
-                # already launched must never be reclassified as a skip / failed.
-                return await self._finalize_skip(
-                    task,
-                    task_run_id=task_run_id,
-                    thread_id=execution_thread_id,
-                    now=now,
+            if not launch_succeeded and self._is_overlap_conflict(exc):
+                await self._task_run_repo.requeue_claimed_run(
+                    task_run_id,
+                    lease_owner=self._lease_owner,
                     error=str(exc),
-                    trigger=trigger,
                 )
+                return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
 
             next_at = next_run_at(
                 task["schedule_type"],
@@ -331,12 +319,11 @@ class ScheduledTaskService:
                 # the run as launched so callers know a run is in flight.
                 task_status = self._task_status_for_launch(task, trigger=trigger)
                 try:
-                    await self._task_run_repo.update_status(
-                        task_run_id,
-                        status="running",
+                    await self._record_launched_run(
+                        task_run_id=task_run_id,
+                        task_id=task["id"],
                         run_id=launched_run_id,
                         started_at=now,
-                        protect_terminal=True,
                     )
                 except Exception:
                     logger.exception(
@@ -363,7 +350,6 @@ class ScheduledTaskService:
                         last_error=None,
                         increment_run_count=True,
                         protect_terminal=True,
-                        expected_lease_owner=expected_lease_owner,
                     )
                 except Exception:
                     logger.exception(
@@ -381,32 +367,57 @@ class ScheduledTaskService:
 
             # _launch_run itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
-            task_status = self._task_status_for_failure(task, trigger=trigger)
-            await self._task_run_repo.update_status(
+            finalized = await self._task_run_repo.fail_launching_run(
                 task_run_id,
-                status="failed",
+                task_id=task["id"],
+                lease_owner=self._lease_owner,
                 error=str(exc),
-                started_at=now,
-                finished_at=now,
+                now=now,
             )
-            await self._task_repo.update_after_launch(
-                task["id"],
-                status=task_status,
-                next_run_at=next_at,
-                last_run_at=now,
-                last_run_id=None,
-                last_thread_id=execution_thread_id,
-                last_error=str(exc),
-                increment_run_count=False,
-                expected_lease_owner=expected_lease_owner,
-            )
+            if not finalized:
+                logger.warning(
+                    "Scheduled task-run %s lost its launch claim before failure bookkeeping; leaving recovery-owned state unchanged",
+                    task_run_id,
+                )
+                return self._queued_result(task_run_id, execution_thread_id, error=str(exc))
             return {
-                "outcome": "conflict" if self._is_overlap_conflict(exc) else "failed",
+                "outcome": "failed",
                 "task_run_id": task_run_id,
                 "run_id": None,
                 "thread_id": execution_thread_id,
                 "error": str(exc),
             }
+
+    async def _record_launched_run(
+        self,
+        *,
+        task_run_id: str,
+        task_id: str,
+        run_id: str,
+        started_at: datetime,
+    ) -> None:
+        updated = await self._task_run_repo.update_status(
+            task_run_id,
+            status="running",
+            run_id=run_id,
+            started_at=started_at,
+            protect_terminal=True,
+            expected_lease_owner=self._lease_owner,
+        )
+        if updated:
+            return
+        reconciled = await self._task_run_repo.reconcile_launched_run(
+            task_run_id,
+            task_id=task_id,
+            run_id=run_id,
+            started_at=started_at,
+        )
+        if not reconciled:
+            logger.error(
+                "Scheduled task-run %s launched durable run %s but could not restore its occurrence association",
+                task_run_id,
+                run_id,
+            )
 
     def _active_run_conflict_result(self, thread_id: str) -> dict[str, Any]:
         """Manual-trigger response when the task already has an active run.
@@ -422,81 +433,65 @@ class ScheduledTaskService:
             "error": _ACTIVE_RUN_CONFLICT_ERROR,
         }
 
-    async def _record_scheduled_skip(
+    def _existing_active_result(
         self,
-        task: dict[str, Any],
-        *,
+        active: dict[str, Any],
         thread_id: str,
-        now: datetime,
+        *,
         trigger: str,
     ) -> dict[str, Any]:
-        """Record a skipped occurrence for a scheduled dispatch that overlapped an active run.
+        if active["status"] == "queued":
+            return self._queued_result(active["id"], active["thread_id"])
+        return self._active_run_conflict_result(thread_id)
 
-        The tombstone is created directly as terminal ``"skipped"`` rather than
-        the transient ``"queued"`` the launch path uses: a queued row is active
-        and would itself trip ``uq_scheduled_task_run_active`` against the
-        pre-existing run that is still holding the task's single active slot.
-        ``"skipped"`` is outside the index predicate, so it never conflicts.
-        """
-        task_run_id = f"task-run-{uuid.uuid4().hex}"
-        await self._task_run_repo.create(
-            run_record_id=task_run_id,
-            task_id=task["id"],
-            thread_id=thread_id,
-            scheduled_for=now,
-            trigger=trigger,
-            status="skipped",
-        )
-        return await self._finalize_skip(
-            task,
-            task_run_id=task_run_id,
-            thread_id=thread_id,
-            now=now,
-            error=_SKIP_ACTIVE_RUN_ERROR,
-            trigger=trigger,
-        )
-
-    async def _finalize_skip(
-        self,
-        task: dict[str, Any],
-        *,
+    @staticmethod
+    def _queued_result(
         task_run_id: str,
         thread_id: str,
-        now: datetime,
-        error: str,
-        trigger: str,
+        *,
+        error: str | None = None,
     ) -> dict[str, Any]:
-        next_at = next_run_at(
-            task["schedule_type"],
-            task["schedule_spec"],
-            task["timezone"],
-            now=now,
-        )
-        await self._task_run_repo.update_status(
-            task_run_id,
-            status="skipped",
-            error=error,
-            started_at=now,
-            finished_at=now,
-        )
-        await self._task_repo.update_after_launch(
-            task["id"],
-            status=self._task_status_for_skip(task),
-            next_run_at=next_at,
-            last_run_at=task.get("last_run_at"),
-            last_run_id=task.get("last_run_id"),
-            last_thread_id=task.get("last_thread_id"),
-            last_error=error if task["schedule_type"] == "once" else None,
-            increment_run_count=False,
-            expected_lease_owner=self._lease_owner if trigger == "scheduled" else None,
-        )
         return {
-            "outcome": "skipped",
+            "outcome": "queued",
             "task_run_id": task_run_id,
             "run_id": None,
             "thread_id": thread_id,
             "error": error,
         }
+
+    async def _drain_queue(self, *, now: datetime) -> None:
+        queued_rows = await self._task_run_repo.list_queued_runs(limit=max(16, self._max_concurrent_runs * 4))
+        for queued in queued_rows:
+            await self._task_repo.release_queued_admission_lease(queued["task_id"])
+            task = await self._task_repo.get_internal(queued["task_id"])
+            if task is None:
+                await self._task_run_repo.update_status(
+                    queued["id"],
+                    status="interrupted",
+                    error="scheduled task was deleted while queued",
+                    finished_at=now,
+                )
+                continue
+            # Pausing suppresses automatic occurrences, but a manual trigger is
+            # an explicit request and has always been allowed to run without
+            # resuming the schedule. A later pause still cancels an already
+            # queued manual row atomically in pause_with_queue_cancellation().
+            if task.get("status") == "paused" and queued["trigger"] != "manual":
+                await self._task_run_repo.update_status(
+                    queued["id"],
+                    status="interrupted",
+                    error="scheduled task was paused while queued",
+                    finished_at=now,
+                )
+                continue
+            await self._attempt_queued_run(task, queued, now=now)
+
+    async def _expire_waiting_runs(self, *, now: datetime) -> None:
+        await self._task_run_repo.expire_queued_runs(
+            created_before=now - timedelta(seconds=self._queue_timeout_seconds),
+            error=_QUEUE_TIMEOUT_ERROR,
+            now=now,
+        )
 
     async def handle_run_completion(self, record: RunRecord) -> None:
         metadata = record.metadata or {}

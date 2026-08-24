@@ -358,6 +358,22 @@ def test_get_artifact_text_preview_supports_bounded_range_requests(tmp_path, mon
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
 
+def test_get_artifact_inline_text_returns_sha256_etag(tmp_path, monkeypatch) -> None:
+    payload = b"hello artifact world"
+    artifact_path = tmp_path / "note.txt"
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/note.txt")
+
+    assert response.status_code == 200
+    expected = hashlib.sha256(payload).hexdigest()
+    assert response.headers.get("etag") == f'"{expected}"'
+
+
 def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, monkeypatch) -> None:
     payload = ("skill preview \u4e2d\u6587\n" * 100_000).encode()
     skill_path = tmp_path / "sample.skill"
@@ -386,6 +402,24 @@ def test_get_skill_archive_preview_supports_bounded_range_requests(tmp_path, mon
     assert invalid.headers["content-range"] == f"bytes */{len(payload)}"
 
 
+def test_get_skill_archive_inline_returns_sha256_etag(tmp_path, monkeypatch) -> None:
+    payload = ("skill preview \u4e2d\u6587\n" * 100).encode()
+    skill_path = tmp_path / "sample.skill"
+    with zipfile.ZipFile(skill_path, "w", compression=zipfile.ZIP_DEFLATED) as zip_ref:
+        zip_ref.writestr("SKILL.md", payload)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: skill_path)
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get("/api/threads/thread-1/artifacts/mnt/user-data/outputs/sample.skill/SKILL.md")
+
+    assert response.status_code == 200
+    expected = hashlib.sha256(payload).hexdigest()
+    assert response.headers.get("etag") == f'"{expected}"'
+
+
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
 def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, filename: str, content: str) -> None:
     artifact_path = tmp_path / filename
@@ -397,6 +431,9 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
+    # The forced-download branch must carry a real SHA-256 ETag so the
+    # frontend can enable inline editing (see issue #4864 review feedback).
+    assert response.headers.get("etag") == f'"{hashlib.sha256(content.encode()).hexdigest()}"'
 
 
 @pytest.mark.parametrize(("filename", "content"), ACTIVE_ARTIFACT_CASES)
@@ -591,3 +628,59 @@ def test_skill_archive_preview_rejects_oversized_member_before_decompression(tmp
         artifacts_router._extract_file_from_skill_archive(skill_path, "SKILL.md")
 
     assert exc_info.value.status_code == 413
+
+
+def test_get_artifact_large_text_skips_etag(tmp_path, monkeypatch) -> None:
+    # A text artifact larger than MAX_EDITABLE_ARTIFACT_BYTES must not be hashed
+    # on every GET / Range request (performance P1 from review). The response
+    # still streams, but carries no full-content SHA-256 ETag; the client falls
+    # back to its own hashing where crypto.subtle is available.
+    payload = b"a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)
+    artifact_path = tmp_path / "large.txt"
+    artifact_path.write_bytes(payload)
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path, user_id=None: artifact_path,
+    )
+
+    app = make_authed_test_app()
+    app.include_router(artifacts_router.router)
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/threads/thread-1/artifacts/mnt/user-data/outputs/large.txt",
+        )
+
+    assert response.status_code == 200
+    # Oversized artifacts skip the full-file SHA-256 pass, so there must be no
+    # 64-hex content-hash ETag. Starlette's FileResponse may still attach a
+    # cheap mtime/size-derived ETag, which requires no file read.
+    etag = response.headers.get("etag")
+    assert etag is None or len(etag.strip('"')) != 64
+    assert response.content == payload
+
+
+def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> None:
+    # Active content (e.g. .html) is force-downloaded. A large active file must
+    # still force a download but skip the full-file SHA-256 pass (performance P1).
+    payload = "<html>" + ("a" * (artifacts_router.MAX_EDITABLE_ARTIFACT_BYTES + 1)) + "</html>"
+    artifact_path = tmp_path / "large.html"
+    artifact_path.write_text(payload, encoding="utf-8")
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path, user_id=None: artifact_path,
+    )
+
+    response = asyncio.run(
+        call_unwrapped(
+            artifacts_router.get_artifact,
+            "thread-1",
+            "mnt/user-data/outputs/large.html",
+            _make_request(),
+        )
+    )
+
+    assert isinstance(response, FileResponse)
+    assert response.headers.get("content-disposition", "").startswith("attachment;")
+    assert response.headers.get("etag") is None
