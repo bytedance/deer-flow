@@ -3,6 +3,10 @@ import { mermaid } from "@streamdown/mermaid";
 import type { Root } from "hast";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize, {
+  defaultSchema,
+  type Options as SanitizeOptions,
+} from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
 import type { StreamdownProps } from "streamdown";
@@ -13,6 +17,75 @@ const katexOptions = {
   throwOnError: false,
   strict: false,
 } as const;
+
+type RehypePlugin = NonNullable<StreamdownProps["rehypePlugins"]>[number];
+
+/**
+ * Schema for the rehype-sanitize step that every custom rehype chain below
+ * re-applies.
+ *
+ * Why an explicit sanitize step is needed at all: streamdown@2.5 swaps its
+ * whole default rehype chain `[rehype-raw, rehype-sanitize, rehype-harden]`
+ * for the caller's array as soon as a `rehypePlugins` prop is passed. Any
+ * custom chain therefore silently loses sanitization unless it re-adds one.
+ *
+ * The schema starts from rehype-sanitize's GitHub-style `defaultSchema`
+ * (the same base streamdown's built-in sanitize step uses): it keeps the
+ * legitimate HTML that LLM/authored markdown documents may embed — tables,
+ * `<details>`, images, alignment/size attributes, … — while dropping
+ * `<script>`, `<iframe>`, `<style>`, `on*` event handlers and non-allow-listed
+ * URL schemes such as `javascript:` (`href` is limited to http(s)/mailto/tel
+ * and relative references).
+ *
+ * Extensions over the plain default schema:
+ * - `tel:` hrefs — mirrors streamdown's built-in schema and the scheme
+ *   allow-list in `isSafeHref` (markdown-link.tsx).
+ * - `math-inline` / `math-display` values for `className` on `code` —
+ *   remark-math marks math spans as `<code class="language-math
+ *   math-inline|math-display">` and rehype-katex (which runs *after* the
+ *   sanitize step, see `rehypeSanitizeStep`) detects math through exactly
+ *   those classes. Without this entry sanitize strips the markers and math
+ *   stops rendering. hast-util-sanitize only honors the first definition
+ *   per property name, so the default `^language-.` allow-list is widened
+ *   in place rather than appended to.
+ * - `metastring` on `code` — parity with streamdown's built-in schema.
+ *
+ * Deliberately NOT extended with the `style` attribute/tag, `iframe`, or
+ * arbitrary `className` values: CSS injection enables UI spoofing and the
+ * GitHub allow-list already covers what authored markdown legitimately
+ * needs.
+ */
+const sanitizeSchema: SanitizeOptions = {
+  ...defaultSchema,
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href ?? []), "tel"],
+  },
+  attributes: {
+    ...defaultSchema.attributes,
+    code: [
+      ["className", /^language-./, "math-inline", "math-display"],
+      "metastring",
+    ],
+  },
+};
+
+/**
+ * The sanitize entry re-inserted into every custom rehype plugin chain.
+ *
+ * Ordering constraints (streamdown's own default chain has the same shape:
+ * raw → sanitize, with its math rehype plugin appended after sanitize):
+ * - AFTER `rehypeRaw`: raw HTML must first be parsed into hast nodes;
+ *   before that it is inert text and cannot be sanitized.
+ * - BEFORE `rehypeKatex`: KaTeX emits class/style-heavy trusted markup that
+ *   the sanitize schema would strip, breaking math rendering.
+ * - In the artifact chain, `rehypeSlug` also runs after this step because
+ *   sanitize clobbers `id` values (`id="x"` → `id="user-content-x"`).
+ */
+export const rehypeSanitizeStep = [
+  rehypeSanitize,
+  sanitizeSchema,
+] as RehypePlugin;
 
 const sharedRemarkPlugins = [
   [remarkGfm, { singleTilde: false }],
@@ -27,8 +100,13 @@ export const streamdownRenderingPlugins = {
 export const streamdownPlugins = {
   plugins: streamdownRenderingPlugins,
   remarkPlugins: sharedRemarkPlugins,
+  // Passing rehypePlugins to streamdown drops its default sanitize chain,
+  // so every chain built from this preset carries rehypeSanitizeStep after
+  // rehypeRaw and before rehypeKatex (see rehypeSanitizeStep for why the
+  // order matters).
   rehypePlugins: [
     rehypeRaw,
+    rehypeSanitizeStep,
     [rehypeKatex, katexOptions],
   ] as StreamdownProps["rehypePlugins"],
 };
@@ -85,6 +163,8 @@ export function rehypeStreamingListItems() {
   };
 }
 
+// Same chain minus rehypeRaw, so raw HTML stays inert text; the sanitize
+// step survives the filter and still cleans autolink URLs etc.
 export const streamdownPluginsWithoutRawHtml = {
   plugins: streamdownPlugins.plugins,
   remarkPlugins: streamdownPlugins.remarkPlugins,
