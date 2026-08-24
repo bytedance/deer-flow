@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -43,10 +46,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.returncode != 0:
         fallback_args = build_force_push_fallback_diff_args(args)
         if fallback_args is None:
-            sys.stderr.write("[skill-review] Failed to collect changed public skill files.\n")
+            sys.stderr.write(
+                "[skill-review] Failed to collect changed public skill files.\n"
+            )
             sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
             return result.returncode
-        sys.stderr.write("[skill-review] Primary push diff failed; falling back to empty-tree comparison.\n")
+        sys.stderr.write(
+            "[skill-review] Primary push diff failed; falling back to empty-tree comparison.\n"
+        )
         sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
         diff_args = fallback_args
         print(f"[skill-review] Fallback diff: git diff {' '.join(diff_args)}")
@@ -57,7 +64,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             check=False,
         )
         if result.returncode != 0:
-            sys.stderr.write("[skill-review] Failed to collect changed public skill files.\n")
+            sys.stderr.write(
+                "[skill-review] Failed to collect changed public skill files.\n"
+            )
             sys.stderr.write(result.stderr.decode("utf-8", errors="replace"))
             return result.returncode
 
@@ -68,13 +77,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     print(f"[skill-review] Reviewing {len(packages)} changed public skill package(s).")
+
+    base_ref = args.base_ref or args.before
+    use_baseline = bool(base_ref)
+
     failed = False
     for package in packages:
-        if run_review(package, repo_root, args.python) != 0:
-            failed = True
+        package_rel = package.relative_to(repo_root).as_posix()
+
+        if use_baseline:
+            base_pkg = extract_package_at_ref(package_rel, base_ref, repo_root)
+            if base_pkg is not None:
+                base_findings = run_review_json(base_pkg, base_pkg.parent, args.python)
+                base_keys = {finding_key(f) for f in base_findings}
+                shutil.rmtree(base_pkg.parent, ignore_errors=True)
+                print(
+                    f"[skill-review] Baseline: {len(base_keys)} existing finding(s) at {base_ref}"
+                )
+            else:
+                base_keys = set()
+                print(
+                    f"[skill-review] Could not extract baseline at {base_ref}; treating all findings as new"
+                )
+
+            head_findings = run_review_json(package, repo_root, args.python)
+            new_findings = [f for f in head_findings if finding_key(f) not in base_keys]
+
+            if new_findings:
+                for f in new_findings:
+                    loc = f.get("path", "<package>")
+                    if f.get("line") is not None:
+                        loc = f"{loc}:{f['line']}"
+                    print(
+                        f"[skill-review] NEW {f.get('severity')} {f.get('rule_id')} at {loc}: {f.get('message')}"
+                    )
+                print(
+                    f"[skill-review] Failed: {package_rel} ({len(new_findings)} new finding(s))"
+                )
+                failed = True
+            else:
+                print(f"[skill-review] Passed: {package_rel} (no new findings)")
+        else:
+            if run_review(package, repo_root, args.python) != 0:
+                failed = True
 
     if failed:
-        print("[skill-review] One or more skill reviews failed.")
+        print("[skill-review] One or more skill reviews failed with new findings.")
         return 1
 
     print("[skill-review] All changed public skill packages passed review.")
@@ -82,7 +130,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=("Review public skill packages whose SKILL.md changed in a PR or push diff."))
+    parser = argparse.ArgumentParser(
+        description=(
+            "Review public skill packages whose SKILL.md changed in a PR or push diff."
+        )
+    )
     parser.add_argument(
         "--base-ref",
         "--base_ref",
@@ -95,8 +147,12 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         dest="head_ref",
         help="Head ref/SHA for PR-style base...head comparison.",
     )
-    parser.add_argument("--before", help="Before SHA for push-style before/after comparison.")
-    parser.add_argument("--after", help="After SHA for push-style before/after comparison.")
+    parser.add_argument(
+        "--before", help="Before SHA for push-style before/after comparison."
+    )
+    parser.add_argument(
+        "--after", help="After SHA for push-style before/after comparison."
+    )
     parser.add_argument(
         "--repo-root",
         type=Path,
@@ -113,7 +169,9 @@ def parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     has_pr_args = bool(args.base_ref or args.head_ref)
     has_push_args = bool(args.before or args.after)
     if has_pr_args == has_push_args:
-        parser.error("pass either --base-ref/--head-ref or --before/--after, but not both")
+        parser.error(
+            "pass either --base-ref/--head-ref or --before/--after, but not both"
+        )
     if has_pr_args and not (args.base_ref and args.head_ref):
         parser.error("--base-ref and --head-ref must be provided together")
     if has_push_args and not (args.before and args.after):
@@ -160,7 +218,9 @@ def parse_name_status(output: bytes) -> list[ChangedPath]:
     return changes
 
 
-def select_skill_packages(changes: Sequence[ChangedPath], repo_root: Path) -> list[Path]:
+def select_skill_packages(
+    changes: Sequence[ChangedPath], repo_root: Path
+) -> list[Path]:
     package_statuses: dict[PurePosixPath, list[str]] = {}
     resolutions: list[tuple[ChangedPath, PurePosixPath]] = []
 
@@ -174,7 +234,9 @@ def select_skill_packages(changes: Sequence[ChangedPath], repo_root: Path) -> li
 
         package_rel = find_public_skill_package(change.path, repo_root)
         if package_rel is None:
-            print(f"[skill-review] Skipping path outside public skill package: {change.path}")
+            print(
+                f"[skill-review] Skipping path outside public skill package: {change.path}"
+            )
             continue
 
         package_statuses.setdefault(package_rel, []).append(change.status)
@@ -189,7 +251,9 @@ def select_skill_packages(changes: Sequence[ChangedPath], repo_root: Path) -> li
             continue
         seen.add(package_rel)
 
-        if is_fully_removed_package(package_rel, package_statuses[package_rel], repo_root):
+        if is_fully_removed_package(
+            package_rel, package_statuses[package_rel], repo_root
+        ):
             print(f"[skill-review] Skipping fully removed package: {package_rel}")
             continue
 
@@ -199,7 +263,9 @@ def select_skill_packages(changes: Sequence[ChangedPath], repo_root: Path) -> li
     return packages
 
 
-def is_fully_removed_package(package_rel: PurePosixPath, statuses: Sequence[str], repo_root: Path) -> bool:
+def is_fully_removed_package(
+    package_rel: PurePosixPath, statuses: Sequence[str], repo_root: Path
+) -> bool:
     """Whether every changed file that resolved to ``package_rel`` was a deletion and the
     package directory itself no longer exists on disk.
 
@@ -215,7 +281,13 @@ def is_fully_removed_package(package_rel: PurePosixPath, statuses: Sequence[str]
 
 def is_public_skill_md(path: PurePosixPath) -> bool:
     parts = path.parts
-    return len(parts) >= 4 and parts[0] == "skills" and parts[1] == "public" and parts[-1] == "SKILL.md" and not _is_eval_fixture_skill_md(path)
+    return (
+        len(parts) >= 4
+        and parts[0] == "skills"
+        and parts[1] == "public"
+        and parts[-1] == "SKILL.md"
+        and not _is_eval_fixture_skill_md(path)
+    )
 
 
 def is_public_skill_package_path(path: PurePosixPath) -> bool:
@@ -223,14 +295,19 @@ def is_public_skill_package_path(path: PurePosixPath) -> bool:
     return len(parts) >= 3 and parts[0] == "skills" and parts[1] == "public"
 
 
-def find_public_skill_package(path: PurePosixPath, repo_root: Path) -> PurePosixPath | None:
+def find_public_skill_package(
+    path: PurePosixPath, repo_root: Path
+) -> PurePosixPath | None:
     if not is_public_skill_package_path(path):
         return None
 
     current = path.parent if path.name else path
     while len(current.parts) >= 3:
         skill_md_rel = current / "SKILL.md"
-        if not _is_eval_fixture_skill_md(skill_md_rel) and (repo_root / skill_md_rel).is_file():
+        if (
+            not _is_eval_fixture_skill_md(skill_md_rel)
+            and (repo_root / skill_md_rel).is_file()
+        ):
             return current
         if len(current.parts) == 3:
             return current
@@ -243,6 +320,69 @@ def _is_eval_fixture_skill_md(path: PurePosixPath) -> bool:
     from deerflow.skills.package_paths import is_eval_fixture_skill_md
 
     return is_eval_fixture_skill_md(path)
+
+
+def finding_key(finding: dict) -> tuple:
+    """Stable key for diffing findings across refs."""
+    return (
+        finding.get("path", ""),
+        finding.get("rule_id", ""),
+        finding.get("line"),
+        finding.get("message", ""),
+    )
+
+
+def run_review_json(
+    package: Path, repo_root: Path, python_executable: str
+) -> list[dict]:
+    """Run review with JSON output, return parsed findings."""
+    package_rel = package.relative_to(repo_root).as_posix()
+    command = [
+        python_executable,
+        "-m",
+        "deerflow.skills.review.cli",
+        package_rel,
+        "--format",
+        "json",
+    ]
+    result = subprocess.run(
+        command,
+        cwd=repo_root,
+        env=review_env(repo_root),
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0 and not result.stdout:
+        return []
+    try:
+        facts = json.loads(result.stdout.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        return []
+    return facts.get("findings", [])
+
+
+def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path | None:
+    """Extract skill package at a git ref to a temp directory."""
+    tmp_dir = Path(tempfile.mkdtemp(prefix="skill-review-"))
+    try:
+        result = subprocess.run(
+            ["git", "archive", ref, "--", package_rel],
+            cwd=repo_root,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return None
+        subprocess.run(["tar", "-x"], cwd=tmp_dir, input=result.stdout, check=False)
+        extracted = tmp_dir / package_rel
+        if not extracted.is_dir():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            return None
+        return extracted
+    except OSError:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return None
 
 
 def run_review(package: Path, repo_root: Path, python_executable: str) -> int:
@@ -289,7 +429,11 @@ def review_env(repo_root: Path) -> dict[str, str]:
     env = os.environ.copy()
     harness_path = repo_root / "backend" / "packages" / "harness"
     existing_pythonpath = env.get("PYTHONPATH")
-    env["PYTHONPATH"] = str(harness_path) if not existing_pythonpath else f"{harness_path}{os.pathsep}{existing_pythonpath}"
+    env["PYTHONPATH"] = (
+        str(harness_path)
+        if not existing_pythonpath
+        else f"{harness_path}{os.pathsep}{existing_pythonpath}"
+    )
     return env
 
 
