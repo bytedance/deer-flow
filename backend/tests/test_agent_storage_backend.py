@@ -272,10 +272,25 @@ def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch
 
 
 def test_get_agent_store_does_not_hide_invalid_config(monkeypatch):
-    """An invalid config must not silently switch a configured DB store to files."""
+    """Only missing config falls back; config errors must reach the caller."""
     from deerflow.config import app_config
 
-    monkeypatch.setattr(app_config, "get_app_config", side_effect=ValueError("invalid config"))
+    def raise_invalid_config():
+        raise ValueError("invalid config")
 
+    monkeypatch.setattr(app_config, "get_app_config", raise_invalid_config)
     with pytest.raises(ValueError, match="invalid config"):
         get_agent_store()
+
+
+def test_get_agent_store_propagates_invalid_on_disk_config(tmp_path, monkeypatch):
+    """A present config with an invalid backend must fail instead of falling back."""
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(cfg_path, {"agent_storage": {"backend": "invalid"}})
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()
+        with pytest.raises(ValueError, match="agent_storage.backend"):
+            get_agent_store()
+    finally:
+        reset_app_config()
