@@ -1,3 +1,3 @@
-from app.subagent_batches.service import SubagentBatchService
+from deerflow.subagents.batch_service import SubagentBatchService
 
 __all__ = ["SubagentBatchService"]

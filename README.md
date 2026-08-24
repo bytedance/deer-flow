@@ -1121,6 +1121,24 @@ The lead agent can spawn sub-agents on the fly — each with its own scoped cont
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 
+Direct `create_deerflow_agent(...)` integrations can own the same boundary explicitly instead of relying on Gateway startup. Construct one `SubagentRuntime` and share it across every graph in that application; its `max_running`, ordinary per-run total, bound `task` tool, and optional durable-batch tools then use the same caller-owned snapshot and execution controller. A runtime with a batch repository owns a worker and must be started before graph construction and stopped during application shutdown:
+
+```python
+from deerflow.agents import RuntimeFeatures, create_deerflow_agent
+from deerflow.subagents import SubagentRuntime
+
+runtime = SubagentRuntime.from_app_config(app_config, batch_repository=batch_repository)
+async with runtime:
+    graph = create_deerflow_agent(
+        model,
+        features=RuntimeFeatures(subagent=True),
+        subagent_runtime=runtime,
+    )
+    # Serve or invoke graph while the durable worker is running.
+```
+
+The factory still does not load YAML or create SQL infrastructure: the caller supplies the config snapshot, repository, and lifecycle. Because it accepts a caller-owned `system_prompt`, direct integrations also own any model-visible wording about those limits; the default middleware enforces the runtime limits regardless. The factory does not mount the Gateway owner-scoped HTTP routes or Web UI, so direct applications must expose their own result API/UI if they need those surfaces. For ordinary delegation only, `SubagentRuntime(...)` needs no asynchronous startup.
+
 Administrators can add, edit, disable, and delete reusable worker definitions from **Settings → Subagents**. Built-in and `config.yaml` definitions remain visible there as read-only entries. The default Lead Agent can use every enabled runtime sub-agent; each page-created Custom Agent can instead allow all, none, or a selected set. That selection is enforced both in the model-visible directory and by the server-side `task` tool. Managed definitions are deployment-wide in this version and follow `agent_storage.backend`: atomic files for a local deployment or the shared application database for multiple instances.
 
 For example, independent read-only research can run concurrently when the wall-clock savings outweigh duplicated discovery and synthesis cost, while a repository refactor with shared files and sequential test feedback remains with the lead agent. When `max_concurrent_subagents` is `1`, parallel and multi-batch routing guidance is disabled; delegation remains available only for material specialist or context-isolation benefit.

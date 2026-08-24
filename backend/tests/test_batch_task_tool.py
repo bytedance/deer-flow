@@ -105,3 +105,96 @@ async def test_batch_task_rejects_duplicate_item_keys_without_submitting(monkeyp
     assert message.status == "error"
     assert "unique" in message.content
     submitter.submit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bound_batch_tools_use_the_explicit_submitter(monkeypatch) -> None:
+    explicit = AsyncMock()
+    explicit.get_batch.return_value = {
+        "id": "subagent-batch-explicit",
+        "status": "running",
+        "total_items": 2,
+        "counts": {"running": 1, "succeeded": 1},
+    }
+    fallback = AsyncMock()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: fallback)
+
+    tools = {tool.name: tool for tool in tool_module.bind_batch_tools(explicit)}
+    result = await tools["batch_status"].coroutine(
+        runtime=_runtime(),
+        batch_id="subagent-batch-explicit",
+    )
+
+    assert "subagent-batch-explicit" in result
+    explicit.get_batch.assert_awaited_once_with(
+        batch_id="subagent-batch-explicit",
+        user_id="user-1",
+    )
+    fallback.get_batch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bound_batch_task_uses_the_explicit_app_config(monkeypatch) -> None:
+    app_config = object()
+    captured = {}
+    submitter = AsyncMock()
+    submitter.submit.return_value = {
+        "id": "subagent-batch-explicit",
+        "status": "queued",
+        "total_items": 1,
+    }
+
+    def available_names(*, app_config, allowed_subagents):
+        captured["names"] = (app_config, allowed_subagents)
+        return ["general-purpose"]
+
+    def subagent_config(name, *, app_config):
+        captured["config"] = (name, app_config)
+        return SubagentConfig(
+            name="general-purpose",
+            description="General purpose",
+        )
+
+    monkeypatch.setattr(tool_module, "get_available_subagent_names", available_names)
+    monkeypatch.setattr(tool_module, "get_subagent_config", subagent_config)
+
+    tools = {
+        tool.name: tool
+        for tool in tool_module.bind_batch_tools(
+            submitter,
+            app_config=app_config,
+        )
+    }
+    await tools["batch_task"].coroutine(
+        runtime=_runtime(),
+        title="Explicit config",
+        items=[BatchTaskItem(key="record-1", prompt="Process one")],
+        subagent_type="general-purpose",
+        tool_call_id="call-explicit",
+        max_live_items=None,
+        max_running_items=None,
+    )
+
+    assert captured["names"] == (app_config, ["general-purpose"])
+    assert captured["config"] == ("general-purpose", app_config)
+    submitter.submit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bound_batch_tools_do_not_fall_back_after_runtime_stops(monkeypatch) -> None:
+    fallback = AsyncMock()
+    monkeypatch.setattr(tool_module, "get_subagent_batch_submitter", lambda: fallback)
+
+    tools = {
+        tool.name: tool
+        for tool in tool_module.bind_batch_tools(
+            submitter_provider=lambda: None,
+        )
+    }
+    result = await tools["batch_status"].coroutine(
+        runtime=_runtime(),
+        batch_id="subagent-batch-stopped",
+    )
+
+    assert result == "Durable subagent batches are unavailable."
+    fallback.get_batch.assert_not_awaited()

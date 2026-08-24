@@ -46,9 +46,9 @@ min(requested task-call concurrency, subagent_runtime.max_running, hard safety m
 
 The same resolved value is used by:
 
-- the lead-agent prompt;
+- the generated lead-agent prompt on Gateway/embedded-client paths;
 - `SubagentLimitMiddleware` tool-call truncation;
-- Gateway and embedded client agent construction; and
+- Gateway, embedded client, and direct `create_deerflow_agent` construction; and
 - the real process-wide execution controller.
 
 The hard schema maximum is now `64`, but that number is not an instruction to run 64 workers. A deployment must explicitly raise `subagent_runtime.max_running`, and every ordinary request remains capped by that real process capacity.
@@ -65,6 +65,14 @@ All native subagents, including ordinary `task` calls and durable batch items, a
 - task status remains pending until a real slot has been acquired.
 
 The previous scheduler thread pool was removed. Background execution submits a coroutine directly to the existing persistent isolated event loop; increasing the queue no longer creates the same number of long-lived blocked threads.
+
+### Direct factory ownership
+
+Gateway and `DeerFlowClient` install their startup dependencies for callers. A direct `create_deerflow_agent(...)` integration instead passes one explicit `SubagentRuntime` to every graph that must share a capacity boundary. The runtime snapshots `SubagentRuntimeConfig`, the ordinary `max_total_per_run`, one `SubagentExecutionCapacity`, an optional caller-owned `AppConfig` used for subagent registry/model/tool resolution, and an optional batch submitter or owned durable worker. This keeps the factory pure-argument: it does not load `config.yaml`, create a SQL repository, or silently start background work.
+
+If the runtime owns a batch repository, the caller must start it before graph construction and stop it at application shutdown; `async with runtime` provides that lifecycle. Graph construction fails closed while the configured worker is stopped, so a graph cannot advertise batch tools backed by no worker. The bound ordinary and batch tools use that runtime's exact capacity/submitter even if another Gateway runtime exists in the same Python process.
+
+The direct factory accepts a caller-provided `system_prompt` and does not render DeerFlow's lead prompt. Such callers own any model-visible wording about delegation capacity; the default middleware still enforces the runtime's real limit regardless of that wording. The direct factory path also does not mount Gateway HTTP routes or the Web UI panel. Callers that need owner-scoped item browsing or export must expose those application surfaces themselves. Repository-free runtimes support ordinary delegation without an asynchronous lifecycle.
 
 ### Ordinary runaway protection remains
 
@@ -231,6 +239,6 @@ Operators should raise capacity gradually, observe provider throttling and resou
 The implementation is covered at four boundaries:
 
 - capacity configuration, startup reload boundaries, queue/reject/timeout/cancel, and slot release;
-- ordinary prompt/middleware/executor consistency and executor regression coverage;
+- ordinary prompt/middleware/executor consistency, explicit direct-factory runtime/config binding, and executor regression coverage;
 - migration parity, durable repository idempotency, live-window claiming, lease recovery, retries, controls, ownership, service execution, and JSONL routes; and
 - frontend type checking, linting, API/type unit tests, and feature-gated chat integration.

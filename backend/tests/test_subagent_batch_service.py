@@ -5,11 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.subagent_batches import service as service_module
-from app.subagent_batches.service import SubagentBatchService
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+from deerflow.subagents import batch_service as service_module
 from deerflow.subagents.batch_runtime import BatchSubmitRequest
+from deerflow.subagents.batch_service import SubagentBatchService
+from deerflow.subagents.capacity import SubagentExecutionCapacity
 
 
 class FakeStatus(Enum):
@@ -103,9 +104,12 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
             self.finalized = kwargs
             return True
 
+    execution_capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=1))
+    executor_kwargs = {}
+
     class Executor:
-        def __init__(self, **_kwargs) -> None:
-            pass
+        def __init__(self, **kwargs) -> None:
+            executor_kwargs.update(kwargs)
 
         def execute_async(self, _prompt, task_id=None):
             assert task_id == "item-1"
@@ -123,6 +127,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
         repository=repository,
         config=SubagentBatchesConfig(),
         runtime_config=SubagentRuntimeConfig(max_running=1),
+        execution_capacity=execution_capacity,
     )
 
     await service.run_once(now=service_module.datetime.now(service_module.UTC))
@@ -132,6 +137,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(mon
     assert repository.finalized is not None
     assert repository.finalized["succeeded"] is True
     assert repository.finalized["result"] == "done"
+    assert executor_kwargs["execution_capacity"] is execution_capacity
 
 
 @pytest.mark.asyncio

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import asdict, replace
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
@@ -13,7 +15,11 @@ from pydantic import BaseModel, Field
 
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.subagents.batch_runtime import BatchSubmitRequest, get_subagent_batch_submitter
+from deerflow.subagents.batch_runtime import (
+    BatchSubmitRequest,
+    SubagentBatchSubmitter,
+    get_subagent_batch_submitter,
+)
 from deerflow.subagents.registry import get_available_subagent_names, get_subagent_config
 from deerflow.tools.types import Runtime
 
@@ -21,6 +27,73 @@ from deerflow.tools.types import Runtime
 class BatchTaskItem(BaseModel):
     key: str = Field(min_length=1, max_length=128)
     prompt: str = Field(min_length=1, max_length=100_000)
+
+
+_NO_EXPLICIT_BATCH_SUBMITTER = object()
+_explicit_batch_submitter: ContextVar[SubagentBatchSubmitter | None | object] = ContextVar(
+    "deerflow_explicit_subagent_batch_submitter",
+    default=_NO_EXPLICIT_BATCH_SUBMITTER,
+)
+_explicit_batch_app_config: ContextVar[Any | None] = ContextVar(
+    "deerflow_explicit_subagent_batch_app_config",
+    default=None,
+)
+
+
+def _batch_submitter() -> SubagentBatchSubmitter | None:
+    explicit = _explicit_batch_submitter.get()
+    if explicit is not _NO_EXPLICIT_BATCH_SUBMITTER:
+        return cast(SubagentBatchSubmitter | None, explicit)
+    return get_subagent_batch_submitter()
+
+
+def _batch_app_config(runtime: Runtime) -> Any | None:
+    explicit = _explicit_batch_app_config.get()
+    if explicit is not None:
+        return explicit
+    context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
+    return context.get("app_config")
+
+
+def _bind_batch_tool(
+    tool,
+    submitter_provider: Callable[[], SubagentBatchSubmitter | None],
+    app_config: Any | None,
+):
+    original_coroutine = tool.coroutine
+    if original_coroutine is None:  # pragma: no cover - all batch tools are async
+        raise RuntimeError(f"{tool.name} has no async implementation")
+
+    async def bound_coroutine(**kwargs):
+        submitter_token = _explicit_batch_submitter.set(submitter_provider())
+        config_token = _explicit_batch_app_config.set(app_config)
+        try:
+            return await original_coroutine(**kwargs)
+        finally:
+            _explicit_batch_app_config.reset(config_token)
+            _explicit_batch_submitter.reset(submitter_token)
+
+    return tool.model_copy(update={"coroutine": bound_coroutine})
+
+
+def bind_batch_tools(
+    submitter: SubagentBatchSubmitter | None = None,
+    *,
+    submitter_provider: Callable[[], SubagentBatchSubmitter | None] | None = None,
+    app_config: Any | None = None,
+):
+    """Return batch tools bound to an explicit SDK runtime submitter.
+
+    A provider preserves runtime lifecycle semantics for already-compiled
+    graphs: after their owned worker stops, the tools report unavailable and
+    never fall through to another application's process-global submitter.
+    """
+
+    if (submitter is None) == (submitter_provider is None):
+        raise ValueError("Provide exactly one of submitter or submitter_provider")
+    provider = submitter_provider if submitter_provider is not None else lambda: submitter
+
+    return tuple(_bind_batch_tool(tool, provider, app_config) for tool in (batch_task, batch_status, cancel_batch))
 
 
 def _result(tool_call_id: str, *, content: str, batch: dict[str, Any] | None = None, error: bool = False) -> Command:
@@ -81,7 +154,7 @@ async def batch_task(
         max_live_items: Optional queued-plus-running item window.
         max_running_items: Optional per-batch real execution concurrency.
     """
-    submitter = get_subagent_batch_submitter()
+    submitter = _batch_submitter()
     if submitter is None:
         return _result(
             tool_call_id,
@@ -96,7 +169,7 @@ async def batch_task(
 
     context = runtime.context if runtime is not None and isinstance(runtime.context, dict) else {}
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
-    app_config = context.get("app_config")
+    app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
     available = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
     config = get_subagent_config(subagent_type, app_config=app_config)
@@ -161,7 +234,7 @@ async def batch_status(runtime: Runtime, batch_id: str) -> str:
     Args:
         batch_id: Server batch identifier returned by ``batch_task``.
     """
-    submitter = get_subagent_batch_submitter()
+    submitter = _batch_submitter()
     if submitter is None:
         return "Durable subagent batches are unavailable."
     batch = await submitter.get_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))
@@ -185,7 +258,7 @@ async def cancel_batch(runtime: Runtime, batch_id: str) -> str:
     Args:
         batch_id: Server batch identifier returned by ``batch_task``.
     """
-    submitter = get_subagent_batch_submitter()
+    submitter = _batch_submitter()
     if submitter is None:
         return "Durable subagent batches are unavailable."
     batch = await submitter.cancel_batch(batch_id=batch_id, user_id=resolve_runtime_user_id(runtime))

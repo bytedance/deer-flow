@@ -32,6 +32,7 @@ from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
     SubagentCapacityError,
+    SubagentExecutionCapacity,
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -461,6 +462,7 @@ class SubagentExecutor:
         authz_attributes: Mapping[str, Any] | None = None,
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
+        execution_capacity: SubagentExecutionCapacity | None = None,
     ):
         """Initialize the executor.
 
@@ -489,6 +491,10 @@ class SubagentExecutor:
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
                 process-wide singleton.
+            execution_capacity: Optional explicitly shared admission controller.
+                Direct ``create_deerflow_agent`` callers pass one through their
+                ``SubagentRuntime``; application factories fall back to the
+                startup-configured process singleton.
         """
         self.config = config
         self.app_config = app_config
@@ -527,6 +533,7 @@ class SubagentExecutor:
         # the lead run's start and this subagent's execution must not swap the
         # generation underneath the delegated work.
         self.extensions = extensions
+        self.execution_capacity = execution_capacity
 
         self._base_tools = _filter_tools(
             tools,
@@ -895,7 +902,8 @@ class SubagentExecutor:
                 status=SubagentStatus.PENDING,
             )
         try:
-            async with get_subagent_execution_capacity().slot():
+            capacity = self.execution_capacity or get_subagent_execution_capacity()
+            async with capacity.slot():
                 with result._state_lock:
                     if not result.status.is_terminal:
                         result.status = SubagentStatus.RUNNING
