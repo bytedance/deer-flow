@@ -54,6 +54,11 @@ export default function NewScheduledTaskPage() {
     ? `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(initialThreadId)}`
     : "/workspace/scheduled-tasks";
 
+  const successHref =
+    contextMode === "reuse_thread" && targetThreadId
+      ? `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(targetThreadId)}`
+      : "/workspace/scheduled-tasks";
+
   const handleCreate = () => {
     createTask.mutate(
       {
@@ -65,7 +70,7 @@ export default function NewScheduledTaskPage() {
         schedule_spec: createSchedule.schedule_spec,
         timezone: createSchedule.timezone || "UTC",
       },
-      { onSuccess: () => router.push(listHref) },
+      { onSuccess: () => router.push(successHref) },
     );
   };
 

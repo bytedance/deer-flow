@@ -105,6 +105,55 @@ test("creating a task from a thread filter returns to the filtered list", async 
   ).toBeVisible();
 });
 
+test("creating a fresh task from a thread filter returns to the global list", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+
+  await page.goto("/workspace/scheduled-tasks?thread_id=thread-from-link");
+  await page.getByTestId("scheduled-task-create-toggle").click();
+  await page.waitForURL(
+    "**/workspace/scheduled-tasks/new?thread_id=thread-from-link",
+  );
+
+  await page.getByRole("button", { name: "Fresh thread" }).click();
+  await page.getByPlaceholder("Task title").fill("Fresh from filter");
+  await page.getByPlaceholder("Prompt").fill("No thread filter");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await page.waitForURL((url) => {
+    return (
+      url.pathname.endsWith("/workspace/scheduled-tasks") &&
+      !url.searchParams.has("thread_id")
+    );
+  });
+  await expect(
+    page.getByRole("button", { name: /Fresh from filter/i }),
+  ).toBeVisible();
+});
+
+test("creating a reuse-thread task follows the submitted thread id", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+
+  await page.goto("/workspace/scheduled-tasks?thread_id=thread-from-link");
+  await page.getByTestId("scheduled-task-create-toggle").click();
+  await page.waitForURL(
+    "**/workspace/scheduled-tasks/new?thread_id=thread-from-link",
+  );
+
+  await page.getByPlaceholder("Thread ID").fill("thread-other");
+  await page.getByPlaceholder("Task title").fill("Reuse other thread");
+  await page.getByPlaceholder("Prompt").fill("Different target");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await page.waitForURL("**/workspace/scheduled-tasks?thread_id=thread-other");
+  await expect(
+    page.getByRole("button", { name: /Reuse other thread/i }),
+  ).toBeVisible();
+});
+
 test("user can create a one-time scheduled task from the create page", async ({
   page,
 }) => {
