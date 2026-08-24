@@ -497,6 +497,7 @@ def _notification_startup_config(*, channel_connections_enabled: bool = True):
             lease_seconds=30,
             max_concurrent_runs=1,
             multi_instance=False,
+            queue_timeout_seconds=3600,
         ),
         run_ownership=SimpleNamespace(grace_seconds=30),
         channel_connections=ChannelConnectionsConfig.model_validate({"enabled": channel_connections_enabled}),
