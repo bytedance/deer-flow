@@ -722,7 +722,7 @@ export function hasReasoning(message: Message) {
     return false;
   }
   if (typeof message.additional_kwargs?.reasoning_content === "string") {
-    return true;
+    return message.additional_kwargs.reasoning_content.trim().length > 0;
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];

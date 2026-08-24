@@ -305,6 +305,25 @@ test("keeps streaming reasoning and answer text out of the processing group", ()
   expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
 });
 
+test("keeps content with empty reasoning metadata in the processing group while streaming", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will check the result first.",
+      additional_kwargs: { reasoning_content: "" },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+});
+
 test("keeps streaming reasoning-only messages in the processing group", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Explain the result" },
