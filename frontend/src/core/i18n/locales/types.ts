@@ -17,6 +17,8 @@ export interface Translations {
     share: string;
     openInNewWindow: string;
     close: string;
+    back: string;
+    confirmTitle: string;
     more: string;
     search: string;
     loadMore: string;
@@ -33,6 +35,7 @@ export interface Translations {
     preview: string;
     cancel: string;
     save: string;
+    saving: string;
     install: string;
     create: string;
     import: string;
@@ -49,6 +52,11 @@ export interface Translations {
     showArtifacts: string;
     browser: string;
     showBrowser: string;
+    resourceMeta: {
+      title: string;
+      createdBy: string;
+      createdAt: string;
+    };
   };
 
   runDuration: {
@@ -479,12 +487,24 @@ export interface Translations {
   // Chats
   chats: {
     searchChats: string;
+    listTitle: string;
+    pageTitle: string;
+    pageDescription: string;
+    countTotal: (count: number) => string;
+    countFiltered: (shown: number, total: number) => string;
+    searchEmpty: string;
+    emptyList: string;
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
     pinChat: string;
     unpinChat: string;
     pinChatFailed: string;
+    mainChat: string;
+    pinnedBadge: string;
+    messageCount: (count: number) => string;
+    deleteConfirm: string;
+    deleteFailed: string;
   };
 
   // Sidecar

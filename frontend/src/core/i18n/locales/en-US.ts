@@ -28,6 +28,8 @@ export const enUS: Translations = {
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",
+    back: "Back",
+    confirmTitle: "Confirm action",
     more: "More",
     search: "Search",
     loadMore: "Load more",
@@ -44,6 +46,7 @@ export const enUS: Translations = {
     preview: "Preview",
     cancel: "Cancel",
     save: "Save",
+    saving: "Saving…",
     install: "Install",
     create: "Create",
     import: "Import",
@@ -61,6 +64,11 @@ export const enUS: Translations = {
     showArtifacts: "Show artifacts of this conversation",
     browser: "Browser",
     showBrowser: "Open browser panel",
+    resourceMeta: {
+      title: "Record",
+      createdBy: "Created by",
+      createdAt: "Created at",
+    },
   },
 
   runDuration: {
@@ -592,12 +600,26 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    listTitle: "Conversations",
+    pageTitle: "Chat history",
+    pageDescription: "Browse and search all conversations on this workspace.",
+    countTotal: (count) => `${count} conversation${count === 1 ? "" : "s"}`,
+    countFiltered: (shown, total) => `${shown} of ${total} conversations`,
+    searchEmpty: "No conversations match your search.",
+    emptyList: "No conversations yet.",
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
     pinChat: "Pin chat",
     unpinChat: "Unpin chat",
     pinChatFailed: "Failed to update pinned chat",
+    mainChat: "Main chat",
+    pinnedBadge: "Pinned",
+    messageCount: (count) =>
+      count === 1 ? "1 message" : `${count.toLocaleString()} messages`,
+    deleteConfirm:
+      "Delete this conversation? This cannot be undone and will remove its chat history.",
+    deleteFailed: "Failed to delete conversation.",
   },
 
   // Sidecar
