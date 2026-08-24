@@ -241,6 +241,7 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
 ```
@@ -249,12 +250,16 @@ Notes:
 
 - `enabled: false` keeps background polling off by default.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
-- `max_concurrent_runs` is a shared global cap in multi-instance mode. It counts active `queued`/`running` scheduled-run rows plus valid pre-launch dispatch leases, and Postgres serializes the budget read with due-task claims so long runs or concurrent Pods cannot exceed it.
+- `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
+- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
+- A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
+- A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
+- Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
 - Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
 - `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
-- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
-- **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and includes active scheduled runs plus dispatch reservations. Plan capacity accordingly; it does not multiply with the replica count.
+- **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
 - Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.

@@ -373,6 +373,9 @@ export const zhCN: Translations = {
       fresh: "新线程",
       reuse: "复用线程",
       threadIdPlaceholder: "线程 ID",
+      reuseNoticeTitle: "使用该线程的历史对话",
+      reuseNoticeDescription:
+        "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
     },
     filters: {
       allStatuses: "全部状态",
@@ -433,6 +436,7 @@ export const zhCN: Translations = {
     runTrigger: { scheduled: "定时", manual: "手动" },
     runStatus: {
       queued: "排队中",
+      launching: "启动中",
       running: "运行中",
       success: "成功",
       failed: "失败",

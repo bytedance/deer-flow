@@ -2134,7 +2134,8 @@ agent_storage:
 #   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
+#   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
+#   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
@@ -2143,6 +2144,7 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
 
@@ -2482,14 +2484,21 @@ run_ownership:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         guest:
-#           tools: {allow: ["web_search", "read_file"]}
+#           # web-only role: sandbox-dependent tools (read_file, bash, glob,
+#           # grep, write_file, ...) are omitted — with sandbox:execute denied
+#           # they could only ever return the deny error, so allow just the
+#           # non-sandbox tools.
+#           tools: {allow: ["web_search"]}
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
+#           sandbox: {allow: false}  # deny sandbox execution
 authorization:
   enabled: false
 
