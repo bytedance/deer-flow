@@ -214,6 +214,9 @@ These apply repo-wide; module guides own the module-specific detail.
   frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
+- **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
+  Python utilities that read them must pass `encoding="utf-8"` rather than relying on the
+  platform locale.
 - **Version sources must stay in lockstep** — a release version must match identically in
   `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
   (`version` + `appVersion`). Pushing a `v*` git tag triggers CI that runs
