@@ -429,3 +429,76 @@ async def test_goal_set_failure_shows_error_tone():
         await pilot.pause()
     errors = [r for r in _system_rows(app) if r.tone == "error"]
     assert any("Could not set goal." in r.text for r in errors)
+
+
+def _seed_scrollable_transcript(app) -> None:
+    """Replace app.state with enough rows to make #scroll scrollable."""
+    from deerflow.tui.view_state import SystemRow, initial_state
+
+    rows = tuple(SystemRow(text=f"line {i:04d} " + "x" * 200) for i in range(400))
+    app.state = initial_state(rows=rows)
+    app._refresh_transcript()
+
+
+@pytest.mark.asyncio
+async def test_pageup_pagedown_scroll_transcript_while_composer_focused():
+    from textual.containers import VerticalScroll
+
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _seed_scrollable_transcript(app)
+        await pilot.pause()
+        scroll = app.query_one("#scroll", VerticalScroll)
+        scroll.scroll_end(animate=False)
+        await pilot.pause()
+
+        composer = app.query_one("#composer")
+        assert app.focused is composer  # composer keeps focus the whole time
+
+        # PageUp while the composer is focused scrolls the transcript up
+        assert scroll.scroll_y >= scroll.max_scroll_y - 1
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert scroll.scroll_y < scroll.max_scroll_y
+        assert app.focused is composer
+
+        # PageDown returns to the bottom
+        await pilot.press("pagedown")
+        await pilot.pause()
+        assert scroll.scroll_y >= scroll.max_scroll_y - 1
+        assert app.focused is composer
+
+
+@pytest.mark.asyncio
+async def test_refresh_transcript_preserves_scroll_position_when_scrolled_up():
+    from textual.containers import VerticalScroll
+
+    from deerflow.tui.view_state import AssistantRow, initial_state
+
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        _seed_scrollable_transcript(app)
+        await pilot.pause()
+        scroll = app.query_one("#scroll", VerticalScroll)
+        scroll.scroll_end(animate=False)
+        await pilot.pause()
+        await pilot.press("pageup")
+        await pilot.pause()
+        scrolled_y = scroll.scroll_y
+        assert scrolled_y < scroll.max_scroll_y
+
+        # A streamed update must not snap the user back to the bottom
+        app.state = initial_state(rows=app.state.rows + (AssistantRow(text="streamed line"),) * 3)
+        app._refresh_transcript()
+        await pilot.pause()
+        assert scroll.scroll_y == scrolled_y
+
+        # Once back at the bottom, follow resumes
+        scroll.scroll_end(animate=False)
+        await pilot.pause()
+        app.state = initial_state(rows=app.state.rows + (AssistantRow(text="more"),))
+        app._refresh_transcript()
+        await pilot.pause()
+        assert scroll.scroll_y >= scroll.max_scroll_y - 1

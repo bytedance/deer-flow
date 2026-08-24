@@ -166,6 +166,11 @@ class DeerFlowTUI(App):
         # of these so they never steal keys from a modal overlay or the composer.
         Binding("down", "nav_down", show=False, priority=True),
         Binding("up", "nav_up", show=False, priority=True),
+        # PageUp/PageDown scroll the transcript while the composer stays focused;
+        # they route to the palette when it is open and are gated by check_action
+        # against modal overlays, same as up/down (issue #4974).
+        Binding("pageup", "scroll_page_up", show=False, priority=True),
+        Binding("pagedown", "scroll_page_down", show=False, priority=True),
         Binding("tab", "palette_complete", show=False, priority=True),
         Binding("escape", "escape", show=False, priority=True),
         Binding("enter", "palette_accept", show=False, priority=True),
@@ -260,16 +265,32 @@ class DeerFlowTUI(App):
     # ----- slash command palette ----------------------------------------- #
 
     def check_action(self, action: str, parameters):  # noqa: D401 - Textual hook
-        custom = {"nav_up", "nav_down", "palette_complete", "palette_accept", "escape"}
+        custom = {
+            "nav_up",
+            "nav_down",
+            "scroll_page_up",
+            "scroll_page_down",
+            "palette_complete",
+            "palette_accept",
+            "escape",
+        }
         if action in custom:
             # A modal overlay (e.g. the model/thread picker) is on top — never
             # intercept its keys; let the overlay handle them natively.
             if len(self.screen_stack) > 1:
                 return None
-            # nav (history), Tab and Esc are always consumed (Tab can't move focus
-            # off the composer; Esc closes the palette or interrupts a run). Enter
-            # falls through to the Input when the palette is closed so it submits.
-            if action in {"nav_up", "nav_down", "palette_complete", "escape"}:
+            # nav (history), transcript paging, Tab and Esc are always consumed
+            # (Tab can't move focus off the composer; Esc closes the palette or
+            # interrupts a run). Enter falls through to the Input when the
+            # palette is closed so it submits.
+            if action in {
+                "nav_up",
+                "nav_down",
+                "scroll_page_up",
+                "scroll_page_down",
+                "palette_complete",
+                "escape",
+            }:
                 return True
             return True if self._palette_open else None
         return True
@@ -285,6 +306,18 @@ class DeerFlowTUI(App):
             self.action_palette_down()
         else:
             self._history_move(self._history.down())
+
+    def action_scroll_page_up(self) -> None:
+        if self._palette_open:
+            self.action_palette_up()
+        else:
+            self.query_one("#scroll", VerticalScroll).scroll_page_up(animate=False)
+
+    def action_scroll_page_down(self) -> None:
+        if self._palette_open:
+            self.action_palette_down()
+        else:
+            self.query_one("#scroll", VerticalScroll).scroll_page_down(animate=False)
 
     def _history_move(self, value: str) -> None:
         composer = self.query_one("#composer", Input)
@@ -702,8 +735,15 @@ class DeerFlowTUI(App):
         )
 
     def _refresh_transcript(self) -> None:
+        scroll = self.query_one("#scroll", VerticalScroll)
+        # Only auto-follow when the user is already at the bottom. If they have
+        # scrolled up to read earlier content, a streamed update must not snap
+        # them back to the end (issue #4974); follow resumes on the next refresh
+        # once they scroll back down.
+        follow = scroll.scroll_y >= scroll.max_scroll_y - 1
         self.query_one("#transcript", Static).update(render_transcript(self.state))
-        self.query_one("#scroll", VerticalScroll).scroll_end(animate=False)
+        if follow:
+            scroll.scroll_end(animate=False)
 
     def _refresh_status(self) -> None:
         spinner = SYMBOLS["spinner"][self._spinner_idx] if self._streaming else ""
