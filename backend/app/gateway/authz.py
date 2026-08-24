@@ -25,6 +25,10 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- memory:read   - View memory data/config
+- memory:write  - Modify memory data (create/update/delete facts, import, clear)
+- agents:read   - View custom agents and the user profile
+- agents:write  - Create/update/delete custom agents and the user profile
 """
 
 from __future__ import annotations
@@ -65,6 +69,14 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+
+    # Memory (per-user memory data surfaced by /api/memory*)
+    MEMORY_READ = "memory:read"
+    MEMORY_WRITE = "memory:write"
+
+    # Custom agents and the per-user USER.md profile (/api/agents*, /api/user-profile)
+    AGENTS_READ = "agents:read"
+    AGENTS_WRITE = "agents:write"
 
 
 class AuthContext:
@@ -124,6 +136,10 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
 ]
 
 

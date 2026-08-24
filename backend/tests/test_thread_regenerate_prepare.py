@@ -252,7 +252,7 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
             ),
         ):
             thread_result = await thread_runs.wait_run.__wrapped__("thread-1", body, request)
-            stateless_result = await runs.stateless_wait(body, request)
+            stateless_result = await runs.stateless_wait.__wrapped__(body, request)
         return thread_result, stateless_result
 
     thread_result, stateless_result = asyncio.run(_scenario())
@@ -304,7 +304,7 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
             ),
         ):
             thread_result = await thread_runs.wait_run.__wrapped__("thread-1", body, request)
-            stateless_result = await runs.stateless_wait(body, request)
+            stateless_result = await runs.stateless_wait.__wrapped__(body, request)
         return thread_result, stateless_result
 
     thread_result, stateless_result = asyncio.run(_scenario())
@@ -352,7 +352,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
                 side_effect=RuntimeError("graph construction failed"),
             ),
         ):
-            return await runs.stateless_wait(body, request)
+            return await runs.stateless_wait.__wrapped__(body, request)
 
     result = asyncio.run(_scenario())
 
