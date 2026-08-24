@@ -593,3 +593,11 @@ class TestClose:
         sandbox._client = SimpleNamespace()  # no close, no _client_wrapper
         sandbox.close()  # must not raise
         assert sandbox._client is None
+
+
+def test_list_dir_preserves_trailing_space_in_filename(sandbox):
+    """ "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    verbatim, one entry per line, so a per-line strip() corrupts the name."""
+    sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="/test/notes.txt \n/test/sub\n")))
+
+    assert sandbox.list_dir("/test") == ["/test/notes.txt ", "/test/sub"]

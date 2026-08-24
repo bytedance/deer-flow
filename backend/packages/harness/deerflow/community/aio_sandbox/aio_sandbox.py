@@ -381,7 +381,10 @@ class AioSandbox(Sandbox):
                 result = self._client.shell.exec_command(command=f"find {shlex.quote(path)} -maxdepth {max_depth} -type f -o -type d 2>/dev/null | head -500", no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
                 output = result.data.output if result.data else ""
                 if output:
-                    return [line.strip() for line in output.strip().split("\n") if line.strip()]
+                    # splitlines() already removed the terminators; do NOT strip
+                    # entries — a filename that legitimately ends in whitespace
+                    # would be corrupted and never resolve again.
+                    return [line for line in output.splitlines() if line]
                 return []
             except Exception as e:
                 logger.error(f"Failed to list directory in sandbox: {e}")
