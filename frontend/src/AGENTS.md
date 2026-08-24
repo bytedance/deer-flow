@@ -18,10 +18,31 @@
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
+   Current-chat MCP background tasks use `core/background-tasks`: the header
+   trigger is hidden for new/mock/static-demo threads and unless `/api/features`
+   reports the startup-scoped `mcp_tasks` capability; the list query is disabled
+   while that capability is unavailable, so default-disabled and memory-backend
+   deployments never poll an endpoint that cannot serve tasks. It lists at most
+   20 local task records, refreshes every 3 seconds while any task is active
+   (15 seconds otherwise), fetches bounded task details only while a user expands
+   a card, and cancels through the thread-scoped local-ID endpoint. The expanded view
+   shows result/preview, artifact metadata, input requests, and the latest poll,
+   notification-delivery, or cancellation error without exposing the persisted remote handle. A
+   persisted cancel request remains "Cancelling…" only while the task status is
+   still active; if remote cancellation keeps failing, the active card remains
+   expandable and shows the attempt count plus the latest bounded error while
+   the backend continues retrying. Notification delivery failures expose their
+   bounded error and attempt count; retryable failures use backend backoff,
+   while a permanent rejection or exhausted five-attempt budget is shown as
+   stopped rather than implying that retries will continue.
    Settings > Integrations uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
    so backend cross-tab ordering remains authoritative.
+   Settings > Subagents reads one catalog for built-in, config, and managed
+   definitions. Only administrators see managed-definition mutation controls;
+   Custom Agent settings consume the same query and preserve stale selected names
+   as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.

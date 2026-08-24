@@ -242,6 +242,7 @@ scheduler:
   lease_seconds: 120
   max_concurrent_runs: 3
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 ```
 
 Notes:
@@ -250,7 +251,8 @@ Notes:
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
 - `max_concurrent_runs` is a shared global cap in multi-instance mode. It counts active `queued`/`running` scheduled-run rows plus valid pre-launch dispatch leases, and Postgres serializes the budget read with due-task claims so long runs or concurrent Pods cannot exceed it.
 - Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
-- All scheduler fields are restart-required; edits need a Gateway restart.
+- `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
 - **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and includes active scheduled runs plus dispatch reservations. Plan capacity accordingly; it does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
@@ -496,6 +498,47 @@ Notes specific to `E2BSandboxProvider`:
   `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
+
+**OpenSandbox Remote Sandbox** (runs code through an OpenSandbox deployment):
+
+```yaml
+sandbox:
+   use: deerflow.community.opensandbox:OpenSandboxProvider
+   image: python:3.11
+   api_key: $OPEN_SANDBOX_API_KEY     # optional when the SDK env var is set
+   domain: localhost:8080             # OPEN_SANDBOX_DOMAIN fallback
+   protocol: http
+   request_timeout: 30                # management request timeout seconds
+   ready_timeout: 30                  # create/readiness timeout seconds
+   use_server_proxy: false            # proxy execd/file traffic through server
+   sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
+   bash_command_timeout: 600          # default remote command timeout seconds
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before destroy; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[opensandbox]"
+```
+
+The provider creates a sandbox per effective user/thread scope and parks it in
+an in-process warm pool after each turn. The same scope can reclaim it after a
+health check; another user or thread cannot. Create-time readiness and
+`/mnt/user-data/{workspace,uploads,outputs}` bootstrap failures are cleaned up
+before `acquire()` returns. Each remote owns an independent SDK transport.
+Operations renew the configured server-side lifetime, and commands without an
+explicit timeout use `bash_command_timeout`; a longer explicit timeout extends
+the renewal horizon to cover the command. Operations on one remote are
+serialized so a shorter renewal cannot overwrite an in-flight command's
+horizon. File transfer uses OpenSandbox's native filesystem API; bounded
+`find`/`grep` commands implement the directory and content-search surface.
+Downloads are restricted to `/mnt/user-data` and all file paths reject
+traversal. Multi-process discovery and ownership coordination are not yet
+implemented, so `replicas` is a per-Gateway-process soft cap.
 
 Choose between local execution or Docker-based isolation:
 

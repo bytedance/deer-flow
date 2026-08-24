@@ -18,7 +18,7 @@ from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig,
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
-from deerflow.mcp.interceptors import build_mcp_tool_interceptors
+from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
@@ -562,14 +562,7 @@ def _make_session_pool_tool(
                     **kwargs,
                 )
 
-            handler = base_handler
-            for interceptor in reversed(tool_interceptors):
-                outer = handler
-
-                async def wrapped(req: Any, _i: Any = interceptor, _h: Any = outer) -> Any:
-                    return await _i(req, _h)
-
-                handler = wrapped
+            handler = compose_tool_interceptors(tool_interceptors, base_handler)
 
             request = MCPToolCallRequest(
                 name=original_name,
@@ -881,7 +874,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                         _VALID_MCP_TOOL_NAME.pattern,
                     )
                     continue
-                tag_mcp_tool(tool)
+                tag_mcp_tool(tool, server_name=source_name, transport=transport)
                 prefix = f"{source_name}_"
                 original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)

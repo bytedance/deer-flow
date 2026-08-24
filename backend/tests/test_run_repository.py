@@ -774,6 +774,28 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_run_admission_reuses_process_wide_idempotency_key(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        first_manager = RunManager(store=repo, worker_id="worker-a")
+        second_manager = RunManager(store=repo, worker_id="worker-b")
+
+        first = await first_manager.create_or_reject(
+            "thread-T",
+            user_id="user-1",
+            idempotency_key="mcp-task:task-1:1:0",
+        )
+        reused = await second_manager.create_or_reject(
+            "thread-T",
+            user_id="user-1",
+            idempotency_key="mcp-task:task-1:1:0",
+        )
+
+        assert reused.run_id == first.run_id
+        assert reused.idempotency_reused is True
+        assert len(await repo.list_by_thread("thread-T", user_id="user-1")) == 1
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_checkpoint_write_reservation_blocks_interrupt_run_on_sql_store(self, tmp_path):
         """An interrupt-strategy run cannot displace a durable checkpoint writer."""
         repo = await _make_repo(tmp_path)
