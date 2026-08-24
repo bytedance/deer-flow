@@ -2104,7 +2104,8 @@ run_events:
 #                   so every node sees them. Requires database.backend to be
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
-# Switching an existing install to 'db'? Import the on-disk agents once with:
+# Switching an existing install to 'db'? Import the on-disk Custom Agents and
+# managed subagents once with:
 #     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #

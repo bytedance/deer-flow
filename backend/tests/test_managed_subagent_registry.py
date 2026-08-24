@@ -28,6 +28,29 @@ def test_enabled_managed_definitions_join_runtime_catalog(monkeypatch):
     assert registry.get_subagent_config("planner", app_config=config).system_prompt == "You are planner."
 
 
+def test_default_lead_catalog_preserves_builtin_defaults(monkeypatch):
+    monkeypatch.setattr(registry, "_managed_definitions", lambda **_: [_managed("planner")])
+    config = SubagentsAppConfig()
+
+    assert registry.get_subagent_names(app_config=config) == ["general-purpose", "bash", "planner"]
+
+    general = registry.get_subagent_config("general-purpose", app_config=config)
+    assert general is not None
+    assert general.tools is None
+    assert set(general.disallowed_tools or []) == {"task", "ask_clarification", "present_files"}
+    assert general.model == "inherit"
+    assert general.max_turns == 150
+    assert general.timeout_seconds == 1800
+
+    bash = registry.get_subagent_config("bash", app_config=config)
+    assert bash is not None
+    assert bash.tools == ["bash", "ls", "read_file", "write_file", "str_replace"]
+    assert set(bash.disallowed_tools or []) == {"task", "ask_clarification", "present_files"}
+    assert bash.model == "inherit"
+    assert bash.max_turns == 60
+    assert bash.timeout_seconds == 1800
+
+
 def test_builtin_and_config_definitions_win_name_conflicts(monkeypatch):
     monkeypatch.setattr(registry, "_managed_definitions", lambda **_: [_managed("general-purpose"), _managed("reviewer")])
     config = SubagentsAppConfig(
