@@ -15,10 +15,14 @@ def _app_with_config(
     browser_extra: dict | None = None,
     mcp_tasks_available: bool = False,
     subagent_batches_available: bool = False,
+    subagent_batch_repo_available: bool | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
     app.state.subagent_batches_available = subagent_batches_available
+    if subagent_batch_repo_available is None:
+        subagent_batch_repo_available = subagent_batches_available
+    app.state.subagent_batch_repo = object() if subagent_batch_repo_available else None
     app.include_router(features.router)
     tools = (
         [
@@ -44,7 +48,12 @@ def test_features_reports_agents_api_enabled() -> None:
         "agents_api": {"enabled": True},
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
-        "subagent_batches": {"enabled": False, "max_running": 3},
+        "subagent_batches": {
+            "enabled": False,
+            "repository_available": False,
+            "worker_running": False,
+            "max_running": 3,
+        },
     }
 
 
@@ -56,7 +65,12 @@ def test_features_reports_agents_api_disabled() -> None:
         "agents_api": {"enabled": False},
         "browser_control": {"enabled": False},
         "mcp_tasks": {"enabled": False},
-        "subagent_batches": {"enabled": False, "max_running": 3},
+        "subagent_batches": {
+            "enabled": False,
+            "repository_available": False,
+            "worker_running": False,
+            "max_running": 3,
+        },
     }
 
 
@@ -76,7 +90,30 @@ def test_features_reports_subagent_batch_startup_capability() -> None:
     ) as client:
         response = client.get("/api/features")
     assert response.status_code == 200
-    assert response.json()["subagent_batches"] == {"enabled": True, "max_running": 3}
+    assert response.json()["subagent_batches"] == {
+        "enabled": True,
+        "repository_available": True,
+        "worker_running": True,
+        "max_running": 3,
+    }
+
+
+def test_features_distinguishes_batch_history_from_worker_availability() -> None:
+    with TestClient(
+        _app_with_config(
+            agents_api_enabled=True,
+            subagent_batches_available=False,
+            subagent_batch_repo_available=True,
+        )
+    ) as client:
+        response = client.get("/api/features")
+    assert response.status_code == 200
+    assert response.json()["subagent_batches"] == {
+        "enabled": False,
+        "repository_available": True,
+        "worker_running": False,
+        "max_running": 3,
+    }
 
 
 def test_features_reports_browser_control_enabled_when_configured_and_runtime_available() -> None:

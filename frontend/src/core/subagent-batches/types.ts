@@ -59,3 +59,10 @@ export function isActiveSubagentBatch(batch: SubagentBatch): boolean {
 export function completedSubagentBatchItems(batch: SubagentBatch): number {
   return batch.counts.succeeded + batch.counts.failed + batch.counts.cancelled;
 }
+
+export function subagentBatchProgress(batch: SubagentBatch): number {
+  if (!Number.isFinite(batch.total_items) || batch.total_items <= 0) return 0;
+  const completed = completedSubagentBatchItems(batch);
+  if (!Number.isFinite(completed)) return 0;
+  return Math.min(100, Math.max(0, (completed / batch.total_items) * 100));
+}

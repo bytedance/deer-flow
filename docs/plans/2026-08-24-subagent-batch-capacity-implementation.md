@@ -177,7 +177,7 @@ Every lookup uses both authenticated owner and thread scope. Read and export rem
 
 ### Frontend behavior
 
-The frontend does not decide whether a prompt is “Swarm-like.” It reads the startup capability from `/api/features` and, when enabled, adds a batch panel to both default and custom-agent chat pages.
+The frontend does not decide whether a prompt is “Swarm-like.” It reads separate SQL-repository and worker-runtime capabilities from `/api/features`. A running worker exposes the batch panel immediately; when the worker is stopped or disabled, the panel remains available in read-only mode only for threads with durable history. This preserves item inspection and JSONL export without exposing an unused panel on deployments that have never enabled batches.
 
 The panel provides:
 
@@ -186,6 +186,8 @@ The panel provides:
 - pause, resume, and cancel controls;
 - item status, result preview, error, and failed-item retry; and
 - JSONL result export.
+
+Worker-dependent mutations are disabled while the worker is unavailable. Progress rendering clamps malformed persisted totals to a bounded `0`–`100` percentage so an invalid or manually edited row cannot pass `NaN`/`Infinity` into the UI primitive.
 
 Only the first bounded item page is rendered in the panel. Large result sets stay outside the React tree and model transcript and are consumed through pagination/export.
 

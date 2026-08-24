@@ -331,6 +331,8 @@ export const zhCN: Translations = {
     label: "批处理",
     title: "子智能体批处理",
     description: "面向大量独立条目的持久化、可恢复执行。",
+    workerUnavailable:
+      "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
     empty: "暂无子智能体批处理",
     emptyHint: "当前对话通过 batch_task 提交的批处理会显示在这里。",
     loadFailed: "无法加载子智能体批处理",

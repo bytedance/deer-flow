@@ -16,14 +16,16 @@ export const subagentBatchItemsKey = (threadId: string, batchId: string) =>
 
 export function useSubagentBatches(
   threadId: string,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; polling?: boolean } = {},
 ) {
   return useQuery({
     queryKey: subagentBatchesKey(threadId),
     queryFn: () => fetchSubagentBatches(threadId),
     enabled: options.enabled !== false && Boolean(threadId),
-    refetchInterval: (query) =>
-      query.state.data?.some(isActiveSubagentBatch) ? 2000 : 15000,
+    refetchInterval: (query) => {
+      if (options.polling === false) return false;
+      return query.state.data?.some(isActiveSubagentBatch) ? 2000 : 15000;
+    },
     refetchIntervalInBackground: false,
   });
 }
@@ -31,13 +33,13 @@ export function useSubagentBatches(
 export function useSubagentBatchItems(
   threadId: string,
   batchId: string,
-  options: { enabled?: boolean } = {},
+  options: { enabled?: boolean; polling?: boolean } = {},
 ) {
   return useQuery({
     queryKey: subagentBatchItemsKey(threadId, batchId),
     queryFn: () => fetchSubagentBatchItems(threadId, batchId),
     enabled: options.enabled !== false && Boolean(threadId) && Boolean(batchId),
-    refetchInterval: 3000,
+    refetchInterval: options.polling === false ? false : 3000,
     refetchIntervalInBackground: false,
   });
 }

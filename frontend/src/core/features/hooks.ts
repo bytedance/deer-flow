@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   fetchBrowserControlEnabled,
   fetchMcpTasksEnabled,
-  fetchSubagentBatchesEnabled,
+  fetchSubagentBatchesCapability,
 } from "./api";
 
 export function useBrowserControlEnabled() {
@@ -36,13 +36,18 @@ export function useMcpTasksEnabled() {
   };
 }
 
-export function useSubagentBatchesEnabled() {
+export function useSubagentBatchesCapability() {
   const { data, isPending } = useQuery({
     queryKey: ["features", "subagent_batches"],
-    queryFn: () => fetchSubagentBatchesEnabled(),
+    queryFn: () => fetchSubagentBatchesCapability(),
     staleTime: 0,
     refetchOnMount: true,
     retry: false,
   });
-  return { enabled: data ?? false, isLoading: isPending };
+  return {
+    repositoryAvailable: data?.repositoryAvailable ?? false,
+    workerRunning: data?.workerRunning ?? false,
+    maxRunning: data?.maxRunning ?? 0,
+    isLoading: isPending,
+  };
 }

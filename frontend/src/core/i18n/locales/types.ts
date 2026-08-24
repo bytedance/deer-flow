@@ -271,6 +271,7 @@ export interface Translations {
     label: string;
     title: string;
     description: string;
+    workerUnavailable: string;
     empty: string;
     emptyHint: string;
     loadFailed: string;

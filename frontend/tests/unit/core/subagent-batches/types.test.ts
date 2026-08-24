@@ -3,6 +3,7 @@ import { describe, expect, it } from "@rstest/core";
 import {
   completedSubagentBatchItems,
   isActiveSubagentBatch,
+  subagentBatchProgress,
   type SubagentBatch,
 } from "@/core/subagent-batches/types";
 
@@ -32,6 +33,18 @@ const BATCH: SubagentBatch = {
 describe("subagent batch progress", () => {
   it("counts only terminal items as completed progress", () => {
     expect(completedSubagentBatchItems(BATCH)).toBe(4);
+    expect(subagentBatchProgress(BATCH)).toBe(40);
+  });
+
+  it("returns bounded progress for malformed persisted totals or counts", () => {
+    expect(subagentBatchProgress({ ...BATCH, total_items: 0 })).toBe(0);
+    expect(
+      subagentBatchProgress({
+        ...BATCH,
+        total_items: 1,
+        counts: { ...BATCH.counts, succeeded: 10 },
+      }),
+    ).toBe(100);
   });
 
   it.each(["queued", "running", "paused"] as const)(

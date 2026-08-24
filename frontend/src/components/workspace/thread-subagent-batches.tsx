@@ -23,11 +23,12 @@ import {
   SheetTitle,
   SheetTrigger,
 } from "@/components/ui/sheet";
-import { useSubagentBatchesEnabled } from "@/core/features";
+import { useSubagentBatchesCapability } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   completedSubagentBatchItems,
   isActiveSubagentBatch,
+  subagentBatchProgress,
   subagentBatchResultsUrl,
   type SubagentBatch,
   type SubagentBatchItem,
@@ -39,13 +40,23 @@ import {
 
 export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
   const { t } = useI18n();
-  const { enabled } = useSubagentBatchesEnabled();
-  const batchesQuery = useSubagentBatches(threadId, { enabled });
+  const { repositoryAvailable, workerRunning } = useSubagentBatchesCapability();
+  const batchesQuery = useSubagentBatches(threadId, {
+    enabled: repositoryAvailable,
+    polling: workerRunning,
+  });
   const control = useControlSubagentBatch(threadId);
   const batches = batchesQuery.data ?? [];
   const activeCount = batches.filter(isActiveSubagentBatch).length;
 
-  if (!enabled) return null;
+  const hasVisibleSurface =
+    repositoryAvailable &&
+    (workerRunning ||
+      batchesQuery.isLoading ||
+      batchesQuery.isError ||
+      batches.length > 0);
+
+  if (!hasVisibleSurface) return null;
 
   return (
     <Sheet>
@@ -76,6 +87,14 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
           <SheetDescription>{t.subagentBatches.description}</SheetDescription>
         </SheetHeader>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
+          {!workerRunning && (
+            <div
+              role="status"
+              className="border-border bg-muted/50 text-muted-foreground mb-4 rounded-xl border p-3 text-xs"
+            >
+              {t.subagentBatches.workerUnavailable}
+            </div>
+          )}
           {batchesQuery.isLoading ? (
             <div className="text-muted-foreground flex justify-center gap-2 py-12 text-sm">
               <LoaderCircleIcon className="size-4 animate-spin" />
@@ -105,6 +124,7 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
                   key={batch.id}
                   threadId={threadId}
                   batch={batch}
+                  workerRunning={workerRunning}
                   controlling={
                     control.isPending && control.variables?.batchId === batch.id
                   }
@@ -124,11 +144,13 @@ export function ThreadSubagentBatches({ threadId }: { threadId: string }) {
 function BatchCard({
   threadId,
   batch,
+  workerRunning,
   controlling,
   onControl,
 }: {
   threadId: string;
   batch: SubagentBatch;
+  workerRunning: boolean;
   controlling: boolean;
   onControl: (action: "pause" | "resume" | "cancel") => void;
 }) {
@@ -158,10 +180,7 @@ function BatchCard({
         </div>
         <Badge variant="outline">{labels[batch.status]}</Badge>
       </div>
-      <Progress
-        className="mt-3 h-1.5"
-        value={(completed / batch.total_items) * 100}
-      />
+      <Progress className="mt-3 h-1.5" value={subagentBatchProgress(batch)} />
       <div className="text-muted-foreground mt-1.5 flex flex-wrap gap-x-3 text-[11px]">
         <span>{t.subagentBatches.progress(completed, batch.total_items)}</span>
         <span>
@@ -187,7 +206,7 @@ function BatchCard({
             type="button"
             size="sm"
             variant="outline"
-            disabled={controlling}
+            disabled={!workerRunning || controlling}
             onClick={() => onControl("pause")}
           >
             <CirclePauseIcon /> {t.subagentBatches.pause}
@@ -197,7 +216,7 @@ function BatchCard({
             type="button"
             size="sm"
             variant="outline"
-            disabled={controlling}
+            disabled={!workerRunning || controlling}
             onClick={() => onControl("resume")}
           >
             <CirclePlayIcon /> {t.subagentBatches.resume}
@@ -208,7 +227,7 @@ function BatchCard({
             type="button"
             size="sm"
             variant="outline"
-            disabled={controlling}
+            disabled={!workerRunning || controlling}
             onClick={() => onControl("cancel")}
           >
             <CircleStopIcon /> {t.subagentBatches.cancel}
@@ -220,7 +239,13 @@ function BatchCard({
           </a>
         </Button>
       </div>
-      {open && <BatchItems threadId={threadId} batch={batch} />}
+      {open && (
+        <BatchItems
+          threadId={threadId}
+          batch={batch}
+          workerRunning={workerRunning}
+        />
+      )}
     </article>
   );
 }
@@ -228,12 +253,16 @@ function BatchCard({
 function BatchItems({
   threadId,
   batch,
+  workerRunning,
 }: {
   threadId: string;
   batch: SubagentBatch;
+  workerRunning: boolean;
 }) {
   const { t } = useI18n();
-  const query = useSubagentBatchItems(threadId, batch.id);
+  const query = useSubagentBatchItems(threadId, batch.id, {
+    polling: workerRunning,
+  });
   const retry = useRetrySubagentBatchItem(threadId, batch.id);
   if (query.isLoading) {
     return (
@@ -255,6 +284,7 @@ function BatchItems({
         <BatchItemRow
           key={item.id}
           item={item}
+          workerRunning={workerRunning}
           retrying={retry.isPending && retry.variables === item.id}
           onRetry={() => retry.mutate(item.id)}
         />
@@ -265,10 +295,12 @@ function BatchItems({
 
 function BatchItemRow({
   item,
+  workerRunning,
   retrying,
   onRetry,
 }: {
   item: SubagentBatchItem;
+  workerRunning: boolean;
   retrying: boolean;
   onRetry: () => void;
 }) {
@@ -294,7 +326,7 @@ function BatchItemRow({
           type="button"
           size="sm"
           variant="ghost"
-          disabled={retrying}
+          disabled={!workerRunning || retrying}
           className="mt-1"
           onClick={onRetry}
         >

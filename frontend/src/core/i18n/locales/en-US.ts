@@ -349,6 +349,8 @@ export const enUS: Translations = {
     label: "Batches",
     title: "Subagent batches",
     description: "Durable, restart-safe work for many independent items.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
     empty: "No subagent batches yet",
     emptyHint: "Explicit batch_task submissions in this chat will appear here.",
     loadFailed: "Couldn't load subagent batches",
