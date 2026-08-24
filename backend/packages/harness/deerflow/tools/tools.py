@@ -56,22 +56,6 @@ def _ensure_sync_invocable_tool(tool: BaseTool) -> BaseTool:
     return tool
 
 
-def _configure_tool_for_entry(tool: BaseTool, tool_config: object) -> BaseTool:
-    """Let a provider derive a per-entry tool copy from local config only.
-
-    Providers use this optional hook for model-visible metadata that depends on
-    their own tool-entry fields. The hook is synchronous by design, preventing
-    configuration loading from turning into external discovery or validation.
-    """
-    configure = getattr(tool, "configure_for_tool_entry", None)
-    if not callable(configure):
-        return tool
-    configured = configure(getattr(tool_config, "model_extra", None) or {})
-    if not isinstance(configured, BaseTool):
-        raise TypeError(f"Tool provider {getattr(tool_config, 'use', tool.name)} returned a non-BaseTool configured value")
-    return configured
-
-
 def get_available_tools(
     groups: list[str] | None = None,
     include_mcp: bool = True,
@@ -105,10 +89,7 @@ def get_available_tools(
     if not is_host_bash_allowed(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]
 
-    loaded_tools_raw = []
-    for cfg in tool_configs:
-        loaded = resolve_variable(cfg.use, BaseTool)
-        loaded_tools_raw.append((cfg, _configure_tool_for_entry(loaded, cfg)))
+    loaded_tools_raw = [(cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs]
 
     # Warn when the config ``name`` field and the tool object's ``.name``
     # attribute diverge — this mismatch is the root cause of issue #1803 where

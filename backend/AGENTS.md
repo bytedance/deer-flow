@@ -297,10 +297,11 @@ The harness provides an opt-in, read-only RAGFlow integration under
 `deerflow.community.ragflow`. The normal `tools:` list enables one
 `knowledge_search(query)` Agent tool. Its entry owns the RAGFlow connection,
 retrieval parameters, and an operator-controlled allowlist of exact dataset
-names. The provider injects those names into the assembled model-visible tool
-description, resolves them lazily through name-filtered RAGFlow requests, and
-always retrieves with a non-empty `dataset_ids` list. Tenant-wide dataset
-listing is not Agent-visible. RAGFlow remains the sole source of truth: there
+IDs. Configuration loading performs no network I/O. At invocation time the
+provider verifies those IDs through ID-filtered RAGFlow requests, resolves their
+current names for citation formatting, and always retrieves with the same
+non-empty `dataset_ids` list. Neither the IDs nor tenant-wide dataset listing is
+Agent-visible. RAGFlow remains the sole source of truth: there
 are no DeerFlow ORM models, migrations, or mirrored knowledge metadata.
 The configured tenant API key must never appear in logs or model-visible tool
 errors, and RAGFlow dataset UUIDs must not enter model context. Provider-authored

@@ -11,26 +11,30 @@ from deerflow.community.ragflow.formatting import format_retrieval_result
 from deerflow.config.tool_config import ToolConfig
 from deerflow.tools.tools import get_available_tools
 
+DATASET_ID_1 = "0123456789abcdef0123456789abcdef"
+DATASET_ID_2 = "fedcba9876543210fedcba9876543210"
+MISSING_DATASET_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 
 class FakeRAGFlowClient:
     def __init__(
         self,
         *,
-        datasets_by_name: Mapping[str, list[dict]] | None = None,
+        datasets_by_id: Mapping[str, list[dict]] | None = None,
         retrieval: dict | None = None,
         error: Exception | None = None,
     ) -> None:
-        self.datasets_by_name = dict(datasets_by_name or {})
+        self.datasets_by_id = dict(datasets_by_id or {})
         self.retrieval = retrieval or {"chunks": [], "doc_aggs": [], "total": 0}
         self.error = error
         self.list_calls: list[str] = []
         self.retrieve_calls: list[tuple[str, dict]] = []
 
-    async def list_datasets(self, *, name: str) -> list[dict]:
+    async def list_datasets(self, *, dataset_id: str) -> list[dict]:
         if self.error is not None:
             raise self.error
-        self.list_calls.append(name)
-        return self.datasets_by_name.get(name, [])
+        self.list_calls.append(dataset_id)
+        return self.datasets_by_id.get(dataset_id, [])
 
     async def retrieve(self, query: str, **kwargs: object) -> dict:
         if self.error is not None:
@@ -76,21 +80,21 @@ def _config(
 
 
 def _install(monkeypatch: pytest.MonkeyPatch, fake: FakeRAGFlowClient, *, config: SimpleNamespace | None = None) -> None:
-    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: config or _config(datasets=["HR Policies"]))
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: config or _config(datasets=[DATASET_ID_1]))
     monkeypatch.setattr(ragflow_tools, "_build_client", lambda settings: fake)
 
 
 @pytest.mark.anyio
-async def test_knowledge_search_resolves_configured_names_and_always_passes_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_knowledge_search_resolves_configured_ids_to_current_names(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
-        datasets_by_name={
-            "HR Policies": [{"id": "dataset-1", "name": "HR Policies"}],
-            "Engineering": [{"id": "dataset-2", "name": "Engineering"}],
+        datasets_by_id={
+            DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}],
+            DATASET_ID_2: [{"id": DATASET_ID_2, "name": "Engineering"}],
         },
         retrieval={
             "chunks": [
                 {
-                    "dataset_id": "dataset-1",
+                    "dataset_id": DATASET_ID_1,
                     "document_id": "doc-1",
                     "document_keyword": "handbook.pdf",
                     "content": "Annual leave is based on years of service.",
@@ -101,16 +105,16 @@ async def test_knowledge_search_resolves_configured_names_and_always_passes_ids(
             "total": 1,
         },
     )
-    _install(monkeypatch, fake, config=_config(datasets=["HR Policies", "Engineering"]))
+    _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1, DATASET_ID_2]))
 
     result = await ragflow_tools.knowledge_search("annual leave")
 
-    assert fake.list_calls == ["HR Policies", "Engineering"]
+    assert fake.list_calls == [DATASET_ID_1, DATASET_ID_2]
     assert fake.retrieve_calls == [
         (
             "annual leave",
             {
-                "dataset_ids": ["dataset-1", "dataset-2"],
+                "dataset_ids": [DATASET_ID_1, DATASET_ID_2],
                 "page_size": 8,
                 "similarity_threshold": 0.2,
                 "vector_similarity_weight": 0.3,
@@ -121,65 +125,58 @@ async def test_knowledge_search_resolves_configured_names_and_always_passes_ids(
     assert "[1] HR Policies / handbook.pdf  (score 0.87)" in result
     assert "Annual leave" in result
     assert "Matched documents: handbook.pdf (1 chunk)" in result
-    assert "dataset-1" not in result
+    assert DATASET_ID_1 not in result
+    assert DATASET_ID_2 not in result
 
 
 @pytest.mark.anyio
-async def test_knowledge_search_uses_exact_name_filtered_lookups(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_knowledge_search_uses_id_filter_and_survives_dataset_rename(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
-        datasets_by_name={
-            "HR Policies": [
-                {"id": "dataset-wrong", "name": "HR Policies Archive"},
-                {"id": "dataset-1", "name": "HR Policies"},
-            ]
-        }
+        datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "Renamed Policies"}]},
+        retrieval={"chunks": [{"dataset_id": DATASET_ID_1, "document_keyword": "policy.pdf", "content": "Current policy."}]},
     )
     _install(monkeypatch, fake)
 
-    await ragflow_tools.knowledge_search("leave")
+    result = await ragflow_tools.knowledge_search("leave")
 
-    assert fake.list_calls == ["HR Policies"]
-    assert fake.retrieve_calls[0][1]["dataset_ids"] == ["dataset-1"]
+    assert fake.list_calls == [DATASET_ID_1]
+    assert fake.retrieve_calls[0][1]["dataset_ids"] == [DATASET_ID_1]
+    assert "Renamed Policies / policy.pdf" in result
+    assert DATASET_ID_1 not in result
 
 
 @pytest.mark.anyio
 async def test_missing_bound_dataset_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(datasets=["Finance"]))
+    _install(monkeypatch, fake, config=_config(datasets=[MISSING_DATASET_ID]))
 
     result = await ragflow_tools.knowledge_search("leave")
 
-    assert result == ("Error: Configured RAGFlow dataset was not found: Finance. It may have been deleted or renamed; check knowledge_search.datasets in config.yaml.")
-    assert fake.list_calls == ["Finance"]
+    assert result == "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
+    assert MISSING_DATASET_ID not in result
+    assert fake.list_calls == [MISSING_DATASET_ID]
     assert fake.retrieve_calls == []
 
 
 @pytest.mark.anyio
-async def test_missing_bound_dataset_error_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_bound_dataset_error_does_not_expose_configured_id(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(datasets=["ragflow-secret archive"]))
+    _install(monkeypatch, fake, config=_config(datasets=[MISSING_DATASET_ID]))
 
     result = await ragflow_tools.knowledge_search("leave")
 
-    assert "ragflow-secret" not in result
-    assert "[REDACTED]" in result
+    assert MISSING_DATASET_ID not in result
+    assert "[DATASET_ID]" not in result
 
 
 @pytest.mark.anyio
-async def test_ambiguous_bound_dataset_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(
-        datasets_by_name={
-            "Policies": [
-                {"id": "dataset-1", "name": "Policies"},
-                {"id": "dataset-2", "name": "Policies"},
-            ]
-        }
-    )
-    _install(monkeypatch, fake, config=_config(datasets=["Policies"]))
+async def test_mismatched_id_filtered_response_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_2, "name": "Wrong dataset"}]})
+    _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1]))
 
     result = await ragflow_tools.knowledge_search("leave")
 
-    assert result == "Error: Configured RAGFlow dataset name is ambiguous: Policies. Check knowledge_search.datasets in config.yaml."
+    assert result == "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
     assert fake.retrieve_calls == []
 
 
@@ -200,7 +197,7 @@ async def test_missing_api_key_returns_english_guidance_and_warns_only_once(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(api_key=None, datasets=["HR Policies"]))
+    _install(monkeypatch, fake, config=_config(api_key=None, datasets=[DATASET_ID_1]))
 
     with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
         first = await ragflow_tools.knowledge_search("leave")
@@ -215,7 +212,7 @@ async def test_missing_api_key_returns_english_guidance_and_warns_only_once(
 @pytest.mark.anyio
 async def test_missing_knowledge_search_config_returns_english_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(configured=False, datasets=["HR Policies"]))
+    _install(monkeypatch, fake, config=_config(configured=False, datasets=[DATASET_ID_1]))
 
     result = await ragflow_tools.knowledge_search("leave")
 
@@ -250,11 +247,11 @@ async def test_success_path_preserves_legitimate_uuid_and_md5_text(monkeypatch: 
     uuid = "123e4567-e89b-12d3-a456-426614174000"
     md5 = "d41d8cd98f00b204e9800998ecf8427e"
     fake = FakeRAGFlowClient(
-        datasets_by_name={"HR Policies": [{"id": "dataset-1", "name": "HR Policies"}]},
+        datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}]},
         retrieval={
             "chunks": [
                 {
-                    "dataset_id": "dataset-1",
+                    "dataset_id": DATASET_ID_1,
                     "document_keyword": "checksums.txt",
                     "content": f"Trace {uuid}; checksum {md5}.",
                 }
@@ -273,11 +270,11 @@ async def test_success_path_preserves_legitimate_uuid_and_md5_text(monkeypatch: 
 @pytest.mark.anyio
 async def test_success_path_still_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
-        datasets_by_name={"HR Policies": [{"id": "dataset-1", "name": "HR Policies"}]},
+        datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}]},
         retrieval={
             "chunks": [
                 {
-                    "dataset_id": "dataset-1",
+                    "dataset_id": DATASET_ID_1,
                     "document_keyword": "secret.txt",
                     "content": "Accidental echo: ragflow-secret",
                 }
@@ -323,7 +320,7 @@ async def test_base_url_with_plain_or_encoded_userinfo_is_rejected_without_leaki
     base_url: str,
 ) -> None:
     fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(base_url=base_url, datasets=["HR Policies"]))
+    _install(monkeypatch, fake, config=_config(base_url=base_url, datasets=[DATASET_ID_1]))
 
     with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
         result = await ragflow_tools.knowledge_search("leave")
@@ -348,7 +345,7 @@ async def test_empty_query_has_english_error(monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.anyio
 async def test_empty_retrieval_has_explicit_english_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets_by_name={"HR Policies": [{"id": "dataset-1", "name": "HR Policies"}]})
+    fake = FakeRAGFlowClient(datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}]})
     _install(monkeypatch, fake)
 
     result = await ragflow_tools.knowledge_search("nothing")
@@ -404,14 +401,14 @@ def test_formatting_applies_total_response_truncation_in_english() -> None:
     assert result.endswith("… (response truncated)")
 
 
-def test_retrieval_settings_load_bound_datasets_and_hide_secret(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config(datasets=["HR Policies", "Engineering"]))
+def test_retrieval_settings_load_bound_dataset_ids_and_hide_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config(datasets=[DATASET_ID_1, DATASET_ID_2]))
 
     config, error = ragflow_tools._settings_or_error()
 
     assert error is None
     assert config is not None
-    assert config.datasets == ["HR Policies", "Engineering"]
+    assert config.datasets == [DATASET_ID_1, DATASET_ID_2]
     assert str(config.base_url).rstrip("/") == "http://ragflow.test"
     assert config.page_size == 8
     assert config.max_chars_per_chunk == 800
@@ -427,7 +424,7 @@ def test_agent_exposes_only_query_on_single_search_tool() -> None:
     assert set(ragflow_tools.knowledge_search_tool.tool_call_schema.model_fields) == {"query"}
 
 
-def test_tool_assembly_injects_bound_dataset_names_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ragflow_tools, "_build_client", lambda settings: pytest.fail("tool assembly must not perform network IO"))
     tool_config = ToolConfig(
         name="knowledge_search",
@@ -435,7 +432,7 @@ def test_tool_assembly_injects_bound_dataset_names_without_network_io(monkeypatc
         use="deerflow.community.ragflow.tools:knowledge_search_tool",
         base_url="http://ragflow.test",
         api_key="ragflow-secret",
-        datasets=["HR Policies", "Engineering", "ragflow-secret archive"],
+        datasets=[DATASET_ID_1, DATASET_ID_2],
     )
     config = SimpleNamespace(
         tools=[tool_config],
@@ -449,9 +446,9 @@ def test_tool_assembly_injects_bound_dataset_names_without_network_io(monkeypatc
     tools = get_available_tools(include_mcp=False, app_config=config)
     assembled = next(tool for tool in tools if tool.name == "knowledge_search")
 
-    assert "HR Policies" in assembled.description
-    assert "Engineering" in assembled.description
-    assert "[REDACTED] archive" in assembled.description
+    assert "operator-configured dataset IDs" in assembled.description
+    assert DATASET_ID_1 not in assembled.description
+    assert DATASET_ID_2 not in assembled.description
     assert "ragflow-secret" not in assembled.description
     assert {tool.name for tool in tools}.isdisjoint({"list_knowledge_bases"})
 

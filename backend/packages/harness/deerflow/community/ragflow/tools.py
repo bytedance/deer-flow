@@ -39,18 +39,18 @@ class _RAGFlowRetrievalSettings(BaseModel):
 
     @field_validator("datasets")
     @classmethod
-    def _normalize_dataset_names(cls, value: list[str]) -> list[str]:
+    def _normalize_dataset_ids(cls, value: list[str]) -> list[str]:
         normalized: list[str] = []
         seen: set[str] = set()
-        for name in value:
-            clean_name = name.strip()
-            if not clean_name or len(clean_name) > 256:
-                raise ValueError("dataset names must contain between 1 and 256 characters")
-            if clean_name not in seen:
-                normalized.append(clean_name)
-                seen.add(clean_name)
+        for dataset_id in value:
+            clean_id = dataset_id.strip()
+            if not clean_id or len(clean_id) > 256:
+                raise ValueError("dataset IDs must contain between 1 and 256 characters")
+            if clean_id not in seen:
+                normalized.append(clean_id)
+                seen.add(clean_id)
         if not normalized:
-            raise ValueError("at least one dataset name is required")
+            raise ValueError("at least one dataset ID is required")
         return normalized
 
     @field_validator("base_url")
@@ -133,63 +133,33 @@ def _tool_error(exc: Exception, settings: _RAGFlowRetrievalSettings) -> str:
     return "Error: An unexpected RAGFlow retrieval error occurred; try again later."
 
 
-def _exact_dataset_matches(datasets: list[dict], bound_name: str) -> list[tuple[str, str]]:
-    matches: list[tuple[str, str]] = []
-    seen_ids: set[str] = set()
+def _current_dataset_name(datasets: list[dict], bound_id: str) -> str | None:
     for dataset in datasets:
         dataset_id = dataset.get("id")
         name = dataset.get("name")
-        if not isinstance(dataset_id, str) or not dataset_id or name != bound_name or dataset_id in seen_ids:
-            continue
-        matches.append((dataset_id, bound_name))
-        seen_ids.add(dataset_id)
-    return matches
+        if dataset_id == bound_id:
+            return str(name).strip() if name else "Unknown dataset"
+    return None
 
 
-def _missing_dataset_error(names: list[str], api_key: str | None) -> str:
-    if len(names) == 1:
-        message = f"Error: Configured RAGFlow dataset was not found: {names[0]}. It may have been deleted or renamed; check knowledge_search.datasets in config.yaml."
-    else:
-        message = f"Error: Configured RAGFlow datasets were not found: {', '.join(names)}. They may have been deleted or renamed; check knowledge_search.datasets in config.yaml."
-    return _redact_error(message, api_key)
-
-
-def _ambiguous_dataset_error(names: list[str], api_key: str | None) -> str:
-    label = "name is" if len(names) == 1 else "names are"
-    return _redact_error(
-        f"Error: Configured RAGFlow dataset {label} ambiguous: {', '.join(names)}. Check knowledge_search.datasets in config.yaml.",
-        api_key,
-    )
+def _missing_dataset_error() -> str:
+    return "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
 
 
 async def _resolve_configured_datasets(
     client: RAGFlowClient,
     settings: _RAGFlowRetrievalSettings,
 ) -> tuple[list[str] | None, dict[str, str] | None, str | None]:
-    batches = await asyncio.gather(*(client.list_datasets(name=name) for name in settings.datasets))
+    batches = await asyncio.gather(*(client.list_datasets(dataset_id=dataset_id) for dataset_id in settings.datasets))
 
-    dataset_ids: list[str] = []
     names_by_id: dict[str, str] = {}
-    missing: list[str] = []
-    ambiguous: list[str] = []
-    for bound_name, datasets in zip(settings.datasets, batches, strict=True):
-        matches = _exact_dataset_matches(datasets, bound_name)
-        if not matches:
-            missing.append(bound_name)
-            continue
-        if len(matches) > 1:
-            ambiguous.append(bound_name)
-            continue
-        dataset_id, dataset_name = matches[0]
-        dataset_ids.append(dataset_id)
-        names_by_id[dataset_id] = dataset_name
+    for bound_id, datasets in zip(settings.datasets, batches, strict=True):
+        current_name = _current_dataset_name(datasets, bound_id)
+        if current_name is None:
+            return None, None, _missing_dataset_error()
+        names_by_id[bound_id] = current_name
 
-    key = _api_key(settings)
-    if missing:
-        return None, None, _missing_dataset_error(missing, key)
-    if ambiguous:
-        return None, None, _ambiguous_dataset_error(ambiguous, key)
-    return dataset_ids, names_by_id, None
+    return list(settings.datasets), names_by_id, None
 
 
 async def knowledge_search(query: str) -> str:
@@ -231,26 +201,9 @@ async def knowledge_search(query: str) -> str:
         return _tool_error(exc, settings)
 
 
-def _tool_description(dataset_names: list[str], api_key: str | None) -> str:
+def _tool_description() -> str:
     base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
-    if not dataset_names:
-        return f"{base} Dataset access is controlled by knowledge_search.datasets in config.yaml."
-    visible_names = [_redact_api_key(name, api_key) for name in dataset_names]
-    return f"{base} This tool is restricted to these configured datasets: {', '.join(visible_names)}."
-
-
-class _ConfiguredKnowledgeSearchTool(StructuredTool):
-    """Structured tool whose model description is derived from its config entry."""
-
-    def configure_for_tool_entry(self, extra: Mapping[str, object]) -> StructuredTool:
-        configured = self.model_copy(deep=False)
-        try:
-            settings = _settings_from_extra(extra)
-        except ValidationError:
-            configured.description = _tool_description([], None)
-        else:
-            configured.description = _tool_description(settings.datasets, _api_key(settings))
-        return configured
+    return f"{base} Access is restricted to operator-configured dataset IDs, which are never shown to the model."
 
 
 async def _knowledge_search_entrypoint(query: str) -> str:
@@ -262,9 +215,9 @@ async def _knowledge_search_entrypoint(query: str) -> str:
     return await knowledge_search(query)
 
 
-knowledge_search_tool = _ConfiguredKnowledgeSearchTool.from_function(
+knowledge_search_tool = StructuredTool.from_function(
     coroutine=_knowledge_search_entrypoint,
     name="knowledge_search",
-    description=_tool_description([], None),
+    description=_tool_description(),
     parse_docstring=True,
 )

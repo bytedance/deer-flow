@@ -12,13 +12,13 @@ from deerflow.community.ragflow.client import (
 
 
 @pytest.mark.anyio
-async def test_list_datasets_filters_by_bound_name_in_one_request() -> None:
+async def test_list_datasets_filters_by_bound_id_in_one_request() -> None:
     requests: list[httpx.Request] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.method == "GET"
-        assert request.url == httpx.URL("http://ragflow.test/api/v1/datasets?name=HR+Policies")
+        assert request.url == httpx.URL("http://ragflow.test/api/v1/datasets?id=dataset-1")
         assert request.headers["Authorization"] == "Bearer ragflow-secret"
         return httpx.Response(
             200,
@@ -36,7 +36,7 @@ async def test_list_datasets_filters_by_bound_name_in_one_request() -> None:
         transport=httpx.MockTransport(handler),
     )
 
-    assert await client.list_datasets(name="HR Policies") == [{"id": "dataset-1", "name": "HR Policies"}]
+    assert await client.list_datasets(dataset_id="dataset-1") == [{"id": "dataset-1", "name": "HR Policies"}]
     assert len(requests) == 1
 
 
@@ -109,7 +109,7 @@ async def test_nonzero_api_code_is_normalized_and_redacts_api_key() -> None:
     )
 
     with pytest.raises(RAGFlowAPIError) as exc_info:
-        await client.list_datasets(name="HR Policies")
+        await client.list_datasets(dataset_id="dataset-1")
 
     assert exc_info.value.code == 102
     assert "invalid credential" in str(exc_info.value)
@@ -130,7 +130,7 @@ async def test_timeout_is_english_and_does_not_leak_api_key(caplog: pytest.LogCa
     )
 
     with pytest.raises(RAGFlowConnectionError) as exc_info:
-        await client.list_datasets(name="HR Policies")
+        await client.list_datasets(dataset_id="dataset-1")
 
     assert str(exc_info.value) == "RAGFlow request timed out after 2 seconds."
     assert "ragflow-secret" not in str(exc_info.value)
@@ -149,7 +149,7 @@ async def test_http_error_body_cannot_echo_api_key() -> None:
     )
 
     with pytest.raises(RAGFlowProtocolError) as exc_info:
-        await client.list_datasets(name="HR Policies")
+        await client.list_datasets(dataset_id="dataset-1")
 
     assert str(exc_info.value) == "RAGFlow request failed (HTTP 401)."
     assert "ragflow-secret" not in str(exc_info.value)
@@ -167,7 +167,7 @@ async def test_invalid_json_response_is_normalized_in_english() -> None:
     )
 
     with pytest.raises(RAGFlowProtocolError, match="RAGFlow returned invalid JSON"):
-        await client.list_datasets(name="HR Policies")
+        await client.list_datasets(dataset_id="dataset-1")
 
 
 @pytest.mark.anyio
@@ -182,4 +182,4 @@ async def test_list_datasets_rejects_unexpected_data_shape_in_english() -> None:
     )
 
     with pytest.raises(RAGFlowProtocolError, match="invalid dataset list"):
-        await client.list_datasets(name="HR Policies")
+        await client.list_datasets(dataset_id="dataset-1")

@@ -224,7 +224,7 @@ RAGFlow integration is disabled by default. It adds one read-only Agent tool,
 `knowledge_search`. DeerFlow does not persist a copy of dataset or document
 metadata; RAGFlow is the sole source of truth. The configured API key is
 tenant-scoped, while the operator-controlled `datasets` list restricts every
-Agent on this deployment to the same named subset.
+Agent on this deployment to the same dataset-ID allowlist.
 
 ```yaml
 tool_groups:
@@ -237,8 +237,8 @@ tools:
     base_url: http://localhost:9380
     api_key: $RAGFLOW_API_KEY
     datasets:
-      - HR Policies
-      - Engineering Handbook
+      - 0123456789abcdef0123456789abcdef
+      - fedcba9876543210fedcba9876543210
     timeout: 30
     page_size: 8
     similarity_threshold: 0.2
@@ -249,12 +249,12 @@ tools:
 ```
 
 The tool is opt-in through the normal `tools:` list. `datasets` must contain one
-or more exact RAGFlow dataset names selected by the deployment operator. DeerFlow
-does not validate their existence while loading configuration; on each search it
-resolves the names with filtered RAGFlow requests and always sends the resulting
-non-empty `dataset_ids` allowlist to retrieval. A deleted or renamed dataset
-produces guidance to check `config.yaml`. Bound names are copied into the tool
-description visible to the Agent, but tenant-wide listing is not exposed.
+or more RAGFlow dataset IDs selected by the deployment operator. DeerFlow does
+not validate their existence while loading configuration. On each search it
+verifies them with ID-filtered RAGFlow requests, resolves their current names for
+citation formatting, and always sends the same non-empty `dataset_ids` allowlist
+to retrieval. A deleted or inaccessible dataset produces guidance to check
+`config.yaml`. Dataset IDs and tenant-wide listing are not exposed to the Agent.
 
 Configure only datasets with compatible embedding models because RAGFlow can
 reject cross-dataset retrieval when models differ. `base_url` must not contain

@@ -38,13 +38,13 @@ drift.
 
 The optional `knowledge` tool group exposes one `knowledge_search(query)` tool.
 Its normal `tools:` entry owns the provider connection, retrieval extras, and a
-required operator allowlist of exact dataset names; there is no top-level
-provider configuration or tenant-wide listing tool. The provider uses the
-synchronous `configure_for_tool_entry` assembly hook to copy bound names into
-the model-visible tool description without network IO. Each invocation resolves
-those names through filtered RAGFlow requests and sends a non-empty
-`dataset_ids` list to retrieval. It never persists dataset metadata, exposes
-RAGFlow dataset UUIDs to the model, or provides write operations.
+required operator allowlist of stable dataset IDs; there is no top-level
+provider configuration or tenant-wide listing tool. Configuration loading does
+not contact RAGFlow. Each invocation verifies the bound IDs through ID-filtered
+RAGFlow requests, resolves their current names for citation formatting, and
+sends the same non-empty `dataset_ids` list to retrieval. It never persists
+dataset metadata, exposes RAGFlow dataset IDs to the model, or provides write
+operations.
 Retrieval output is bounded at both the individual chunk and full-response
 levels. Provider-authored model-visible text is English. Every path must redact
 the configured tenant API key; dataset-UUID redaction is error-only so normal

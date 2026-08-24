@@ -106,12 +106,12 @@ class RAGFlowClient:
             raise RAGFlowAPIError(message, code=code)
         return payload
 
-    async def list_datasets(self, *, name: str) -> list[dict[str, Any]]:
-        """Resolve a configured dataset name without enumerating the tenant catalog."""
-        if not name.strip():
-            raise ValueError("name must not be empty")
+    async def list_datasets(self, *, dataset_id: str) -> list[dict[str, Any]]:
+        """Resolve one configured dataset ID without enumerating the tenant catalog."""
+        if not dataset_id.strip():
+            raise ValueError("dataset_id must not be empty")
 
-        payload = await self._request("GET", "/datasets", params={"name": name})
+        payload = await self._request("GET", "/datasets", params={"id": dataset_id})
         data = payload.get("data")
         if not isinstance(data, list):
             raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")

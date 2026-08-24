@@ -311,15 +311,15 @@ config: |
 
   tools:
     # Optional tenant-shared, read-only RAGFlow retrieval. Put RAGFLOW_API_KEY
-    # in `secrets`, then bind an operator-controlled allowlist of exact dataset
-    # names. The Agent cannot enumerate the tenant catalog.
+    # in `secrets`, then bind an operator-controlled allowlist of stable dataset
+    # IDs. The Agent cannot enumerate the tenant catalog or see those IDs.
     # - name: knowledge_search
     #   group: knowledge
     #   use: deerflow.community.ragflow.tools:knowledge_search_tool
     #   base_url: http://ragflow:9380
     #   api_key: $RAGFLOW_API_KEY
     #   datasets:
-    #     - HR Policies
+    #     - 0123456789abcdef0123456789abcdef
     #   timeout: 30
     #   page_size: 8
     #   similarity_threshold: 0.2
