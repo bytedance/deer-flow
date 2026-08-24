@@ -626,6 +626,7 @@ async def run_agent(
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
@@ -1226,6 +1227,37 @@ async def run_agent(
                     persist=False,
                 )
 
+        if not record.ownership_lost and journal is not None and persist_completion:
+            try:
+                # Advance the final completion fields and timestamp without
+                # terminalizing the durable row. That active row continues to
+                # fence peer checkpoint writers through the duration write.
+                completion_data = journal.get_completion_data()
+                await run_manager.update_finalizing_progress(run_id, **completion_data)
+            except Exception:
+                logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
+
+        # Keep the durable run row active through its final duration checkpoint
+        # write. A peer Gateway admits history migration from the durable row,
+        # not this worker's staged terminal status; terminalizing first would
+        # let that migration read an unfinished lifetime and race this write.
+        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+            try:
+                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                # Match legacy history semantics: turn_duration is the whole
+                # RunRecord lifetime in integer seconds, including admission
+                # delay. Persist zero for sub-second successful turns.
+                duration = max(0, int((updated - created).total_seconds()))
+                await _persist_run_duration(
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    duration_seconds=duration,
+                )
+            except Exception:
+                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
+
         if not record.ownership_lost and event_store is not None:
             try:
                 # Even after bounded receipt retries are exhausted, persist the
@@ -1250,8 +1282,8 @@ async def run_agent(
         if not record.ownership_lost and journal is not None and persist_completion:
             try:
                 # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
+                completion_data = completion_data or journal.get_completion_data()
+                await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
@@ -1275,25 +1307,6 @@ async def run_agent(
                         await thread_store.update_display_name(thread_id, title)
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
-
-        # Persist run duration to checkpoint metadata so history reads
-        # don't need to correlate runs and events.
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
-            try:
-                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
-                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
-                # Match legacy history semantics: turn_duration is the whole
-                # RunRecord lifetime in integer seconds, including admission
-                # delay. Persist zero for sub-second successful turns.
-                duration = max(0, int((updated - created).total_seconds()))
-                await _persist_run_duration(
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    duration_seconds=duration,
-                )
-            except Exception:
-                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
         if started and not record.ownership_lost and thread_store is not None:

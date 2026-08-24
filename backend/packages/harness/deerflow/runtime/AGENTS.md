@@ -47,6 +47,8 @@ readers ignore. Migration must acquire the durable `checkpoint_write`
 reservation, then repeat the whole message audit and batch-reload required run
 rows before persisting. Post-admission exact hits replace foreground exact or
 boundary mappings, and recomputed final durations replace foreground snapshots.
+Successful workers keep their durable run row active through the final duration
+checkpoint write, so a peer migration cannot enter during terminalization.
 The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
 the number of required IDs, whichever is larger; missing exact runs use targeted
 `get()` calls.
