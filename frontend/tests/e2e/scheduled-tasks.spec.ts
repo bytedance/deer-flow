@@ -79,6 +79,63 @@ test("user can create a scheduled task from the create page", async ({
   ).toBeVisible();
 });
 
+test("creating a task from a thread filter returns to the filtered list", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+
+  await page.goto("/workspace/scheduled-tasks?thread_id=thread-from-link");
+  await page.getByTestId("scheduled-task-create-toggle").click();
+  await page.waitForURL(
+    "**/workspace/scheduled-tasks/new?thread_id=thread-from-link",
+  );
+
+  await expect(page.getByPlaceholder("Thread ID")).toHaveValue(
+    "thread-from-link",
+  );
+  await page.getByPlaceholder("Task title").fill("Filtered create");
+  await page.getByPlaceholder("Prompt").fill("Keep thread filter");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await page.waitForURL(
+    "**/workspace/scheduled-tasks?thread_id=thread-from-link",
+  );
+  await expect(
+    page.getByRole("button", { name: /Filtered create/i }),
+  ).toBeVisible();
+});
+
+test("user can create a one-time scheduled task from the create page", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], scheduledTasks: [] });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await page.getByTestId("scheduled-task-create-toggle").click();
+  await page.waitForURL("**/workspace/scheduled-tasks/new");
+
+  await page.getByPlaceholder("Task title").fill("One-time from UI");
+  await page.getByPlaceholder("Prompt").fill("Run once");
+  await page.getByRole("button", { name: "One-time", exact: true }).click();
+
+  await expect(page.getByText("Enter a valid date and time")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Create", exact: true }),
+  ).toBeDisabled();
+
+  await page.getByLabel("Year").fill("2027");
+  await page.getByLabel("Month").fill("8");
+  await page.getByLabel("Day").fill("15");
+  await page.getByLabel("Time").fill("09:30");
+
+  await expect(page.getByText("Enter a valid date and time")).toHaveCount(0);
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+
+  await expect(
+    page.getByRole("button", { name: /One-time from UI/i }),
+  ).toBeVisible();
+});
+
 test("reuse-thread tasks explain their context and busy-thread queue behavior", async ({
   page,
 }) => {

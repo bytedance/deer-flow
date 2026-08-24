@@ -50,6 +50,10 @@ export default function NewScheduledTaskPage() {
     timezone: "",
   });
 
+  const listHref = initialThreadId
+    ? `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(initialThreadId)}`
+    : "/workspace/scheduled-tasks";
+
   const handleCreate = () => {
     createTask.mutate(
       {
@@ -61,7 +65,7 @@ export default function NewScheduledTaskPage() {
         schedule_spec: createSchedule.schedule_spec,
         timezone: createSchedule.timezone || "UTC",
       },
-      { onSuccess: () => router.push("/workspace/scheduled-tasks") },
+      { onSuccess: () => router.push(listHref) },
     );
   };
 
@@ -72,7 +76,9 @@ export default function NewScheduledTaskPage() {
           <Button
             variant="ghost"
             size="icon-sm"
-            onClick={() => router.push("/workspace/scheduled-tasks")}
+            aria-label={st.create.back}
+            title={st.create.back}
+            onClick={() => router.push(listHref)}
           >
             <ArrowLeftIcon className="h-4 w-4" />
           </Button>
@@ -150,7 +156,7 @@ export default function NewScheduledTaskPage() {
           <div className="flex justify-end gap-2">
             <Button
               variant="outline"
-              onClick={() => router.push("/workspace/scheduled-tasks")}
+              onClick={() => router.push(listHref)}
               disabled={createTask.isPending}
             >
               {t.common.cancel}

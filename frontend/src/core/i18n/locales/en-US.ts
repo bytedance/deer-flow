@@ -404,6 +404,7 @@ export const enUS: Translations = {
     cronHelp: "Open crontab.guru",
     create: {
       title: "Create scheduled task",
+      back: "Back to scheduled tasks",
       taskTitle: "Task title",
       prompt: "Prompt",
       submit: "Create",

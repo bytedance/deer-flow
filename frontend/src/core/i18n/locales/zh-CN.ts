@@ -386,6 +386,7 @@ export const zhCN: Translations = {
     cronHelp: "打开 crontab.guru",
     create: {
       title: "新建定时任务",
+      back: "返回定时任务",
       taskTitle: "任务标题",
       prompt: "提示词",
       submit: "新建",

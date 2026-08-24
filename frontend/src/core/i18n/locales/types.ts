@@ -323,6 +323,7 @@ export interface Translations {
     cronHelp: string;
     create: {
       title: string;
+      back: string;
       taskTitle: string;
       prompt: string;
       submit: string;
