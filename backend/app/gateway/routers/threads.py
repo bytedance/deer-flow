@@ -40,6 +40,7 @@ from app.gateway.services import (
     build_thread_checkpoint_state_accessor,
     build_thread_checkpoint_state_mutation_accessor,
     reserve_checkpoint_write,
+    strip_server_owned_state_metadata,
 )
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.thread_state import THREAD_STATE_REDUCER_FIELDS
@@ -1284,7 +1285,12 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         as_node=mutation_node,
         checkpoint_id=body.checkpoint_id,
     )
-    values = dict(body.values or {})
+    # These values go straight into a checkpoint, so they need the same
+    # server-owned-metadata stripping the run path gets inside normalize_input.
+    # Without it an authenticated client can persist forged provenance and
+    # transform trails, which later readers are entitled to treat as facts
+    # about what the host itself did.
+    values = strip_server_owned_state_metadata(dict(body.values or {}))
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)

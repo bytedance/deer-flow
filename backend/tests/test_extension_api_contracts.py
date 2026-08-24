@@ -304,7 +304,7 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.1.2"
+    assert API_VERSION == "0.2.0"
     assert API_VERSION == version("deerflow-extension-api")
 
 
