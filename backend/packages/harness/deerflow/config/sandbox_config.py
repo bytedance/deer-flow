@@ -1,6 +1,8 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+import math
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -43,6 +45,16 @@ class SandboxOwnershipConfig(BaseModel):
         default="deerflow:sandbox:owner",
         description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
     )
+
+    @model_validator(mode="after")
+    def _reject_non_finite_lease_timing(self):
+        for field_name in ("renewal_interval_seconds", "ttl_multiplier"):
+            value = getattr(self, field_name)
+            if not math.isfinite(value):
+                raise ValueError(
+                    f"{field_name} must be a finite number, got {value!r}"
+                )
+        return self
 
 
 class VolumeMountConfig(BaseModel):
