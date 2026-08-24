@@ -287,6 +287,24 @@ test("keeps unresolved streaming text in the processing group when tool calls ar
   );
 });
 
+test("keeps streaming reasoning and answer text out of the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "The final answer is ready.",
+      additional_kwargs: {
+        reasoning_content: "I checked the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+});
+
 test("keeps post-tool streaming text in the processing group until the turn settles", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Inspect and summarize" },

@@ -149,7 +149,11 @@ export function getMessageGroups(
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
         hasContent(message) &&
-        !hasToolCalls(message);
+        !hasToolCalls(message) &&
+        // A provider that has already supplied reasoning with answer text is
+        // completing an answer, not merely streaming a pre-tool narration.
+        // Keep it out of the processing disclosure while the turn is active.
+        !hasReasoning(message);
       const becomesAssistantBubble =
         hasContent(message) &&
         !hasToolCalls(message) &&

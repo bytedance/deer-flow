@@ -161,3 +161,15 @@ def test_bash_tool_description_guides_backgrounding_long_lived_processes():
     description = bash_tool.description.lower()
     assert "background" in description
     assert "server" in description
+
+
+def test_bash_tool_description_guides_safe_cross_platform_local_environment_probes():
+    """The model-visible bash contract must recover from local path-guard failures (#4999)."""
+    from deerflow.sandbox.tools import bash_tool
+
+    description = bash_tool.description.lower()
+    assert "local-environment questions" in description
+    assert "uname -s" in description
+    assert "sw_vers" in description
+    assert "do not assume linux" in description
+    assert "do not repeat the blocked path" in description
