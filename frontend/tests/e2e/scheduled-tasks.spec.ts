@@ -79,7 +79,6 @@ test("user can create a scheduled task from the create page", async ({
   ).toBeVisible();
 });
 
-
 test("reuse-thread tasks explain their context and busy-thread queue behavior", async ({
   page,
 }) => {
@@ -108,6 +107,7 @@ test("reuse-thread tasks explain their context and busy-thread queue behavior", 
   });
 
   await page.goto("/workspace/scheduled-tasks");
+  await page.getByTestId("scheduled-task-item-task-reuse").click();
 
   const detailNotice = page
     .getByTestId("scheduled-task-detail")
@@ -118,6 +118,9 @@ test("reuse-thread tasks explain their context and busy-thread queue behavior", 
   await expect(detailNotice).toContainText(
     "queues this occurrence and starts it when the thread is available",
   );
+
+  await page.getByTestId("scheduled-task-create-toggle").click();
+  await page.waitForURL("**/workspace/scheduled-tasks/new");
 
   const createForm = page.getByTestId("scheduled-task-create-form");
   await expect(createForm.getByRole("alert")).toHaveCount(0);

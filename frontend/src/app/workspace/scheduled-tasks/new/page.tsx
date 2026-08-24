@@ -1,9 +1,10 @@
 "use client";
 
-import { ArrowLeftIcon, CalendarClock } from "lucide-react";
+import { ArrowLeftIcon, CalendarClock, TriangleAlertIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState } from "react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -13,6 +14,22 @@ import {
 } from "@/components/workspace/scheduled-task-schedule-input";
 import { useI18n } from "@/core/i18n/hooks";
 import { useCreateScheduledTask } from "@/core/scheduled-tasks/hooks";
+
+function ReuseThreadNotice({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <Alert className="border-amber-500/50 bg-amber-500/10">
+      <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
+    </Alert>
+  );
+}
 
 export default function NewScheduledTaskPage() {
   const { t } = useI18n();
@@ -63,7 +80,10 @@ export default function NewScheduledTaskPage() {
         </div>
       </header>
       <main className="flex flex-1 justify-center overflow-y-auto px-4 py-6">
-        <div className="my-auto w-full max-w-xl space-y-4">
+        <div
+          className="my-auto w-full max-w-xl space-y-4"
+          data-testid="scheduled-task-create-form"
+        >
           <div className="space-y-3 pb-2 text-center">
             <div className="bg-primary/10 mx-auto flex h-14 w-14 items-center justify-center rounded-full">
               <CalendarClock className="text-primary h-7 w-7" />
@@ -94,11 +114,17 @@ export default function NewScheduledTaskPage() {
             </Button>
           </div>
           {contextMode === "reuse_thread" && (
-            <Input
-              value={targetThreadId}
-              onChange={(event) => setTargetThreadId(event.target.value)}
-              placeholder={st.context.threadIdPlaceholder}
-            />
+            <>
+              <Input
+                value={targetThreadId}
+                onChange={(event) => setTargetThreadId(event.target.value)}
+                placeholder={st.context.threadIdPlaceholder}
+              />
+              <ReuseThreadNotice
+                title={st.context.reuseNoticeTitle}
+                description={st.context.reuseNoticeDescription}
+              />
+            </>
           )}
           <Input
             value={title}

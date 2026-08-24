@@ -1,9 +1,10 @@
 "use client";
 
-import { CalendarClock, Plus } from "lucide-react";
+import { CalendarClock, Plus, TriangleAlertIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -42,6 +43,22 @@ import type {
 import { cn } from "@/lib/utils";
 
 const NONE = "—";
+
+function ReuseThreadNotice({
+  title,
+  description,
+}: {
+  title: string;
+  description: string;
+}) {
+  return (
+    <Alert className="border-amber-500/50 bg-amber-500/10">
+      <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
+    </Alert>
+  );
+}
 
 function formatTimestamp(value: string | null, locale: string): string {
   if (!value) {
@@ -317,7 +334,10 @@ export default function ScheduledTasksPage() {
           if (!open) setEditing(false);
         }}
       >
-        <DialogContent className="sm:max-w-lg">
+        <DialogContent
+          className="sm:max-w-lg"
+          data-testid="scheduled-task-detail"
+        >
           {selectedTask ? (
             <TaskDetail
               task={selectedTask}
@@ -585,6 +605,12 @@ function TaskDetail({
       )}
 
       {/* Key-value details */}
+      {task.context_mode === "reuse_thread" && (
+        <ReuseThreadNotice
+          title={st.context.reuseNoticeTitle}
+          description={st.context.reuseNoticeDescription}
+        />
+      )}
       <div className="flex flex-col gap-px py-2">
         {[
           {
