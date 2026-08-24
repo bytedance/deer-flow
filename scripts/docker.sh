@@ -15,9 +15,13 @@ DOCKER_DIR="$PROJECT_ROOT/docker"
 # Docker Compose command with project name.
 # Use a filename relative to DOCKER_DIR (we always `cd` there) so Windows
 # Docker Desktop does not receive a Git Bash `/c/...` path it cannot open.
-# See https://github.com/bytedance/deer-flow/issues/2416
 COMPOSE_FILE="docker-compose-dev.yaml"
 COMPOSE_CMD="docker compose -p deer-flow-dev -f $COMPOSE_FILE"
+
+# docker-compose-dev.yaml marks its env_file entries optional with the long-form
+# `- path: ... / required: false` syntax, understood by Compose v2.24.0 and up.
+# Older clients abort while parsing the file, before any preflight below can run.
+COMPOSE_MIN_VERSION="2.24.0"
 
 ensure_from_example() {
     local dest="$1"
@@ -37,18 +41,89 @@ ensure_from_example() {
     exit 1
 }
 
-# Compose env_file entries fail closed on Windows when .env is missing
-# ("The specified file cannot be found" / "Le fichier spécifique est introuvable").
-prepare_compose_env() {
-    if [ ! -f "$DOCKER_DIR/$COMPOSE_FILE" ]; then
-        echo -e "${YELLOW}✗ ${COMPOSE_FILE} not found at ${DOCKER_DIR}/${COMPOSE_FILE}${NC}"
-        echo "Run this from the DeerFlow repository root, e.g. 'make docker-start'."
-        echo "Do not run 'docker compose -f docker/${COMPOSE_FILE}' from inside docker/ — that resolves to docker/docker/${COMPOSE_FILE}."
-        exit 1
+require_compose_file() {
+    if [ -f "$DOCKER_DIR/$COMPOSE_FILE" ]; then
+        return 0
     fi
+    echo -e "${YELLOW}✗ ${COMPOSE_FILE} not found at ${DOCKER_DIR}/${COMPOSE_FILE}${NC}"
+    echo "Run this from the DeerFlow repository root, e.g. 'make docker-start'."
+    echo "Do not run 'docker compose -f docker/${COMPOSE_FILE}' from inside docker/ — that resolves to docker/docker/${COMPOSE_FILE}."
+    exit 1
+}
+
+# Prefer the Compose V2 plugin (`docker compose`); fall back to the legacy
+# hyphenated binary (`docker-compose`) when the plugin is missing. Direct
+# callers of either binary get no such check: see CONTRIBUTING.md.
+_compose_version_short() {
+    local out
+
+    out="$(docker compose version --short 2>/dev/null || true)"
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    out="$(docker-compose version --short 2>/dev/null || true)"
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    return 1
+}
+
+# Fail with an actionable message instead of the parser error an older client
+# emits for the optional env_file syntax.
+require_compose_version() {
+    local raw major minor min_major min_minor
+
+    min_major="${COMPOSE_MIN_VERSION%%.*}"
+    min_minor="${COMPOSE_MIN_VERSION#*.}"
+    min_minor="${min_minor%%.*}"
+
+    raw="$(_compose_version_short || true)"
+    raw="${raw#v}"
+    major="${raw%%.*}"
+    minor="${raw#*.}"
+    minor="${minor%%.*}"
+    major="${major//[!0-9]/}"
+    minor="${minor//[!0-9]/}"
+
+    if [ -z "$major" ] || [ -z "$minor" ]; then
+        echo -e "${YELLOW}⚠ Could not determine the Docker Compose version; ${COMPOSE_MIN_VERSION} or newer is required.${NC}"
+        return 0
+    fi
+    if [ "$major" -gt "$min_major" ] || { [ "$major" -eq "$min_major" ] && [ "$minor" -ge "$min_minor" ]; }; then
+        return 0
+    fi
+
+    echo -e "${YELLOW}✗ Docker Compose ${raw} is too old — ${COMPOSE_MIN_VERSION} or newer is required.${NC}"
+    echo "${COMPOSE_FILE} marks its env_file entries optional using the long-form"
+    echo "'- path: ... / required: false' syntax, which your client cannot parse."
+    echo "Update Docker Desktop, or install a current Compose v2 plugin:"
+    echo "  https://docs.docker.com/compose/install/"
+    exit 1
+}
+
+# Compose interpolates ${DEER_FLOW_ROOT} into host-side paths
+# (DEER_FLOW_HOST_BASE_DIR, THREADS_HOST_PATH) that AIO/provisioner sandbox
+# modes bind-mount. Unset, those render as /backend/.deer-flow — a plausible
+# looking absolute path on the wrong root, so mounts silently miss the checkout.
+ensure_deer_flow_root() {
     if [ -z "$DEER_FLOW_ROOT" ]; then
         export DEER_FLOW_ROOT="$PROJECT_ROOT"
     fi
+}
+
+# Read-only with respect to configuration; safe for logs/stop/restart.
+compose_preflight() {
+    require_compose_file
+    require_compose_version
+    ensure_deer_flow_root
+}
+
+# Only `start` may create files. Compose env_file entries fail closed on Windows
+# when .env is missing ("The specified file cannot be found" /
+# "Le fichier spécifique est introuvable").
+ensure_env_files() {
     ensure_from_example "$PROJECT_ROOT/.env" "$PROJECT_ROOT/.env.example" ".env"
     ensure_from_example "$PROJECT_ROOT/frontend/.env" "$PROJECT_ROOT/frontend/.env.example" "frontend/.env"
 }
@@ -227,6 +302,9 @@ start() {
     echo "=========================================="
     echo ""
 
+    # Validate the toolchain before creating any config files below.
+    compose_preflight
+
     sandbox_mode="$(detect_sandbox_mode)"
 
     services="redis frontend gateway nginx"
@@ -257,13 +335,11 @@ start() {
     fi
     echo ""
     
-    # Set DEER_FLOW_ROOT for provisioner if not already set
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
-        echo ""
-    fi
-    
+    # Set by compose_preflight above; shown because the provisioner turns it into
+    # host-side bind-mount paths.
+    echo -e "${BLUE}Using DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+    echo ""
+
     # Ensure config.yaml exists before starting.
     if [ ! -f "$PROJECT_ROOT/config.yaml" ]; then
         if [ -f "$PROJECT_ROOT/config.example.yaml" ]; then
@@ -298,7 +374,7 @@ start() {
         fi
     fi
 
-    prepare_compose_env
+    ensure_env_files
     load_proxy_env_from_dotenv
 
     echo "Building and starting containers..."
@@ -322,7 +398,7 @@ start() {
 logs() {
     local service=""
 
-    prepare_compose_env
+    compose_preflight
 
     case "$1" in
         --frontend)
@@ -360,7 +436,7 @@ logs() {
 
 # Stop Docker development environment
 stop() {
-    prepare_compose_env
+    compose_preflight
     echo "Stopping Docker development services..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD down
     echo "Cleaning up sandbox containers..."
@@ -370,7 +446,7 @@ stop() {
 
 # Restart Docker development environment
 restart() {
-    prepare_compose_env
+    compose_preflight
     echo "========================================"
     echo "  Restarting DeerFlow Docker Services"
     echo "========================================"
