@@ -351,9 +351,9 @@ def test_public_make_lead_agent_does_not_take_mode_from_runtime_context(monkeypa
     def _capture(config, *, app_config):
         captured["config"] = config
         captured["app_config"] = app_config
-        return object()
+        return lead_agent_module.LeadAgentAssembly(graph=object(), descriptor=object())
 
-    monkeypatch.setattr(lead_agent_module, "_make_lead_agent", _capture)
+    monkeypatch.setattr(lead_agent_module, "_assemble_lead_agent", _capture)
     config = {
         "configurable": {"model_name": "full-model"},
         "context": {

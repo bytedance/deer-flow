@@ -76,13 +76,35 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     reported an empty sequence while iteration yielded the real constraints.
     Deferring the call instead of faking the value keeps one answer.
     """
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.guardrails.middleware import GuardrailMiddleware
 
     return (
         OrderingConstraint(
             outer=ToolProgressMiddleware,
             inner=ToolErrorHandlingMiddleware,
             reason=("ToolProgressMiddleware reads deerflow_tool_meta in _update_state_from_result, so its wrap_tool_call chain must enclose the ToolErrorHandlingMiddleware step that stamps it"),
+        ),
+        OrderingConstraint(
+            outer=ToolReceiptMiddleware,
+            inner=ToolErrorHandlingMiddleware,
+            reason=("ToolReceiptMiddleware reads the deerflow_tool_meta status stamped by ToolErrorHandlingMiddleware when building each receipt, so its wrap_tool_call chain must enclose the stamping step"),
+        ),
+        *(
+            OrderingConstraint(
+                outer=ToolReceiptMiddleware,
+                inner=short_circuiter,
+                reason=(f"{short_circuiter.__name__} can return or rebuild a ToolMessage without invoking its handler; ToolReceiptMiddleware must wrap it or those results never get a receipt and the ledger silently gaps"),
+            )
+            for short_circuiter in (
+                GuardrailMiddleware,
+                SandboxAuditMiddleware,
+                ReadBeforeWriteMiddleware,
+                ToolProgressMiddleware,
+            )
         ),
     )
