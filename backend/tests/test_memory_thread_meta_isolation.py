@@ -55,6 +55,40 @@ async def test_search_isolation(store):
 
 @pytest.mark.anyio
 @pytest.mark.no_auto_user
+async def test_search_matches_nested_thread_metadata(store):
+    with _as_user(USER_A):
+        await store.create("root", metadata={})
+        await store.create("child", metadata={"branch_parent_thread_id": "root"})
+        await store.create("other", metadata={"branch_parent_thread_id": "elsewhere"})
+
+        results = await store.search(metadata={"branch_parent_thread_id": "root"})
+
+    assert [record["thread_id"] for record in results] == ["child"]
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
+async def test_update_display_name_can_remove_stale_metadata(store):
+    with _as_user(USER_A):
+        await store.create(
+            "branch",
+            display_name="Original (2)",
+            metadata={"branch_title_sequence": 2, "keep": True},
+        )
+        await store.update_display_name(
+            "branch",
+            "Report Q4",
+            remove_metadata_keys=("branch_title_sequence",),
+        )
+        result = await store.get("branch")
+
+    assert result is not None
+    assert result["display_name"] == "Report Q4"
+    assert result["metadata"] == {"keep": True}
+
+
+@pytest.mark.anyio
+@pytest.mark.no_auto_user
 async def test_get_isolation(store):
     """get() returns None for threads owned by another user."""
     with _as_user(USER_A):

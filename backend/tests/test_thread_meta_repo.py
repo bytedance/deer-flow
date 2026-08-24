@@ -47,6 +47,21 @@ class TestThreadMetaRepository:
         assert record["metadata"] == {"key": "value"}
 
     @pytest.mark.anyio
+    async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
+        await repo.create("t1", display_name="Original (2)", metadata={"branch_title_sequence": 2, "keep": True})
+
+        await repo.update_display_name(
+            "t1",
+            "Report Q4",
+            remove_metadata_keys=("branch_title_sequence",),
+        )
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "Report Q4"
+        assert record["metadata"] == {"keep": True}
+
+    @pytest.mark.anyio
     async def test_get_nonexistent(self, repo):
         assert await repo.get("nonexistent") is None
 
