@@ -90,10 +90,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         lines.append(f"  Path: {neutralize_untrusted_tags(file['path'])}")
         markdown_file = file.get("markdown_file")
         if markdown_file:
-            lines.append(
-                f"  Converted text: {neutralize_untrusted_tags(f'/mnt/user-data/uploads/{markdown_file}')} "
-                "(read this instead of the binary; outline line numbers below refer to it)"
-            )
+            lines.append(f"  Converted text: {neutralize_untrusted_tags(f'/mnt/user-data/uploads/{markdown_file}')} (read this instead of the binary; outline line numbers below refer to it)")
         if file.get("selection_reason") == "query_match":
             lines.append("  Selected because: matched the current query.")
         outline = file.get("outline") or []
@@ -204,12 +201,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             # `report.md` next to `report.pdf`) so the context can point the
             # model at the readable text instead of the binary original (#4981).
             markdown_file = f.get("markdown_file")
-            if (
-                isinstance(markdown_file, str)
-                and markdown_file
-                and Path(markdown_file).name == markdown_file
-                and not is_upload_staging_file(markdown_file)
-            ):
+            if isinstance(markdown_file, str) and markdown_file and Path(markdown_file).name == markdown_file and not is_upload_staging_file(markdown_file):
                 if uploads_dir is None or (uploads_dir / markdown_file).is_file():
                     entry["markdown_file"] = markdown_file
             files.append(entry)
