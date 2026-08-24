@@ -57,7 +57,10 @@ from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
-from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    effective_subagent_concurrency,
+)
 from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
@@ -625,7 +628,10 @@ def build_middlewares(
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
     if subagent_enabled:
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = effective_subagent_concurrency(
+            cfg.get("max_concurrent_subagents"),
+            resolved_app_config,
+        )
         max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
         effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
@@ -870,7 +876,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     requested_subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+    max_concurrent_subagents = effective_subagent_concurrency(
+        cfg.get("max_concurrent_subagents"),
+        resolved_app_config,
+    )
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))

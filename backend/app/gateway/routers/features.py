@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from app.gateway.browser_capability import browser_capability
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
+from deerflow.subagents.capacity import configured_subagent_max_running
 
 router = APIRouter(prefix="/api", tags=["features"])
 
@@ -35,12 +36,20 @@ class McpTasksFeature(BaseModel):
     enabled: bool = Field(..., description="Whether durable MCP task APIs and UI are available")
 
 
+class SubagentBatchesFeature(BaseModel):
+    """Availability and process capacity for durable native-subagent batches."""
+
+    enabled: bool = Field(..., description="Whether durable native-subagent batch APIs and UI are available")
+    max_running: int = Field(..., description="Native subagent execution slots in this Gateway process")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
+    subagent_batches: SubagentBatchesFeature
 
 
 @router.get(
@@ -59,4 +68,8 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         # capability that actually started rather than a hot-reloaded config
         # value that would require a Gateway restart to take effect.
         mcp_tasks=McpTasksFeature(enabled=bool(getattr(request.app.state, "mcp_tasks_available", False))),
+        subagent_batches=SubagentBatchesFeature(
+            enabled=bool(getattr(request.app.state, "subagent_batches_available", False)),
+            max_running=configured_subagent_max_running(),
+        ),
     )

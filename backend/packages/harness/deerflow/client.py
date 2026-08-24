@@ -49,6 +49,7 @@ from deerflow.config.extensions_config import (
     reload_extensions_config,
 )
 from deerflow.config.paths import get_paths
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.models import create_chat_model
 from deerflow.runtime import CheckpointStateAccessor
 from deerflow.runtime.checkpoint_mode import (
@@ -61,6 +62,7 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.skills.storage import get_or_new_user_skill_storage
+from deerflow.subagents.capacity import configure_subagent_execution_capacity
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
@@ -199,6 +201,12 @@ class DeerFlowClient:
         if config_path is not None:
             reload_app_config(config_path)
         self._app_config = get_app_config()
+        runtime_config = getattr(self._app_config, "subagent_runtime", None)
+        if not isinstance(runtime_config, SubagentRuntimeConfig):
+            # Preserve compatibility with lightweight embedded/test configs
+            # created before the startup-only section existed.
+            runtime_config = SubagentRuntimeConfig()
+        configure_subagent_execution_capacity(runtime_config)
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
         self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
@@ -303,7 +311,12 @@ class DeerFlowClient:
             model_name = self._app_config.models[0].name
         model_name = _authorize_model_name(model_name, context=cfg, app_config=self._app_config)
         subagent_enabled = cfg.get("subagent_enabled", False)
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        from deerflow.config.subagents_config import effective_subagent_concurrency
+
+        max_concurrent_subagents = effective_subagent_concurrency(
+            cfg.get("max_concurrent_subagents"),
+            self._app_config,
+        )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
         tools = self._get_tools(model_name=model_name, subagent_enabled=subagent_enabled)

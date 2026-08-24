@@ -5,6 +5,7 @@ export interface FeaturesResponse {
   agents_api: { enabled: boolean };
   browser_control?: { enabled: boolean };
   mcp_tasks?: { enabled: boolean };
+  subagent_batches?: { enabled: boolean; max_running: number };
 }
 
 export async function fetchFeatures(): Promise<FeaturesResponse> {
@@ -25,4 +26,8 @@ export async function fetchBrowserControlEnabled(): Promise<boolean> {
 
 export async function fetchMcpTasksEnabled(): Promise<boolean> {
   return (await fetchFeatures()).mcp_tasks?.enabled ?? false;
+}
+
+export async function fetchSubagentBatchesEnabled(): Promise<boolean> {
+  return (await fetchFeatures()).subagent_batches?.enabled ?? false;
 }

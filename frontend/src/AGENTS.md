@@ -35,6 +35,12 @@
    bounded error and attempt count; retryable failures use backend backoff,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
+   Explicit durable native-subagent batches use `core/subagent-batches` and
+   `ThreadSubagentBatches`. The trigger is feature-gated by the startup-scoped
+   `subagent_batches` capability on both default and Custom Agent chat pages.
+   The panel renders bounded progress/item pages, controls pause/resume/cancel,
+   retries failed items, and exports JSONL; it must not infer batch mode from
+   prompt text or inject the complete result set into chat state.
    Settings > Integrations uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
