@@ -64,7 +64,11 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
-from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY, ToolResultMeta
+from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
+    ToolResultMeta,
+    tool_messages_from_result,
+)
 
 if TYPE_CHECKING:
     from deerflow.config.tool_progress_config import ToolProgressConfig
@@ -302,12 +306,20 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
         self,
         result: ToolMessage | Command,
         tool_name: str,
+        tool_call_id: str,
         runtime: Runtime,
     ) -> ToolMessage | Command:
         """Update the state machine from a tool result; queue hints if warranted."""
-        if not isinstance(result, ToolMessage):
+        if isinstance(result, ToolMessage):
+            message = result
+        else:
+            message = next(
+                (candidate for candidate in tool_messages_from_result(result) if str(candidate.tool_call_id) == tool_call_id),
+                None,
+            )
+        if message is None:
             return result
-        meta = _parse_tool_meta((result.additional_kwargs or {}).get(TOOL_META_KEY))
+        meta = _parse_tool_meta((message.additional_kwargs or {}).get(TOOL_META_KEY))
         if meta is None:
             if tool_name not in self._exempt_tools:
                 logger.warning(
@@ -315,7 +327,7 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                     tool_name,
                 )
             return result
-        content = _message_content_str(result)
+        content = _message_content_str(message)
         thread_id = self._thread_id(runtime)
         with self._lock:
             state = self._get_state(thread_id, tool_name)
@@ -502,7 +514,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(handler(request), tool_name, runtime)
+        tool_call_id = str(request.tool_call.get("id", ""))
+        return self._update_state_from_result(
+            handler(request),
+            tool_name,
+            tool_call_id,
+            runtime,
+        )
 
     @override
     async def awrap_tool_call(
@@ -525,7 +543,13 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                 block_reason,
             )
             return self._make_blocked_message(request, tool_name, block_reason)
-        return self._update_state_from_result(await handler(request), tool_name, runtime)
+        tool_call_id = str(request.tool_call.get("id", ""))
+        return self._update_state_from_result(
+            await handler(request),
+            tool_name,
+            tool_call_id,
+            runtime,
+        )
 
     # ------------------------------------------------------------------
     # wrap_model_call: drain pending hints and inject before model sees messages

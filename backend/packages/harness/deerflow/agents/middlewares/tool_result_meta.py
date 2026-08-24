@@ -297,8 +297,27 @@ def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     return msg
 
 
-def normalize_tool_result(result: ToolMessage | Command) -> ToolMessage | Command:
-    """Normalize a tool result, handling Command wrappers transparently."""
+def tool_messages_from_result(result: ToolMessage | Command) -> tuple[ToolMessage, ...]:
+    """Return ToolMessages carried directly or inside a Command update."""
     if isinstance(result, ToolMessage):
-        return normalize_tool_message(result)
+        return (result,)
+
+    update = result.update
+    if not isinstance(update, dict):
+        return ()
+    messages = update.get("messages", ())
+    if isinstance(messages, ToolMessage):
+        return (messages,)
+    if not isinstance(messages, (list, tuple)):
+        return ()
+    return tuple(message for message in messages if isinstance(message, ToolMessage))
+
+
+def normalize_tool_result(result: ToolMessage | Command, *, tool_call_id: str = "") -> ToolMessage | Command:
+    """Normalize a tool result, handling Command wrappers transparently."""
+    is_command = isinstance(result, Command)
+    for message in tool_messages_from_result(result):
+        if is_command and tool_call_id and str(message.tool_call_id) != tool_call_id:
+            continue
+        normalize_tool_message(message)
     return result
