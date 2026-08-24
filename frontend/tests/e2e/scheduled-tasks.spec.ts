@@ -119,6 +119,8 @@ test("reuse-thread tasks explain their context and busy-thread queue behavior", 
     "queues this occurrence and starts it when the thread is available",
   );
 
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).not.toBeVisible();
   await page.getByTestId("scheduled-task-create-toggle").click();
   await page.waitForURL("**/workspace/scheduled-tasks/new");
 
