@@ -678,16 +678,16 @@ tool_groups:
 
 tools:
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
-  # `datasets` is an operator-controlled allowlist of stable RAGFlow dataset
-  # IDs. The Agent cannot enumerate the tenant catalog or change this scope.
-  # Bind only datasets with compatible embedding models. Current names are
-  # resolved at search time, and dataset IDs are never shown to the model.
+  # `datasets` is optional. Omit it to list every tenant-visible dataset at
+  # search time and explicitly pass all discovered IDs to retrieval. Configure
+  # stable IDs to restrict scope or avoid mixing incompatible embedding models.
+  # Dataset IDs and catalog listing are never shown to the model.
   # - name: knowledge_search
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:knowledge_search_tool
   #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
   #   api_key: $RAGFLOW_API_KEY
-  #   datasets:
+  #   datasets:  # Optional operator-controlled allowlist
   #     - 0123456789abcdef0123456789abcdef  # Replace with a RAGFlow dataset ID
   #   timeout: 30
   #   page_size: 8

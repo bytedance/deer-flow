@@ -21,19 +21,23 @@ class FakeRAGFlowClient:
         self,
         *,
         datasets_by_id: Mapping[str, list[dict]] | None = None,
+        all_datasets: list[dict] | None = None,
         retrieval: dict | None = None,
         error: Exception | None = None,
     ) -> None:
         self.datasets_by_id = dict(datasets_by_id or {})
+        self.all_datasets = list(all_datasets or [])
         self.retrieval = retrieval or {"chunks": [], "doc_aggs": [], "total": 0}
         self.error = error
-        self.list_calls: list[str] = []
+        self.list_calls: list[str | None] = []
         self.retrieve_calls: list[tuple[str, dict]] = []
 
-    async def list_datasets(self, *, dataset_id: str) -> list[dict]:
+    async def list_datasets(self, *, dataset_id: str | None = None) -> list[dict]:
         if self.error is not None:
             raise self.error
         self.list_calls.append(dataset_id)
+        if dataset_id is None:
+            return self.all_datasets
         return self.datasets_by_id.get(dataset_id, [])
 
     async def retrieve(self, query: str, **kwargs: object) -> dict:
@@ -181,14 +185,35 @@ async def test_mismatched_id_filtered_response_returns_operator_guidance(monkeyp
 
 
 @pytest.mark.anyio
-async def test_missing_dataset_binding_is_rejected_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_missing_dataset_binding_lists_all_and_passes_every_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        all_datasets=[
+            {"id": DATASET_ID_1, "name": "HR Policies"},
+            {"id": DATASET_ID_2, "name": "Engineering"},
+        ],
+        retrieval={"chunks": [{"dataset_id": DATASET_ID_2, "document_keyword": "guide.pdf", "content": "Build guide."}]},
+    )
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("leave")
+
+    assert fake.list_calls == [None]
+    assert fake.retrieve_calls[0][1]["dataset_ids"] == [DATASET_ID_1, DATASET_ID_2]
+    assert "Engineering / guide.pdf" in result
+    assert DATASET_ID_1 not in result
+    assert DATASET_ID_2 not in result
+
+
+@pytest.mark.anyio
+async def test_missing_dataset_binding_with_empty_catalog_returns_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient()
     _install(monkeypatch, fake, config=_config(datasets=None))
 
     result = await ragflow_tools.knowledge_search("leave")
 
-    assert result == "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
-    assert fake.list_calls == []
+    assert result == "Error: No accessible RAGFlow datasets were found; configure knowledge_search.datasets or add a dataset in RAGFlow."
+    assert fake.list_calls == [None]
+    assert fake.retrieve_calls == []
 
 
 @pytest.mark.anyio
@@ -416,6 +441,16 @@ def test_retrieval_settings_load_bound_dataset_ids_and_hide_secret(monkeypatch: 
     assert "ragflow-secret" not in repr(config)
 
 
+def test_retrieval_settings_allow_omitting_dataset_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(ragflow_tools, "get_app_config", lambda: _config(datasets=None))
+
+    config, error = ragflow_tools._settings_or_error()
+
+    assert error is None
+    assert config is not None
+    assert config.datasets is None
+
+
 def test_agent_exposes_only_query_on_single_search_tool() -> None:
     assert not hasattr(ragflow_tools, "list_knowledge_bases_tool")
     assert not hasattr(ragflow_tools, "list_knowledge_bases")
@@ -446,7 +481,8 @@ def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: p
     tools = get_available_tools(include_mcp=False, app_config=config)
     assembled = next(tool for tool in tools if tool.name == "knowledge_search")
 
-    assert "operator-configured dataset IDs" in assembled.description
+    assert "If knowledge_search.datasets is omitted" in assembled.description
+    assert "all datasets accessible to the configured RAGFlow API key" in assembled.description
     assert DATASET_ID_1 not in assembled.description
     assert DATASET_ID_2 not in assembled.description
     assert "ragflow-secret" not in assembled.description

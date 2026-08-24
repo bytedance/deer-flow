@@ -6,6 +6,9 @@ from typing import Any
 
 import httpx
 
+_DATASET_PAGE_SIZE = 100
+_MAX_DATASET_PAGES = 100
+
 
 class RAGFlowError(Exception):
     """Base class for normalized RAGFlow failures."""
@@ -106,16 +109,45 @@ class RAGFlowClient:
             raise RAGFlowAPIError(message, code=code)
         return payload
 
-    async def list_datasets(self, *, dataset_id: str) -> list[dict[str, Any]]:
-        """Resolve one configured dataset ID without enumerating the tenant catalog."""
-        if not dataset_id.strip():
-            raise ValueError("dataset_id must not be empty")
+    async def list_datasets(self, *, dataset_id: str | None = None) -> list[dict[str, Any]]:
+        """Resolve one dataset ID, or enumerate every page when no ID is given."""
+        if dataset_id is not None:
+            dataset_id = dataset_id.strip()
+            if not dataset_id:
+                raise ValueError("dataset_id must not be empty")
 
-        payload = await self._request("GET", "/datasets", params={"id": dataset_id})
-        data = payload.get("data")
-        if not isinstance(data, list):
-            raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")
-        return [item for item in data if isinstance(item, dict)]
+            payload = await self._request("GET", "/datasets", params={"id": dataset_id})
+            data = payload.get("data")
+            if not isinstance(data, list):
+                raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")
+            return [item for item in data if isinstance(item, dict)]
+
+        datasets: list[dict[str, Any]] = []
+        received_count = 0
+        for page in range(1, _MAX_DATASET_PAGES + 1):
+            payload = await self._request(
+                "GET",
+                "/datasets",
+                params={"page": page, "page_size": _DATASET_PAGE_SIZE},
+            )
+            data = payload.get("data")
+            if not isinstance(data, list):
+                raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")
+
+            datasets.extend(item for item in data if isinstance(item, dict))
+            received_count += len(data)
+
+            total = payload.get("total_datasets")
+            has_valid_total = isinstance(total, int) and not isinstance(total, bool) and total >= 0
+            if has_valid_total:
+                if received_count >= total:
+                    return datasets
+                if not data:
+                    raise RAGFlowProtocolError("RAGFlow dataset listing ended before the reported total.")
+            elif len(data) < _DATASET_PAGE_SIZE:
+                return datasets
+
+        raise RAGFlowProtocolError(f"RAGFlow dataset listing exceeded {_MAX_DATASET_PAGES} pages.")
 
     async def retrieve(
         self,

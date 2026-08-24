@@ -38,11 +38,12 @@ drift.
 
 The optional `knowledge` tool group exposes one `knowledge_search(query)` tool.
 Its normal `tools:` entry owns the provider connection, retrieval extras, and a
-required operator allowlist of stable dataset IDs; there is no top-level
-provider configuration or tenant-wide listing tool. Configuration loading does
-not contact RAGFlow. Each invocation verifies the bound IDs through ID-filtered
-RAGFlow requests, resolves their current names for citation formatting, and
-sends the same non-empty `dataset_ids` list to retrieval. It never persists
+optional operator allowlist of stable dataset IDs; there is no top-level
+provider configuration or Agent-visible listing tool. Configuration loading
+does not contact RAGFlow. Each invocation either verifies the bound IDs through
+ID-filtered requests or, when no IDs are bound, internally paginates through all
+tenant-visible datasets. It resolves their current names for citation formatting
+and sends an explicit non-empty `dataset_ids` list to retrieval. It never persists
 dataset metadata, exposes RAGFlow dataset IDs to the model, or provides write
 operations.
 Retrieval output is bounded at both the individual chunk and full-response

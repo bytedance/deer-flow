@@ -26,7 +26,7 @@ class _RAGFlowRetrievalSettings(BaseModel):
 
     model_config = ConfigDict(validate_default=True)
 
-    datasets: list[str] = Field(min_length=1, max_length=100)
+    datasets: list[str] | None = Field(default=None, max_length=100)
     base_url: AnyHttpUrl = Field(default="http://localhost:9380")
     api_key: SecretStr | None = Field(default=None)
     timeout: float = Field(default=30, gt=0, le=600)
@@ -39,7 +39,9 @@ class _RAGFlowRetrievalSettings(BaseModel):
 
     @field_validator("datasets")
     @classmethod
-    def _normalize_dataset_ids(cls, value: list[str]) -> list[str]:
+    def _normalize_dataset_ids(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
         normalized: list[str] = []
         seen: set[str] = set()
         for dataset_id in value:
@@ -49,9 +51,7 @@ class _RAGFlowRetrievalSettings(BaseModel):
             if clean_id not in seen:
                 normalized.append(clean_id)
                 seen.add(clean_id)
-        if not normalized:
-            raise ValueError("at least one dataset ID is required")
-        return normalized
+        return normalized or None
 
     @field_validator("base_url")
     @classmethod
@@ -146,10 +146,29 @@ def _missing_dataset_error() -> str:
     return "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
 
 
-async def _resolve_configured_datasets(
+async def _resolve_datasets(
     client: RAGFlowClient,
     settings: _RAGFlowRetrievalSettings,
 ) -> tuple[list[str] | None, dict[str, str] | None, str | None]:
+    if settings.datasets is None:
+        datasets = await client.list_datasets()
+        names_by_id: dict[str, str] = {}
+        for dataset in datasets:
+            dataset_id = dataset.get("id")
+            if not isinstance(dataset_id, str) or not dataset_id.strip():
+                continue
+            clean_id = dataset_id.strip()
+            name = dataset.get("name")
+            names_by_id.setdefault(clean_id, str(name).strip() if name else "Unknown dataset")
+
+        if not names_by_id:
+            return (
+                None,
+                None,
+                "Error: No accessible RAGFlow datasets were found; configure knowledge_search.datasets or add a dataset in RAGFlow.",
+            )
+        return list(names_by_id), names_by_id, None
+
     batches = await asyncio.gather(*(client.list_datasets(dataset_id=dataset_id) for dataset_id in settings.datasets))
 
     names_by_id: dict[str, str] = {}
@@ -163,7 +182,7 @@ async def _resolve_configured_datasets(
 
 
 async def knowledge_search(query: str) -> str:
-    """Search the operator-configured RAGFlow dataset allowlist."""
+    """Search the configured RAGFlow scope, defaulting to every accessible dataset."""
     query = query.strip()
     if not query:
         return "Error: query must not be empty."
@@ -174,11 +193,11 @@ async def knowledge_search(query: str) -> str:
 
     client = _build_client(settings)
     try:
-        dataset_ids, names_by_id, resolution_error = await _resolve_configured_datasets(client, settings)
+        dataset_ids, names_by_id, resolution_error = await _resolve_datasets(client, settings)
         if resolution_error is not None:
             return resolution_error
-        if not dataset_ids or names_by_id is None:  # Defensive; settings require at least one binding.
-            return "Error: No configured RAGFlow datasets could be resolved; check knowledge_search.datasets in config.yaml."
+        if not dataset_ids or names_by_id is None:  # Defensive; both resolution paths return a non-empty scope.
+            return "Error: No RAGFlow datasets could be resolved; check knowledge_search in config.yaml."
 
         result = await client.retrieve(
             query,
@@ -203,11 +222,11 @@ async def knowledge_search(query: str) -> str:
 
 def _tool_description() -> str:
     base = "Search the operator-approved RAGFlow datasets and return compact, citation-numbered source chunks."
-    return f"{base} Access is restricted to operator-configured dataset IDs, which are never shown to the model."
+    return f"{base} If knowledge_search.datasets is omitted, all datasets accessible to the configured RAGFlow API key are searched. Dataset IDs are never shown to the model."
 
 
 async def _knowledge_search_entrypoint(query: str) -> str:
-    """Search the RAGFlow datasets selected by the deployment operator.
+    """Search the configured RAGFlow datasets, or every accessible dataset by default.
 
     Args:
         query: Specific question or search terms to retrieve from the configured private documents.

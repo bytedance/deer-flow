@@ -41,6 +41,55 @@ async def test_list_datasets_filters_by_bound_id_in_one_request() -> None:
 
 
 @pytest.mark.anyio
+async def test_list_datasets_without_id_fetches_every_page() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = int(request.url.params["page"])
+        assert request.url.params["page_size"] == "100"
+        if page == 1:
+            data = [{"id": f"dataset-{index}", "name": f"Dataset {index}"} for index in range(100)]
+        elif page == 2:
+            data = [{"id": "dataset-100", "name": "Dataset 100"}]
+        else:
+            pytest.fail(f"unexpected page {page}")
+        return httpx.Response(200, json={"code": 0, "data": data, "total_datasets": 101})
+
+    client = RAGFlowClient(
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    datasets = await client.list_datasets()
+
+    assert len(datasets) == 101
+    assert [request.url.params["page"] for request in requests] == ["1", "2"]
+
+
+@pytest.mark.anyio
+async def test_list_datasets_without_id_has_a_hard_page_cap() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        data = [{"id": f"dataset-{index}", "name": f"Dataset {index}"} for index in range(100)]
+        return httpx.Response(200, json={"code": 0, "data": data})
+
+    client = RAGFlowClient(
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(RAGFlowProtocolError, match="exceeded 100 pages"):
+        await client.list_datasets()
+
+    assert len(requests) == 100
+
+
+@pytest.mark.anyio
 async def test_retrieve_always_sends_nonempty_dataset_ids() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.method == "POST"

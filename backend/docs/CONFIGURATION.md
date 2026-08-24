@@ -223,8 +223,9 @@ models:
 RAGFlow integration is disabled by default. It adds one read-only Agent tool,
 `knowledge_search`. DeerFlow does not persist a copy of dataset or document
 metadata; RAGFlow is the sole source of truth. The configured API key is
-tenant-scoped, while the operator-controlled `datasets` list restricts every
-Agent on this deployment to the same dataset-ID allowlist.
+tenant-scoped. An optional operator-controlled `datasets` list restricts every
+Agent on this deployment to the same dataset-ID allowlist; omitting it searches
+all datasets visible to that tenant API key.
 
 ```yaml
 tool_groups:
@@ -248,16 +249,19 @@ tools:
     max_total_chars: 8000
 ```
 
-The tool is opt-in through the normal `tools:` list. `datasets` must contain one
-or more RAGFlow dataset IDs selected by the deployment operator. DeerFlow does
-not validate their existence while loading configuration. On each search it
-verifies them with ID-filtered RAGFlow requests, resolves their current names for
-citation formatting, and always sends the same non-empty `dataset_ids` allowlist
-to retrieval. A deleted or inaccessible dataset produces guidance to check
-`config.yaml`. Dataset IDs and tenant-wide listing are not exposed to the Agent.
+The tool is opt-in through the normal `tools:` list. `datasets` is optional. If
+it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
+does not validate their existence while loading configuration; on each search
+it verifies them with ID-filtered requests. If `datasets` is omitted, each
+search paginates through the tenant-visible dataset catalog. Both paths resolve
+current names for citation formatting and explicitly send a non-empty
+`dataset_ids` list to retrieval. A deleted or inaccessible configured dataset
+produces guidance to check `config.yaml`. Dataset IDs and catalog listing are
+not exposed to the Agent.
 
-Configure only datasets with compatible embedding models because RAGFlow can
-reject cross-dataset retrieval when models differ. `base_url` must not contain
+Configure an allowlist when tenant datasets use incompatible embedding models,
+because RAGFlow can reject cross-dataset retrieval when models differ.
+`base_url` must not contain
 embedded username or password information. For Docker or Kubernetes, it must be
 reachable from the Gateway container or Pod; `localhost` refers to that
 container or Pod, not the host machine.
