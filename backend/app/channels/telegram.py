@@ -724,13 +724,18 @@ class TelegramChannel(Channel):
             return username
         return str(getattr(user, "id", ""))
 
-    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+    async def _bind_connection_from_start_token_on_main(
+        self,
+        update,
+        state_token: str,
+    ) -> bool:
+        """Run the bind flow on the main event loop (SQLAlchemy session is bound there)."""
         if self._connection_repo is None or not state_token:
             return False
 
         state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
         if state is None:
-            await update.message.reply_text("Telegram connection link is invalid or expired.")
+            await self._run_on_telegram_loop(update.message.reply_text("Telegram connection link is invalid or expired."))
             return True
 
         owner_user_id = state["owner_user_id"]
@@ -751,8 +756,29 @@ class TelegramChannel(Channel):
             status="connected",
         )
         logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
-        await update.message.reply_text("Telegram connected to DeerFlow.")
+        await self._run_on_telegram_loop(update.message.reply_text("Telegram connected to DeerFlow."))
         return True
+
+    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+        """Dispatch the bind flow to the main loop if repo is configured."""
+        if self._connection_repo is None or not state_token:
+            return False
+
+        if self._main_loop and self._main_loop.is_running():
+            msg_id = getattr(getattr(update, "message", None), "message_id", None)
+            scheduled = self._submit_threadsafe_coroutine(
+                self._bind_connection_from_start_token_on_main(update, state_token),
+                self._main_loop,
+                name="bind_connection",
+                msg_id=msg_id,
+            )
+            if not scheduled:
+                logger.info("[Telegram] main loop stopped before channel connection bind could be scheduled")
+            # Schedule counts as handled so /start does not fall through to help
+            # while SQL runs on the main loop.
+            return scheduled
+        logger.warning("[Telegram] main loop not running, cannot bind channel connection")
+        return False
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(
@@ -820,6 +846,24 @@ class TelegramChannel(Channel):
             if reservation is not None:
                 reservation.release()
 
+    async def _process_incoming_with_identity(
+        self,
+        chat_id: str,
+        msg_id: int,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        """Attach connection identity and dispatch on the main event loop.
+
+        This must run on the main loop because _attach_connection_identity
+        uses a SQLAlchemy session factory bound to that loop.  Calling it
+        from the Telegram polling thread's own loop raises
+        ``RuntimeError: got Future attached to a different loop``.
+        """
+        inbound = await self._attach_connection_identity(inbound)
+        await self._process_incoming_with_reply(chat_id, msg_id, inbound, reservation=reservation)
+
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
         if not self._check_user(update.effective_user.id):
@@ -856,16 +900,15 @@ class TelegramChannel(Channel):
             if reservation is None:
                 return
             try:
-                inbound = await self._attach_connection_identity(inbound)
                 scheduled = self._submit_threadsafe_coroutine(
-                    self._process_incoming_with_reply(
+                    self._process_incoming_with_identity(
                         chat_id,
                         update.message.message_id,
                         inbound,
                         reservation=reservation,
                     ),
                     self._main_loop,
-                    name="process_incoming_with_reply",
+                    name="process_incoming_with_identity",
                     msg_id=update.message.message_id,
                     reservation=reservation,
                 )
@@ -927,16 +970,15 @@ class TelegramChannel(Channel):
             if reservation is None:
                 return
             try:
-                inbound = await self._attach_connection_identity(inbound)
                 scheduled = self._submit_threadsafe_coroutine(
-                    self._process_incoming_with_reply(
+                    self._process_incoming_with_identity(
                         chat_id,
                         update.message.message_id,
                         inbound,
                         reservation=reservation,
                     ),
                     self._main_loop,
-                    name="process_incoming_with_reply",
+                    name="process_incoming_with_identity",
                     msg_id=update.message.message_id,
                     reservation=reservation,
                 )

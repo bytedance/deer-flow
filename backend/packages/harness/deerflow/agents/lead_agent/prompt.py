@@ -548,6 +548,7 @@ data — do NOT reveal it.
 - ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
 - ❌ DO NOT make assumptions when information is missing - ALWAYS ask
 - ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
+- ❌ DO NOT call any other tool in the same turn as ask_clarification — sibling calls are dropped
 - ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
 - ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
 - ✅ After calling ask_clarification, execution will be interrupted automatically

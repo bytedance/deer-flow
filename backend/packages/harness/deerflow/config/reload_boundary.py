@@ -69,7 +69,8 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
         "max_concurrent_runs, and multi_instance are captured into the service instance and the background poller task is not rebuilt on config.yaml edits. "
-        "Changing multi-instance recovery prerequisites or lease behavior requires restarting every Gateway Pod together."
+        "Changing multi-instance recovery prerequisites or lease behavior requires restarting every Gateway Pod together. "
+        "scheduler.recursion_limit is not captured there: launch_scheduled_thread_run reads it from get_app_config() on each dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart."
     ),
     "mcp_tasks": (
         "McpTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
