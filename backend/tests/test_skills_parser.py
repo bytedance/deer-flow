@@ -125,6 +125,53 @@ def test_parse_allowed_tools_string(tmp_path):
     )
 
 
+def test_parse_allowed_tools_string_preserves_parenthesized_spaces(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *) Bash(playwright-cli:*) Bash(npx:*) Bash(npm:*)",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == (
+        "Bash(tvly *)",
+        "Bash(playwright-cli:*)",
+        "Bash(npx:*)",
+        "Bash(npm:*)",
+    )
+
+
+def test_parse_allowed_tools_list_preserves_exact_runtime_names(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: [mcp__arxiv__SearchPapers, Read, 'Bash(tvly *)']\n",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "Read", "Bash(tvly *)")
+
+
+def test_parse_allowed_tools_string_rejects_unbalanced_parentheses(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *",
+    )
+
+    assert parse_skill_file(skill_file, category="custom") is None
+
+
+def test_parse_allowed_tools_string_rejects_unmatched_closing_parenthesis(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Bash(tvly *) )",
+    )
+
+    assert parse_skill_file(skill_file, category="custom") is None
+
+
 def test_parse_invalid_allowed_tools_returns_none(tmp_path):
     skill_file = _write_skill(tmp_path, "name: my-skill\ndescription: Test\nallowed-tools: {bash: true}")
     skill = parse_skill_file(skill_file, category="custom")

@@ -28,6 +28,33 @@ def _normalize_unscoped_allowed_tool(tool_name: str) -> str:
     return _PORTABLE_TOOL_ALIASES.get(snake_case, snake_case)
 
 
+def _split_portable_allowed_tools(raw: str, skill_file: Path) -> list[str]:
+    """Split a portable scalar while keeping parenthesized patterns intact."""
+    tokens: list[str] = []
+    current: list[str] = []
+    depth = 0
+
+    for char in raw:
+        if char.isspace() and depth == 0:
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            if depth == 0:
+                raise ValueError(f"allowed-tools in {skill_file} contains an unmatched closing parenthesis")
+            depth -= 1
+        current.append(char)
+
+    if depth:
+        raise ValueError(f"allowed-tools in {skill_file} contains an unclosed parenthesized pattern")
+    if current:
+        tokens.append("".join(current))
+    return tokens
+
+
 def _format_yaml_error(skill_file: Path, exc: yaml.YAMLError, source: str) -> str:
     """Render a developer-friendly explanation of a YAML front-matter error."""
 
@@ -66,9 +93,12 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None
     if raw is None:
         return None
     if isinstance(raw, str):
-        raw = raw.split()
+        raw = _split_portable_allowed_tools(raw, skill_file)
+        normalize_tools = True
     elif not isinstance(raw, list):
         raise ValueError(f"allowed-tools in {skill_file} must be a space-separated string or list of strings")
+    else:
+        normalize_tools = False
 
     allowed_tools: list[str] = []
     for item in raw:
@@ -77,7 +107,7 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None
         tool_name = item.strip()
         if not tool_name:
             raise ValueError(f"allowed-tools in {skill_file} cannot contain empty tool names")
-        allowed_tools.append(_normalize_unscoped_allowed_tool(tool_name))
+        allowed_tools.append(_normalize_unscoped_allowed_tool(tool_name) if normalize_tools else tool_name)
     return tuple(allowed_tools)
 
 

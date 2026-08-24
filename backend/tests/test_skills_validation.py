@@ -60,7 +60,7 @@ class TestValidateSkillFrontmatter:
     def test_allows_allowed_tools_string(self, tmp_path):
         skill_dir = _write_skill(
             tmp_path,
-            "---\nname: my-skill\ndescription: A skill\nallowed-tools: bash\n---\n\nBody\n",
+            "---\nname: my-skill\ndescription: A skill\nallowed-tools: Bash(tvly *) Bash(playwright-cli:*)\n---\n\nBody\n",
         )
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
         assert valid is True
