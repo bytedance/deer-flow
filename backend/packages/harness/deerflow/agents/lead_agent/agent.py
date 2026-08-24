@@ -1024,35 +1024,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             deferred_names=setup.deferred_names,
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
+            allowed_subagents=allowed_subagents,
         )
         graph = create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
             tools=final_tools,
-            middleware=normalize_middleware_state_schemas(
-                build_middlewares(
-                    config,
-                    model_name=model_name,
-                    agent_name=agent_name,
-                    available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                    app_config=resolved_app_config,
-                    deferred_setup=setup,
-                    mcp_routing_middleware=mcp_routing_middleware,
-                    user_id=resolved_user_id,
-                    authorization_provider=_authz_provider,
-                ),
-                mode,
-            ),
-            system_prompt=apply_prompt_template(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
-                max_total_subagents=max_total_subagents,
-                available_skills=set(_BOOTSTRAP_SKILL_NAMES),
-                app_config=resolved_app_config,
-                deferred_names=setup.deferred_names,
-                user_id=resolved_user_id,
-                skill_names=skill_setup.skill_names or None,
-                allowed_subagents=allowed_subagents,
-            ),
+            middleware=normalize_middleware_state_schemas(middlewares, mode),
+            system_prompt=system_prompt,
             state_schema=get_thread_state_schema(mode),
         )
         return _complete_assembly(
@@ -1162,37 +1140,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         mcp_routing_hints_section=mcp_routing_hints_section,
         user_id=resolved_user_id,
         skill_names=skill_setup.skill_names or None,
+        allowed_subagents=allowed_subagents,
     )
     graph = create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
         tools=final_tools,
-        middleware=normalize_middleware_state_schemas(
-            build_middlewares(
-                config,
-                model_name=model_name,
-                agent_name=agent_name,
-                available_skills=available_skills,
-                app_config=resolved_app_config,
-                deferred_setup=setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=resolved_user_id,
-                authorization_provider=_authz_provider,
-            ),
-            mode,
-        ),
-        system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled,
-            max_concurrent_subagents=max_concurrent_subagents,
-            max_total_subagents=max_total_subagents,
-            agent_name=agent_name,
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            deferred_names=setup.deferred_names,
-            mcp_routing_hints_section=mcp_routing_hints_section,
-            user_id=resolved_user_id,
-            skill_names=skill_setup.skill_names or None,
-            allowed_subagents=allowed_subagents,
-        ),
+        middleware=normalize_middleware_state_schemas(middlewares, mode),
+        system_prompt=system_prompt,
         state_schema=get_thread_state_schema(mode),
     )
     return _complete_assembly(

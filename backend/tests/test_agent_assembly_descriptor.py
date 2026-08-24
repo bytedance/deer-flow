@@ -181,6 +181,41 @@ class TestLeadAgentAssembly:
         assert assembly.descriptor.effective_model
         assert assembly.descriptor.fingerprint
 
+    def test_descriptor_hashes_the_same_scoped_prompt_passed_to_the_graph(self, monkeypatch):
+        from deerflow_extension_api import canonical_hash
+
+        from deerflow.agents.lead_agent import agent as lead_agent_module
+        from deerflow.agents.lead_agent.agent import assemble_lead_agent
+        from deerflow.config.agents_config import AgentConfig
+        from deerflow.extensions import bind_agent_build_extensions
+
+        self._isolate_from_the_ambient_config(monkeypatch)
+        agent_config = AgentConfig(name="custom", allowed_subagents=["general-purpose"])
+        monkeypatch.setattr(lead_agent_module, "load_agent_config", lambda name, *, user_id=None: agent_config)
+
+        prompt_calls = []
+
+        def render_prompt(**kwargs):
+            prompt_calls.append(kwargs)
+            return f"allowed_subagents={kwargs['allowed_subagents']}"
+
+        monkeypatch.setattr(lead_agent_module, "apply_prompt_template", render_prompt)
+        with bind_agent_build_extensions(self._extensions_with_an_agent_assembly_observer()):
+            assembly = assemble_lead_agent(
+                {
+                    "configurable": {
+                        "thread_id": "t-scoped-prompt",
+                        "agent_name": "custom",
+                        "subagent_enabled": True,
+                    }
+                }
+            )
+
+        assert len(prompt_calls) == 1
+        assert prompt_calls[0]["allowed_subagents"] == ["general-purpose"]
+        assert assembly.graph["system_prompt"] == "allowed_subagents=['general-purpose']"
+        assert assembly.descriptor.base_prompt_hash == canonical_hash(assembly.graph["system_prompt"])
+
     def test_observers_receive_the_descriptor(self, monkeypatch):
         from deerflow.agents.lead_agent.agent import assemble_lead_agent
         from deerflow.extensions import bind_agent_build_extensions

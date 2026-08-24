@@ -185,12 +185,14 @@ def test_make_lead_agent_uses_server_auth_identity_for_all_user_scoped_inputs(mo
 
 def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
-    captured: dict[str, object] = {}
+    middleware_calls: list[dict[str, object]] = []
+    prompt_calls: list[dict[str, object]] = []
 
     import deerflow.tools as tools_module
 
     monkeypatch.setattr(lead_agent_module, "_load_enabled_available_skills", lambda *args, **kwargs: [])
-    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: captured.update(kwargs) or [])
+    monkeypatch.setattr(lead_agent_module, "build_middlewares", lambda *args, **kwargs: middleware_calls.append(kwargs) or [])
+    monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **kwargs: prompt_calls.append(kwargs) or "system prompt")
     monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **kwargs: object())
     monkeypatch.setattr(lead_agent_module, "create_agent", lambda **kwargs: kwargs)
     monkeypatch.setattr(lead_agent_module, "build_tracing_callbacks", lambda: [])
@@ -201,7 +203,9 @@ def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatc
         app_config=app_config,
     )
 
-    assert captured["agent_name"] == "game"
+    assert len(middleware_calls) == 1
+    assert middleware_calls[0]["agent_name"] == "game"
+    assert len(prompt_calls) == 1
 
 
 def test_make_lead_agent_attaches_tracing_callbacks_at_graph_root(monkeypatch):
