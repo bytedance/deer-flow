@@ -305,6 +305,28 @@ test("keeps streaming reasoning and answer text out of the processing group", ()
   expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
 });
 
+test("keeps streaming reasoning-only messages in the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: {
+        reasoning_content: "I am still checking the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
 test("keeps post-tool streaming text in the processing group until the turn settles", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Inspect and summarize" },
