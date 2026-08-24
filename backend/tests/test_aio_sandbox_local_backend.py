@@ -147,11 +147,26 @@ def test_resolve_docker_bind_host_defaults_loopback_for_localhost(monkeypatch):
     assert _resolve_docker_bind_host() == "127.0.0.1"
 
 
-def test_resolve_docker_bind_host_keeps_dood_compatibility(monkeypatch):
+def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_for_dood(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
+        lambda: "192.168.64.1",
+    )
 
-    assert _resolve_docker_bind_host() == "0.0.0.0"
+    assert _resolve_docker_bind_host() == "192.168.64.1"
+
+
+def test_resolve_docker_bind_host_falls_back_to_static_bridge_gateway(monkeypatch):
+    monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
+        lambda: None,
+    )
+
+    assert _resolve_docker_bind_host() == "172.17.0.1"
 
 
 def test_resolve_docker_bind_host_uses_ipv6_loopback_for_ipv6_sandbox_host(monkeypatch):
@@ -176,6 +191,28 @@ def test_resolve_docker_bind_host_allows_explicit_override(monkeypatch):
     assert _resolve_docker_bind_host() == "192.0.2.10"
 
 
+def test_resolve_docker_bind_host_allows_restoring_legacy_broad_bind(monkeypatch):
+    """DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0 restores the pre-hardening bind."""
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "0.0.0.0")
+
+    assert _resolve_docker_bind_host() == "0.0.0.0"
+
+
+def _clear_hardening_env(monkeypatch):
+    for var in (
+        "DEER_FLOW_SANDBOX_HOST",
+        "DEER_FLOW_SANDBOX_BIND_HOST",
+        "DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED",
+        "DEER_FLOW_SANDBOX_MEMORY",
+        "DEER_FLOW_SANDBOX_CPUS",
+        "DEER_FLOW_SANDBOX_PIDS_LIMIT",
+        "DEER_FLOW_SANDBOX_CONTAINER_USER",
+        "DEER_FLOW_SANDBOX_NETWORK",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_start_container_binds_local_docker_port_to_loopback_by_default(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
@@ -192,7 +229,7 @@ def test_start_container_binds_local_docker_port_to_loopback_by_default(monkeypa
     assert captured_cmd[captured_cmd.index("-p") + 1] == "127.0.0.1:18080:8080"
 
 
-def test_start_container_keeps_broad_bind_for_dood_sandbox_host(monkeypatch):
+def test_start_container_binds_dood_port_to_bridge_gateway(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,
@@ -202,10 +239,14 @@ def test_start_container_keeps_broad_bind_for_dood_sandbox_host(monkeypatch):
     )
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
+        lambda: "172.17.0.1",
+    )
 
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
-    assert captured_cmd[captured_cmd.index("-p") + 1] == "0.0.0.0:18080:8080"
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "172.17.0.1:18080:8080"
 
 
 def test_start_container_binds_ipv6_sandbox_host_to_ipv6_loopback(monkeypatch):
@@ -237,6 +278,128 @@ def test_start_container_keeps_apple_container_port_format(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
 
     assert captured_cmd[captured_cmd.index("-p") + 1] == "18080:8080"
+
+
+def test_start_container_hardens_docker_run_by_default(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--cap-drop=ALL" in captured_cmd
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "no-new-privileges" in security_opts
+    # Default seccomp profile: the sandbox no longer runs seccomp-unconfined.
+    assert "seccomp=unconfined" not in security_opts
+    assert captured_cmd[captured_cmd.index("--memory") + 1] == "2g"
+    assert captured_cmd[captured_cmd.index("--cpus") + 1] == "2"
+    assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "512"
+    # Opt-in-only knobs stay absent unless explicitly configured.
+    assert "--user" not in captured_cmd
+    assert "--network" not in captured_cmd
+
+
+def test_start_container_seccomp_unconfined_requires_opt_in(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "1")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "seccomp=unconfined" in security_opts
+    assert "no-new-privileges" in security_opts
+
+
+def test_start_container_resource_limits_env_override(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_MEMORY", "4g")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_CPUS", "4")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PIDS_LIMIT", "1024")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--memory") + 1] == "4g"
+    assert captured_cmd[captured_cmd.index("--cpus") + 1] == "4"
+    assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "1024"
+
+
+def test_start_container_resource_limits_can_be_disabled(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_MEMORY", "0")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_CPUS", "none")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PIDS_LIMIT", "0")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--memory" not in captured_cmd
+    assert "--cpus" not in captured_cmd
+    assert "--pids-limit" not in captured_cmd
+
+
+def test_start_container_passes_through_user_and_network(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_CONTAINER_USER", "1000:1000")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "deer-flow-sandbox-egress")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--user") + 1] == "1000:1000"
+    assert captured_cmd[captured_cmd.index("--network") + 1] == "deer-flow-sandbox-egress"
+
+
+def test_start_container_does_not_add_docker_hardening_to_apple_container(monkeypatch):
+    """Apple Container's CLI does not support the Docker hardening flags."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "127.0.0.1")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+
+    assert "--cap-drop=ALL" not in captured_cmd
+    assert "--security-opt" not in captured_cmd
+    assert "--memory" not in captured_cmd
+    assert "--cpus" not in captured_cmd
+    assert "--pids-limit" not in captured_cmd
 
 
 def _backend_for_inspect_tests() -> LocalContainerBackend:
