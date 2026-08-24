@@ -148,7 +148,7 @@ async def test_migration_supersedes_duplicate_active_runs_before_unique_index(tm
     try:
         runs = _fetch_runs(db_path)
 
-        # 0007 keeps the newest duplicate, then 0014 deliberately interrupts
+        # 0007 keeps the newest duplicate, then 0015 deliberately interrupts
         # that pre-existing queued row before durable queue semantics begin.
         newest_status, newest_error, newest_finished_at = runs["run-newest"]
         assert newest_status == "interrupted"
@@ -173,7 +173,7 @@ async def test_migration_supersedes_duplicate_active_runs_before_unique_index(tm
 
         with sqlite3.connect(db_path) as raw:
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version_row[0] == "0014_scheduled_task_enqueue"
+        assert version_row[0] == "0015_scheduled_task_enqueue"
 
         # Sanity: the invariant the index enforces now holds — at most one
         # active row per task_id.

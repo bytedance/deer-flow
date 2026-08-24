@@ -1,7 +1,7 @@
 """Durable scheduled-task enqueue state.
 
-Revision ID: 0014_scheduled_task_enqueue
-Revises: 0013_mcp_task_notifications
+Revision ID: 0015_scheduled_task_enqueue
+Revises: 0014_managed_subagents
 Create Date: 2026-08-20
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0014_scheduled_task_enqueue"
-down_revision: str | Sequence[str] | None = "0013_mcp_task_notifications"
+revision: str = "0015_scheduled_task_enqueue"
+down_revision: str | Sequence[str] | None = "0014_managed_subagents"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
