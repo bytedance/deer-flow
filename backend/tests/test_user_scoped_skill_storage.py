@@ -378,7 +378,7 @@ class TestPathSafety:
             raise
 
         with pytest.raises(ValueError, match="must stay within"):
-            user_storage.validate_skill_file_path(deep_link / "nested" / "SKILL.md")
+            user_storage.validate_skill_file_path(deep_link / "SKILL.md")
         with pytest.raises(ValueError, match="must stay within"):
             user_storage.validate_skill_file_path(public_link / "SKILL.md")
 
