@@ -10,7 +10,64 @@ import logging
 import re
 from pathlib import Path
 
+from deerflow.uploads.manager import is_upload_staging_file
+
 logger = logging.getLogger(__name__)
+
+
+def is_safe_markdown_companion_name(name: str | None) -> bool:
+    """Return whether *name* is a same-directory ``*.md`` basename.
+
+    Rejects path separators, NUL, staging names, and anything other than a
+    markdown basename so caller-supplied ``markdown_file`` cannot escape the
+    uploads directory.
+    """
+    if not isinstance(name, str) or name == ".md" or not name.endswith(".md"):
+        return False
+    if "/" in name or "\\" in name or "\0" in name:
+        return False
+    if Path(name).name != name:
+        return False
+    return not is_upload_staging_file(name)
+
+
+def resolve_converted_markdown_path(
+    file_path: Path,
+    *,
+    companion_name: str | None = None,
+) -> Path | None:
+    """Return the on-disk converted-markdown path for *file_path*, or ``None``.
+
+    Prefers an explicit companion basename (used when conversion renamed
+    ``a.pdf`` to ``a_1.md``). Falls back to a same-directory ``<stem>.md``.
+    Symlinks and paths that resolve outside *file_path*'s directory are ignored.
+    """
+    candidates: list[Path] = []
+    if is_safe_markdown_companion_name(companion_name):
+        candidates.append(file_path.parent / companion_name)
+    sibling = file_path.with_suffix(".md")
+    if sibling not in candidates and is_safe_markdown_companion_name(sibling.name):
+        candidates.append(sibling)
+
+    try:
+        parent_resolved = file_path.parent.resolve()
+    except OSError:
+        return None
+
+    for md_path in candidates:
+        try:
+            if md_path.is_symlink() or not md_path.is_file():
+                continue
+            resolved = md_path.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved.parent != parent_resolved:
+            continue
+        if resolved.suffix.lower() != ".md":
+            continue
+        return md_path
+    return None
+
 
 # Regex for bold structural headings produced by pymupdf4llm when it can't
 # promote bold text to a Markdown # heading (common in SEC filings).
@@ -124,11 +181,16 @@ def extract_outline(md_path: Path) -> list[dict]:
     return outline
 
 
-def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
+def extract_outline_for_file(
+    file_path: Path,
+    *,
+    companion_name: str | None = None,
+) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
     Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline.
+    pipeline, or an explicit companion basename when conversion renamed it
+    (for example ``a.pdf`` → ``a_1.md``).
 
     Returns:
         (outline, preview) where:
@@ -138,8 +200,8 @@ def extract_outline_for_file(file_path: Path) -> tuple[list[dict], list[str]]:
           anchor when outline is empty so the agent has some context.
           Empty when outline is non-empty (no fallback needed).
     """
-    md_path = file_path.with_suffix(".md")
-    if not md_path.is_file():
+    md_path = resolve_converted_markdown_path(file_path, companion_name=companion_name)
+    if md_path is None:
         return [], []
 
     outline = extract_outline(md_path)

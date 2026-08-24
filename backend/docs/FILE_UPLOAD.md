@@ -110,7 +110,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下，文件名为原文件名 + `.md` 扩展名。
+转换后的 Markdown 文件会保存在同一目录下。通常名为原 stem + `.md`；若该名已被占用（例如同一次上传了 `a.docx` 和 `a.pdf`），则会写成 `a_1.md` 这样的唯一名，并通过上传响应的 `markdown_file` 返回。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -128,27 +128,30 @@ The following files were uploaded in this message:
 
 - document.pdf (1.2 MB)
   Path: /mnt/user-data/uploads/document.pdf
+  Converted text: /mnt/user-data/uploads/document.md
+  Document outline (line numbers refer to the converted text; use `read_file` on that path):
+    L1: Introduction
 
 To work with these files:
-- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
+- If a file lists Converted text, call `read_file` on that path. `read_file` cannot open binary originals such as .pdf or .xlsx.
+- Otherwise read from the listed Path first — use the outline line numbers and `read_file` to locate relevant sections.
 - Use `grep` to search for keywords when you are not sure which section to look at.
 - Use `glob` to find files by name pattern.
 </current_uploads>
 ```
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
-`list_uploaded_files` 查询历史上传；如果已知文件名，也可直接使用
-`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
+`list_uploaded_files` 查询历史上传；该工具仍会隐藏作为转换产物的
+companion `.md` 行，但会在原文件条目上返回 `markdown_file` /
+`markdown_path`。如果已知文件名，也可直接使用 `read_file` 或 `grep`
+访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
 Agent 在沙箱中运行，使用虚拟路径访问文件。Agent 可以直接使用 `read_file` 工具读取上传的文件：
 
 ```python
-# 读取原始 PDF（如果支持）
-read_file(path="/mnt/user-data/uploads/document.pdf")
-
-# 读取转换后的 Markdown（推荐）
+# 二进制原件无法用 read_file 打开；使用 Converted text 路径
 read_file(path="/mnt/user-data/uploads/document.md")
 ```
 

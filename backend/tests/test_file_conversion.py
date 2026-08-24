@@ -485,3 +485,37 @@ class TestExtractOutline:
         assert len(outline) == 1
         # Title must be clean — no ** ** artefacts
         assert outline[0]["title"] == "UNITED STATES SECURITIES AND EXCHANGE COMMISSION"
+
+
+class TestResolveConvertedMarkdownPath:
+    def test_explicit_companion_wins_over_sibling(self, tmp_path):
+        from deerflow.utils.file_outline import resolve_converted_markdown_path
+
+        pdf = tmp_path / "a.pdf"
+        pdf.write_bytes(b"%PDF")
+        (tmp_path / "a.md").write_text("# DOCX\n", encoding="utf-8")
+        renamed = tmp_path / "a_1.md"
+        renamed.write_text("# PDF\n", encoding="utf-8")
+
+        assert resolve_converted_markdown_path(pdf, companion_name="a_1.md") == renamed
+
+    def test_rejects_path_traversal_and_falls_back_to_sibling(self, tmp_path):
+        from deerflow.utils.file_outline import resolve_converted_markdown_path
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF")
+        sibling = tmp_path / "report.md"
+        sibling.write_text("# Safe\n", encoding="utf-8")
+
+        assert resolve_converted_markdown_path(pdf, companion_name="../escape.md") == sibling
+
+    def test_ignores_symlink_companion(self, tmp_path):
+        from deerflow.utils.file_outline import resolve_converted_markdown_path
+
+        pdf = tmp_path / "report.pdf"
+        pdf.write_bytes(b"%PDF")
+        target = tmp_path / "outside.md"
+        target.write_text("# LEAK\n", encoding="utf-8")
+        (tmp_path / "report.md").symlink_to(target)
+
+        assert resolve_converted_markdown_path(pdf) is None

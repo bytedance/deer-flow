@@ -20,7 +20,7 @@ from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
 from deerflow.uploads.manager import is_upload_staging_file
-from deerflow.utils.file_outline import extract_outline_for_file
+from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 
 logger = logging.getLogger(__name__)
 
@@ -157,10 +157,17 @@ def _list_uploaded_files_impl(
             "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
             "extension": neutralize_untrusted_tags(file_path.suffix),
         }
+        companion = resolve_converted_markdown_path(file_path)
+        if companion is not None and companion.name != filename:
+            file_info["markdown_file"] = neutralize_untrusted_tags(companion.name)
+            file_info["markdown_path"] = neutralize_untrusted_tags(f"/mnt/user-data/uploads/{companion.name}")
 
         should_include_outline = outline_for_all or filename in outline_filenames
         if should_include_outline:
-            outline, preview = extract_outline_for_file(file_path)
+            outline, preview = extract_outline_for_file(
+                file_path,
+                companion_name=companion.name if companion is not None else None,
+            )
             if outline:
                 file_info["outline"] = [{**entry, "title": neutralize_untrusted_tags(entry["title"])} if "title" in entry else entry for entry in outline]
             if preview:
@@ -191,7 +198,7 @@ def list_uploaded_files(
     include_outline: Annotated[
         bool | list[str],
         "Control which files get their document outline (headings/preview) returned. "
-        "False (default): no outline for any file — just filename, size, and path. "
+        "False (default): no outline for any file — just filename, size, path, and converted-text companion when one exists. "
         "True: include outline/preview for every .md-convertible file. "
         'list of filenames: include outline/preview only for those specific files (e.g. ["report.md", "data.csv"]).',
     ] = False,

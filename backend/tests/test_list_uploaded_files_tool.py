@@ -186,6 +186,20 @@ class TestListUploadedFiles:
         assert "outline" in result["files"][0]
         assert result["files"][0]["outline"][0]["title"] == "Heading 1"
         assert result["files"][0]["outline"][1]["title"] == "Heading 2"
+        assert result["files"][0]["markdown_file"] == "doc.md"
+        assert result["files"][0]["markdown_path"] == "/mnt/user-data/uploads/doc.md"
+
+    def test_attaches_converted_markdown_path_without_listing_the_companion(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "report.md").write_text("# Report\n", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(runtime=_runtime(), _paths=_paths(tmp_path))
+
+        filenames = [f["filename"] for f in result["files"]]
+        assert filenames == ["report.pdf"]
+        assert result["files"][0]["markdown_file"] == "report.md"
+        assert result["files"][0]["markdown_path"] == "/mnt/user-data/uploads/report.md"
 
     def test_include_outline_list(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)

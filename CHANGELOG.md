@@ -275,6 +275,7 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **uploads:** Surface the converted Markdown companion in `<current_uploads>` and `list_uploaded_files`, and forward `markdown_file` from the frontend, so the agent can `read_file` UTF-8 text instead of the binary original. Outline line numbers now refer to that companion path. Related to [#3750].
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview.
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
@@ -1148,6 +1149,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#3730]: https://github.com/bytedance/deer-flow/pull/3730
 [#3733]: https://github.com/bytedance/deer-flow/pull/3733
 [#3740]: https://github.com/bytedance/deer-flow/pull/3740
+[#3750]: https://github.com/bytedance/deer-flow/issues/3750
 [#3753]: https://github.com/bytedance/deer-flow/pull/3753
 [#3760]: https://github.com/bytedance/deer-flow/pull/3760
 [#3764]: https://github.com/bytedance/deer-flow/pull/3764

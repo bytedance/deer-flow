@@ -642,6 +642,67 @@ class TestBeforeAgent:
         assert "ITEM 1. BUSINESS" in content
         assert "ITEM 2. RISK" in content
         assert "read_file" in content
+        # Line numbers come from the companion markdown, so the agent must
+        # see that readable path rather than only the binary original.
+        assert "Converted text: /mnt/user-data/uploads/report.md" in content
+        assert "line numbers refer to the converted text" in content
+        assert result["uploaded_files"][0]["markdown_file"] == "report.md"
+
+    def test_explicit_markdown_file_wins_over_same_stem_sibling(self, tmp_path):
+        """Collision-renamed companions (a.pdf → a_1.md) must not use a.md."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.docx").write_bytes(b"docx")
+        (uploads_dir / "a.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "a.md").write_text("# FROM DOCX\n\n## Docx Heading\n", encoding="utf-8")
+        (uploads_dir / "a_1.md").write_text("# FROM PDF\n\n## Pdf Heading\n", encoding="utf-8")
+
+        msg = _human(
+            "compare",
+            files=[
+                {"filename": "a.docx", "size": 4, "path": "/mnt/user-data/uploads/a.docx"},
+                {
+                    "filename": "a.pdf",
+                    "size": 4,
+                    "path": "/mnt/user-data/uploads/a.pdf",
+                    "markdown_file": "a_1.md",
+                },
+            ],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Converted text: /mnt/user-data/uploads/a.md" in content
+        assert "Converted text: /mnt/user-data/uploads/a_1.md" in content
+        assert "Pdf Heading" in content
+        uploaded = {entry["filename"]: entry for entry in result["uploaded_files"]}
+        assert uploaded["a.pdf"]["markdown_file"] == "a_1.md"
+        assert uploaded["a.docx"]["markdown_file"] == "a.md"
+
+    def test_rejects_markdown_file_path_traversal(self, tmp_path):
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "report.pdf").write_bytes(b"%PDF")
+        (uploads_dir / "report.md").write_text("# Safe\n", encoding="utf-8")
+
+        msg = _human(
+            "go",
+            files=[
+                {
+                    "filename": "report.pdf",
+                    "size": 4,
+                    "path": "/mnt/user-data/uploads/report.pdf",
+                    "markdown_file": "../escape.md",
+                }
+            ],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "../escape.md" not in content
+        assert "Converted text: /mnt/user-data/uploads/report.md" in content
 
     def test_no_outline_when_no_md_file(self, tmp_path):
         """Files without a sibling .md have no outline section."""
