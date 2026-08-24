@@ -25,6 +25,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_output_synopsis import render_tool_output_preview
+from deerflow.agents.middlewares.tool_transform_meta import append_tool_transform
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -338,8 +339,12 @@ def _budget_content(
     outputs_path: str | None,
     config: ToolOutputConfig,
     sandbox: Sandbox | None = None,
-) -> str | None:
-    """Apply budget to *content*. Returns ``None`` if no change needed."""
+) -> tuple[str, str] | None:
+    """Apply budget to *content* and name the applied transform.
+
+    Returns ``(replacement, transform_kind)`` — ``"externalized"`` or
+    ``"truncated"`` — or ``None`` if no change was needed.
+    """
     threshold = config.tool_overrides.get(tool_name, config.externalize_min_chars)
     if threshold <= 0 and config.fallback_max_chars <= 0:
         return None
@@ -397,12 +402,15 @@ def _budget_content(
                 len(content),
                 virtual_path,
             )
-            return _build_preview(
-                content,
-                tool_name=tool_name,
-                virtual_path=virtual_path,
-                head_chars=config.preview_head_chars,
-                tail_chars=config.preview_tail_chars,
+            return (
+                _build_preview(
+                    content,
+                    tool_name=tool_name,
+                    virtual_path=virtual_path,
+                    head_chars=config.preview_head_chars,
+                    tail_chars=config.preview_tail_chars,
+                ),
+                "externalized",
             )
 
     if config.fallback_max_chars > 0 and len(content) > config.fallback_max_chars:
@@ -412,12 +420,15 @@ def _budget_content(
             len(content),
             config.fallback_max_chars,
         )
-        return _build_fallback(
-            content,
-            tool_name=tool_name,
-            max_chars=config.fallback_max_chars,
-            head_chars=config.fallback_head_chars,
-            tail_chars=config.fallback_tail_chars,
+        return (
+            _build_fallback(
+                content,
+                tool_name=tool_name,
+                max_chars=config.fallback_max_chars,
+                head_chars=config.fallback_head_chars,
+                tail_chars=config.fallback_tail_chars,
+            ),
+            "truncated",
         )
 
     return None
@@ -443,7 +454,7 @@ def _patch_tool_message(
     if text is None:
         return msg
 
-    replacement = _budget_content(
+    budgeted = _budget_content(
         text,
         tool_name=tool_name,
         tool_call_id=msg.tool_call_id or "",
@@ -451,14 +462,16 @@ def _patch_tool_message(
         config=config,
         sandbox=sandbox,
     )
-    if replacement is None:
+    if budgeted is None:
         return msg
+    replacement, transform_kind = budgeted
 
     update: dict[str, Any] = {"content": replacement}
     if getattr(msg, "response_metadata", None):
         update["response_metadata"] = dict(msg.response_metadata)
-    if getattr(msg, "additional_kwargs", None):
-        update["additional_kwargs"] = dict(msg.additional_kwargs)
+    new_kwargs = dict(getattr(msg, "additional_kwargs", None) or {})
+    append_tool_transform(new_kwargs, transform_kind, by="ToolOutputBudgetMiddleware")
+    update["additional_kwargs"] = new_kwargs
     return msg.model_copy(update=update)
 
 
@@ -576,6 +589,9 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
     def __init__(self, config: ToolOutputConfig | None = None) -> None:
         super().__init__()
         self._config = config if config is not None else _default_config()
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"config": self._config.model_dump(mode="python")}
 
     @classmethod
     def from_app_config(cls, app_config: Any) -> ToolOutputBudgetMiddleware:

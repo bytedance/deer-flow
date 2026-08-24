@@ -231,7 +231,7 @@ export function ArtifactFileDetail({
     isWriteFile,
     isSkillFile,
     isMock: Boolean(isMock),
-    hasRevision: typeof sha256 === "string",
+    hasRevision: typeof sha256 === "string" && sha256.length === 64,
     isStaticWebsite: env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true",
   });
   const editorContent = isDirty ? activeDraft.draftContent : visibleContent;

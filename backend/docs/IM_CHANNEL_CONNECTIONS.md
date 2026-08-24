@@ -230,6 +230,11 @@ the resulting virtual path (or a failure notice). Historical uploads are not
 automatically injected on later turns; the agent discovers them with
 `list_uploaded_files`.
 
+Feishu/Lark inbound resource streams are read with a 20,000,000-byte cap before
+they are persisted or synced into a non-local sandbox. Oversized resources and
+per-file path failures are surfaced as a failure placeholder in the message text
+without aborting later attachments in the same inbound message.
+
 ```mermaid
 sequenceDiagram
     autonumber

@@ -1,10 +1,16 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from fastapi import HTTPException
 
 from app.gateway.routers import scheduled_tasks
+from deerflow.config.database_config import DatabaseConfig
+from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
+from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 
 @pytest.mark.parametrize(
@@ -32,10 +38,27 @@ def test_scheduled_task_models_reject_invalid_thread_ids(model, thread_id):
         model(**kwargs)
 
 
+@pytest.mark.parametrize(
+    ("status", "offers_pause_cancellation"),
+    [
+        ("queued", True),
+        ("launching", False),
+        ("running", False),
+    ],
+)
+def test_active_occurrence_conflict_detail_only_offers_pause_for_queued(status, offers_pause_cancellation):
+    detail = scheduled_tasks._active_occurrence_conflict_detail(status)
+
+    assert f"active {status} occurrence" in detail
+    assert ("cancel the queued occurrence by pausing the task" in detail) is offers_pause_cancellation
+
+
 class _Repo:
     def __init__(self) -> None:
         self.created = []
         self.items = {}
+        self.active_status = None
+        self.cancelled_queue = False
 
     async def list_by_user(self, user_id: str):
         return [item for item in self.items.values() if item["user_id"] == user_id]
@@ -67,12 +90,39 @@ class _Repo:
             return None
         return item
 
-    async def update(self, task_id: str, *, user_id: str, updates):
+    async def update(self, task_id: str, *, user_id: str, updates, require_mutable: bool = False):
         item = await self.get(task_id, user_id=user_id)
         if item is None:
             return None
         item.update(updates)
         return item
+
+    async def get_active_run_status(self, task_id: str):
+        return self.active_status
+
+    async def pause_with_queue_cancellation(self, task_id: str, *, user_id: str, **_kwargs):
+        item = await self.get(task_id, user_id=user_id)
+        if item is None:
+            return "not_found"
+        if self.active_status in {"launching", "running"}:
+            return "executing"
+        if self.active_status == "queued":
+            self.cancelled_queue = True
+            self.active_status = None
+        item["status"] = "paused"
+        return "paused"
+
+    async def delete_with_queue_cancellation(self, task_id: str, *, user_id: str, **_kwargs):
+        item = await self.get(task_id, user_id=user_id)
+        if item is None:
+            return "not_found"
+        if self.active_status in {"launching", "running"}:
+            return "executing"
+        if self.active_status == "queued":
+            self.cancelled_queue = True
+            self.active_status = None
+        self.items.pop(task_id, None)
+        return "deleted"
 
     async def delete(self, task_id: str, *, user_id: str):
         item = await self.get(task_id, user_id=user_id)
@@ -325,6 +375,83 @@ async def test_update_scheduled_task_writes_repo():
 
 
 @pytest.mark.asyncio
+async def test_update_rechecks_atomic_mutability_after_router_precheck(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_thread_store = scheduled_tasks.get_thread_store
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+
+        class PrecheckBarrierRepository(ScheduledTaskRepository):
+            def __init__(self, session_factory):
+                super().__init__(session_factory)
+                self.prechecked = asyncio.Event()
+                self.resume = asyncio.Event()
+
+            async def get_active_run_status(self, task_id: str):
+                status = await super().get_active_run_status(task_id)
+                if status is None:
+                    self.prechecked.set()
+                    await self.resume.wait()
+                return status
+
+        repo = PrecheckBarrierRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        task = await repo.create(
+            task_id="task-router-atomic-patch",
+            user_id="user-1",
+            thread_id="thread-1",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Atomic patch",
+            prompt="original prompt",
+            schedule_type="cron",
+            schedule_spec={"cron": "0 9 * * *"},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_thread_store = lambda _request: SimpleNamespace(check_access=AsyncMock(return_value=True))
+        scheduled_tasks.get_config = lambda: _Config()
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
+
+        patch_call = asyncio.create_task(
+            scheduled_tasks.update_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=SimpleNamespace(),
+                body=scheduled_tasks.ScheduledTaskUpdateRequest(prompt="changed after admission"),
+            )
+        )
+        await repo.prechecked.wait()
+        await run_repo.create(
+            run_record_id="task-run-router-atomic-patch",
+            task_id=task["id"],
+            thread_id="thread-1",
+            scheduled_for=datetime.now(UTC),
+            trigger="manual",
+            status="queued",
+        )
+        repo.resume.set()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await patch_call
+        assert exc_info.value.status_code == 409
+        assert "active queued occurrence" in exc_info.value.detail
+        current = await repo.get(task["id"], user_id="user-1")
+        assert current is not None
+        assert current["prompt"] == "original prompt"
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_thread_store = old_thread_store
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+        await close_engine()
+
+
+@pytest.mark.asyncio
 async def test_delete_scheduled_task_deletes_repo_row():
     repo = _Repo()
     task = await repo.create(
@@ -401,6 +528,81 @@ async def test_pause_and_resume_scheduled_task_update_status():
 
     assert paused_status == "paused"
     assert resumed["status"] == "enabled"
+
+
+@pytest.mark.asyncio
+async def test_pause_cancels_waiting_occurrence_before_pausing_task():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-queued",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Queued task",
+        prompt="Prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    repo.active_status = "queued"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        result = await scheduled_tasks.pause_scheduled_task.__wrapped__(
+            task_id=task["id"],
+            request=request,
+        )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert result["status"] == "paused"
+    assert repo.cancelled_queue is True
+
+
+@pytest.mark.asyncio
+async def test_delete_rejects_occurrence_that_has_started_launching():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-launching",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Launching task",
+        prompt="Prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    repo.active_status = "launching"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.delete_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "launching or running" in str(exc_info.value)
+    assert task["id"] in repo.items
 
 
 @pytest.mark.asyncio
@@ -486,6 +688,50 @@ async def test_update_rejects_running_task():
         scheduled_tasks.get_optional_user_from_request = old_user
 
     assert "currently running" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_queued_task_definition_until_occurrence_finishes():
+    repo = _Repo()
+    task = await repo.create(
+        task_id="task-queued",
+        user_id="user-1",
+        thread_id="thread-1",
+        context_mode="reuse_thread",
+        assistant_id="lead_agent",
+        title="Queued task",
+        prompt="Original prompt",
+        schedule_type="cron",
+        schedule_spec={"cron": "0 9 * * *"},
+        timezone="UTC",
+        next_run_at=None,
+    )
+    repo.active_status = "queued"
+    request = SimpleNamespace()
+    user = SimpleNamespace(id="user-1")
+    config = _Config()
+
+    old_repo = scheduled_tasks.get_scheduled_task_repo
+    old_config = scheduled_tasks.get_config
+    old_user = scheduled_tasks.get_optional_user_from_request
+    try:
+        scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
+        scheduled_tasks.get_config = lambda: config
+        scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
+
+        with pytest.raises(Exception) as exc_info:
+            await scheduled_tasks.update_scheduled_task.__wrapped__(
+                task_id=task["id"],
+                request=request,
+                body=scheduled_tasks.ScheduledTaskUpdateRequest(prompt="Changed while queued"),
+            )
+    finally:
+        scheduled_tasks.get_scheduled_task_repo = old_repo
+        scheduled_tasks.get_config = old_config
+        scheduled_tasks.get_optional_user_from_request = old_user
+
+    assert "active queued occurrence" in str(exc_info.value)
+    assert repo.items[task["id"]]["prompt"] == "Original prompt"
 
 
 @pytest.mark.asyncio

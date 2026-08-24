@@ -1,15 +1,14 @@
 """Concurrency regression tests for the scheduled-task dispatch TOCTOU.
 
-``ScheduledTaskService.dispatch_task`` guards the "at most one active run per
-task when overlap_policy=skip" invariant with a non-atomic
-``has_active_runs`` check followed by a separate ``create(status="queued")``
+``ScheduledTaskService.dispatch_task`` guards the "at most one non-terminal
+occurrence per task" invariant with a non-atomic active-row lookup followed by
+a separate ``create(status="queued")``
 insert. Two concurrent dispatches (double-click, client retry, or a manual
 trigger racing the poller) can both pass the check and both launch. The fix
 makes the database the atomic arbiter via the partial unique index
 ``uq_scheduled_task_run_active`` (``task_id WHERE status IN
-('queued','running')``); the losing insert is translated to the typed
-``ActiveScheduledRunConflict`` and collapsed to the same outcome as the
-fast-path check.
+('queued','launching','running')``); the losing insert is translated to the
+typed ``ActiveScheduledRunConflict``.
 
 These tests drive the REAL ``ScheduledTaskRunRepository`` + ``ScheduledTaskService``
 against a real file-backed ``sqlite+aiosqlite`` DB (so the index is actually
@@ -31,22 +30,24 @@ from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 
 pytestmark = pytest.mark.asyncio
 
-_ACTIVE_STATUSES = {"queued", "running"}
+_ACTIVE_STATUSES = {"queued", "launching", "running"}
 
 
 class _BarrierRunRepo(ScheduledTaskRunRepository):
     """Real repository that only releases both dispatchers past
-    ``has_active_runs`` once both have read it, so their ``create()`` calls
+    ``get_active_run`` once both have read it, so their ``create()`` calls
     genuinely race for the task's single active slot — a deterministic
     reproduction of the check-then-insert TOCTOU."""
 
     def __init__(self, session_factory, barrier: asyncio.Barrier | None) -> None:
         super().__init__(session_factory)
         self._barrier = barrier
+        self._barrier_reads = 0
 
-    async def has_active_runs(self, task_id: str) -> bool:
-        result = await super().has_active_runs(task_id)
-        if self._barrier is not None:
+    async def get_active_run(self, task_id: str):
+        result = await super().get_active_run(task_id)
+        self._barrier_reads += 1
+        if self._barrier is not None and self._barrier_reads <= 2:
             await self._barrier.wait()
         return result
 
@@ -87,7 +88,7 @@ async def _seed_task(task_repo: ScheduledTaskRepository, task_id: str) -> dict:
     )
     task = await task_repo.get(task_id, user_id="user-1")
     assert task is not None
-    assert task["overlap_policy"] == "skip"
+    assert task["overlap_policy"] == "enqueue"
     return task
 
 
@@ -114,13 +115,13 @@ async def test_two_concurrent_manual_dispatches_launch_exactly_once(tmp_path):
         )
 
         outcomes = sorted(result["outcome"] for result in results)
-        # Exactly one wins the active slot; the loser is a 409-style conflict.
-        assert outcomes == ["conflict", "launched"], outcomes
+        # Exactly one wins the occurrence slot; the loser either observes the
+        # queued row and coalesces into it or sees execution already starting.
+        assert outcomes.count("launched") == 1, outcomes
+        assert set(outcomes) <= {"launched", "queued", "conflict"}, outcomes
         assert len(launched) == 1, launched
         assert await _active_run_count(run_repo, "task-race-manual") == 1
-        # The manual loser records no run-history row (nothing was scheduled).
-        conflict = next(r for r in results if r["outcome"] == "conflict")
-        assert conflict["task_run_id"] is None
+        assert len({r["task_run_id"] for r in results if r["task_run_id"] is not None}) == 1
     finally:
         await close_engine()
 
@@ -143,10 +144,9 @@ async def test_scheduled_and_manual_dispatch_launch_exactly_once(tmp_path):
         )
 
         outcomes = sorted(result["outcome"] for result in results)
-        # Whichever won launched; the loser is conflict (manual) or skipped
-        # (scheduled). Which one wins is timing-dependent, but exactly one runs.
+        # Whichever won launched; the loser coalesces or sees execution begin.
         assert outcomes.count("launched") == 1, outcomes
-        assert set(outcomes) <= {"launched", "conflict", "skipped"}, outcomes
+        assert set(outcomes) <= {"launched", "queued", "conflict"}, outcomes
         assert len(launched) == 1, launched
         assert await _active_run_count(run_repo, "task-race-mixed") == 1
     finally:

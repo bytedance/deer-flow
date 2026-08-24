@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, override, runtime_checkable
 
+from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
@@ -17,11 +18,14 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
 from deerflow.utils.messages import is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
+_COMPACTION_TRANSFORM_KIND = "summarization"
+_COMPACTION_TRANSFORM_VERSION = "1"
 _UNSET = object()
 # Valid non-generated summaries for the empty / too-long-to-summarize edges; these
 # short-circuit model invocation (and must not be treated as generation failures).
@@ -150,6 +154,28 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # that failed, so a broken candidate config is not retried every turn and does
         # not escape the fail-open boundary).
         self._model_cache: dict[str | None, Any] = {}
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Return the effective compaction policy used for release identity."""
+
+        def plain_size(value: object) -> object:
+            if isinstance(value, tuple):
+                return [plain_size(child) for child in value]
+            if isinstance(value, list):
+                return [plain_size(child) for child in value]
+            return value
+
+        return {
+            "trigger": plain_size(self.trigger),
+            "keep": plain_size(self.keep),
+            "trim_tokens_to_summarize": self.trim_tokens_to_summarize,
+            "summary_prompt_hash": canonical_hash(self.summary_prompt),
+            # self.model is a chat-model object and is not JSON-serialisable; the
+            # anchor model name is the identity that actually drives compaction
+            # behaviour (token counting/profile inspection and, absent an
+            # explicit configured summary model, generation itself).
+            "summary_model": self._anchor_model_name,
+        }
 
     def _tag_nostream(self, model: Any) -> Any:
         """Return a copy of ``model`` carrying TAG_NOSTREAM without clobbering tags.
@@ -542,6 +568,52 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
 
+    def _freeze_compaction_sources(self, messages_to_summarize: list[AnyMessage]) -> tuple[str, ...]:
+        """Hash each about-to-be-removed message's content before the summary call.
+
+        Returns empty when no ``ContextCompactionObserver`` is registered. The
+        hashing is an O(context-size) canonical-JSON pass, and
+        ``notify_context_compacted`` would discard the event anyway; an install
+        with no observer must not pay for one, the same rule ``_complete_assembly``
+        follows for descriptor construction. The check cannot live only in the
+        notify call — by then the work is already done.
+
+        Once the summary call returns, ``messages_to_summarize`` is gone from state —
+        only the produced summary remains. The mapping from "these messages" to "this
+        summary" exists only in this stack frame, so it must be captured now rather
+        than reconstructed later.
+
+        Hashes ``message.content`` directly, never ``str(message.content)``:
+        DeerFlow messages are routinely multimodal (``list[dict]`` content, e.g.
+        ``view_image_middleware``'s injected image payloads), and ``str()`` on a
+        dict renders insertion order, so pre-stringifying would make two
+        logically identical messages hash differently. ``canonical_hash`` exists
+        precisely to normalize that away (sorted keys via ``canonical_json``);
+        stringifying first throws the normalization away before it runs.
+        """
+        extensions = getattr(self, "_extensions", None)
+        if extensions is None or not extensions.context_compaction_observers:
+            return ()
+        return tuple(canonical_hash(message.content) for message in messages_to_summarize)
+
+    def _record_compaction(
+        self,
+        source_content_hashes: tuple[str, ...],
+        *,
+        summary: str,
+        compacted_message_count: int,
+        kept_message_count: int,
+    ) -> None:
+        event = CompactionEvent(
+            transform_kind=_COMPACTION_TRANSFORM_KIND,
+            transform_version=_COMPACTION_TRANSFORM_VERSION,
+            source_content_hashes=source_content_hashes,
+            output_content_hash=canonical_hash(summary),
+            compacted_message_count=compacted_message_count,
+            kept_message_count=kept_message_count,
+        )
+        notify_context_compacted(event, extensions=self._extensions)
+
     def compact_state(
         self,
         state: AgentState,
@@ -562,6 +634,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
+        source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             if raise_on_failure:
@@ -572,6 +645,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # duplicate that work on the next attempt. Messages are still removed after
         # this returns (in _maybe_summarize), so hooks run before they are gone.
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._record_compaction(
+            source_content_hashes,
+            summary=summary,
+            compacted_message_count=len(messages_to_summarize),
+            kept_message_count=len(preserved_messages),
+        )
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -594,6 +673,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
         from deerflow_extension_api import task_store_from_runtime
 
+        source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
         summary = await self._asummarize_with(
             messages_to_summarize,
             previous_summary=previous_summary,
@@ -605,6 +685,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             return None
         # Fire hooks only once a replacement summary exists (see compact_state).
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._record_compaction(
+            source_content_hashes,
+            summary=summary,
+            compacted_message_count=len(messages_to_summarize),
+            kept_message_count=len(preserved_messages),
+        )
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),

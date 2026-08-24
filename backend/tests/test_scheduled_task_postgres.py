@@ -73,29 +73,39 @@ async def _create_cron_task(task_repo: ScheduledTaskRepository, task_id: str, *,
 
 @pytest.mark.asyncio
 async def test_postgres_global_budget_serializes_cross_pod_claims(postgres_repositories):
-    task_repo, _task_run_repo, _run_repo = postgres_repositories
+    task_repo, task_run_repo, _run_repo = postgres_repositories
     now = datetime.now(UTC)
-    await _create_cron_task(task_repo, "task-a", next_run_at=now)
-    await _create_cron_task(task_repo, "task-b", next_run_at=now)
+    for suffix in ("a", "b"):
+        await _create_cron_task(task_repo, f"task-{suffix}", next_run_at=now)
+        await task_run_repo.create(
+            run_record_id=f"task-run-{suffix}",
+            task_id=f"task-{suffix}",
+            thread_id=f"thread-{suffix}",
+            scheduled_for=now,
+            trigger="scheduled",
+            status="queued",
+        )
 
     claims = await asyncio.gather(
-        task_repo.claim_due_tasks(
+        task_run_repo.claim_queued_run(
+            "task-run-a",
             now=now,
             lease_owner="pod-a",
             lease_seconds=60,
-            limit=1,
             global_max_concurrent_runs=1,
         ),
-        task_repo.claim_due_tasks(
+        task_run_repo.claim_queued_run(
+            "task-run-b",
             now=now,
             lease_owner="pod-b",
             lease_seconds=60,
-            limit=1,
             global_max_concurrent_runs=1,
         ),
     )
 
-    assert sum(len(claimed) for claimed in claims) == 1
+    assert sum(claimed is not None for claimed in claims) == 1
+    statuses = {(await task_run_repo.list_by_task(task_id))[0]["status"] for task_id in ("task-a", "task-b")}
+    assert statuses == {"queued", "launching"}
 
 
 @pytest.mark.asyncio
