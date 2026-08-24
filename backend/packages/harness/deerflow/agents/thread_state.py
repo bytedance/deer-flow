@@ -42,6 +42,13 @@ class ThreadDataState(TypedDict):
     outputs_path: NotRequired[str | None]
 
 
+class BackgroundTaskState(TypedDict):
+    task_id: str
+    task_name: str
+    status: str
+    updated_at: str
+
+
 class ViewedImageData(TypedDict):
     """Metadata for a viewed image file.
 
@@ -274,6 +281,7 @@ class ThreadState(AgentState):
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+    background_tasks: NotRequired[list[BackgroundTaskState]]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:

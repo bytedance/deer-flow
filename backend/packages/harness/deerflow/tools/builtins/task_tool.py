@@ -84,10 +84,16 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, exe
         logger.error(f"[trace={trace_id}] Deferred cleanup failed for execution {execution_id}: {exc}")
 
 
-def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> None:
+_deferred_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> asyncio.Task[None]:
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled execution {execution_id}")
     cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(execution_id, trace_id, max_polls))
+    _deferred_cleanup_tasks.add(cleanup_task)
+    cleanup_task.add_done_callback(_deferred_cleanup_tasks.discard)
     cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, execution_id=execution_id))
+    return cleanup_task
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
@@ -262,18 +268,15 @@ async def task_tool(
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
-    available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
+    allowed_subagents = metadata.get("allowed_subagents")
+    if allowed_subagents is None:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
+    else:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
-    # Get subagent configuration
-    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
-    if config is None:
-        available = ", ".join(available_subagent_names)
-        error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
-        return _task_result_command(
-            tool_call_id=tool_call_id,
-            status="failed",
-            error=error,
-        )
+    # Preserve the dedicated sandbox-policy guidance before the generic
+    # registry/policy membership gate filters bash from the visible catalog.
     if subagent_type == "bash":
         host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
         if not host_bash_allowed:
@@ -283,6 +286,21 @@ async def task_tool(
                 error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
             )
 
+    # Get subagent configuration
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    if config is None or subagent_type not in available_subagent_names:
+        if available_subagent_names:
+            available = ", ".join(available_subagent_names)
+        elif allowed_subagents is not None:
+            available = "none permitted by caller policy"
+        else:
+            available = "none"
+        error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
+        return _task_result_command(
+            tool_call_id=tool_call_id,
+            status="failed",
+            error=error,
+        )
     # Build config overrides
     overrides: dict = {}
 
@@ -298,8 +316,6 @@ async def task_tool(
     trace_id = None
     user_id = None
     deerflow_trace_id = None
-    metadata: dict = {}
-
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
@@ -308,7 +324,6 @@ async def task_tool(
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
         # Try to get parent model from configurable
-        metadata = runtime.config.get("metadata", {})
         parent_model = metadata.get("model_name")
 
         # Get or generate trace_id for distributed tracing

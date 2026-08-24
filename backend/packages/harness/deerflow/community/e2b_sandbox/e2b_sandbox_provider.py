@@ -2016,7 +2016,10 @@ class E2BSandboxProvider(SandboxProvider):
             if time.monotonic() >= deadline:
                 truncated_reason = f"time budget {self._SYNC_DEADLINE_SECONDS}s"
                 break
-            entry = entry.strip()
+            # NUL already delimits records, so do NOT strip: a filename that
+            # legitimately ends in whitespace (e.g. "report ") would have its
+            # trailing space trimmed here, pointing host_path at the wrong
+            # file and recording a manifest key that never matches again.
             if not entry:
                 continue
             try:
@@ -2096,7 +2099,21 @@ class E2BSandboxProvider(SandboxProvider):
                 host_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = host_path.with_name(host_path.name + ".e2bsync.tmp")
                 tmp_path.write_bytes(data)
-                os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
+                # os.utime rejects ns values outside roughly +/-2^63; a remote
+                # mtime far in the future (e.g. `touch -d "99999 years" file`)
+                # raises OverflowError, which is not an OSError and would
+                # escape the outer except below, skipping the manifest write
+                # and forcing a full re-download next release. Drop only the
+                # timestamp restoration in that case — the file is still
+                # written correctly.
+                try:
+                    os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
+                except (OSError, OverflowError):
+                    logger.debug(
+                        "e2b sync: skipped mtime restoration for %s (ns=%d)",
+                        host_path,
+                        remote_mtime_ns,
+                    )
                 tmp_path.replace(host_path)
                 host_stat = host_path.stat()
                 manifest[manifest_key] = {

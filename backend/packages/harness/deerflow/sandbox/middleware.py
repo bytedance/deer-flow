@@ -12,8 +12,10 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
+from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.sandbox.overwrite import unwrap_sandbox
 
 logger = logging.getLogger(__name__)
@@ -76,6 +78,21 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return super().before_agent(state, runtime)
+            # Phase 3: enforce sandbox:execute authorization before acquiring
+            # (eager path). On deny, skip the eager acquisition instead of
+            # raising: an exception here is outside any tool call, so it would
+            # surface as a run-level graph error rather than the RFC §9
+            # friendly ToolMessage. Skipping defers to the lazy gate inside
+            # ``ensure_sandbox_initialized``, which denies per-tool with the
+            # friendly message on the first sandbox-touching tool call.
+            try:
+                authorize_sandbox_execution(
+                    context=runtime.context or {},
+                    app_config=safe_app_config(),
+                )
+            except SandboxAuthorizationError:
+                logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
+                return None
             sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
@@ -93,6 +110,19 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
+            # Phase 3: enforce sandbox:execute authorization before acquiring
+            # (eager path, async counterpart of the gate in before_agent). On
+            # deny, skip the eager acquisition — the lazy gate inside
+            # ``ensure_sandbox_initialized`` denies per-tool with the RFC §9
+            # friendly message on the first sandbox-touching tool call.
+            try:
+                authorize_sandbox_execution(
+                    context=runtime.context or {},
+                    app_config=safe_app_config(),
+                )
+            except SandboxAuthorizationError:
+                logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
+                return None
             sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
