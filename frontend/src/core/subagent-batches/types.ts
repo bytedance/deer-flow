@@ -40,7 +40,6 @@ export type SubagentBatchItem = {
   status: SubagentBatchItemStatus;
   attempt: number;
   model_name: string | null;
-  result: string | null;
   result_preview: string | null;
   result_truncated: boolean;
   error: string | null;

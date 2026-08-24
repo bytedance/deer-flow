@@ -280,7 +280,7 @@ function BatchItems({
   }
   return (
     <div className="border-border mt-3 max-h-72 space-y-2 overflow-y-auto border-t pt-3">
-      {(query.data ?? []).map((item) => (
+      {(query.data?.pages.flat() ?? []).map((item) => (
         <BatchItemRow
           key={item.id}
           item={item}
@@ -289,6 +289,21 @@ function BatchItems({
           onRetry={() => retry.mutate(item.id)}
         />
       ))}
+      {query.hasNextPage && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="w-full"
+          disabled={query.isFetchingNextPage}
+          onClick={() => void query.fetchNextPage()}
+        >
+          {query.isFetchingNextPage && (
+            <LoaderCircleIcon className="animate-spin" />
+          )}
+          {t.common.loadMore}
+        </Button>
+      )}
     </div>
   );
 }

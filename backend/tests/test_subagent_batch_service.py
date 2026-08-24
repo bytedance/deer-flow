@@ -17,10 +17,11 @@ class FakeStatus(Enum):
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
+    FAILED = "failed"
 
     @property
     def is_terminal(self) -> bool:
-        return self is FakeStatus.COMPLETED
+        return self in {FakeStatus.COMPLETED, FakeStatus.FAILED}
 
 
 def _request(**overrides) -> BatchSubmitRequest:
@@ -219,3 +220,73 @@ async def test_execute_item_polls_completion_without_waiting_for_lease_renewal(m
 
     assert repository.finalized is not None
     assert repository.finalized["result"] == "fast result"
+
+
+@pytest.mark.asyncio
+async def test_executor_admission_failure_requeues_instead_of_finalizing(monkeypatch) -> None:
+    result = SimpleNamespace(
+        status=FakeStatus.FAILED,
+        result=None,
+        error="Process-wide subagent capacity is full",
+        stop_reason=None,
+        token_usage_records=None,
+        admission_failure=True,
+    )
+
+    class Repository:
+        def __init__(self) -> None:
+            self.requeued = None
+            self.finalized = False
+
+        async def claim_items(self, **_kwargs):
+            return [
+                {
+                    "id": "item-1",
+                    "item_key": "record-1",
+                    "prompt": "Process record 1",
+                    "batch": {
+                        "id": "batch-1",
+                        "thread_id": "thread-1",
+                        "user_id": "user-1",
+                        "run_id": "run-1",
+                        "execution_spec": _request().execution_spec,
+                    },
+                }
+            ]
+
+        async def requeue_item_after_admission_failure(self, item_id, **kwargs):
+            self.requeued = (item_id, kwargs)
+            return True
+
+        async def finalize_item(self, *_args, **_kwargs):
+            self.finalized = True
+            return True
+
+    class Executor:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def execute_async(self, _prompt, task_id=None):
+            assert task_id == "item-1"
+            return "execution-1"
+
+    repository = Repository()
+    monkeypatch.setattr(service_module, "get_app_config", lambda: SimpleNamespace())
+    monkeypatch.setattr(service_module, "resolve_subagent_model_name", lambda *_args, **_kwargs: "model-a")
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+    monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
+    monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+    )
+
+    await service.run_once(now=service_module.datetime.now(service_module.UTC))
+    await asyncio.gather(*list(service._executions.values()))
+
+    assert repository.requeued is not None
+    assert repository.requeued[0] == "item-1"
+    assert repository.finalized is False

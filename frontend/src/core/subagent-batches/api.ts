@@ -25,10 +25,20 @@ export async function fetchSubagentBatches(
 export async function fetchSubagentBatchItems(
   threadId: string,
   batchId: string,
+  options: {
+    offset?: number;
+    limit?: number;
+    status?: SubagentBatchItem["status"];
+  } = {},
 ): Promise<SubagentBatchItem[]> {
+  const params = new URLSearchParams({
+    offset: String(options.offset ?? 0),
+    limit: String(options.limit ?? 100),
+  });
+  if (options.status) params.set("status", options.status);
   return json(
     await fetch(
-      batchUrl(threadId, `/${encodeURIComponent(batchId)}/items?limit=100`),
+      batchUrl(threadId, `/${encodeURIComponent(batchId)}/items?${params}`),
     ),
     "Failed to load batch items",
   );

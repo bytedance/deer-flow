@@ -207,6 +207,7 @@ class DeerFlowClient:
             # created before the startup-only section existed.
             runtime_config = SubagentRuntimeConfig()
         configure_subagent_execution_capacity(runtime_config)
+        self._subagent_execution_capacity = runtime_config.max_running
         self._checkpoint_channel_mode = freeze_checkpoint_channel_mode(self._app_config.database.checkpoint_channel_mode)
         self._checkpoint_snapshot_frequency = freeze_checkpoint_snapshot_frequency(self._app_config.database.checkpoint_delta.snapshot_frequency)
 
@@ -313,9 +314,19 @@ class DeerFlowClient:
         subagent_enabled = cfg.get("subagent_enabled", False)
         from deerflow.config.subagents_config import effective_subagent_concurrency
 
+        # Lightweight integrations and older tests may construct a client via
+        # ``__new__`` and inject only ``_app_config``. Production clients keep
+        # the startup snapshot set by ``__init__``; the fallback preserves the
+        # pre-snapshot construction contract without consulting global state.
+        subagent_execution_capacity = getattr(
+            self,
+            "_subagent_execution_capacity",
+            int(getattr(getattr(self._app_config, "subagent_runtime", None), "max_running", 3)),
+        )
         max_concurrent_subagents = effective_subagent_concurrency(
             cfg.get("max_concurrent_subagents"),
             self._app_config,
+            execution_capacity=subagent_execution_capacity,
         )
         max_total_subagents = cfg.get("max_total_subagents", self._app_config.subagents.max_total_per_run)
 
@@ -376,6 +387,7 @@ class DeerFlowClient:
                     mcp_routing_middleware=mcp_routing_middleware,
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
+                    subagent_execution_capacity=subagent_execution_capacity,
                 ),
                 self._checkpoint_channel_mode,
                 self._checkpoint_snapshot_frequency,
@@ -391,6 +403,7 @@ class DeerFlowClient:
                 mcp_routing_hints_section=mcp_routing_hints_section,
                 user_id=effective_user_id,
                 skill_names=skill_setup.skill_names or None,
+                subagent_execution_capacity=subagent_execution_capacity,
             ),
             "state_schema": get_thread_state_schema(self._checkpoint_channel_mode, self._checkpoint_snapshot_frequency),
         }

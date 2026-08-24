@@ -21,7 +21,14 @@ async def _repo(tmp_path) -> SubagentBatchRepository:
     return SubagentBatchRepository(sf)
 
 
-async def _create(repo: SubagentBatchRepository, *, count: int = 4, max_live: int = 2, max_running: int = 1) -> dict:
+async def _create(
+    repo: SubagentBatchRepository,
+    *,
+    count: int = 4,
+    max_live: int = 2,
+    max_running: int = 1,
+    max_attempts: int = 2,
+) -> dict:
     return await repo.create_batch(
         batch_id="batch-1",
         user_id="user-1",
@@ -34,8 +41,15 @@ async def _create(repo: SubagentBatchRepository, *, count: int = 4, max_live: in
         items=[{"key": f"item-{i}", "prompt": f"Process {i}"} for i in range(count)],
         max_live_items=max_live,
         max_running_items=max_running,
-        max_attempts=2,
-        execution_spec={"subagent_config": {"name": "general-purpose", "description": "test"}},
+        max_attempts=max_attempts,
+        execution_spec={
+            "subagent_config": {
+                "name": "general-purpose",
+                "description": "test",
+                "system_prompt": "private instructions",
+            },
+            "authz_attributes": {"tenant": "private-tenant"},
+        },
     )
 
 
@@ -146,6 +160,119 @@ async def test_pause_resume_cancel_and_owner_scope(tmp_path) -> None:
     assert cancelled is not None and cancelled["status"] == "cancelled"
     assert cancelled["counts"]["cancelled"] == 2
     assert await repo.get_batch("batch-1", user_id="other") is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_terminalizes_in_flight_items_and_fences_stale_completion(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1)
+    now = datetime.now(UTC)
+    claimed = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    assert await repo.mark_item_running(claimed["id"], lease_owner="worker-1", now=now)
+
+    cancelled = await repo.cancel_batch("batch-1", user_id="user-1")
+
+    assert cancelled is not None
+    assert cancelled["counts"]["cancelled"] == 1
+    item = (await repo.list_items("batch-1", user_id="user-1"))[0]
+    assert item["status"] == "cancelled"
+    assert not await repo.finalize_item(
+        claimed["id"],
+        lease_owner="worker-1",
+        succeeded=True,
+        result="late result",
+        result_preview="late result",
+        result_truncated=False,
+        error=None,
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now + timedelta(seconds=1),
+    )
+
+
+@pytest.mark.asyncio
+async def test_executor_admission_failure_requeues_without_consuming_attempt(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1)
+    now = datetime.now(UTC)
+    first = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    assert first["attempt"] == 1
+
+    assert await repo.requeue_item_after_admission_failure(
+        first["id"],
+        lease_owner="worker-1",
+        error="Process-wide subagent capacity is full",
+        now=now,
+    )
+    queued = (await repo.list_items("batch-1", user_id="user-1"))[0]
+    assert queued["status"] == "queued"
+    assert queued["attempt"] == 0
+
+    second = (await repo.claim_items(now=now + timedelta(seconds=1), lease_owner="worker-2", lease_seconds=60, limit=1))[0]
+    assert second["attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_all_failed_items_mark_batch_failed(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo, count=1, max_live=1, max_running=1, max_attempts=1)
+    now = datetime.now(UTC)
+    item = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+
+    assert await repo.finalize_item(
+        item["id"],
+        lease_owner="worker-1",
+        succeeded=False,
+        result=None,
+        result_preview=None,
+        result_truncated=False,
+        error="permanent",
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+    batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert batch is not None
+    assert batch["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_public_projections_omit_execution_context_and_full_results(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    created = await _create(repo, count=1, max_live=1, max_running=1)
+    assert "execution_spec" not in created
+    assert "user_id" not in created
+    assert "submission_key" not in created
+    assert "run_id" not in created
+    assert "tool_call_id" not in created
+
+    now = datetime.now(UTC)
+    item = (await repo.claim_items(now=now, lease_owner="worker-1", lease_seconds=60, limit=1))[0]
+    assert await repo.finalize_item(
+        item["id"],
+        lease_owner="worker-1",
+        succeeded=True,
+        result="full private result",
+        result_preview="preview",
+        result_truncated=False,
+        error=None,
+        stop_reason=None,
+        token_usage=None,
+        model_name="model-a",
+        completed_at=now,
+    )
+
+    public_batch = await repo.get_batch("batch-1", user_id="user-1")
+    assert public_batch is not None
+    assert "execution_spec" not in public_batch
+    public_item = (await repo.list_items("batch-1", user_id="user-1"))[0]
+    assert public_item["result_preview"] == "preview"
+    assert "result" not in public_item
+    assert "lease_owner" not in public_item
+    export_item = (await repo.list_items("batch-1", user_id="user-1", include_result=True))[0]
+    assert export_item["result"] == "full private result"
 
 
 @pytest.mark.asyncio

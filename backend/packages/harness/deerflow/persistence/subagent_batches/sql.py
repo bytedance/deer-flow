@@ -16,15 +16,40 @@ BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
 BATCH_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 ITEM_ACTIVE_STATUSES = ("queued", "leased", "running")
 ITEM_TERMINAL_STATUSES = ("succeeded", "failed", "cancelled")
+_BATCH_PUBLIC_FIELDS = (
+    "id",
+    "thread_id",
+    "title",
+    "subagent_type",
+    "status",
+    "total_items",
+    "max_live_items",
+    "max_running_items",
+    "max_attempts",
+    "created_at",
+    "updated_at",
+    "completed_at",
+)
 _BATCH_TIMESTAMP_FIELDS = ("created_at", "updated_at", "completed_at")
-_ITEM_TIMESTAMP_FIELDS = (
-    "lease_expires_at",
-    "cancel_requested_at",
+_ITEM_PUBLIC_FIELDS = (
+    "id",
+    "batch_id",
+    "item_key",
+    "position",
+    "status",
+    "attempt",
+    "model_name",
+    "result_preview",
+    "result_truncated",
+    "error",
+    "stop_reason",
+    "token_usage",
     "started_at",
     "completed_at",
     "created_at",
     "updated_at",
 )
+_ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
 
 
 class SubagentBatchRepository:
@@ -35,15 +60,29 @@ class SubagentBatchRepository:
 
     @staticmethod
     def _batch_dict(row: SubagentBatchRow) -> dict[str, Any]:
-        data = row.to_dict()
+        """Return the stable owner-facing projection, never execution context."""
+        data = {key: getattr(row, key) for key in _BATCH_PUBLIC_FIELDS}
         for key in _BATCH_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
         return data
 
     @staticmethod
-    def _item_dict(row: SubagentBatchItemRow) -> dict[str, Any]:
-        data = row.to_dict(exclude={"prompt"})
+    def _execution_batch_dict(row: SubagentBatchRow) -> dict[str, Any]:
+        """Return worker-only fields required to reconstruct an execution."""
+        return {
+            "id": row.id,
+            "user_id": row.user_id,
+            "thread_id": row.thread_id,
+            "run_id": row.run_id,
+            "execution_spec": row.execution_spec,
+        }
+
+    @staticmethod
+    def _item_dict(row: SubagentBatchItemRow, *, include_result: bool = False) -> dict[str, Any]:
+        data = {key: getattr(row, key) for key in _ITEM_PUBLIC_FIELDS}
+        if include_result:
+            data["result"] = row.result
         for key in _ITEM_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -169,6 +208,7 @@ class SubagentBatchRepository:
         limit: int = 100,
         status: str | None = None,
         include_prompt: bool = False,
+        include_result: bool = False,
     ) -> list[dict[str, Any]] | None:
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id)
@@ -181,7 +221,7 @@ class SubagentBatchRepository:
             rows = list((await session.execute(stmt)).scalars())
             values = []
             for row in rows:
-                value = self._item_dict(row)
+                value = self._item_dict(row, include_result=include_result)
                 if include_prompt:
                     value["prompt"] = row.prompt
                 values.append(value)
@@ -286,7 +326,7 @@ class SubagentBatchRepository:
                     item.error = None
                     value = self._item_dict(item)
                     value["prompt"] = item.prompt
-                    value["batch"] = self._batch_dict(batch)
+                    value["batch"] = self._execution_batch_dict(batch)
                     claimed.append(value)
                 if runnable:
                     batch.status = "running"
@@ -406,12 +446,60 @@ class SubagentBatchRepository:
             await session.commit()
             return True
 
+    async def requeue_item_after_admission_failure(
+        self,
+        item_id: str,
+        *,
+        lease_owner: str,
+        error: str | None,
+        now: datetime,
+    ) -> bool:
+        """Undo a claim rejected before execution admission.
+
+        Claiming increments ``attempt`` so crash recovery can bound real
+        executions. A process-wide capacity rejection happens before an
+        execution starts, so it must release the lease and restore that
+        attempt instead of consuming the batch's retry budget.
+        """
+        async with self._sf() as session:
+            item = (
+                await session.execute(
+                    select(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.id == item_id,
+                        SubagentBatchItemRow.status.in_(("leased", "running")),
+                        SubagentBatchItemRow.lease_owner == lease_owner,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if item is None:
+                return False
+            batch = await session.get(SubagentBatchRow, item.batch_id, with_for_update=True)
+            cancelled = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
+            item.lease_owner = None
+            item.lease_expires_at = None
+            item.updated_at = now
+            if cancelled:
+                item.status = "cancelled"
+                item.error = "Cancelled by user"
+                item.completed_at = now
+            else:
+                item.status = "queued"
+                item.attempt = max(0, item.attempt - 1)
+                item.started_at = None
+                item.error = error
+            if batch is not None:
+                await self._refresh_batch_status(session, batch, now=now)
+            await session.commit()
+            return True
+
     async def _refresh_batch_status(self, session: AsyncSession, batch: SubagentBatchRow, *, now: datetime) -> None:
         counts = await self._counts(session, batch.id)
         terminal = sum(counts[state] for state in ITEM_TERMINAL_STATUSES)
         if terminal >= batch.total_items:
             if batch.status != "cancelled":
-                batch.status = "completed"
+                batch.status = "failed" if counts["failed"] > 0 and counts["succeeded"] == 0 else "completed"
             batch.completed_at = now
         elif batch.status not in ("paused", "cancelled"):
             batch.status = "running"
@@ -454,9 +542,11 @@ class SubagentBatchRepository:
                 for item in items:
                     item.cancel_requested_at = now
                     item.updated_at = now
-                    if item.status not in ("leased", "running"):
-                        item.status = "cancelled"
-                        item.completed_at = now
+                    item.status = "cancelled"
+                    item.error = "Cancelled by user"
+                    item.lease_owner = None
+                    item.lease_expires_at = None
+                    item.completed_at = now
             batch.updated_at = now
             await session.commit()
             return await self._with_counts(session, batch)

@@ -1,4 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useInfiniteQuery,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
@@ -13,6 +18,7 @@ export const subagentBatchesKey = (threadId: string) =>
   ["subagent-batches", threadId] as const;
 export const subagentBatchItemsKey = (threadId: string, batchId: string) =>
   [...subagentBatchesKey(threadId), batchId, "items"] as const;
+const SUBAGENT_BATCH_ITEMS_PAGE_SIZE = 100;
 
 export function useSubagentBatches(
   threadId: string,
@@ -35,11 +41,26 @@ export function useSubagentBatchItems(
   batchId: string,
   options: { enabled?: boolean; polling?: boolean } = {},
 ) {
-  return useQuery({
+  return useInfiniteQuery({
     queryKey: subagentBatchItemsKey(threadId, batchId),
-    queryFn: () => fetchSubagentBatchItems(threadId, batchId),
+    queryFn: ({ pageParam }) =>
+      fetchSubagentBatchItems(threadId, batchId, {
+        offset: pageParam,
+        limit: SUBAGENT_BATCH_ITEMS_PAGE_SIZE,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) =>
+      lastPage.length === SUBAGENT_BATCH_ITEMS_PAGE_SIZE
+        ? allPages.reduce((total, page) => total + page.length, 0)
+        : undefined,
     enabled: options.enabled !== false && Boolean(threadId) && Boolean(batchId),
-    refetchInterval: options.polling === false ? false : 3000,
+    // React Query refetches every loaded infinite page. Keep live polling for
+    // the bounded first page, then stop automatic fan-out after the user loads
+    // more; window-focus/manual invalidation still refreshes the loaded pages.
+    refetchInterval: (query) => {
+      if (options.polling === false) return false;
+      return (query.state.data?.pages.length ?? 0) <= 1 ? 3000 : false;
+    },
     refetchIntervalInBackground: false,
   });
 }

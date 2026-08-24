@@ -34,9 +34,13 @@ describe("subagent batch API", () => {
     );
 
     mockedFetch.mockResolvedValueOnce(jsonResponse([]));
-    await fetchSubagentBatchItems("thread / 1", "batch / 1");
+    await fetchSubagentBatchItems("thread / 1", "batch / 1", {
+      offset: 100,
+      limit: 50,
+      status: "failed",
+    });
     expect(mockedFetch).toHaveBeenLastCalledWith(
-      "/api/threads/thread%20%2F%201/subagent-batches/batch%20%2F%201/items?limit=100",
+      "/api/threads/thread%20%2F%201/subagent-batches/batch%20%2F%201/items?offset=100&limit=50&status=failed",
     );
   });
 

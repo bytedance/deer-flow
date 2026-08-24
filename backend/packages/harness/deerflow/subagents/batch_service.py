@@ -265,6 +265,14 @@ class SubagentBatchService:
                     pass
 
             raw_result = result.result or ""
+            if getattr(result, "admission_failure", False):
+                await self._repository.requeue_item_after_admission_failure(
+                    item_id,
+                    lease_owner=self._lease_owner,
+                    error=result.error,
+                    now=datetime.now(UTC),
+                )
+                return
             truncated = len(raw_result) > self._config.max_result_chars
             stored_result = raw_result[: self._config.max_result_chars] if raw_result else None
             preview = raw_result[: self._config.result_preview_max_chars] if raw_result else None

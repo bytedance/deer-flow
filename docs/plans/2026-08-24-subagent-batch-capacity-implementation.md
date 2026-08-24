@@ -63,6 +63,8 @@ All native subagents, including ordinary `task` calls and durable batch items, a
 - `reject` fails immediately while saturated.
 - cancellation and timeout remove the waiter and cannot leak a slot.
 - task status remains pending until a real slot has been acquired.
+- a durable item rejected or timed out at this admission boundary returns to
+  `queued` without consuming an execution attempt.
 
 The previous scheduler thread pool was removed. Background execution submits a coroutine directly to the existing persistent isolated event loop; increasing the queue no longer creates the same number of long-lived blocked threads.
 
@@ -158,6 +160,12 @@ Workers claim rows using database locks and a lease owner. A worker renews the l
 
 Gateway shutdown cancels local native executions but intentionally does not falsely finalize their durable rows; the expired lease is the recovery handoff.
 
+User cancellation is different from process shutdown: it atomically marks every
+nonterminal item `cancelled`, clears active leases, and fences late completion
+writes from workers that were already running. A terminal batch is `failed` when
+all finished work failed and no item succeeded; mixed success/failure is
+`completed`, preserving item-level failure counts for partial-result consumers.
+
 Submission is idempotent per `(user_id, submission_key)`, where model submissions use the stable `run_id:tool_call_id` identity. Item keys must be unique within a batch and survive retries.
 
 Execution is **at least once**, not exactly once. An external side effect can complete immediately before a worker crashes and before DeerFlow commits the result. Batch items therefore must be read-only or use their stable item key as an idempotency key at the external system.
@@ -181,7 +189,12 @@ POST /api/threads/{thread_id}/subagent-batches/{batch_id}/items/{item_id}/retry
 GET  /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl
 ```
 
-Every lookup uses both authenticated owner and thread scope. Read and export remain possible for historical batches; live cancellation requires the startup batch worker to be available.
+Every lookup uses both authenticated owner and thread scope. Owner-facing batch
+responses are explicit projections and never expose `execution_spec`, submission
+identity, authorization context, prompts, lease internals, or full result text.
+Paged item reads return bounded previews; only JSONL export explicitly includes
+the stored full result. Read and export remain possible for historical batches;
+live cancellation requires the startup batch worker to be available.
 
 ### Frontend behavior
 
@@ -197,7 +210,10 @@ The panel provides:
 
 Worker-dependent mutations are disabled while the worker is unavailable. Progress rendering clamps malformed persisted totals to a bounded `0`–`100` percentage so an invalid or manually edited row cannot pass `NaN`/`Infinity` into the UI primitive.
 
-Only the first bounded item page is rendered in the panel. Large result sets stay outside the React tree and model transcript and are consumed through pagination/export.
+The panel fetches one bounded item page at a time and exposes an explicit
+load-more control until the final page. Large result sets therefore stay outside
+the React tree and model transcript until requested, while JSONL remains the
+full-result export path.
 
 ## Why this matches the useful part of OpenClaw's design
 

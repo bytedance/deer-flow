@@ -101,6 +101,7 @@ class SubagentResult:
         started_at: When execution started.
         completed_at: When execution completed.
         ai_messages: List of complete AI messages (as dicts) generated during execution.
+        admission_failure: Whether capacity rejected/timed out before execution started.
     """
 
     task_id: str
@@ -115,6 +116,7 @@ class SubagentResult:
     ai_messages: list[dict[str, Any]] | None = None
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
+    admission_failure: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -139,6 +141,7 @@ class SubagentResult:
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
         token_usage_records: list[dict[str, int | str | None]] | None = None,
+        admission_failure: bool = False,
     ) -> bool:
         """Set a terminal status exactly once.
 
@@ -163,6 +166,7 @@ class SubagentResult:
                 self.ai_messages = ai_messages
             if token_usage_records is not None:
                 self.token_usage_records = token_usage_records
+            self.admission_failure = admission_failure
             self.completed_at = completed_at or datetime.now()
             self.status = status
             return True
@@ -910,7 +914,11 @@ class SubagentExecutor:
                         result.started_at = datetime.now()
                 return await self._aexecute_admitted(task, result)
         except SubagentCapacityError as exc:
-            result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
+            result.try_set_terminal(
+                SubagentStatus.FAILED,
+                error=str(exc),
+                admission_failure=True,
+            )
             return result
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:

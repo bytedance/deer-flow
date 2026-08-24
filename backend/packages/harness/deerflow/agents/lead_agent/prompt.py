@@ -1031,9 +1031,21 @@ def apply_prompt_template(
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
     allowed_subagents: list[str] | None = None,
+    subagent_execution_capacity: int | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = effective_subagent_concurrency(max_concurrent_subagents, app_config) if app_config is not None else clamp_subagent_concurrency(max_concurrent_subagents)
+    n = (
+        effective_subagent_concurrency(
+            max_concurrent_subagents,
+            app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
+        if app_config is not None
+        else clamp_subagent_concurrency(
+            max_concurrent_subagents,
+            execution_capacity=subagent_execution_capacity,
+        )
+    )
     total = max_total_subagents
     if total is None:
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None

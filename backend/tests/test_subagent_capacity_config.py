@@ -50,3 +50,9 @@ def test_ordinary_task_limit_never_advertises_more_than_real_process_slots() -> 
     assert effective_subagent_concurrency(None, config) == 8
     assert effective_subagent_concurrency(4, config) == 4
     assert effective_subagent_concurrency(50, config) == 8
+
+
+def test_ordinary_task_limit_uses_frozen_execution_capacity_after_reload() -> None:
+    reloaded_config = SimpleNamespace(subagent_runtime=SubagentRuntimeConfig(max_running=12))
+    assert effective_subagent_concurrency(None, reloaded_config, execution_capacity=3) == 3
+    assert effective_subagent_concurrency(10, reloaded_config, execution_capacity=3) == 3

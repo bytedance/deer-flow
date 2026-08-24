@@ -23,10 +23,15 @@ def clamp_subagent_concurrency(value: int, *, execution_capacity: int | None = N
     return max(MIN_CONCURRENT_SUBAGENT_CALLS, min(upper, value))
 
 
-def effective_subagent_concurrency(value: int | None, app_config: object) -> int:
+def effective_subagent_concurrency(
+    value: int | None,
+    app_config: object,
+    *,
+    execution_capacity: int | None = None,
+) -> int:
     """Resolve one value for prompt, middleware, and process execution capacity."""
     runtime = getattr(app_config, "subagent_runtime", None)
-    capacity = int(getattr(runtime, "max_running", 3))
+    capacity = int(execution_capacity if execution_capacity is not None else getattr(runtime, "max_running", 3))
     requested = capacity if value is None else int(value)
     return clamp_subagent_concurrency(requested, execution_capacity=capacity)
 

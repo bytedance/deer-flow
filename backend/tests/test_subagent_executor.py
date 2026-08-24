@@ -29,6 +29,7 @@ import pytest
 from packaging.version import Version
 
 from deerflow.skills.types import Skill
+from deerflow.subagents.capacity import SubagentCapacityRejected
 
 # Module names that need to be mocked to break circular imports
 _MOCKED_MODULE_NAMES = [
@@ -861,6 +862,35 @@ class TestAsyncExecutionPath:
         assert result.error is None
         assert result.started_at is not None
         assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_marks_capacity_rejection_as_admission_failure(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        class RejectingSlot:
+            async def __aenter__(self):
+                raise SubagentCapacityRejected("Process-wide subagent capacity is full")
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+        class RejectingCapacity:
+            def slot(self):
+                return RejectingSlot()
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            execution_capacity=RejectingCapacity(),
+        )
+
+        result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.admission_failure is True
+        assert "capacity is full" in result.error
 
     @pytest.mark.anyio
     async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):

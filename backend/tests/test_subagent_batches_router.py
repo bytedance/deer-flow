@@ -28,6 +28,7 @@ class Repository:
             {"id": "item-1", "batch_id": "batch-1", "item_key": "one", "status": "succeeded", "result": "done"},
             {"id": "item-2", "batch_id": "batch-1", "item_key": "two", "status": "failed", "error": "bad"},
         ]
+        self.include_result_calls = []
 
     async def get_batch(self, batch_id, *, user_id):
         if batch_id != self.batch["id"] or user_id != self.batch["user_id"]:
@@ -38,8 +39,9 @@ class Repository:
         assert (thread_id, user_id, limit) == ("thread-1", "user-1", 20)
         return [self.batch]
 
-    async def list_items(self, batch_id, *, user_id, offset=0, limit=100, status=None):
+    async def list_items(self, batch_id, *, user_id, offset=0, limit=100, status=None, include_result=False):
         assert batch_id == "batch-1" and user_id == "user-1"
+        self.include_result_calls.append(include_result)
         values = self.items
         if status is not None:
             values = [item for item in values if item["status"] == status]
@@ -121,3 +123,4 @@ async def test_jsonl_export_streams_item_results(monkeypatch) -> None:
 
     assert [row["id"] for row in rows] == ["item-1", "item-2"]
     assert rows[0]["result"] == "done"
+    assert repo.include_result_calls and all(repo.include_result_calls)

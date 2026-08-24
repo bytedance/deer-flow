@@ -110,7 +110,13 @@ async def export_batch_results(thread_id: ThreadId, batch_id: str, request: Requ
     async def lines() -> AsyncIterator[bytes]:
         offset = 0
         while True:
-            page = await repo.list_items(batch_id, user_id=user_id, offset=offset, limit=500)
+            page = await repo.list_items(
+                batch_id,
+                user_id=user_id,
+                offset=offset,
+                limit=500,
+                include_result=True,
+            )
             if not page:
                 break
             for item in page:
