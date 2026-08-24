@@ -164,7 +164,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     # + 1 SkillActivationMiddleware + 1 SkillToolPolicyMiddleware
     # + 1 SafetyFinishReasonMiddleware + 1 DurableContextMiddleware
     # + 1 SubagentDateContextMiddleware
-    # + 1 SystemMessageCoalescingMiddleware (all enabled by default).
+    # + 1 SystemMessageCoalescingMiddleware + 1 ToolReceiptMiddleware
+    # (all enabled by default).
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.dynamic_context_middleware import SubagentDateContextMiddleware
     from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -173,11 +174,17 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 18
+    assert len(middlewares) == 19
     assert isinstance(middlewares[0], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[1], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
+    # The receipt layer wraps ToolErrorHandlingMiddleware so receipts read the
+    # deerflow_tool_meta status it stamps (guard-enforced, like ToolProgress).
+    receipt_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolReceiptMiddleware))
+    error_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware))
+    assert receipt_idx < error_idx
     # The token-budget backstop is attached by default so the cap engages (#3875).
     assert any(isinstance(m, TokenBudgetMiddleware) for m in middlewares)
     assert any(isinstance(m, SafetyFinishReasonMiddleware) for m in middlewares)

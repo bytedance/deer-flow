@@ -98,6 +98,40 @@ class McpTaskToolsetConfig(BaseModel):
         return value
 
 
+class McpUserScopedAuthConfig(BaseModel):
+    """Per-user credential injection for a shared MCP server (HTTP/SSE transports).
+
+    Maps DeerFlow user ids to credential header values so that one configured
+    MCP server can serve several users, each authenticated to the remote
+    service with their own credential. The credential for the authenticated
+    user is injected into every tool call by the built-in user-scoped auth
+    interceptor; the server entry's static ``headers`` are only used for
+    startup tool discovery.
+
+    Values support the same ``$ENV_VAR`` resolution as the rest of this file,
+    so raw secrets can stay in the process environment.
+    """
+
+    enabled: bool = Field(default=True, description="Whether user-scoped credential injection is enabled")
+    header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
+    users: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of DeerFlow user id to full credential header value (e.g. 'Bearer <token>'); values support $ENV_VAR references",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when the calling user has no mapped credential (or the mapped value resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("header")
+    @classmethod
+    def _validate_header_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("user_auth.header must not be empty")
+        return value
+
+
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
 
@@ -132,6 +166,10 @@ class McpServerConfig(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
+    user_auth: McpUserScopedAuthConfig | None = Field(
+        default=None,
+        description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
