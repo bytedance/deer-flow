@@ -379,7 +379,14 @@ sandbox:
 ```yaml
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+   prewarm: true # optional: overlap likely sandbox work with the first model call
 ```
+
+`prewarm` is disabled by default. When enabled, DeerFlow starts an AIO sandbox
+only for user turns with a code fence, path, shell command, or traceback, then
+the first sandbox tool reuses that in-flight startup. Turns that do not use a
+sandbox return the completed prewarm to the provider's warm pool. The option is
+ignored by non-AIO providers.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml

@@ -105,6 +105,10 @@ class SandboxConfig(BaseModel):
         default=False,
         description="Allow the bash tool to execute directly on the host when using LocalSandboxProvider. Dangerous; intended only for fully trusted local environments.",
     )
+    prewarm: bool = Field(
+        default=False,
+        description=("Start an AioSandboxProvider acquire in parallel with the first model call when the user input contains a strong sandbox-use signal. Disabled by default; ignored by other sandbox providers."),
+    )
     image: str | None = Field(
         default=None,
         description="Sandbox image to use (Docker/AIO image or BoxLite OCI image)",

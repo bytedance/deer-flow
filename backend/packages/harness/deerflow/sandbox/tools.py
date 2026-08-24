@@ -25,6 +25,7 @@ from deerflow.sandbox.exceptions import (
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.prewarm import claim_sandbox_prewarm
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -1464,7 +1465,9 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    sandbox_id = await claim_sandbox_prewarm(runtime)
+    if sandbox_id is None:
+        sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
