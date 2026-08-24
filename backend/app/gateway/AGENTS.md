@@ -140,38 +140,6 @@ Multi-worker deployments therefore require `run_events.backend: db` for shared,
 ordered delivery events; the startup gate rejects process-local memory and
 JSONL event stores when `GATEWAY_WORKERS > 1`.
 
-`POST /api/threads/{id}/history` correlates legacy checkpoint AI messages with
-their exact run IDs through `RunEventStore.find_latest_ai_message_run_ids()`.
-The default memory/database lookup pages backward through `list_messages()` in
-bounded 1000-row windows, so a target in the latest window needs one fetch and
-the first page's oldest `seq` acts as a stable high-watermark while older pages
-are read. A full page with missing or non-progressing `seq` raises an incomplete
-lookup error instead of looping or returning a misleading partial result. JSONL
-reads and validates one complete thread-log snapshot to avoid repeatedly
-rescanning the same files. An exhaustive miss preserves the pre-event-store
-human turn-boundary fallback; an incomplete/failed lookup removes synthesized
-AI run IDs rather than stamping a duration it cannot prove, while durations
-backed by persisted message mappings remain available. The write-on-read
-migration persists `run_durations` plus a complete `run_message_ids` audit cache,
-including boundary fallbacks for IDs with an exhaustive no-event result;
-duration presence alone never marks attribution complete. This intentionally
-adds one metadata entry per audited AI message. While the materialized message
-set at the head remains unchanged, current-head reads query only uncached IDs;
-historical `body.before` reads can rescan because their migration is written to
-the head instead of rewriting the old checkpoint. This
-metadata-only merge retains existing entries, so compaction timing and
-historical migrations can leave stale IDs that current-message lookups ignore
-at the cost of metadata storage. The metadata checkpoint is admitted through
-the durable `checkpoint_write` reservation before taking the worker's checkpoint
-lock, so it cannot race a run or another Gateway writer. Every audited AI ID is
-queried again after admission: a later exact hit replaces either a foreground
-exact hit or boundary fallback before either becomes a cache entry. Required run
-rows are also reloaded and their durations recomputed inside the reservation, so
-a final run row cannot be overwritten by the foreground snapshot. The initial
-`RunManager.list_by_thread()` page is sized to the number of required run IDs
-(with a 100-row floor); exact runs still outside it are hydrated with targeted
-`get()` calls.
-
 **RunManager / RunStore contract**:
 - LangGraph-compatible run requests validate their supported subset before creating a run. `runtime/stream_modes.py` is the shared backend contract for public stream modes and the worker's `graph.astream` mapping; the public `messages-tuple` mode maps to LangGraph's internal `messages` mode, while public `messages`, `events`, and other unsupported modes are rejected instead of being dropped or replaced with `values`. `app/gateway/run_models.py::RunCreateRequest` is shared by HTTP and internal scheduled launch paths, retains only truthful compatibility defaults for unimplemented options (`if_not_exists="create"` plus `None` placeholders), returns 422 for unsupported values including `on_completion="complete"`, `on_completion="continue"`, and `multitask_strategy="enqueue"`, and forbids undeclared SDK options so fields such as `checkpoint_during` and `durability` cannot be silently discarded. A placeholder must still accept the stock SDK's own default: `langgraph_sdk` drops only `None` from its run payload, so `stream_resumable=False` reaches every request and means "non-resumable", which is what DeerFlow serves — rejecting it 422'd every IM channel run (#4466). `tests/test_run_request_validation.py::test_gateway_accepts_langgraph_sdk_default_payload` pins the real SDK payload against this boundary; channel tests mock the SDK client and cannot catch this class of drift.
 - `RunManager.get()` is async; direct callers must `await` it.

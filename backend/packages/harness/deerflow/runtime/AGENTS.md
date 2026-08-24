@@ -36,6 +36,21 @@ checkpoint-write admission boundary must repeat the complete audit after
 admission; a pre-admission exact hit can be superseded by a later event just as
 a pre-admission miss can become an exact hit.
 
+Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
+messages. An exhaustive miss preserves the human-boundary fallback; an
+incomplete lookup removes unproven synthesized IDs. Its metadata-only
+write-on-read cache stores `run_message_ids` for every audited AI ID (including
+exhaustive misses) plus required `run_durations`; duration presence alone does
+not prove attribution. Historical `body.before` reads write the audit to the
+head, and the merge may retain IDs no longer in materialized history, which
+readers ignore. Migration must acquire the durable `checkpoint_write`
+reservation, then repeat the whole message audit and batch-reload required run
+rows before persisting. Post-admission exact hits replace foreground exact or
+boundary mappings, and recomputed final durations replace foreground snapshots.
+The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
+the number of required IDs, whichever is larger; missing exact runs use targeted
+`get()` calls.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`
