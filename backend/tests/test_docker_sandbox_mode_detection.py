@@ -106,14 +106,25 @@ sandbox:
     assert _detect_mode_with_config(config) == "local"
 
 
+def _seed_compose_env(tmp_root: Path) -> None:
+    """Give prepare_compose_env the compose file and example env files it copies."""
+    (tmp_root / "docker-compose-dev.yaml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_root / ".env.example").write_text("# test\n", encoding="utf-8")
+    frontend = tmp_root / "frontend"
+    frontend.mkdir()
+    (frontend / ".env.example").write_text("# test\n", encoding="utf-8")
+
+
 @pytest.mark.parametrize("docker_command", ["logs --gateway", "restart"])
 def test_compose_commands_set_deer_flow_root_before_compose(docker_command):
     """Log and restart commands should resolve mounts from the repository root."""
     with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        _seed_compose_env(tmp_root)
         command = f"""
 source '{SCRIPT_PATH}'
-PROJECT_ROOT='{tmpdir}'
-DOCKER_DIR='{tmpdir}'
+PROJECT_ROOT='{tmp_root}'
+DOCKER_DIR='{tmp_root}'
 COMPOSE_CMD=capture_compose
 capture_compose() {{ test "${{DEER_FLOW_ROOT:-}}" = "$PROJECT_ROOT"; }}
 unset DEER_FLOW_ROOT

@@ -1,5 +1,17 @@
 # DeerFlow Development Environment
-# Usage: docker-compose -f docker-compose-dev.yaml up --build
+#
+# Supported entry: from the repository root, run `make docker-start`.
+# That wrapper creates missing .env files and invokes Compose from this
+# directory with a relative filename.
+#
+# Direct Compose must also be run from the repository root:
+#   docker compose -f docker/docker-compose-dev.yaml up --build
+# Do not reuse that -f path from inside docker/ — it resolves to
+# docker/docker/docker-compose-dev.yaml and fails with file-not-found.
+#
+# env_file targets are optional so a missing ../.env or ../frontend/.env
+# does not abort Compose on Windows ("file not found" /
+# "Le fichier spécifique est introuvable").
 #
 # Services:
 #   - nginx: Reverse proxy (port 2026)
@@ -74,7 +86,8 @@ services:
       # The same value must be set on the gateway side via config.yaml sandbox.provisioner_api_key.
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
@@ -139,7 +152,8 @@ services:
       - CI=true
       - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
-      - ../frontend/.env
+      - path: ../frontend/.env
+        required: false
     networks:
       - deer-flow-dev
     restart: unless-stopped
@@ -212,7 +226,8 @@ services:
       - NO_PROXY=${NO_PROXY:-}${NO_PROXY:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
       - no_proxy=${no_proxy:-}${no_proxy:+,}localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner,openviking,host.docker.internal
     env_file:
-      - ../.env
+      - path: ../.env
+        required: false
     extra_hosts:
       # For Linux: map host.docker.internal to host gateway
       - "host.docker.internal:host-gateway"

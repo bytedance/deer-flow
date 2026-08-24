@@ -43,6 +43,10 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    ```
    `make docker-start` reads `config.yaml` and starts `provisioner` only for provisioner/Kubernetes sandbox mode.
 
+   Prefer this wrapper over invoking Compose yourself. If you do run Compose
+   directly, do it from the repository root (`docker compose -f docker/docker-compose-dev.yaml`),
+   not from inside `docker/`.
+
    All services will start with hot-reload enabled:
    - Frontend changes are automatically reloaded
    - Backend changes trigger automatic restart
