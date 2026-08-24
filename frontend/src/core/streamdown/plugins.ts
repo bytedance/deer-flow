@@ -1,7 +1,7 @@
 import { code } from "@streamdown/code";
 import { mermaid } from "@streamdown/mermaid";
-import type { Element, Nodes, Root } from "hast";
 import GithubSlugger from "github-slugger";
+import type { Element, Nodes, Root } from "hast";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, {
