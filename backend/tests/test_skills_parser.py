@@ -147,13 +147,13 @@ def test_parse_allowed_tools_string_preserves_parenthesized_spaces(tmp_path):
 def test_parse_allowed_tools_string_preserves_scalar_custom_tool_names(tmp_path):
     skill_file = _write_skill(
         tmp_path,
-        "name: my-skill\ndescription: Test\nallowed-tools: mcp__arxiv__SearchPapers MyCustomTool",
+        "name: my-skill\ndescription: Test\nallowed-tools: mcp__arxiv__SearchPapers MyCustomTool write",
     )
 
     skill = parse_skill_file(skill_file, category="custom")
 
     assert skill is not None
-    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "MyCustomTool")
+    assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "MyCustomTool", "write")
 
 
 @pytest.mark.parametrize(

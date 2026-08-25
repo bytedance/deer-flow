@@ -11,12 +11,12 @@ logger = logging.getLogger(__name__)
 # Valid POSIX environment-variable name.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PORTABLE_TOOL_ALIASES = {
-    "bash": "bash",
-    "edit": "str_replace",
-    "read": "read_file",
-    "webfetch": "web_fetch",
-    "websearch": "web_search",
-    "write": "write_file",
+    "Bash": "bash",
+    "Edit": "str_replace",
+    "Read": "read_file",
+    "WebFetch": "web_fetch",
+    "WebSearch": "web_search",
+    "Write": "write_file",
 }
 
 
@@ -24,7 +24,7 @@ def _normalize_unscoped_allowed_tool(tool_name: str) -> str:
     """Map known portable aliases while preserving unknown runtime names."""
     if "(" in tool_name or ")" in tool_name:
         return tool_name
-    return _PORTABLE_TOOL_ALIASES.get(tool_name.casefold(), tool_name)
+    return _PORTABLE_TOOL_ALIASES.get(tool_name, tool_name)
 
 
 def _split_portable_allowed_tools(raw: str, skill_file: Path) -> list[str]:

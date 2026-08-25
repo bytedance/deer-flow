@@ -175,7 +175,7 @@ def test_slash_activation_normalizes_unscoped_portable_tools_but_not_command_pat
     skill_dir.mkdir()
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(
-        "---\nname: portable\ndescription: Portable tools\nallowed-tools: WebFetch Bash(git:*)\n---\nBody\n",
+        "---\nname: portable\ndescription: Portable tools\nallowed-tools: WebFetch Bash(git add *)\n---\nBody\n",
         encoding="utf-8",
     )
     skill = parse_skill_file(skill_file, category=SkillCategory.CUSTOM)
@@ -188,7 +188,7 @@ def test_slash_activation_normalizes_unscoped_portable_tools_but_not_command_pat
     )
     middleware = _middleware([skill])
     request = ModelRequestStub(
-        [NamedTool("bash"), NamedTool("web_fetch"), NamedTool("web_search")],
+        [NamedTool("bash"), NamedTool("web_fetch"), NamedTool("web_search"), NamedTool("add")],
         context=context,
     )
 
@@ -207,6 +207,11 @@ def test_slash_activation_normalizes_unscoped_portable_tools_but_not_command_pat
         lambda _: "executed",
     )
     assert blocked.status == "error"
+    blocked_fragment = middleware.wrap_tool_call(
+        ToolRequestStub("add", context=context),
+        lambda _: "executed",
+    )
+    assert blocked_fragment.status == "error"
 
 
 def test_slash_activation_preserves_scalar_custom_tool_names(tmp_path):
@@ -234,6 +239,33 @@ def test_slash_activation_preserves_scalar_custom_tool_names(tmp_path):
     filtered = middleware.wrap_model_call(request, lambda model_request: model_request)
 
     assert _tool_names(filtered) == ["mcp__arxiv__SearchPapers"]
+
+
+def test_slash_activation_preserves_lowercase_exact_tool_authority(tmp_path):
+    skill_dir = tmp_path / "lowercase-tool"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: lowercase-tool\ndescription: Lowercase tool\nallowed-tools: write\n---\nBody\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, category=SkillCategory.CUSTOM)
+    assert skill is not None
+    context = {}
+    write_slash_skill_source_path(
+        context,
+        skill.get_container_file_path(),
+        owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    middleware = _middleware([skill])
+    request = ModelRequestStub(
+        [NamedTool("write"), NamedTool("write_file")],
+        context=context,
+    )
+
+    filtered = middleware.wrap_model_call(request, lambda model_request: model_request)
+
+    assert _tool_names(filtered) == ["write"]
 
 
 @pytest.mark.parametrize("active_source", ["slash", "skill_context"])
