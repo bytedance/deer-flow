@@ -231,8 +231,13 @@ class SQLiteUserRepository(UserRepository):
             stored, revision = row
             return deepcopy(stored), int(revision)
 
-    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict, int]:
-        """Merge with an optimistic revision CAS supported by SQLite/Postgres."""
+    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict | None, int]:
+        """Merge with an optimistic revision CAS supported by SQLite/Postgres.
+
+        A structurally corrupt JSON value cannot be deep-merged safely. Clear
+        it in the same CAS write so the client receives the normal absent-record
+        recovery signal instead of a server error.
+        """
         for _attempt in range(_PREFERENCE_WRITE_MAX_ATTEMPTS):
             async with self._sf() as session:
                 dialect_name = session.get_bind().dialect.name
@@ -311,11 +316,20 @@ def _is_sqlite_busy_error(exc: OperationalError) -> bool:
     return "database is locked" in str(exc.orig).lower()
 
 
-def _merge_preferences(current: dict, patch: dict) -> dict:
-    """Deep-merge allowlisted sections; JSON null clears optional fields."""
+def _merge_preferences(current: object, patch: dict) -> dict | None:
+    """Deep-merge allowlisted sections, or flag an unsafe stored shape."""
+    if not isinstance(current, dict):
+        return None
+
     merged = deepcopy(current)
     for section, values in patch.items():
-        target = merged.setdefault(section, {})
+        if not isinstance(values, dict):
+            return None
+        if section not in merged:
+            merged[section] = {}
+        target = merged[section]
+        if not isinstance(target, dict):
+            return None
         for key, value in values.items():
             if value is None:
                 target.pop(key, None)

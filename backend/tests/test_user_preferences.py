@@ -417,6 +417,32 @@ async def test_patch_resets_an_invalid_merged_record_for_client_reinitialization
 
 
 @pytest.mark.asyncio
+async def test_patch_resets_structurally_corrupt_record_before_merging(
+    user_repository: SQLiteUserRepository,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = await _create_user(user_repository, "structurally-invalid-patch@example.com")
+    await user_repository.initialize_user_preferences(str(user.id), _full_preferences())
+    await _overwrite_stored_preferences(str(user.id), {"context": []})
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=user, auth_source=AUTH_SOURCE_SESSION),
+        cookies={},
+        headers={},
+    )
+    monkeypatch.setattr(user_preferences_router, "get_current_user_from_request", AsyncMock(return_value=user))
+    monkeypatch.setattr(user_preferences_router, "get_user_repository", lambda: user_repository)
+
+    response = await patch_user_preferences(
+        UserPreferencesPatchRequest.model_validate({"context": {"mode": "pro"}}),
+        request,  # type: ignore[arg-type]
+    )
+
+    assert response.settings is None
+    assert response.revision == 2
+    assert await user_repository.get_user_preferences(str(user.id)) == (None, 2)
+
+
+@pytest.mark.asyncio
 async def test_route_rejects_a_stale_tab_after_the_session_owner_changes(monkeypatch: pytest.MonkeyPatch) -> None:
     current_user = User(id=uuid4(), email="current@example.com", password_hash="hash")
     stale_user_id = str(uuid4())

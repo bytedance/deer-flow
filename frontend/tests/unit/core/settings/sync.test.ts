@@ -407,12 +407,20 @@ test("keeps the local edit when a background PATCH fails", async () => {
   controller.stop();
 });
 
-test("reinitializes a corrupt server record before acknowledging its discovering PATCH", async () => {
+test("reapplies a pending patch after corrupt-record recovery before acknowledging it", async () => {
   const store = new FakeStore(settings("initial"));
   const transport = transportWithServer(settings("server"));
-  transport.patch = rs.fn(async () => ({ settings: null, revision: 2 }));
-  transport.initialize = rs.fn(async (local: PersistedUserSettings) => ({
-    settings: structuredClone(local),
+  let patchAttempt = 0;
+  transport.patch = rs.fn(async () => {
+    patchAttempt += 1;
+    return patchAttempt === 1
+      ? { settings: null, revision: 2 }
+      : { settings: settings("recovered-edit"), revision: 4 };
+  });
+  transport.initialize = rs.fn(async () => ({
+    // Another device won the first-writer-wins initialization race without
+    // this tab's pending mutation.
+    settings: settings("other-device"),
     revision: 3,
   }));
   const controller = new UserSettingsSyncController(store, transport);
@@ -421,9 +429,12 @@ test("reinitializes a corrupt server record before acknowledging its discovering
   store.mutate({ context: { model_name: "recovered-edit" } });
   await controller.whenIdle();
 
-  expect(transport.patch).toHaveBeenCalledWith({
+  const pendingPatch = {
     context: { model_name: "recovered-edit" },
-  });
+  };
+  expect(transport.patch).toHaveBeenCalledTimes(2);
+  expect(transport.patch).toHaveBeenNthCalledWith(1, pendingPatch);
+  expect(transport.patch).toHaveBeenNthCalledWith(2, pendingPatch);
   expect(transport.initialize).toHaveBeenCalledWith(
     expect.objectContaining({
       context: expect.objectContaining({ model_name: "recovered-edit" }),

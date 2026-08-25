@@ -34,8 +34,11 @@
    schema validation is also recoverable: the
    Gateway revision-conditionally clears the corrupt value, and a PATCH response
    carrying that absent record makes the controller reinitialize from its full
-   current local state before acknowledging the pending mutation. This keeps a
-   repair from silently dropping the edit that discovered the corrupt record.
+   current local state, then reapply the pending patch before acknowledging it.
+   The replay is required because another device can win the first-writer-wins
+   initialization race with settings that do not include this tab's edit. This
+   keeps a repair from silently dropping the edit that discovered the corrupt
+   record.
    Local and cross-tab cache changes
    enqueue only their changed allowlisted leaves. Each user/leaf has a fixed
    mutation slot containing an opaque operation id and a separate acknowledgement

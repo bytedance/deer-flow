@@ -205,6 +205,12 @@ export class UserSettingsSyncController {
                 "User settings recovery did not initialize a record",
               );
             }
+            const reapplied = await this.transport.patch(patch);
+            if (reapplied.settings === null) {
+              throw new Error(
+                "User settings recovery did not retain the pending patch",
+              );
+            }
           }
         } catch {
           requestFailed = true;

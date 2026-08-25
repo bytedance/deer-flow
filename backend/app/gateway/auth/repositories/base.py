@@ -125,8 +125,8 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict, int]:
-        """Atomically deep-merge a validated partial preference update."""
+    async def merge_user_preferences(self, user_id: str, patch: dict) -> tuple[dict | None, int]:
+        """Atomically merge a patch, or clear a structurally corrupt record."""
         raise NotImplementedError
 
     @abstractmethod
