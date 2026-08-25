@@ -144,11 +144,16 @@ def create_deerflow_agent(
     state_schema: type | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
+    subagent_runtime: SubagentRuntime | None = None,
 ) -> CompiledStateGraph:
     ...
 ```
 
 `DeerFlowClient` 内部调用此函数。
+
+直接集成需要原生子智能体时，调用方可以显式传入一个 `SubagentRuntime`。同一应用内的多个 graph 应复用同一实例，让 middleware 限制、`task` 工具、真实执行槽位和可选批处理 worker 共享同一份容量快照。这个参数不改变“纯参数工厂”边界：工厂不读取 YAML、不创建 SQL repository，也不启动后台 worker。
+
+当 runtime 持有批处理 repository 时，调用方必须在构建 graph 前执行 `await runtime.start()`（或使用 `async with runtime`），并在应用停机时 `stop()`。直接工厂只绑定执行工具和 worker，不会自动挂载 Gateway 的 HTTP API 或前端面板。只使用普通 `task` 时不需要异步启停。
 
 ### 3.3 `RuntimeFeatures` — 内置 Middleware 替换
 

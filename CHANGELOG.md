@@ -81,6 +81,10 @@ This section accumulates work toward the **2.1.0** milestone
   Deployments that relied on the old default now snapshot 100x more often in
   delta mode -- set `database.checkpoint_delta.snapshot_frequency: 1000`
   explicitly to keep the previous cadence. ([#4516])
+- **docker:** The published entry port now binds to loopback (`127.0.0.1`) by
+  default in both compose files, matching the documented local-trust deployment
+  model. Deployments that relied on the old `0.0.0.0` binding must set
+  `BIND_HOST` to expose the stack on other interfaces. ([#4618])
 
 ### Added
 
@@ -113,7 +117,7 @@ This section accumulates work toward the **2.1.0** milestone
   thread storage from O(N²) to near-linear for long research/coding runs.
   ([#4292])
 - **runtime:** Delta-mode checkpoint history cache (memory/redis) with O(1)
-  incremental composition, configured via `database.checkpoint_cache`.
+  incremental composition, configured via `database.checkpoint_cache`. ([#4638])
 - **agent:** Config-declared lead-agent middlewares let deployments add custom
   `AgentMiddleware` classes without patching the runtime chain. ([#3964])
 - **agents:** Per-agent model and generation settings (`temperature`,
@@ -123,6 +127,28 @@ This section accumulates work toward the **2.1.0** milestone
   `present_files` no longer report success when delivery fails. ([#4365])
 - **uploads:** Lazy-load historical files via a `list_uploaded_files` tool
   instead of injecting the full manifest. ([#4174])
+- **scheduler:** `scheduler.recursion_limit` in `config.yaml` sets the LangGraph
+  super-step cap for scheduled runs (default 1000, matching the web UI's
+  interactive budget, clamped by `max_recursion_limit`). ([#4848])
+- **runtime:** Every tool call now carries a runtime-stamped, tamper-evident
+  tool receipt, and a bounded receipt ledger is injected into the model
+  context so agents can cite execution evidence in their reports. Enabled
+  by default via the new `verification` config section. ([#4659])
+- **clarification:** Human-input (clarification) cards support structured
+  form fields, so an agent can request exactly the input it needs instead
+  of free text only. ([#4406])
+- **subagents:** Built-in subagents now receive the current-date context
+  anchor, so delegated tasks involving relative dates behave like tasks the
+  lead agent handles directly. ([#4797])
+- **subagents:** A Settings page manages a deployment-level Subagent catalog
+  (admin-managed worker definitions alongside built-in and `config.yaml`
+  ones), and Custom Agents can restrict delegation to an explicit worker
+  allowlist enforced at both prompt and execution time. ([#4887])
+- **subagents:** Subagent concurrency is now governed by one process-wide
+  capacity controller, and an opt-in `batch_task` tool runs large
+  collections of independent items as durable, resumable SQL-backed batches
+  with leases, bounded retries, pause/resume/cancel, and a chat panel for
+  tracking progress. ([#4998])
 
 #### Memory
 
@@ -140,6 +166,13 @@ This section accumulates work toward the **2.1.0** milestone
 - **memory:** Memory message processing adds a conversation watermark,
   trivial-turn filtering, and a durable queue so extraction no longer re-feeds
   the full conversation every turn. ([#4447])
+- **memory:** A built-in FTS5/BM25 retrieval adapter provides full-text
+  search over stored memories without an external retrieval service.
+  ([#4360])
+- **memory:** New pluggable memory backends: OpenViking and mem0 over HTTP,
+  plus Honcho as a user-model memory provider. ([#4509], [#4528], [#4730])
+- **memory:** A hybrid fact eviction policy blends multiple signals when
+  deciding which stored facts to drop as memory fills. ([#4789])
 
 #### Skills
 
@@ -148,6 +181,8 @@ This section accumulates work toward the **2.1.0** milestone
   skill's schema on demand instead of loading all skills up front. ([#3033],
   [#3775])
 - **skills:** Per-user custom skill isolation with sandbox mounting. ([#3889])
+- **skills:** The skill list reopens after a skill is selected, so several
+  skills can be attached in a row. ([#4639])
 
 #### Models & integrations
 
@@ -165,6 +200,27 @@ This section accumulates work toward the **2.1.0** milestone
 - **community:** Lark/Feishu CLI integration bundles the runtime install, the
   official `lark-*` skill pack, and an interactive auth flow so the integration
   is no longer environment-dependent. ([#3971])
+- **integrations:** Lark/Feishu app credentials can be switched per user
+  from Settings > Integrations: new App ID/Secret values are validated
+  before anything is committed, and the previous OAuth token is revoked
+  after a successful switch. ([#4703])
+- **acp:** MiniMax Code (`mcode acp`) is supported and documented as a
+  native external coding agent, and ACP thought chunks are no longer
+  concatenated into tool results. ([#4846])
+
+#### MCP
+
+- **mcp:** A durable task runtime for MCP: long-running tool tasks survive
+  Gateway restarts through a durable driver, and their progress and
+  completion notifications surface in the chat UI. ([#4665], [#4690],
+  [#4833])
+- **mcp:** Shared MCP servers can inject per-user credentials: a single
+  server entry authenticates each DeerFlow user with their own header
+  value, unmapped users are denied by default, and stored credentials are
+  masked in Gateway API responses. ([#4868])
+- **mcp:** Per-server `tool_name_prefix` option lets servers that already
+  namespace their own tools keep their original tool names; the default
+  behavior is unchanged. ([#4624])
 
 #### Channels
 
@@ -172,6 +228,13 @@ This section accumulates work toward the **2.1.0** milestone
   `DEERFLOW_CHANNEL_USER_ID`. ([#3926])
 - **channels:** Queue rapid same-thread messages and preserve topic-card
   previews across batches. ([#3988])
+- **channels:** Inbound webhook deduplication moves to Postgres, so several
+  Gateway pods can serve the same IM channel without double-processing
+  events. ([#4210])
+- **channels:** DingTalk inbound messages support file and image
+  attachments. ([#4423])
+- **channels:** New Buzz (Nostr) channel connector, including the frontend
+  experience for the channel. ([#4649], [#4727])
 
 #### Auth & guardrails
 
@@ -186,6 +249,12 @@ This section accumulates work toward the **2.1.0** milestone
 - **authz:** Built-in RBAC authorization provider with a unified factory, plus
   tool-authorization enforcement at both assembly (tools removed before the
   model sees them) and runtime (denied calls blocked). ([#4260], [#4370])
+- **authz:** Gateway route permissions are derived from the configured
+  AuthorizationProvider rather than a fixed table. ([#4439])
+- **authz:** Model authorization is enforced at Gateway routes and again in
+  the agent runtime, and `sandbox:execute` is checked when a sandbox is
+  acquired - users can no longer reach models or sandboxes they are not
+  authorized for. ([#4540], [#4911])
 
 #### Sandbox & provisioner
 
@@ -193,6 +262,31 @@ This section accumulates work toward the **2.1.0** milestone
   with a warm pool. ([#3883], [#3940], [#3951])
 - **provisioner:** ClusterIP Services and scoped per-skill PVC mounts, plus a
   configurable sandbox container port. ([#4016], [#3928])
+- **sandbox:** New cloud sandbox providers: Tenki and OpenSandbox.
+  ([#4382], [#4877])
+- **sandbox:** An optional lark-cli credential broker sidecar (K8s
+  provisioner mode) keeps Lark app secrets and OAuth tokens out of the
+  sandbox filesystem entirely - the sandbox sees only a shim that forwards
+  commands to a loopback broker in the pod. Off by default. ([#4501])
+
+#### Extensions & plugins
+
+- **extensions:** An out-of-tree Python extension system: extensions can
+  contribute middleware, task-lifecycle and system-model observers, Gateway
+  services, and HTTP routers, and are managed with `deerflow extensions`
+  install/enable/disable/remove. ([#4636], [#4684], [#4780])
+- **extensions:** Extensions can observe what the agent did - message
+  provenance, middleware policy declarations, agent-assembly fingerprints,
+  context-compaction records, guardrail decisions, and the MCP origin of a
+  tool. `deerflow-extension-api` moves to 0.2.0; extensions written against
+  0.1 are refused at startup with an install hint. ([#4863])
+
+#### Persistence
+
+- **persistence:** A custom PostgreSQL schema can be selected via
+  `postgres_schema`; ORM, LangGraph checkpointer, and store tables are all
+  created there, and the schema is created automatically at startup.
+  ([#3442])
 
 #### Frontend
 
@@ -211,6 +305,21 @@ This section accumulates work toward the **2.1.0** milestone
 - **frontend:** Localized AI-assistance disclaimer. ([#4374])
 - **frontend:** Pin recent chats. ([#4442])
 - **frontend:** Validate `/goal` objective length in the composer. ([#4337])
+- **frontend:** Real-time context window usage is shown as a conversation
+  grows. ([#3183])
+- **frontend:** The latest user turn can be edited and rerun in place.
+  ([#4377])
+- **frontend:** Replies can be typed and sent while a clarification card is
+  pending. ([#4530])
+- **suggestions:** The number of follow-up suggestions is configurable via
+  `suggestions.max_suggestions` (default 3). ([#4533])
+- **artifacts:** Text artifacts can be edited inline in the artifact panel.
+  ([#4596])
+- **frontend:** Browser Live is available in Custom Agent chats. ([#4719])
+- **threads:** Branched conversations get distinguishing titles
+  (automatic `Title (2)`, `Title (3)` sibling numbering) and the
+  recent-chats list shows parent-child lineage with tree connectors.
+  ([#4983])
 
 #### Observability & tooling
 
@@ -223,6 +332,7 @@ This section accumulates work toward the **2.1.0** milestone
   support thinking, and a Volcengine Coding Plan quick-setup path was added.
   ([#3428], [#4141])
 - **tui:** `clear` command. ([#4306])
+- **tui:** The TUI supports a transparent terminal background. ([#4631])
 
 ### Changed
 
@@ -269,10 +379,20 @@ This section accumulates work toward the **2.1.0** milestone
   eliminating duplicated pattern compilation. ([#4108])
 - **docs:** `AGENTS.md` is now the source of truth for agent guidance, imported
   by `CLAUDE.md` via `@AGENTS.md`; module guides refreshed. ([#3770])
+- **memory:** The OpenViking memory backend now uses the official OpenViking
+  adapter; the old trusted-mode `auth_mode`/`account` fields are rejected in
+  favor of a credential-bound USER API key. ([#4707])
+- **gateway:** Threads created before the run-event journal have their
+  checkpoint history backfilled as seed events before the first new run, so
+  legacy conversations stay visible and correctly ordered after an upgrade.
+  ([#4590])
+- **agents:** Subagent delegation is now routed by net benefit: the lead agent
+  defaults to direct execution unless parallel latency, specialist capability,
+  or context isolation clearly pays off. ([#4384])
 
 ### Fixed
 
-- **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview.
+- **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
   of matching any `$(`: `x=$(curl url)`, `echo $(curl url)`, an argument, and a
@@ -291,7 +411,7 @@ This section accumulates work toward the **2.1.0** milestone
   Variable expansions whose name merely starts with a risky executable
   (`$shell`, `$bashrc`, `$python_version`) and lookalike binaries
   (`shellcheck`, `shasum`) are no longer false positives.
-  ([#4611])
+  ([#4611], [#4623])
 - **mcp:** Isolate Settings > Tools enable/disable updates to one MCP server, so
   an unrelated disallowed stdio command no longer blocks every switch; allow
   disabling a disallowed target while still rejecting its re-enable, preserve
@@ -299,7 +419,7 @@ This section accumulates work toward the **2.1.0** milestone
   SSE/HTTP servers, surface backend validation details in the UI, and atomically
   replace the shared config for MCP, skill, and embedded-client updates so
   interrupted writes cannot leave it truncated.
-  ([#4574])
+  ([#4574], [#4577])
 - **runtime:** Thread metadata now switches to `running` only after the run passes
   the startup barrier, so pending-cancelled runs no longer briefly project
   `running`; clients may observe the prior thread status during worker startup.
@@ -540,12 +660,271 @@ This section accumulates work toward the **2.1.0** milestone
   with a new per-server `session_init_timeout` (default 60s, `null` disables),
   so a hung stdio server can no longer block agent construction, or the whole
   Gateway event loop, indefinitely. `tool_call_timeout` still bounds individual
-  stdio tool calls.
+  stdio tool calls. ([#4657])
 - **runtime:** Tool-output budget externalization no longer trips run delivery
   verification. The default `.tool-results` storage dir (and any custom
   `tool_output.storage_subdir`) is excluded from workspace-change snapshots and
   produced-artifact detection, so a run that only externalized oversized tool
-  outputs succeeds instead of failing as an error.
+  outputs succeeds instead of failing as an error. ([#4657])
+- **frontend:** Hide stale follow-up suggestion chips while a turn is still
+  streaming. ([#3396])
+- **frontend:** Fix streaming render glitches: stop the word animation from
+  replaying, keep step text stable, preserve message order during long runs,
+  and keep reasoning above the answer. ([#4266], [#4510], [#4513], [#4578])
+- **frontend:** Encode thread IDs in chat routes so IDs with special
+  characters no longer break navigation. ([#4302])
+- **frontend:** Render citation links from React children. ([#4486])
+- **frontend:** Localize conversation export failure messages. ([#4493])
+- **frontend:** Sync side panel state when a drag collapses the panel. ([#4556])
+- **frontend:** Render one workspace-change card per run instead of
+  duplicates. ([#4559])
+- **frontend:** Refresh the active artifact's content when it changes. ([#4584])
+- **gateway:** Reject non-positive read limits in API requests. ([#4284])
+- **gateway:** Handle a null `config.configurable` when resolving the thread
+  id instead of failing. ([#4301])
+- **gateway:** Unify thread id validation across API routes. ([#4589])
+- **gateway:** Merge concurrent thread metadata updates instead of letting
+  them silently overwrite each other's changes. ([#4489])
+- **gateway:** Expose the run metadata response header to cross-origin
+  clients, so a split-origin frontend learns new run ids instead of staying
+  stuck on the new-thread placeholder route until reload. ([#4535])
+- **gateway:** Replay edit and rerun from a settled checkpoint so the edited
+  prompt actually runs (previously a first turn's edit replayed the original
+  prompt and vanished after reload), and keep a manual rename through the
+  rerun. ([#4534], [#4539])
+- **runtime:** Cancel a run from any live gateway worker, not only the one
+  that owns it, so the stop button no longer depends on request routing.
+  ([#4500])
+- **runtime:** Close a replacement run when interrupt or rollback admission
+  is cancelled mid-flight, instead of stranding an unseen active run on the
+  thread. ([#4472])
+- **runtime:** Regenerating a response now preserves the thread's current
+  title and supports the latest interrupted response whose partial message
+  never reached a checkpoint. ([#4480], [#4524])
+- **agents:** Classify web_fetch error pages such as 404s as errors rather
+  than successful evidence, so retries and stagnation guards can react.
+  ([#4314])
+- **agents:** Handle XML-to-dict option shapes when normalizing
+  clarification choices. ([#4527])
+- **subagents:** Run delegated subagents with isolated callbacks and lazy
+  skill activation, fixing cross-event-loop failures and passive skills
+  stripping baseline tools like `write_file`. ([#4497])
+- **sandbox:** Handle overwrite-wrapped state when ensuring the sandbox is
+  initialized. ([#4429])
+- **sandbox:** Reconcile E2B sandboxes safely: pick the first healthy
+  candidate, adopt the canonical instance per user and thread, defer a
+  peer's live duplicates, and reap orphans after a grace window. ([#4443])
+- **sandbox:** Claim ownership before destroying a sandbox that failed its
+  readiness check, so a peer gateway can no longer adopt the not-yet-ready
+  sandbox and kill a live turn. ([#4505])
+- **sandbox:** Allow grep to search a single file. ([#4512])
+- **sandbox:** Enforce the E2B capacity limit deployment-wide when sandbox
+  ownership uses Redis, so multiple gateways cannot create past it. ([#4575])
+- **skills:** Activate managed integration skills from the managed
+  integrations root on slash invocation. ([#4570])
+- **skills:** Offload blocking filesystem IO when updating a skill and
+  serialize concurrent writes. ([#3565])
+- **mcp:** Ignore oversized path-like text. ([#4582])
+- **memory:** Harden long-term memory: reject duplicate facts inside the
+  create critical section, truncate injected mem0 context on entry
+  boundaries, and keep task-scoped instructions such as "inspect only" out
+  of long-term memory. ([#4599], [#4600], [#4604])
+- **scheduler:** Keep a successfully launched scheduled run's slot and run
+  id when post-launch bookkeeping fails, preventing a later dispatch from
+  launching a duplicate run. ([#4504])
+- **config:** Treat a deleted extensions config file as absent instead of
+  raising, so tool and skill config resolution keeps working. ([#4275])
+- **config:** Normalize the `postgres://` short scheme for the async ORM
+  engine. ([#4293])
+- **console:** Disable cost reporting when model pricing mixes currencies
+  instead of reporting a meaningless cross-currency total. ([#4564])
+- **browserless:** Accept the `timeout` config key and harden its coercion.
+  ([#4519])
+- **docker:** Send `Connection: upgrade` only when the browser requests it,
+  fixing login-page refresh loops when the Docker dev stack is accessed via
+  a remote host. ([#4250])
+- **runtime:** Group JSONL batch event writes by run, so a batch covering
+  several runs no longer lands all events in the first run's file and makes
+  later runs unreadable through per-run APIs. ([#4938])
+- **runtime:** Restore standalone LangGraph Studio compatibility: the graph
+  entrypoint and file-based app load again, the Studio identity can discover
+  system assistants, and the documented `langgraph dev` workflow works.
+  ([#4760], [#4838])
+- **gateway:** Stamp `turn_duration` on a run's last AI message only in
+  `/messages/page`, so multi-step turns no longer repeat the same run
+  lifetime as thinking latency on every intermediate message. ([#4755])
+- **gateway:** Preserve exact history attribution beyond the event page
+  limit, so older AI messages on long-lived threads are no longer credited
+  to a later turn's run and duration. ([#4953])
+- **gateway:** Reject MCP task cancellation with HTTP 503 when the task
+  worker is stopped, instead of acknowledging a cancellation that would
+  never run. ([#4963])
+- **middleware:** Correct four context-handling defects: fallback
+  dynamic-context injection targets the latest user message instead of
+  resurrecting an old prompt as the current turn; bare string blocks in
+  list-form user content are sanitized like all other user text; duplicate
+  placeholders are no longer emitted for the same invalid tool call; and
+  summarization no longer compresses away the current request's user message
+  while leaving the previous turn's behind. ([#4667], [#4668], [#4693],
+  [#4882])
+- **middleware:** Restore the system-prompt injection that teaches the model
+  about the `write_todos` tool, which the todo middleware's model-call
+  override had silently dropped. ([#4735])
+- **agents:** Make SQL agent-store signatures content-sensitive, so an agent
+  update that reuses its previous timestamp no longer leaves the GitHub
+  agent registry serving stale webhook routing. ([#4709])
+- **tools:** Resolve presented files with the runtime user, so `present_files`
+  no longer rejects valid artifacts as outside the outputs directory when
+  the request user context is unavailable. ([#4677])
+- **tools:** Retain a strong reference to deferred subagent cleanup tasks, so
+  garbage collection can no longer destroy a pending cleanup and leak
+  cancelled subagent records, locks, and memory. ([#4928])
+- **subagents:** Give every background subagent run a server-side execution
+  ID, so concurrent runs that reuse a provider tool-call ID can no longer
+  overwrite, poll, or cancel each other's state. ([#4758])
+- **harness:** Offload ACP workspace creation and MCP config loading from the
+  event loop, so invoking an ACP agent no longer raises blocking-IO errors
+  or stalls other async work. ([#4965])
+- **mcp:** Reject non-finite `poll_after_seconds` values on task snapshots
+  when they arrive, so a bad polling interval no longer crashes scheduling
+  and persistence after a successful poll. ([#4750])
+- **mcp:** Keep the configured `grant_type` authoritative over
+  `extra_token_params` during OAuth token exchange, so extra parameters can
+  no longer silently switch the configured flow and be rejected by the token
+  endpoint. ([#4860])
+- **mcp:** Exclude the internal stdio MCP temp directory (`.mcp/tmp`) from
+  workspace changes, so MCP temporary and debug files no longer appear
+  alongside user deliverables or crowd real changes out of the file budget.
+  ([#4898])
+- **mcp:** Cancel the remote task when a durable task submission is cancelled
+  mid-flight, so an interrupted submission no longer leaves a remote task
+  running with no record to poll or stop. ([#4933])
+- **sandbox:** Accept the documented E2B reconciliation config fields, so
+  valid E2B configuration no longer produces misleading startup warnings.
+  ([#4772])
+- **sandbox:** Bound E2B mount upload resource use per file, per mount, and
+  across the whole upload pass (shared size and file budgets plus a
+  wall-clock deadline), so large mounts can no longer spike Gateway memory
+  or hold sandbox capacity indefinitely. ([#4812], [#4842])
+- **sandbox:** Preserve trailing whitespace in E2B-synced filenames and
+  tolerate out-of-range remote mtimes, so output sync no longer re-downloads
+  files repeatedly or aborts mid-sync. ([#4861])
+- **sandbox:** Reject non-finite Redis lease-timing values in sandbox
+  ownership config at parse time instead of crashing with an `OverflowError`
+  during startup. ([#4960])
+- **sandbox:** Resolve structured skill reads through the sandbox provider's
+  path mappings, so `read_file` opens legacy and per-user custom skills
+  under the same enabled-state projection as `ls` and shell execution.
+  ([#4792])
+- **skills:** Parse Responses API content blocks in the moderation scanner,
+  so valid skill-management decisions returned as content blocks are no
+  longer rejected as unparseable. ([#4936])
+- **memory:** Reject non-positive and non-finite timeout and character-limit
+  settings in the Honcho and Mem0 backends at config parse time, so a bad
+  value fails fast instead of silently truncating stored text or crashing on
+  the first HTTP call. ([#4783], [#4823])
+- **memory:** Scope custom-agent bootstrap facts to the selected agent's
+  bucket, so facts learned during setup no longer leak into the default
+  bucket and influence ordinary lead-agent conversations. ([#4804])
+- **artifacts:** Support atomic saves on Windows, and serve a SHA-256 ETag on
+  artifact reads so inline preview and editing work on non-secure contexts
+  such as plain-HTTP LAN origins where `crypto.subtle` is unavailable.
+  ([#4629], [#4865])
+- **frontend:** Keep conversation order stable around long runs: the
+  submitted user message no longer renders twice or sinks below its own
+  processing steps, and after a mid-run page reload a turn's steps can no
+  longer appear above the user message that started the run. ([#4620],
+  [#4660])
+- **frontend:** Stop matching `<header>` as `<head>` when injecting the base
+  href into HTML artifact previews, so relative assets in report fragments
+  that begin with `<header>` now load in the sandboxed preview iframe.
+  ([#4625])
+- **frontend:** Open landing-page case studies on a public read-only
+  `/showcase/` route so anonymous visitors are no longer redirected to
+  login. ([#4635])
+- **frontend:** Sort the chats page by pinned state, so pinned threads no
+  longer render below unpinned ones. ([#4643])
+- **frontend:** Keep `<think>` pairs written inside markdown inline code in
+  the rendered content instead of hollowing them out into the Reasoning
+  panel, and restore the copy button for turns that contain only reasoning.
+  ([#4647])
+- **frontend:** Surface model-loading failures with a workspace error banner
+  and retry action instead of a silently empty model list. ([#4840])
+- **frontend:** Preserve copy and other actions on completed assistant
+  messages while a later turn is still streaming. ([#4844])
+- **frontend:** Keep the browser live stream connected after a successful
+  reconnect instead of tearing down the new socket and immediately creating
+  another. ([#4951])
+- **frontend:** Reuse the shared clipboard fallback when copying the Lark
+  authorization link, so the copy action works in browsers without the
+  Clipboard API. ([#4767])
+- **frontend:** Use consistent "DeerFlow" casing in the composer disclaimer
+  and fix the "What's New" heading on the landing page. ([#4970])
+- **channels:** Bound inbound intake with a fixed worker pool and bounded
+  admission queues, and await real cross-thread tasks on shutdown, so
+  message floods are rejected promptly instead of accumulating and channel
+  shutdown no longer tears down transports with work still in flight.
+  ([#4800], [#4816])
+- **channels:** Offload outbound attachment file IO for Feishu, Telegram, and
+  WeCom to worker threads, so sending a large artifact no longer stalls the
+  Gateway event loop. ([#4633])
+- **channels:** Run Telegram connection-identity lookups on the Gateway event
+  loop, so inbound messages and commands no longer crash with a cross-loop
+  error when channel connections are enabled. ([#4815])
+- **feishu:** Keep file receiving off the event loop and preserve every
+  inbound attachment: duplicate provider filenames no longer overwrite each
+  other, writes can no longer be redirected outside the thread bucket, and a
+  failed attachment no longer blocks the rest of the message. ([#4627],
+  [#4903])
+- **dingtalk:** Strip leading `@bot` mentions before command classification,
+  so slash commands like `/new` sent in group chats are recognized instead
+  of treated as plain chat. ([#4724])
+- **discord:** Refuse to start typing-indicator loops after the channel
+  stops, so shutdown no longer leaves an infinite typing task sending
+  events in the background. ([#4752])
+- **wecom:** Serialize WebSocket start/stop transitions and await the SDK's
+  real receive-task shutdown, so stopping the WeCom channel can no longer
+  return before the socket closes or clear a newer connection's state.
+  ([#4762])
+- **buzz:** Drop replayed events across reconnects using a persistent
+  seen-id store, so the agent no longer re-answers the last message in a
+  channel after a relay or Gateway restart. ([#4888])
+- **lark:** Keep the CLI lock directory writable inside sandboxes while the
+  credential-bearing config root stays read-only, restoring Lark API
+  commands that previously failed with a read-only filesystem error.
+  ([#4701])
+- **scheduler:** Enforce the global `max_concurrent_runs` budget for manual
+  triggers too, returning HTTP 409 when the cap is reached instead of
+  letting manual launches exceed it. ([#4769])
+- **scheduler:** Coerce serialized task timestamps on read, so
+  scheduled-task operations no longer fail when string-form timestamp values
+  reach the database layer. ([#4785])
+- **scheduler:** Support safe multi-instance scheduler recovery: startup no
+  longer treats live runs owned by peer Gateway instances as local
+  leftovers, so a restarting instance cannot interrupt a live run or trigger
+  a duplicate execution; multi-instance mode is opt-in via
+  `scheduler.multi_instance`. ([#4713])
+- **scheduler:** Enqueue busy scheduled task runs instead of skipping them:
+  occurrences that hit a busy reused thread now wait in a durable queue
+  (bounded by `scheduler.queue_timeout_seconds`) and survive Gateway
+  restarts, and the UI explains the queueing behavior. ([#4918])
+- **cli:** Add `--recursion-limit` to headless `--print`, `--json`, and
+  `--cli` runs, so long-running agent loops are no longer stuck at the
+  default recursion limit of 100. ([#4615])
+- **dev:** Exclude backend runtime state from the Uvicorn reload watcher in
+  the backend `make dev` launcher, so an agent task writing files under the
+  runtime tree can no longer restart the Gateway and reset concurrent
+  users' requests. ([#4759])
+- **dev:** Resolve diagnostic script paths from the script's own location, so
+  root diagnostic commands work when invoked from any working directory.
+  ([#4736])
+- **docker:** Harden local and container startup: `make up` waits for the
+  Gateway health probe before declaring the stack ready, Docker startup no
+  longer aborts when `.env` is missing, the Gateway can write
+  `extensions_config.json` in production, runtime data stays out of the
+  image build context, log commands resolve the checkout root correctly,
+  and the default loopback origins are allowed so the dev setup page can
+  hydrate. ([#4658], [#4806], [#4852], [#4853], [#4956], [#4959])
 
 ### Performance
 
@@ -561,6 +940,10 @@ This section accumulates work toward the **2.1.0** milestone
   chunk. ([#4425])
 - **frontend:** Stop re-deriving message content on every stream chunk.
   ([#4441])
+- **sandbox:** `read_file` reads only the requested line range from the
+  sandbox instead of fetching the whole file first. ([#3824])
+- **browser:** Encode Browser Live progress frames as JPEG to cut progress
+  payload size. ([#4836])
 
 ### Security
 
@@ -587,6 +970,77 @@ This section accumulates work toward the **2.1.0** milestone
 - **auth:** Persist the `csrf_token` cookie for the access-token lifetime.
   ([#3872])
 - **storage:** Stop persisting base64 image data in checkpoint state. ([#4140])
+- **mcp:** Reject legacy MCP credentials in run metadata. ([#4448])
+- **mcp:** Constrain stdio launcher arguments and environment variables at
+  the config API, rejecting launcher flags and env names that could turn an
+  allowlisted `npx`/`uvx` server registration into arbitrary code execution.
+  ([#4617])
+- **auth:** Harden validation of the post-login `next` path. ([#4587])
+- **runtime:** Honor the LangGraph Server's authenticated user identity
+  across agents, uploads, thread data, memory, and skills, and reject
+  client-supplied auth identity fields. ([#4538])
+- **frontend:** Send the session cookie on model, workspace-change, and
+  ranged artifact reads in split-origin deployments. ([#4827])
+- **frontend:** Restore sanitization in custom streamdown rehype chains, so
+  artifact markdown previews and the memory settings summary can no longer
+  render hostile HTML such as `javascript:` links or `on*` event handlers.
+  ([#4987])
+- **skills:** Copy projected skill files instead of hardlinking them, so a
+  sandboxed write can no longer mutate the canonical skill source, and fail
+  closed on a drifted projection namespace on every platform, including
+  Windows. ([#4825], [#4830])
+- **scripts:** Redact secret-shaped keys (`db_pass`, `signing_key`, ...)
+  wherever they appear in bundled config, not only under well-known key
+  names. ([#4242])
+
+### Documentation
+
+- **docs:** Clarify how `LocalSandboxProvider` resolves `sandbox.mounts[].host_path`
+  under production Docker, with gateway bind-mount and config examples. ([#3833])
+- **docs:** Document that Crawl4AI >= 0.9 requires a bearer token. ([#4518])
+- **docs:** Document the GitHub inbound-dedupe TTL semantics, including what
+  redeliveries are not deduped, and tighten the redelivery tests. ([#4274])
+- **docs:** Update the agent AGENTS.md and ARCHITECTURE.md guides. ([#4817])
+- **docs:** Document the Honcho memory backend with a dedicated guide and a
+  long-term memory section entry in the README. ([#4822])
+
+### Internal
+
+- **tests:** Migrate frontend unit tests to rstest and run hook-level tests in
+  a DOM environment. ([#3703], [#4453])
+- **tests:** Require explicit opt-in for live client tests. ([#4482])
+- **tests:** Rename the LLM-error test stand-in instead of the shared
+  FakeError. ([#4744])
+- **tests:** Replace the magic unwritable absolute path in tool-output tests
+  with a self-constructed failure condition. ([#4722])
+- **tests:** Add multi-turn message-stream invariants as graph integration
+  tests. ([#3708])
+- **tests:** Add trace-based behavioral tests with Monocle Test Tools,
+  asserting agent routing, tool calls, and token/duration cost. ([#4025])
+- **tests:** Cover passive skill tool visibility in the MCP layer. ([#4247])
+- **tests:** Add SQL and concurrent-reconciler coverage for lease-aware orphan
+  recovery. ([#4427])
+- **tests:** Restore memory updater regression coverage. ([#4490])
+- **tests:** Lock in POST logout from the gateway-offline banner. ([#4506])
+- **tests:** Document known instance-client false negatives in the SkillScan
+  tests. ([#4644])
+- **refactor:** Extract frontend placeholder detection into a tested utility.
+  ([#3783])
+- **refactor:** Consolidate E2B client lifecycle helpers and reuse the kill
+  helper during warm-pool eviction. ([#4262], [#4298])
+- **refactor:** Name the E2B capacity-ledger meta-field count so the admission
+  offset is explicit. ([#4764])
+- **dev:** Trace self/cls attribute chains and local aliases in the
+  blocking-IO detector's call graph, closing false negatives. ([#4200])
+- **ci:** Publish the lark-cli-init and lark-broker images. ([#4558])
+- **dev:** Route host-side pnpm consumers through a shared runner with a
+  Corepack fallback so local workflows work without a pnpm shim. ([#4405])
+- **bench:** Add an isolated checkpoint channel-mode benchmark comparing `full`
+  and `delta` across latency, storage, and replay metrics. ([#4395])
+- **deps:** Bump `cryptography` 49.0.0 -> 50.0.0, `postcss` 8.4.31 -> 8.5.25,
+  `h2` 4.3.0 -> 4.4.1, `langgraph-checkpoint-sqlite` and
+  `langgraph-checkpoint-postgres` 3.1.0 -> 3.1.1, and `nanoid` 5.1.6 -> 5.1.16.
+  ([#4681], [#4683], [#4737], [#4738], [#4747], [#4748])
 
 ## [2.0.0] — 2026-06-15
 
@@ -1420,3 +1874,206 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4516]: https://github.com/bytedance/deer-flow/pull/4516
 [#4611]: https://github.com/bytedance/deer-flow/issues/4611
 [#4745]: https://github.com/bytedance/deer-flow/pull/4745
+[#4574]: https://github.com/bytedance/deer-flow/issues/4574
+[#4577]: https://github.com/bytedance/deer-flow/pull/4577
+[#4623]: https://github.com/bytedance/deer-flow/pull/4623
+[#4634]: https://github.com/bytedance/deer-flow/pull/4634
+[#4638]: https://github.com/bytedance/deer-flow/pull/4638
+[#4848]: https://github.com/bytedance/deer-flow/pull/4848
+[#3183]: https://github.com/bytedance/deer-flow/pull/3183
+[#3396]: https://github.com/bytedance/deer-flow/pull/3396
+[#3442]: https://github.com/bytedance/deer-flow/pull/3442
+[#3565]: https://github.com/bytedance/deer-flow/pull/3565
+[#3703]: https://github.com/bytedance/deer-flow/pull/3703
+[#3708]: https://github.com/bytedance/deer-flow/pull/3708
+[#3783]: https://github.com/bytedance/deer-flow/pull/3783
+[#3824]: https://github.com/bytedance/deer-flow/pull/3824
+[#3833]: https://github.com/bytedance/deer-flow/pull/3833
+[#4025]: https://github.com/bytedance/deer-flow/pull/4025
+[#4200]: https://github.com/bytedance/deer-flow/pull/4200
+[#4210]: https://github.com/bytedance/deer-flow/pull/4210
+[#4242]: https://github.com/bytedance/deer-flow/pull/4242
+[#4247]: https://github.com/bytedance/deer-flow/pull/4247
+[#4250]: https://github.com/bytedance/deer-flow/pull/4250
+[#4262]: https://github.com/bytedance/deer-flow/pull/4262
+[#4266]: https://github.com/bytedance/deer-flow/pull/4266
+[#4274]: https://github.com/bytedance/deer-flow/pull/4274
+[#4275]: https://github.com/bytedance/deer-flow/pull/4275
+[#4284]: https://github.com/bytedance/deer-flow/pull/4284
+[#4293]: https://github.com/bytedance/deer-flow/pull/4293
+[#4298]: https://github.com/bytedance/deer-flow/pull/4298
+[#4301]: https://github.com/bytedance/deer-flow/pull/4301
+[#4302]: https://github.com/bytedance/deer-flow/pull/4302
+[#4314]: https://github.com/bytedance/deer-flow/pull/4314
+[#4360]: https://github.com/bytedance/deer-flow/pull/4360
+[#4377]: https://github.com/bytedance/deer-flow/pull/4377
+[#4382]: https://github.com/bytedance/deer-flow/pull/4382
+[#4384]: https://github.com/bytedance/deer-flow/pull/4384
+[#4395]: https://github.com/bytedance/deer-flow/pull/4395
+[#4405]: https://github.com/bytedance/deer-flow/pull/4405
+[#4406]: https://github.com/bytedance/deer-flow/pull/4406
+[#4423]: https://github.com/bytedance/deer-flow/pull/4423
+[#4427]: https://github.com/bytedance/deer-flow/pull/4427
+[#4429]: https://github.com/bytedance/deer-flow/pull/4429
+[#4439]: https://github.com/bytedance/deer-flow/pull/4439
+[#4443]: https://github.com/bytedance/deer-flow/pull/4443
+[#4448]: https://github.com/bytedance/deer-flow/pull/4448
+[#4453]: https://github.com/bytedance/deer-flow/pull/4453
+[#4472]: https://github.com/bytedance/deer-flow/pull/4472
+[#4480]: https://github.com/bytedance/deer-flow/pull/4480
+[#4482]: https://github.com/bytedance/deer-flow/pull/4482
+[#4486]: https://github.com/bytedance/deer-flow/pull/4486
+[#4489]: https://github.com/bytedance/deer-flow/pull/4489
+[#4490]: https://github.com/bytedance/deer-flow/pull/4490
+[#4493]: https://github.com/bytedance/deer-flow/pull/4493
+[#4497]: https://github.com/bytedance/deer-flow/pull/4497
+[#4500]: https://github.com/bytedance/deer-flow/pull/4500
+[#4501]: https://github.com/bytedance/deer-flow/pull/4501
+[#4504]: https://github.com/bytedance/deer-flow/pull/4504
+[#4505]: https://github.com/bytedance/deer-flow/pull/4505
+[#4506]: https://github.com/bytedance/deer-flow/pull/4506
+[#4509]: https://github.com/bytedance/deer-flow/pull/4509
+[#4510]: https://github.com/bytedance/deer-flow/pull/4510
+[#4512]: https://github.com/bytedance/deer-flow/pull/4512
+[#4513]: https://github.com/bytedance/deer-flow/pull/4513
+[#4518]: https://github.com/bytedance/deer-flow/pull/4518
+[#4519]: https://github.com/bytedance/deer-flow/pull/4519
+[#4524]: https://github.com/bytedance/deer-flow/pull/4524
+[#4527]: https://github.com/bytedance/deer-flow/pull/4527
+[#4528]: https://github.com/bytedance/deer-flow/pull/4528
+[#4530]: https://github.com/bytedance/deer-flow/pull/4530
+[#4533]: https://github.com/bytedance/deer-flow/pull/4533
+[#4534]: https://github.com/bytedance/deer-flow/pull/4534
+[#4535]: https://github.com/bytedance/deer-flow/pull/4535
+[#4538]: https://github.com/bytedance/deer-flow/pull/4538
+[#4539]: https://github.com/bytedance/deer-flow/pull/4539
+[#4540]: https://github.com/bytedance/deer-flow/pull/4540
+[#4556]: https://github.com/bytedance/deer-flow/pull/4556
+[#4558]: https://github.com/bytedance/deer-flow/pull/4558
+[#4559]: https://github.com/bytedance/deer-flow/pull/4559
+[#4564]: https://github.com/bytedance/deer-flow/pull/4564
+[#4570]: https://github.com/bytedance/deer-flow/pull/4570
+[#4575]: https://github.com/bytedance/deer-flow/pull/4575
+[#4578]: https://github.com/bytedance/deer-flow/pull/4578
+[#4582]: https://github.com/bytedance/deer-flow/pull/4582
+[#4584]: https://github.com/bytedance/deer-flow/pull/4584
+[#4587]: https://github.com/bytedance/deer-flow/pull/4587
+[#4589]: https://github.com/bytedance/deer-flow/pull/4589
+[#4590]: https://github.com/bytedance/deer-flow/pull/4590
+[#4596]: https://github.com/bytedance/deer-flow/pull/4596
+[#4599]: https://github.com/bytedance/deer-flow/pull/4599
+[#4600]: https://github.com/bytedance/deer-flow/pull/4600
+[#4604]: https://github.com/bytedance/deer-flow/pull/4604
+[#4615]: https://github.com/bytedance/deer-flow/pull/4615
+[#4617]: https://github.com/bytedance/deer-flow/pull/4617
+[#4618]: https://github.com/bytedance/deer-flow/pull/4618
+[#4620]: https://github.com/bytedance/deer-flow/pull/4620
+[#4624]: https://github.com/bytedance/deer-flow/pull/4624
+[#4625]: https://github.com/bytedance/deer-flow/pull/4625
+[#4627]: https://github.com/bytedance/deer-flow/pull/4627
+[#4629]: https://github.com/bytedance/deer-flow/pull/4629
+[#4631]: https://github.com/bytedance/deer-flow/pull/4631
+[#4633]: https://github.com/bytedance/deer-flow/pull/4633
+[#4635]: https://github.com/bytedance/deer-flow/pull/4635
+[#4636]: https://github.com/bytedance/deer-flow/pull/4636
+[#4639]: https://github.com/bytedance/deer-flow/pull/4639
+[#4643]: https://github.com/bytedance/deer-flow/pull/4643
+[#4644]: https://github.com/bytedance/deer-flow/pull/4644
+[#4647]: https://github.com/bytedance/deer-flow/pull/4647
+[#4649]: https://github.com/bytedance/deer-flow/pull/4649
+[#4657]: https://github.com/bytedance/deer-flow/pull/4657
+[#4658]: https://github.com/bytedance/deer-flow/pull/4658
+[#4659]: https://github.com/bytedance/deer-flow/pull/4659
+[#4660]: https://github.com/bytedance/deer-flow/pull/4660
+[#4665]: https://github.com/bytedance/deer-flow/pull/4665
+[#4667]: https://github.com/bytedance/deer-flow/pull/4667
+[#4668]: https://github.com/bytedance/deer-flow/pull/4668
+[#4677]: https://github.com/bytedance/deer-flow/pull/4677
+[#4681]: https://github.com/bytedance/deer-flow/pull/4681
+[#4683]: https://github.com/bytedance/deer-flow/pull/4683
+[#4684]: https://github.com/bytedance/deer-flow/pull/4684
+[#4690]: https://github.com/bytedance/deer-flow/pull/4690
+[#4693]: https://github.com/bytedance/deer-flow/pull/4693
+[#4701]: https://github.com/bytedance/deer-flow/pull/4701
+[#4703]: https://github.com/bytedance/deer-flow/pull/4703
+[#4707]: https://github.com/bytedance/deer-flow/pull/4707
+[#4709]: https://github.com/bytedance/deer-flow/pull/4709
+[#4713]: https://github.com/bytedance/deer-flow/pull/4713
+[#4719]: https://github.com/bytedance/deer-flow/pull/4719
+[#4722]: https://github.com/bytedance/deer-flow/pull/4722
+[#4724]: https://github.com/bytedance/deer-flow/pull/4724
+[#4727]: https://github.com/bytedance/deer-flow/pull/4727
+[#4730]: https://github.com/bytedance/deer-flow/pull/4730
+[#4735]: https://github.com/bytedance/deer-flow/pull/4735
+[#4736]: https://github.com/bytedance/deer-flow/pull/4736
+[#4737]: https://github.com/bytedance/deer-flow/pull/4737
+[#4738]: https://github.com/bytedance/deer-flow/pull/4738
+[#4744]: https://github.com/bytedance/deer-flow/pull/4744
+[#4747]: https://github.com/bytedance/deer-flow/pull/4747
+[#4748]: https://github.com/bytedance/deer-flow/pull/4748
+[#4750]: https://github.com/bytedance/deer-flow/pull/4750
+[#4752]: https://github.com/bytedance/deer-flow/pull/4752
+[#4755]: https://github.com/bytedance/deer-flow/pull/4755
+[#4758]: https://github.com/bytedance/deer-flow/pull/4758
+[#4759]: https://github.com/bytedance/deer-flow/pull/4759
+[#4760]: https://github.com/bytedance/deer-flow/pull/4760
+[#4762]: https://github.com/bytedance/deer-flow/pull/4762
+[#4764]: https://github.com/bytedance/deer-flow/pull/4764
+[#4767]: https://github.com/bytedance/deer-flow/pull/4767
+[#4769]: https://github.com/bytedance/deer-flow/pull/4769
+[#4772]: https://github.com/bytedance/deer-flow/pull/4772
+[#4780]: https://github.com/bytedance/deer-flow/pull/4780
+[#4783]: https://github.com/bytedance/deer-flow/pull/4783
+[#4785]: https://github.com/bytedance/deer-flow/pull/4785
+[#4789]: https://github.com/bytedance/deer-flow/pull/4789
+[#4792]: https://github.com/bytedance/deer-flow/pull/4792
+[#4797]: https://github.com/bytedance/deer-flow/pull/4797
+[#4800]: https://github.com/bytedance/deer-flow/pull/4800
+[#4804]: https://github.com/bytedance/deer-flow/pull/4804
+[#4806]: https://github.com/bytedance/deer-flow/pull/4806
+[#4812]: https://github.com/bytedance/deer-flow/pull/4812
+[#4815]: https://github.com/bytedance/deer-flow/pull/4815
+[#4816]: https://github.com/bytedance/deer-flow/pull/4816
+[#4817]: https://github.com/bytedance/deer-flow/pull/4817
+[#4822]: https://github.com/bytedance/deer-flow/pull/4822
+[#4823]: https://github.com/bytedance/deer-flow/pull/4823
+[#4825]: https://github.com/bytedance/deer-flow/pull/4825
+[#4827]: https://github.com/bytedance/deer-flow/pull/4827
+[#4830]: https://github.com/bytedance/deer-flow/pull/4830
+[#4833]: https://github.com/bytedance/deer-flow/pull/4833
+[#4836]: https://github.com/bytedance/deer-flow/pull/4836
+[#4838]: https://github.com/bytedance/deer-flow/pull/4838
+[#4840]: https://github.com/bytedance/deer-flow/pull/4840
+[#4842]: https://github.com/bytedance/deer-flow/pull/4842
+[#4844]: https://github.com/bytedance/deer-flow/pull/4844
+[#4846]: https://github.com/bytedance/deer-flow/pull/4846
+[#4852]: https://github.com/bytedance/deer-flow/pull/4852
+[#4853]: https://github.com/bytedance/deer-flow/pull/4853
+[#4860]: https://github.com/bytedance/deer-flow/pull/4860
+[#4861]: https://github.com/bytedance/deer-flow/pull/4861
+[#4863]: https://github.com/bytedance/deer-flow/pull/4863
+[#4865]: https://github.com/bytedance/deer-flow/pull/4865
+[#4868]: https://github.com/bytedance/deer-flow/pull/4868
+[#4877]: https://github.com/bytedance/deer-flow/pull/4877
+[#4882]: https://github.com/bytedance/deer-flow/pull/4882
+[#4887]: https://github.com/bytedance/deer-flow/pull/4887
+[#4888]: https://github.com/bytedance/deer-flow/pull/4888
+[#4898]: https://github.com/bytedance/deer-flow/pull/4898
+[#4903]: https://github.com/bytedance/deer-flow/pull/4903
+[#4911]: https://github.com/bytedance/deer-flow/pull/4911
+[#4918]: https://github.com/bytedance/deer-flow/pull/4918
+[#4928]: https://github.com/bytedance/deer-flow/pull/4928
+[#4933]: https://github.com/bytedance/deer-flow/pull/4933
+[#4936]: https://github.com/bytedance/deer-flow/pull/4936
+[#4938]: https://github.com/bytedance/deer-flow/pull/4938
+[#4951]: https://github.com/bytedance/deer-flow/pull/4951
+[#4953]: https://github.com/bytedance/deer-flow/pull/4953
+[#4956]: https://github.com/bytedance/deer-flow/pull/4956
+[#4959]: https://github.com/bytedance/deer-flow/pull/4959
+[#4960]: https://github.com/bytedance/deer-flow/pull/4960
+[#4963]: https://github.com/bytedance/deer-flow/pull/4963
+[#4965]: https://github.com/bytedance/deer-flow/pull/4965
+[#4970]: https://github.com/bytedance/deer-flow/pull/4970
+[#4983]: https://github.com/bytedance/deer-flow/pull/4983
+[#4987]: https://github.com/bytedance/deer-flow/pull/4987
+[#4998]: https://github.com/bytedance/deer-flow/pull/4998

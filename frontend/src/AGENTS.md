@@ -35,10 +35,27 @@
    bounded error and attempt count; retryable failures use backend backoff,
    while a permanent rejection or exhausted five-attempt budget is shown as
    stopped rather than implying that retries will continue.
+   Explicit durable native-subagent batches use `core/subagent-batches` and
+   `ThreadSubagentBatches`. `/api/features` reports SQL-repository availability
+   separately from the startup worker. A running worker exposes the trigger on
+   both default and Custom Agent chat pages; a stopped worker keeps threads with
+   durable history visible in read-only mode for inspection and JSONL export,
+   while deployments with neither a worker nor history keep the trigger hidden.
+   The panel renders bounded progress and incrementally paged item previews, controls pause/resume/cancel,
+   retries failed items, and exports JSONL. Worker-dependent mutations stay
+   disabled in read-only history mode, and persisted progress is normalized to
+   a bounded percentage before reaching the UI primitive. Item pagination uses a
+   fixed page size and an explicit load-more control; full results remain available
+   only through JSONL export. The panel must not infer batch mode from prompt text
+   or inject the complete result set into chat state.
    Settings > Integrations uses a local generation only to suppress stale React
    callbacks; server-issued Lark flow generations must be passed through every
    config/auth completion and across switch-or-register to authorization chains
    so backend cross-tab ordering remains authoritative.
+   Settings > Subagents reads one catalog for built-in, config, and managed
+   definitions. Only administrators see managed-definition mutation controls;
+   Custom Agent settings consume the same query and preserve stale selected names
+   as removable "missing" entries instead of silently widening the allowlist.
 6. Components subscribe to thread state and render updates
 
 The chat header's context-window control is intentionally persistent: while `context_usage` is unavailable, `ContextUsageBadge` renders a gauge placeholder rather than unmounting; once data arrives, the same position shows the percentage. `useThreadTokenUsage` retains placeholder data only when the response `thread_id` still matches the active route, so same-thread refetches do not flicker and cross-thread navigation never displays the previous chat's usage.
@@ -90,6 +107,7 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
+- `core/threads/thread-branch-tree.ts` projects only loaded, same-pin branch lineage into Recent chats. Missing, malformed, cross-pin, self, or cyclic parents stay top-level; unpinned groups follow their freshest descendant while pinned root order stays stable. `recent-chat-list.tsx` caps visual indentation without changing the recursive order.
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own edit-and-rerun submission wiring because the page must preserve normal/custom-agent run context; `MessageList` only detects the latest editable user turn and renders the inline editor.
 - `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` applies the same capability gate and additionally requires the Custom Agent's tool groups to be unrestricted or include `browser`. Default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
