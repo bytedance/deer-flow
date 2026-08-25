@@ -88,9 +88,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if use_baseline:
             base_pkg = extract_package_at_ref(package_rel, base_ref, repo_root)
             if base_pkg is not None:
-                base_findings = run_review_json(base_pkg, base_pkg.parent, args.python)
+                base_findings = run_review_json(base_pkg, repo_root, args.python)
                 base_keys = {finding_key(f) for f in base_findings}
-                shutil.rmtree(base_pkg.parent, ignore_errors=True)
+                shutil.rmtree(base_pkg, ignore_errors=True)
+                # Clean up the temp root left behind by extract_package_at_ref.
+                tmp_root = base_pkg.parent
+                while tmp_root != tmp_root.parent and not any(tmp_root.iterdir()):
+                    parent = tmp_root.parent
+                    tmp_root.rmdir()
+                    tmp_root = parent
                 print(
                     f"[skill-review] Baseline: {len(base_keys)} existing finding(s) at {base_ref}"
                 )
@@ -323,17 +329,21 @@ def _is_eval_fixture_skill_md(path: PurePosixPath) -> bool:
 
 
 def finding_key(finding: dict) -> tuple:
-    """Stable key for diffing findings across refs."""
+    """Stable key for diffing findings across refs.
+
+    Line numbers are excluded because unrelated insertions/deletions in the same
+    file shift line numbers for pre-existing findings.  Path + rule_id + message
+    is a stable identity that survives typical code churn.
+    """
     return (
         finding.get("path", ""),
         finding.get("rule_id", ""),
-        finding.get("line"),
         finding.get("message", ""),
     )
 
 
 def run_review_json(
-    package: Path, repo_root: Path, python_executable: str
+    package: Path, repo_root: Path, python_executable: str,
 ) -> list[dict]:
     """Run review with JSON output, return parsed findings."""
     package_rel = package.relative_to(repo_root).as_posix()
