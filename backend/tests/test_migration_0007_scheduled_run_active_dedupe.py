@@ -13,9 +13,10 @@ End-to-end shape (mirrors ``test_migration_0004_run_ownership_dedupe``):
 4. Run ``init_engine`` (the FastAPI lifespan entry point), which routes through
    ``bootstrap_schema`` -> ``upgrade head`` -> ``0007.upgrade()``.
 5. Verify the migration superseded the older duplicates (set them to
-   ``interrupted`` with an explanatory message + ``finished_at``), kept the
-   newest active row, and successfully built the ``uq_scheduled_task_run_active``
-   partial unique index.
+   ``interrupted`` with an explanatory message + ``finished_at``), successfully
+   built the ``uq_scheduled_task_run_active`` partial unique index, and let the
+   later scheduler-enqueue migration normalize the surviving legacy ``queued``
+   row before durable queue semantics become active.
 
 Pre-fix codepath would have raised ``UNIQUE constraint failed`` (SQLite) /
 ``could not create unique index`` (Postgres) on step 5, aborting the alembic
@@ -147,9 +148,12 @@ async def test_migration_supersedes_duplicate_active_runs_before_unique_index(tm
     try:
         runs = _fetch_runs(db_path)
 
-        # Newest active row on the duplicated task survives unchanged.
-        assert runs["run-newest"][0] == "queued"
-        assert runs["run-newest"][1] is None
+        # 0007 keeps the newest duplicate, then 0015 deliberately interrupts
+        # that pre-existing queued row before durable queue semantics begin.
+        newest_status, newest_error, newest_finished_at = runs["run-newest"]
+        assert newest_status == "interrupted"
+        assert "gateway upgraded" in (newest_error or "")
+        assert newest_finished_at is not None
 
         # Older duplicate active rows are superseded with an explanatory error
         # and a finished_at timestamp (mark_stale_active_runs orphan semantics).
@@ -169,7 +173,7 @@ async def test_migration_supersedes_duplicate_active_runs_before_unique_index(tm
 
         with sqlite3.connect(db_path) as raw:
             version_row = raw.execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version_row[0] == "0013_mcp_task_notifications"
+        assert version_row[0] == "0016_subagent_batches"
 
         # Sanity: the invariant the index enforces now holds — at most one
         # active row per task_id.

@@ -18,6 +18,10 @@ from deerflow.persistence.agents.file import FileAgentStore
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.agents.sql import SqlAgentStore
 from deerflow.persistence.base import Base
+from deerflow.persistence.managed_subagents.base import ManagedSubagentDefinition
+from deerflow.persistence.managed_subagents.file import FileManagedSubagentStore
+from deerflow.persistence.managed_subagents.model import ManagedSubagentRow
+from deerflow.persistence.managed_subagents.sql import SqlManagedSubagentStore
 
 
 def _cfg(agent_backend: str, db_backend: str, sqlite_dir: str = "/tmp/agent-store-test") -> SimpleNamespace:
@@ -72,7 +76,7 @@ def test_validation_warns_on_file_under_multiworker_postgres(monkeypatch, caplog
 
 @pytest.fixture()
 def file_home(tmp_path, monkeypatch):
-    """Root the file store at a temp DEER_FLOW_HOME with two seeded agents."""
+    """Root file stores at a temp DEER_FLOW_HOME with seeded definitions."""
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     from deerflow.config import paths as paths_module
 
@@ -80,6 +84,14 @@ def file_home(tmp_path, monkeypatch):
     fs = FileAgentStore()
     fs.create("reviewer", {"name": "reviewer", "description": "reviews"}, "review soul", user_id="u1")
     fs.create("planner", {"name": "planner", "description": "plans", "model": "m1"}, "plan soul", user_id="u2")
+    FileManagedSubagentStore().create(
+        ManagedSubagentDefinition(
+            name="researcher",
+            description="Researches topics",
+            system_prompt="Research carefully.",
+            enabled=False,
+        )
+    )
     return tmp_path
 
 
@@ -95,7 +107,7 @@ def _patch_importer(monkeypatch, cfg):
     # does, which also creates the sqlite directory).
     pathlib.Path(cfg.database.sqlite_dir).mkdir(parents=True, exist_ok=True)
     engine = create_engine(cfg.database.app_sync_sqlalchemy_url)
-    Base.metadata.create_all(engine, tables=[AgentRow.__table__])
+    Base.metadata.create_all(engine, tables=[AgentRow.__table__, ManagedSubagentRow.__table__])
     engine.dispose()
 
     monkeypatch.setattr(importer, "get_app_config", lambda: cfg)
@@ -103,7 +115,7 @@ def _patch_importer(monkeypatch, cfg):
     return importer
 
 
-def test_importer_copies_all_agents_into_db(file_home, monkeypatch):
+def test_importer_copies_all_definitions_into_db(file_home, monkeypatch):
     cfg = _cfg("db", "sqlite", str(file_home / "db"))
     importer = _patch_importer(monkeypatch, cfg)
     monkeypatch.setattr(sys, "argv", ["migrate_agents_to_db"])
@@ -114,6 +126,9 @@ def test_importer_copies_all_agents_into_db(file_home, monkeypatch):
     assert dest.get("reviewer", user_id="u1").description == "reviews"
     assert dest.get_soul("reviewer", user_id="u1") == "review soul"
     assert dest.get("planner", user_id="u2").model == "m1"
+    managed = SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).get("researcher")
+    assert managed.description == "Researches topics"
+    assert managed.enabled is False
 
 
 def test_importer_is_idempotent(file_home, monkeypatch):
@@ -126,6 +141,7 @@ def test_importer_is_idempotent(file_home, monkeypatch):
     assert importer.main() == 0
     dest = SqlAgentStore(cfg.database.app_sync_sqlalchemy_url)
     assert len(dest.list_all()) == 2
+    assert [item.name for item in SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).list()] == ["researcher"]
 
 
 def test_importer_dry_run_writes_nothing(file_home, monkeypatch):
@@ -136,6 +152,30 @@ def test_importer_dry_run_writes_nothing(file_home, monkeypatch):
     assert importer.main() == 0
     dest = SqlAgentStore(cfg.database.app_sync_sqlalchemy_url)
     assert dest.list_all() == []
+    assert SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).list() == []
+
+
+def test_importer_runs_when_only_managed_subagents_exist(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    FileManagedSubagentStore().create(
+        ManagedSubagentDefinition(
+            name="writer",
+            description="Writes reports",
+            system_prompt="Write clearly.",
+        )
+    )
+
+    cfg = _cfg("db", "sqlite", str(tmp_path / "db"))
+    importer = _patch_importer(monkeypatch, cfg)
+    monkeypatch.setattr(sys, "argv", ["migrate_agents_to_db"])
+
+    assert importer.main() == 0
+
+    assert SqlAgentStore(cfg.database.app_sync_sqlalchemy_url).list_all() == []
+    assert SqlManagedSubagentStore(cfg.database.app_sync_sqlalchemy_url).get("writer").description == "Writes reports"
 
 
 def test_read_free_functions_dispatch_to_db_backend(file_home, monkeypatch):

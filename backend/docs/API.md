@@ -127,8 +127,10 @@ in a single run. The unified Gateway path defaults to `100` in
 `build_run_config` (see `backend/app/gateway/services.py`), which is a safer
 starting point for plan-mode or subagent-heavy runs. Clients can still set
 `recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs. For safety, the Gateway clamps any client-supplied value
-to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+nested subagent graphs. Scheduled-task launches do not take a client body: they
+use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
+the web UI). For safety, the Gateway clamps any supplied
+value to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
 LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
 
@@ -1037,4 +1039,5 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > The unified Gateway path defaults `config.recursion_limit` to 100 for
 > plan-mode and subagent-heavy runs. Clients may still set
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
-> section for details.
+> section for details. Scheduled-task launches use
+> `scheduler.recursion_limit` from `config.yaml` instead of a client body.

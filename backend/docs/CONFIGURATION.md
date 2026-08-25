@@ -218,6 +218,67 @@ models:
 
 `PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
 
+### RAGFlow Knowledge Retrieval
+
+RAGFlow integration is disabled by default. It adds one read-only Agent tool,
+`knowledge_search`. DeerFlow does not persist a copy of dataset or document
+metadata; RAGFlow is the sole source of truth. The configured API key is
+tenant-scoped. An optional operator-controlled `datasets` list restricts every
+Agent on this deployment to the same dataset-ID allowlist; omitting it searches
+all datasets visible to that tenant API key. An explicitly empty `datasets: []`
+is rejected rather than being treated as tenant-wide access.
+
+```yaml
+tool_groups:
+  - name: knowledge
+
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.community.ragflow.tools:knowledge_search_tool
+    base_url: http://localhost:9380
+    api_key: $RAGFLOW_API_KEY
+    datasets:
+      - 0123456789abcdef0123456789abcdef
+      - fedcba9876543210fedcba9876543210
+    timeout: 30
+    page_size: 8
+    similarity_threshold: 0.2
+    vector_similarity_weight: 0.3
+    top_k: 256
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+```
+
+The tool is opt-in through the normal `tools:` list. `datasets` is optional but,
+when present, must contain at least one ID. If
+it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
+does not validate their existence while loading configuration; on each search
+it verifies them with ID-filtered requests. If `datasets` is omitted, each
+search paginates through the tenant-visible dataset catalog. Both paths resolve
+current names, embedding models, and chunk counts. Empty datasets are ignored;
+an empty dataset that has no embedding-model metadata is also skipped with a
+server warning. The remaining datasets are grouped by the exact embedding-model
+identifier and each group is sent to RAGFlow with a non-empty `dataset_ids`
+list. At most four groups are retrieved concurrently. Because raw similarity
+scores from different embedding spaces are not globally comparable, DeerFlow
+preserves each group's RAGFlow ranking, interleaves equal rank positions, omits
+score labels when more than one group is searched, and applies `page_size` as a
+single global chunk limit. If any searchable group fails, the whole tool call
+fails rather than silently omitting part of the configured scope. A deleted or
+inaccessible configured dataset identifies its ordinal entry in
+`knowledge_search.datasets` and produces guidance to check `config.yaml`.
+Dataset IDs and catalog listing are not exposed to the Agent.
+
+Use an allowlist to narrow the tenant-wide scope; compatible embedding models
+are no longer required across selected datasets. `base_url` must not contain
+embedded username or password information. For Docker or Kubernetes, it must be
+reachable from the Gateway container or Pod; `localhost` refers to that
+container or Pod, not the host machine.
+
+This integration is retrieval-only. Dataset creation, uploads, parsing, and
+deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+
 ### Tool Groups
 
 Organize tools into logical groups:
@@ -241,18 +302,25 @@ scheduler:
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 ```
 
 Notes:
 
 - `enabled: false` keeps background polling off by default.
 - `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
-- `max_concurrent_runs` is a shared global cap in multi-instance mode. It counts active `queued`/`running` scheduled-run rows plus valid pre-launch dispatch leases, and Postgres serializes the budget read with due-task claims so long runs or concurrent Pods cannot exceed it.
+- `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
+- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
+- A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
+- A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
+- Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
 - Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
-- All scheduler fields are restart-required; edits need a Gateway restart.
+- `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
-- **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and includes active scheduled runs plus dispatch reservations. Plan capacity accordingly; it does not multiply with the replica count.
+- **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
 - Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
@@ -496,6 +564,47 @@ Notes specific to `E2BSandboxProvider`:
   `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
+
+**OpenSandbox Remote Sandbox** (runs code through an OpenSandbox deployment):
+
+```yaml
+sandbox:
+   use: deerflow.community.opensandbox:OpenSandboxProvider
+   image: python:3.11
+   api_key: $OPEN_SANDBOX_API_KEY     # optional when the SDK env var is set
+   domain: localhost:8080             # OPEN_SANDBOX_DOMAIN fallback
+   protocol: http
+   request_timeout: 30                # management request timeout seconds
+   ready_timeout: 30                  # create/readiness timeout seconds
+   use_server_proxy: false            # proxy execd/file traffic through server
+   sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
+   bash_command_timeout: 600          # default remote command timeout seconds
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before destroy; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[opensandbox]"
+```
+
+The provider creates a sandbox per effective user/thread scope and parks it in
+an in-process warm pool after each turn. The same scope can reclaim it after a
+health check; another user or thread cannot. Create-time readiness and
+`/mnt/user-data/{workspace,uploads,outputs}` bootstrap failures are cleaned up
+before `acquire()` returns. Each remote owns an independent SDK transport.
+Operations renew the configured server-side lifetime, and commands without an
+explicit timeout use `bash_command_timeout`; a longer explicit timeout extends
+the renewal horizon to cover the command. Operations on one remote are
+serialized so a shorter renewal cannot overwrite an in-flight command's
+horizon. File transfer uses OpenSandbox's native filesystem API; bounded
+`find`/`grep` commands implement the directory and content-search surface.
+Downloads are restricted to `/mnt/user-data` and all file paths reject
+traversal. Multi-process discovery and ownership coordination are not yet
+implemented, so `replicas` is a per-Gateway-process soft cap.
 
 Choose between local execution or Docker-based isolation:
 
