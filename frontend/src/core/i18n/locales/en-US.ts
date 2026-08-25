@@ -160,7 +160,7 @@ export const enUS: Translations = {
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
-    disclaimer: "Deerflow is AI and can make mistakes",
+    disclaimer: "DeerFlow is AI and can make mistakes",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
@@ -345,6 +345,37 @@ export const enUS: Translations = {
     },
   },
 
+  subagentBatches: {
+    label: "Batches",
+    title: "Subagent batches",
+    description: "Durable, restart-safe work for many independent items.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
+    empty: "No subagent batches yet",
+    emptyHint: "Explicit batch_task submissions in this chat will appear here.",
+    loadFailed: "Couldn't load subagent batches",
+    active: "Active",
+    recent: "Recent",
+    pause: "Pause",
+    resume: "Resume",
+    cancel: "Cancel",
+    retryItem: "Retry",
+    exportResults: "Export JSONL",
+    viewItems: "View items",
+    hideItems: "Hide items",
+    itemsFailed: "Couldn't load batch items",
+    progress: (completed, total) => `${completed} of ${total} terminal`,
+    limits: (live, running) => `Live ${live} · running ${running}`,
+    status: {
+      queued: "Queued",
+      running: "Running",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
@@ -391,6 +422,9 @@ export const enUS: Translations = {
       fresh: "Fresh thread",
       reuse: "Reuse thread",
       threadIdPlaceholder: "Thread ID",
+      reuseNoticeTitle: "Uses this thread's conversation history",
+      reuseNoticeDescription:
+        "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
     filters: {
       allStatuses: "All statuses",
@@ -452,6 +486,7 @@ export const enUS: Translations = {
     runTrigger: { scheduled: "scheduled", manual: "manual" },
     runStatus: {
       queued: "Queued",
+      launching: "Launching",
       running: "Running",
       success: "Success",
       failed: "Failed",
@@ -588,6 +623,7 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
@@ -800,6 +836,7 @@ export const enUS: Translations = {
       integrations: "Integrations",
       memory: "Memory",
       tools: "Tools",
+      subagents: "Subagents",
       skills: "Skills",
       notification: "Notification",
       about: "About",
@@ -901,6 +938,51 @@ export const enUS: Translations = {
       description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+    },
+    subagents: {
+      title: "Subagents",
+      description:
+        "Reusable workers that the Lead Agent and permitted Custom Agents can delegate bounded tasks to.",
+      executionNote:
+        "Each invocation starts a fresh temporary context with no persistent chat or memory and cannot ask the user follow-up questions. A system prompt changes behavior; tools and skills grant actual capabilities.",
+      adminNote:
+        "You can view the catalog. Only administrators can add, edit, enable, or delete subagents.",
+      create: "Add subagent",
+      empty: "No subagents are available.",
+      sourceBuiltin: "Built-in",
+      sourceConfig: "config.yaml",
+      sourceManaged: "Managed",
+      conflict: "Name conflict — excluded from runtime",
+      overridden: "Some runtime values are overridden by config.yaml",
+      createTitle: "Add managed subagent",
+      editTitle: "Edit managed subagent",
+      name: "Name",
+      nameHint: "Use letters, numbers, and hyphens only.",
+      displayName: "Display name",
+      descriptionLabel: "Delegation description",
+      systemPrompt: "System prompt",
+      model: "Model",
+      inheritModel: "Inherit from caller",
+      tools: "Allowed tools (comma-separated)",
+      skills: "Skills (comma-separated)",
+      listModeAll: "Inherit all available",
+      listModeNone: "Allow none",
+      listModeSelected: "Allow selected names",
+      listNamesPlaceholder: "Comma-separated names",
+      maxTurns: "Maximum turns",
+      timeout: "Timeout (seconds)",
+      created: "Subagent created",
+      saved: "Subagent saved",
+      deleted: "Subagent deleted",
+      deleteConfirm:
+        "Delete this managed subagent? Custom Agents may keep referencing its name, and recreating the same name will reconnect those bindings. This cannot be undone.",
+      bindingTitle: "Subagent access",
+      bindingDescription:
+        "Choose which subagents this Custom Agent may invoke. This is enforced by the server.",
+      allAllowed: "All enabled subagents",
+      noneAllowed: "No subagents",
+      selectedAllowed: "Selected subagents",
+      missing: "Missing or unavailable; deselect to remove",
     },
     channels: {
       title: "Channels",

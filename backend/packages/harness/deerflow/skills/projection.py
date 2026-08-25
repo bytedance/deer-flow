@@ -216,7 +216,13 @@ def _clear_projection_scope(scope_root: Path, *category_roots: Path) -> None:
     _manifest_path(scope_root).unlink(missing_ok=True)
 
 
-def _update_tree_digest(digest, root: Path, label: str) -> None:
+def _update_tree_digest(
+    digest,
+    root: Path,
+    label: str,
+    *,
+    follow_package_directory_symlinks: bool = False,
+) -> None:
     """Hash directory metadata (inode/mode/size/mtime), not file contents.
 
     Trade-off: fast enough to run on every sandbox acquire (O(files), no
@@ -225,6 +231,11 @@ def _update_tree_digest(digest, root: Path, label: str) -> None:
     projection stale until the next explicit rebuild. Runtime writes through
     this codebase are covered regardless: the mutation path rebuilds under
     lock, and atomic-rename always changes the inode.
+
+    Custom skill roots may contain an operator-managed package directory
+    symlink. Follow only those links directly below the category root so
+    changes in their external target tree invalidate the projection, while
+    nested and unrelated symlinks remain boundary markers.
     """
     digest.update(f"root:{label}\0".encode())
     if not root.exists():
@@ -242,6 +253,9 @@ def _update_tree_digest(digest, root: Path, label: str) -> None:
             metadata = entry.stat(follow_symlinks=False)
             if entry.is_symlink():
                 kind = "link"
+                if follow_package_directory_symlinks and relative_root == Path(".") and entry.is_dir(follow_symlinks=True):
+                    digest.update(f"{label}:{relative.as_posix()}:target:{Path(entry.path).resolve(strict=False)}\0".encode())
+                    child_dirs.append((Path(entry.path), relative))
             elif entry.is_dir(follow_symlinks=False):
                 kind = "dir"
                 child_dirs.append((Path(entry.path), relative))
@@ -267,8 +281,18 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
     elif scope == "user":
         user_custom_root = storage.get_user_custom_root()
         integration_root = storage.get_user_integrations_root()
-        _update_tree_digest(digest, user_custom_root, "custom")
-        _update_tree_digest(digest, host_root / SkillCategory.CUSTOM.value, "legacy")
+        _update_tree_digest(
+            digest,
+            user_custom_root,
+            "custom",
+            follow_package_directory_symlinks=True,
+        )
+        _update_tree_digest(
+            digest,
+            host_root / SkillCategory.CUSTOM.value,
+            "legacy",
+            follow_package_directory_symlinks=True,
+        )
         _update_tree_digest(digest, integration_root, "integrations")
         # CUSTOM/LEGACY/INTEGRATION visibility is the intersection of the
         # per-user state and the global extensions default, so both belong in

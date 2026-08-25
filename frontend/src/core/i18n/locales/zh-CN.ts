@@ -327,6 +327,37 @@ export const zhCN: Translations = {
     },
   },
 
+  subagentBatches: {
+    label: "批处理",
+    title: "子智能体批处理",
+    description: "面向大量独立条目的持久化、可恢复执行。",
+    workerUnavailable:
+      "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
+    empty: "暂无子智能体批处理",
+    emptyHint: "当前对话通过 batch_task 提交的批处理会显示在这里。",
+    loadFailed: "无法加载子智能体批处理",
+    active: "进行中",
+    recent: "最近任务",
+    pause: "暂停",
+    resume: "继续",
+    cancel: "取消",
+    retryItem: "重试",
+    exportResults: "导出 JSONL",
+    viewItems: "查看条目",
+    hideItems: "收起条目",
+    itemsFailed: "无法加载批处理条目",
+    progress: (completed, total) => `${completed}/${total} 已结束`,
+    limits: (live, running) => `存活 ${live} · 运行 ${running}`,
+    status: {
+      queued: "排队中",
+      running: "运行中",
+      paused: "已暂停",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+  },
+
   // 定时任务
   scheduledTasks: {
     scheduleType: {
@@ -373,6 +404,9 @@ export const zhCN: Translations = {
       fresh: "新线程",
       reuse: "复用线程",
       threadIdPlaceholder: "线程 ID",
+      reuseNoticeTitle: "使用该线程的历史对话",
+      reuseNoticeDescription:
+        "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
     },
     filters: {
       allStatuses: "全部状态",
@@ -433,6 +467,7 @@ export const zhCN: Translations = {
     runTrigger: { scheduled: "定时", manual: "手动" },
     runStatus: {
       queued: "排队中",
+      launching: "启动中",
       running: "运行中",
       success: "成功",
       failed: "失败",
@@ -560,6 +595,7 @@ export const zhCN: Translations = {
   // Chats
   chats: {
     searchChats: "搜索对话",
+    branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
@@ -767,6 +803,7 @@ export const zhCN: Translations = {
       integrations: "集成",
       memory: "记忆",
       tools: "工具",
+      subagents: "子智能体",
       skills: "技能",
       notification: "通知",
       about: "关于",
@@ -865,6 +902,51 @@ export const zhCN: Translations = {
       description: "管理 MCP 工具的配置和启用状态。",
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
       empty: "暂无 MCP 工具。",
+    },
+    subagents: {
+      title: "子智能体",
+      description:
+        "可由 Lead Agent 和已授权 Custom Agent 派遣、执行边界明确任务的复用型工作智能体。",
+      executionNote:
+        "每次调用都使用全新的临时上下文，没有独立持久会话或记忆，也不能向用户追问。系统提示词只改变工作方式；工具和技能才提供实际能力。",
+      adminNote:
+        "你可以查看目录；只有管理员可以添加、编辑、启停或删除子智能体。",
+      create: "添加子智能体",
+      empty: "暂无可用子智能体。",
+      sourceBuiltin: "内置",
+      sourceConfig: "config.yaml",
+      sourceManaged: "设置页管理",
+      conflict: "名称冲突，已从运行时排除",
+      overridden: "部分运行参数已被 config.yaml 覆盖",
+      createTitle: "添加子智能体",
+      editTitle: "编辑子智能体",
+      name: "名称",
+      nameHint: "仅可使用字母、数字和连字符。",
+      displayName: "显示名称",
+      descriptionLabel: "派遣说明",
+      systemPrompt: "系统提示词",
+      model: "模型",
+      inheritModel: "继承调用者模型",
+      tools: "允许的工具（逗号分隔）",
+      skills: "技能（逗号分隔）",
+      listModeAll: "继承全部可用项",
+      listModeNone: "全部禁用",
+      listModeSelected: "仅允许指定名称",
+      listNamesPlaceholder: "多个名称用逗号分隔",
+      maxTurns: "最大轮次",
+      timeout: "超时时间（秒）",
+      created: "子智能体已创建",
+      saved: "子智能体已保存",
+      deleted: "子智能体已删除",
+      deleteConfirm:
+        "确定删除这个子智能体吗？Custom Agent 可能仍保留对该名称的引用；以同名重建后，这些绑定会重新生效。此操作无法撤销。",
+      bindingTitle: "子智能体权限",
+      bindingDescription:
+        "选择这个 Custom Agent 可以派遣哪些子智能体；服务端会强制执行该范围。",
+      allAllowed: "全部已启用子智能体",
+      noneAllowed: "不允许使用子智能体",
+      selectedAllowed: "仅允许选中的子智能体",
+      missing: "已缺失或不可用；取消勾选后移除",
     },
     channels: {
       title: "渠道",

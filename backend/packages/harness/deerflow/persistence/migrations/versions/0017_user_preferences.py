@@ -1,7 +1,7 @@
 """Add durable user-level UI preferences.
 
-Revision ID: 0014_user_preferences
-Revises: 0013_mcp_task_notifications
+Revision ID: 0017_user_preferences
+Revises: 0016_subagent_batches
 Create Date: 2026-08-23
 """
 
@@ -11,8 +11,8 @@ from collections.abc import Sequence
 
 import sqlalchemy as sa
 
-revision: str = "0014_user_preferences"
-down_revision: str | Sequence[str] | None = "0013_mcp_task_notifications"
+revision: str = "0017_user_preferences"
+down_revision: str | Sequence[str] | None = "0016_subagent_batches"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
