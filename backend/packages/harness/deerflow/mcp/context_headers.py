@@ -18,6 +18,9 @@ credential is written to disk or returned by the config API.
 Registered last in ``mcp/interceptors.py``, so for a server declaring several
 credential sources the per-request value wins the final header — interceptors
 wrap outermost-first, and the later-registered one runs closer to the transport.
+Header names are written case-insensitively through ``mcp/headers.py``, so a
+mapped ``Authorization`` replaces a static ``authorization`` rather than putting
+a second copy of the field on the wire ahead of it.
 
 Fail-closed by default: a mapped key that is absent from the request secrets
 (or resolved empty) gets an actionable ``ToolException`` rather than silently
@@ -34,6 +37,7 @@ from typing import Any
 from langchain_core.tools import ToolException
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpContextHeadersConfig
+from deerflow.mcp.headers import apply_header_overrides, header_spellings
 from deerflow.runtime.secret_context import extract_request_secrets
 
 logger = logging.getLogger(__name__)
@@ -81,6 +85,10 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
     (mirrors ``build_oauth_tool_interceptor`` / ``build_user_scoped_auth_interceptor``).
     """
     mapping_by_server: dict[str, McpContextHeadersConfig] = {}
+    # The server's static header spellings, so a mapped name that differs from
+    # the configured one only in case still *replaces* it at the adapter's
+    # case-sensitive connection merge instead of riding alongside it.
+    spellings_by_server: dict[str, dict[str, str]] = {}
     for server_name, server_config in extensions_config.get_enabled_mcp_servers().items():
         context_headers = server_config.headers_from_context
         if context_headers is None or not context_headers.enabled or not context_headers.headers:
@@ -107,6 +115,7 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
                 server_name,
             )
         mapping_by_server[server_name] = context_headers
+        spellings_by_server[server_name] = header_spellings(server_config.headers)
 
     if not mapping_by_server:
         return None
@@ -143,8 +152,11 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
         if not resolved:
             return await handler(request)
 
-        updated_headers = dict(request.headers or {})
-        updated_headers.update(resolved)
+        updated_headers = apply_header_overrides(
+            request.headers,
+            resolved,
+            spellings=spellings_by_server.get(request.server_name),
+        )
         return await handler(request.override(headers=updated_headers))
 
     return context_headers_interceptor

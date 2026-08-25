@@ -163,6 +163,140 @@ def test_falls_back_to_ambient_runtime_when_request_runtime_is_missing():
 
 
 # ---------------------------------------------------------------------------
+# Header-name casing
+#
+# HTTP field names are case-insensitive, but every dict on the path to the wire
+# is case-sensitive — including the adapter's ``{**connection_headers,
+# **override_headers}`` merge. A mapped name spelled differently from the static
+# one would therefore travel *alongside* it rather than replacing it, and a
+# server reading the field with a single-value accessor would see the static
+# discovery credential first.
+# ---------------------------------------------------------------------------
+
+
+def _config_with_static_headers(static: dict[str, str], **context_headers_kwargs) -> ExtensionsConfig:
+    config = _config(**context_headers_kwargs)
+    config.mcp_servers["shared-http"].headers = static
+    return config
+
+
+def test_mapped_name_is_emitted_in_the_servers_static_spelling():
+    config = _config_with_static_headers({"authorization": "Bearer discovery-token"}, headers={"Authorization": "tenant_token"})
+    interceptor = build_context_headers_interceptor(config)
+    result = asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=TENANT_TOKEN)), _echo_handler))
+    assert result.headers == {"authorization": TENANT_TOKEN}
+
+
+def test_mapped_name_replaces_a_differently_cased_header_from_an_earlier_interceptor():
+    """OAuth and user_auth write before this interceptor; their value must not survive.
+
+    The surviving spelling is whichever one is already on the request, so the
+    write lands on the existing field rather than adding a second one.
+    """
+    config = _config_with_static_headers({}, headers={"authorization": "tenant_token"})
+    interceptor = build_context_headers_interceptor(config)
+    request = _request(headers={"Authorization": "Bearer per-user"}, runtime=_runtime_with_secrets(tenant_token=TENANT_TOKEN))
+    result = asyncio.run(interceptor(request, _echo_handler))
+    assert list(result.headers.values()) == [TENANT_TOKEN]
+
+
+def test_unrelated_headers_keep_their_own_spelling():
+    config = _config_with_static_headers({"Authorization": "Bearer discovery-token"}, headers={"X-Tenant-Token": "tenant_token"})
+    interceptor = build_context_headers_interceptor(config)
+    request = _request(headers={"Accept": "application/json"}, runtime=_runtime_with_secrets(tenant_token=TENANT_TOKEN))
+    result = asyncio.run(interceptor(request, _echo_handler))
+    assert result.headers == {"Accept": "application/json", "X-Tenant-Token": TENANT_TOKEN}
+
+
+def _connection_headers_for_adapter_call(config: ExtensionsConfig) -> dict[str, str]:
+    """Return the headers the adapter would open the remote session with.
+
+    Goes through the real connection merge rather than seeding static headers
+    onto ``request.headers``: the adapter builds the request with
+    ``headers=None``, so an interceptor never sees the connection's static
+    headers and the collision can only be observed here.
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_mcp_adapters.tools import convert_mcp_tool_to_langchain_tool
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from mcp.types import CallToolResult, TextContent
+    from mcp.types import Tool as MCPTool
+
+    from deerflow.mcp.client import build_server_params
+
+    opened: dict[str, str] = {}
+
+    class _Session:
+        async def initialize(self) -> None:
+            return None
+
+        async def call_tool(self, *_args, **_kwargs):
+            return CallToolResult(content=[TextContent(type="text", text="done")], isError=False)
+
+    class _SessionContext:
+        def __init__(self, connection, **_kwargs):
+            opened.update(connection.get("headers") or {})
+
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    tool = convert_mcp_tool_to_langchain_tool(
+        None,
+        MCPTool(name="act", description="act", inputSchema={"type": "object", "properties": {}}),
+        connection=build_server_params("shared-http", config.mcp_servers["shared-http"]),
+        server_name="shared-http",
+        tool_interceptors=build_mcp_tool_interceptors(config, oauth_builder=lambda _cfg: None),
+    )
+
+    builder = StateGraph(_AgentState, context_schema=dict)
+    builder.add_node("tools", ToolNode([tool]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+
+    with patch("langchain_mcp_adapters.tools.create_session", _SessionContext):
+        asyncio.run(
+            graph.ainvoke(
+                {"messages": [AIMessage(content="", tool_calls=[{"name": "act", "args": {}, "id": "call_1", "type": "tool_call"}])]},
+                context={"secrets": {"tenant_token": TENANT_TOKEN}, "thread_id": "th-1"},
+            )
+        )
+    return opened
+
+
+def test_connection_carries_one_authorization_header_despite_a_casing_mismatch():
+    """The reviewed failure: two spellings both reach httpx, static one first."""
+    config = _config_with_static_headers({"authorization": "Bearer discovery-token"}, headers={"Authorization": "tenant_token"})
+    opened = _connection_headers_for_adapter_call(config)
+    assert [name for name in opened if name.lower() == "authorization"] == ["authorization"]
+    assert opened["authorization"] == TENANT_TOKEN
+
+
+def test_connection_keeps_static_headers_the_mapping_does_not_touch():
+    config = _config_with_static_headers({"Authorization": "Bearer discovery-token", "X-Api-Version": "2"}, headers={"X-Tenant-Token": "tenant_token"})
+    opened = _connection_headers_for_adapter_call(config)
+    assert opened == {"Authorization": "Bearer discovery-token", "X-Api-Version": "2", "X-Tenant-Token": TENANT_TOKEN}
+
+
+def test_mapping_the_same_header_under_two_spellings_is_rejected():
+    with pytest.raises(ValueError, match="two spellings"):
+        McpContextHeadersConfig(headers={"Authorization": "tenant_token", "authorization": "other_token"})
+
+
+def test_gateway_rejects_the_same_header_under_two_spellings():
+    from pydantic import ValidationError
+
+    from app.gateway.routers.mcp import McpContextHeadersConfigResponse
+
+    with pytest.raises(ValidationError, match="two spellings"):
+        McpContextHeadersConfigResponse(headers={"Authorization": "tenant_token", "AUTHORIZATION": "other_token"})
+
+
+# ---------------------------------------------------------------------------
 # Fail-closed behaviour
 # ---------------------------------------------------------------------------
 
@@ -385,6 +519,127 @@ def test_adapter_tool_receives_the_runtime_langgraph_injects():
 # ---------------------------------------------------------------------------
 
 
+def _task_config() -> ExtensionsConfig:
+    return ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "reports": {
+                    "type": "http",
+                    "url": "https://reports.example.com/mcp",
+                    "headers": {"Authorization": "Bearer discovery-token"},
+                    "headers_from_context": {"headers": {"Authorization": "tenant_token"}},
+                    "task_toolsets": [{"name": "reports", "submit_tool": "submit", "status_tool": "status", "cancel_tool": "cancel"}],
+                }
+            }
+        }
+    )
+
+
+def _task_caller(config: ExtensionsConfig) -> tuple[Any, dict[str, str], Any]:
+    """Build a task caller whose remote session records the headers it opened with."""
+    from deerflow.mcp.task_tool_caller import McpTaskToolCaller
+
+    opened: dict[str, str] = {}
+    result = SimpleNamespace(structuredContent={"task_id": "remote-1", "status": "running"}, isError=False)
+
+    class _SessionContext:
+        def __init__(self, connection, **_kwargs):
+            opened.clear()
+            opened.update(connection.get("headers") or {})
+
+        async def __aenter__(self):
+            return SimpleNamespace(initialize=AsyncMock(), call_tool=AsyncMock(return_value=result))
+
+        async def __aexit__(self, *_exc):
+            return False
+
+    caller = McpTaskToolCaller(
+        config,
+        oauth_token_manager=SimpleNamespace(has_oauth_servers=lambda: False, get_authorization_header=AsyncMock(return_value=None)),
+    )
+    return caller, opened, _SessionContext
+
+
+_DRIVER_DATA = {"submit_tool": "submit", "status_tool": "status", "cancel_tool": "cancel"}
+
+
+def test_durable_submit_carries_the_request_scoped_headers():
+    """Submit is awaited inside the Agent run, so it can — and must — carry them.
+
+    Driven through a real tool node with no ambient-runtime patching: the run
+    context reaches the driver through the contextvar LangGraph sets around the
+    tool coroutine, several awaits below it.
+    """
+    from langchain_core.messages import AIMessage
+    from langchain_core.tools import tool as make_tool
+    from langgraph.graph import END, START, StateGraph
+    from langgraph.prebuilt import ToolNode
+
+    from deerflow.mcp.tasks import TaskSubmitRequest
+    from deerflow.mcp.tasks.ordinary import OrdinaryMcpTaskDriver
+
+    caller, opened, session_context = _task_caller(_task_config())
+    driver = OrdinaryMcpTaskDriver(caller)
+
+    @make_tool
+    async def submit_report() -> str:
+        """Submit a durable report task."""
+        await driver.submit(
+            TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-1",
+                run_id=None,
+                tool_call_id=None,
+                server_name="reports",
+                task_name="reports",
+                arguments={},
+                driver_data=dict(_DRIVER_DATA),
+            )
+        )
+        return "submitted"
+
+    builder = StateGraph(_AgentState, context_schema=dict)
+    builder.add_node("tools", ToolNode([submit_report]))
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+
+    with patch("langchain_mcp_adapters.sessions.create_session", session_context):
+        asyncio.run(
+            graph.ainvoke(
+                {"messages": [AIMessage(content="", tool_calls=[{"name": "submit_report", "args": {}, "id": "call_1", "type": "tool_call"}])]},
+                context={"secrets": {"tenant_token": TENANT_TOKEN}, "thread_id": "thread-1"},
+            )
+        )
+
+    assert opened == {"Authorization": TENANT_TOKEN}
+
+
+@pytest.mark.asyncio
+async def test_durable_status_poll_keeps_the_server_credential():
+    """The poller runs after the Agent run ended: no run context, no deny."""
+    from deerflow.mcp.tasks.models import TaskReference
+    from deerflow.mcp.tasks.ordinary import OrdinaryMcpTaskDriver
+
+    caller, opened, session_context = _task_caller(_task_config())
+    driver = OrdinaryMcpTaskDriver(caller)
+
+    with patch("langchain_mcp_adapters.sessions.create_session", session_context):
+        snapshot = await driver.get_status(
+            TaskReference(
+                local_task_id="local-1",
+                user_id="user-1",
+                thread_id="thread-1",
+                server_name="reports",
+                remote_task_id="remote-1",
+                driver_data=dict(_DRIVER_DATA),
+            )
+        )
+
+    assert snapshot is not None
+    assert opened == {"Authorization": "Bearer discovery-token"}
+
+
 def test_declaring_both_request_headers_and_task_toolsets_warns(caplog):
     """Background polls run outside the Agent run that carried the secrets."""
     config = _config(headers={"X-Tenant-Token": "tenant_token"})
@@ -518,3 +773,69 @@ def test_gateway_put_can_replace_the_mapping():
     merged = _merge_preserving_secrets(incoming, existing)
     assert merged.headers_from_context.headers == {"X-Org": "org"}
     assert merged.headers_from_context.on_missing == "passthrough"
+
+
+def test_gateway_round_trip_restores_masked_extras_inside_the_block():
+    """GET masks the block's extras, so PUT must swap the sentinel back."""
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _mask_server_config,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(headers={"X-Tenant-Token": "tenant_token"}, api_key="real-secret", note="kept"),
+    )
+    merged = _merge_preserving_secrets(_mask_server_config(existing), existing)
+    assert merged.headers_from_context.model_extra["api_key"] == "real-secret"
+    assert merged.headers_from_context.model_extra["note"] == "kept"
+
+
+def test_gateway_keeps_block_extras_a_put_does_not_mention():
+    """Matches how user_auth and server-level extras survive a partial PUT."""
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(headers={"X-Tenant-Token": "tenant_token"}, vendor_note="keep-me"),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(headers={"X-Org": "org"}),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.headers_from_context.headers == {"X-Org": "org"}
+    assert merged.headers_from_context.model_extra["vendor_note"] == "keep-me"
+
+
+def test_gateway_rejects_a_masked_value_for_an_unknown_block_extra():
+    """A sentinel with nothing stored behind it must not be written to disk."""
+    from fastapi import HTTPException
+
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(headers={"X-Tenant-Token": "tenant_token"}),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(headers={"X-Tenant-Token": "tenant_token"}, api_key="***"),
+    )
+    with pytest.raises(HTTPException):
+        _merge_preserving_secrets(incoming, existing)

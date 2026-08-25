@@ -306,9 +306,10 @@ Server-level OAuth works during background polling and refreshes normally.
 Request-scoped secrets from a particular Agent run are not durable task
 credentials and are unavailable to later background polls; use server-level
 authentication for a task toolset. `headers_from_context` follows the same
-rule: submit runs inside the Agent run and carries the mapped headers, while
-status and cancel polls skip them and authenticate with the server's static or
-OAuth credentials. Declaring both on one server logs a warning at startup. Restart DeerFlow after changing
+rule: submit is awaited inside the Agent run and carries the mapped headers,
+while status and cancel polls skip them and authenticate with the server's
+static or OAuth credentials — so `on_missing: "deny"` guards the submit but not
+those polls. Declaring both on one server logs a warning at startup. Restart DeerFlow after changing
 `mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
 authentication, transport, or timeout setting on a task-enabled server.
 DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
@@ -399,7 +400,10 @@ The caller supplies the values on each run request:
   trace payloads.
 - The server's static `headers` are used for startup tool discovery. A mapped
   header replaces the static one for that tool call, as shown above for
-  `Authorization`.
+  `Authorization`. Header names are matched case-insensitively, so a mapped
+  `Authorization` still replaces a static `authorization` instead of putting a
+  second copy of the field on the wire. Mapping one header under two spellings
+  is rejected at config load.
 - `on_missing` defaults to `"deny"`: if the run carries no value for a mapped
   key, the tool call fails with an actionable error rather than falling back to
   the discovery credential — which in a multi-tenant deployment would send one
@@ -410,9 +414,11 @@ The caller supplies the values on each run request:
   request is the most specific, so it wins.
 - `sse`/`http` only. A stdio server has no HTTP headers; declaring the block
   there logs a warning and is ignored.
-- Durable background tasks are the one exception: `task_toolsets` status and
-  cancel polls run after the Agent run ends, so they skip these headers and use
-  the server's static/OAuth credentials. See *Durable Background Tasks* above.
+- Durable background tasks are the one exception, and only half of one: a
+  `task_toolsets` submit is awaited inside the Agent run and carries these
+  headers, but the status and cancel polls run after that run ends, so they skip
+  them and use the server's static/OAuth credentials. See *Durable Background
+  Tasks* above.
 
 Use `user_auth` instead when the credential belongs to a configured DeerFlow
 user rather than to the individual request.

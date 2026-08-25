@@ -394,11 +394,16 @@ class McpContextHeadersConfigResponse(BaseModel):
     @field_validator("headers")
     @classmethod
     def _validate_mapping_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        seen: dict[str, str] = {}
         for header_name, secret_key in value.items():
             if not header_name.strip():
                 raise ValueError("headers_from_context.headers must not contain a blank header name")
             if not isinstance(secret_key, str) or not secret_key.strip():
                 raise ValueError(f"headers_from_context.headers[{header_name!r}] must name a non-blank secret key from config.context.secrets")
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers_from_context.headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
         return value
 
 
@@ -843,16 +848,40 @@ def _merge_preserving_secrets(
             effective["users"] = merged_users
         merged_user_auth = McpUserScopedAuthConfigResponse(**effective)
 
+    merged_context_headers = incoming.headers_from_context
+    if incoming.headers_from_context is not None:
+        # The block's *declared* fields are names, not credentials, so an
+        # explicitly supplied mapping replaces the stored one verbatim — that is
+        # how a round-trip removes an entry. Its extras are a different matter:
+        # `extra="allow"` lets an operator store a secret-bearing key there, GET
+        # masks it (see _mask_server_config), and a round-trip PUT would write
+        # the sentinel back over the stored value. Restore them exactly as
+        # user_auth extras and server-level extras are restored below.
+        base_ch = existing.headers_from_context
+        base_ch_extra = (base_ch.model_extra or {}) if base_ch is not None else {}
+        incoming_ch_extra = incoming.headers_from_context.model_extra or {}
+        merged_ch_extra = {
+            key: _merge_extra_value_preserving_masked(
+                key,
+                value,
+                base_ch_extra.get(key),
+                existing_present=key in base_ch_extra,
+            )
+            for key, value in incoming_ch_extra.items()
+        }
+        merged_ch_extra.update({key: value for key, value in base_ch_extra.items() if key not in incoming_ch_extra})
+        if merged_ch_extra:
+            merged_context_headers = incoming.headers_from_context.model_copy(update=merged_ch_extra)
+
     update = {
         "env": merged_env,
         "headers": merged_headers,
         "oauth": merged_oauth,
         "user_auth": merged_user_auth,
+        "headers_from_context": merged_context_headers,
     }
     if "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
-    # No masked round-trip to repair: the block stores names, not credentials,
-    # so an explicitly supplied value replaces the stored one verbatim.
     if "headers_from_context" not in incoming.model_fields_set:
         update["headers_from_context"] = existing.headers_from_context
     if "routing" not in incoming.model_fields_set:

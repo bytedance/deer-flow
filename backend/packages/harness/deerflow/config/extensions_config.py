@@ -161,11 +161,19 @@ class McpContextHeadersConfig(BaseModel):
     @field_validator("headers")
     @classmethod
     def _validate_mapping_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        seen: dict[str, str] = {}
         for header_name, secret_key in value.items():
             if not header_name.strip():
                 raise ValueError("headers_from_context.headers must not contain a blank header name")
             if not isinstance(secret_key, str) or not secret_key.strip():
                 raise ValueError(f"headers_from_context.headers[{header_name!r}] must name a non-blank secret key from config.context.secrets")
+            # HTTP field names are case-insensitive, so two spellings of one
+            # header are one header with two candidate values, and which one
+            # reaches the remote would depend on dict ordering.
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers_from_context.headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
         return value
 
 
