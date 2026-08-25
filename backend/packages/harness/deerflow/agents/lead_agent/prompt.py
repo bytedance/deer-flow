@@ -273,10 +273,19 @@ async def refresh_user_skills_system_prompt_cache_async(user_id: str) -> None:
     invalidate_user_skill_cache(user_id)
 
 
-def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
+def _build_skill_evolution_section(
+    skill_evolution_enabled: bool,
+    interaction_policy: RunInteractionPolicy | None = None,
+) -> str:
     if not skill_evolution_enabled:
         return ""
-    return """
+    interaction_policy = interaction_policy or RunInteractionPolicy()
+    creation_guidance = (
+        "Before creating a new skill, confirm with the user first."
+        if interaction_policy.allows_clarification
+        else "In unattended runs, do not wait for confirmation. Create a skill only when its recurring value and content are unambiguous; otherwise skip it."
+    )
+    return f"""
 ## Skill Self-Evolution
 After completing a task, consider creating or updating a skill when:
 - The task required 5+ tool calls to resolve
@@ -296,7 +305,7 @@ If you used a skill and encountered issues not covered by it, patch it immediate
 Skills are NOT deliverables — they are persistent capabilities managed through `skill_manage`.
 The tool stores skills in the per-user skills directory automatically; you do NOT need to specify a path.
 
-Prefer patch over edit. Before creating a new skill, confirm with the user first.
+Prefer patch over edit. {creation_guidance}
 Skip simple one-off tasks.
 """
 
@@ -347,6 +356,7 @@ def _build_subagent_section(
     app_config: AppConfig | None = None,
     allowed_subagents: list[str] | None = None,
     batch_enabled: bool = False,
+    interaction_policy: RunInteractionPolicy | None = None,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -357,6 +367,7 @@ def _build_subagent_section(
     Returns:
         Formatted subagent section string.
     """
+    interaction_policy = interaction_policy or RunInteractionPolicy()
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
     if allowed_subagents is None:
@@ -448,6 +459,11 @@ count and never emulate it by repeatedly calling `task`.
 - Do not wait for or paste all item results into this run. The Web UI and results
   export API own progress and result inspection.
 """
+    ambiguity_guidance = (
+        "**Clarify first**: Requirements that need user input must be resolved before direct execution or delegation."
+        if interaction_policy.allows_clarification
+        else "**Unattended delegation**: Do not wait for user input. Make minimal-risk, reversible assumptions for delegation; skip or report high-risk ambiguity as blocked."
+    )
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
 
@@ -468,7 +484,7 @@ Expected cost = delegation and startup overhead + duplicate context and reposito
 - **Cheap direct path**: The lead agent can finish with a small number of tool calls or less work than delegation plus synthesis.
 - **Coordination burden**: The lead agent would spend substantial work reconciling or verifying subagent results.
 
-**Clarify first**: Requirements that need user input must be resolved before direct execution or delegation.
+{ambiguity_guidance}
 
 **Valid sources of delegation benefit:**
 {valid_benefits}
@@ -774,6 +790,7 @@ def get_skills_prompt_section(
     app_config: AppConfig | None = None,
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    interaction_policy: RunInteractionPolicy | None = None,
 ) -> str:
     """Generate the skills prompt section.
 
@@ -802,7 +819,7 @@ def get_skills_prompt_section(
         container_base_path = app_config.skills.container_path
         skill_evolution_enabled = app_config.skill_evolution.enabled
 
-    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
+    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled, interaction_policy)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
     if skill_names is not None:
@@ -995,6 +1012,7 @@ def apply_prompt_template(
             app_config=app_config,
             allowed_subagents=allowed_subagents,
             batch_enabled=is_subagent_batch_runtime_available(),
+            interaction_policy=interaction_policy,
         )
     else:
         subagent_section = ""
@@ -1031,6 +1049,7 @@ def apply_prompt_template(
         app_config=app_config,
         user_id=user_id,
         skill_names=skill_names,
+        interaction_policy=interaction_policy,
     )
 
     # Get deferred tools section (tool_search)
