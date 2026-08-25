@@ -246,6 +246,10 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
 #### 方式一：Docker（推荐）
 
+需要 Docker Desktop / Docker Engine，以及 **Docker Compose v2.24+**
+（`docker compose version`）。更旧的 Compose 客户端无法解析
+`docker/docker-compose-dev.yaml` 里的可选 `env_file` 语法。
+
 **开发模式**（支持热更新，挂载源码）：
 
 ```bash
@@ -572,7 +576,7 @@ Tools 也是同样的思路。DeerFlow 自带一组核心工具：网页搜索�
 
 Gateway 生成后续建议时，现在会先把普通字符串输出和 block/list 风格的富文本内容统一归一化，再去解析 JSON 数组响应，因此不同 provider 的内容包装方式不会再悄悄把建议吞掉。
 
-Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
+Web UI 支持从已完成的 assistant 回复分叉出一个新的主对话。自动继承的分叉标题会使用下一个空闲的数字后缀（`标题 (2)`、`标题 (3)`……）；显式指定或手动重命名得到的同名后缀也会占号，即使它没有生成序号 metadata，后续自动分叉也不会与它重名。API 调用方显式提供的标题保持不变；重命名会清除旧的生成序号，因此从新标题继续自动分叉时会重新从 `(2)` 开始。最近对话列表还会把已加载的分叉直接排列在已加载的父对话下方，并显示低干扰的树形连接线。父对话尚未加载、谱系数据错误或成环、父子置顶状态不一致时，分叉会安全地保留在顶层，不会被隐藏或跨越置顶边界移动。新 thread 会保留该轮回复的 checkpoint 以及用户消息之前的重放 checkpoint，因此分叉后可以立即重新生成该回复。对于缺少 checkpoint 父链接的旧历史或导入历史，Gateway 会进行有界的时间顺序查找；如果不存在更早的重放 checkpoint，分叉仍会按旧版单-checkpoint 形态成功创建，但无法重新生成继承的回复。已有的单-checkpoint 分叉会保持不变，不会通过不安全的 checkpoint 复制尝试修复。只有从最新回合分叉时才会尽力复制当前 thread 的工作区文件；从历史回合分叉不会带入后续时间线创建的文件。
 
 ```text
 # sandbox 容器内的路径
@@ -643,6 +647,8 @@ Web UI 会在输入框上方展示当前激活的 goal。同样的命令在 TUI 
 Sub-agent 是一种执行优化，而不是遇到复杂任务时的默认选择。
 
 lead agent 只会在委派具有明确净收益时动态拉起 sub-agents，例如真正缩短耗时的并行工作、专业能力收益或上下文隔离收益。存在跨 Agent 依赖或重叠副作用的工作不会并行分派；当专业能力或上下文隔离收益明显占优时，一条有界的顺序任务链仍可交给一个 sub-agent 完成。lead agent 会使用能取得收益的最少 sub-agents，并在每一批完成后重新评估，而不会仅仅因为任务规模大或步骤多就继续拆分。每个 sub-agent 都有自己独立的上下文、工具和终止条件，返回结构化结果后由 lead agent 验证并汇总成完整输出。
+
+管理员可以在**设置 → 子智能体**中添加、修改、停用和删除可复用的工作智能体；内置项和 `config.yaml` 项会在同一目录中以只读方式展示。默认 Lead Agent 可以使用全部已启用的运行时 sub-agents；页面创建的每个 Custom Agent 则可以选择允许全部、全部禁用或仅允许指定项。该范围同时约束模型可见目录和服务端 `task` 工具，不能通过直接填写名称绕过。当前版本的设置页管理定义是部署级全局数据，并跟随 `agent_storage.backend`：单机使用原子文件，多实例使用共享应用数据库。
 
 例如，彼此独立的只读研究可以在并行节省的时间明显高于重复检索和结果合并成本时并发执行；而会修改相同文件、依赖连续测试反馈的仓库重构则由 lead agent 直接完成。当 `max_concurrent_subagents` 为 `1` 时，提示词会关闭并行和多批次路由指导，仅在专业能力或上下文隔离具有明确收益时保留委派。
 
@@ -723,10 +729,11 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 当前 MVP 能力：
 
 - 在 `/workspace/scheduled-tasks` 管理任务
-- 每个定时任务可以选择复用同一个 thread，也可以选择每次运行新建一个 thread
+- 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
 - 支持 `once` 和 `cron` 两种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
-- 当到期的 cron 执行与同一复用 thread 上的活跃 run 冲突时，采用 `skip` 的重叠处理策略
+- 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
+- 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
 

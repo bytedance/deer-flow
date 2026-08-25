@@ -6,6 +6,13 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "deerflow-harness",
+    # Direct dependency on purpose, even though deerflow-harness already pulls
+    # it in: app/gateway/app.py and app/gateway/services.py import the public
+    # contract package themselves (the extension principal resolver, and the
+    # provenance key set the state route strips). Those are the app layer's own
+    # imports of a package whose whole point is a stable public surface, so the
+    # app declares them rather than relying on the harness to keep supplying it.
+    "deerflow-extension-api",
     "fastapi>=0.115.0",
     "httpx>=0.28.0",
     "python-multipart>=0.0.31",

@@ -31,12 +31,10 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
-
-_SUMMARY_MESSAGE_NAME = "summary"
 
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 #
@@ -93,6 +91,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "mcp_routing_hints",
         "available-deferred-tools",
         "goal_continuation",
+        "background_task_event",
         "file_editing_workflow",
         "guidelines",
         "output_format",
@@ -150,7 +149,7 @@ def neutralize_untrusted_tags(text: str) -> str:
 
     Shared primitive for any content that originates outside the trust boundary
     and is about to enter the model context as *data* — currently the genuine
-    user message (via :func:`_check_user_content`) and remote tool results
+    user message (via :func:`frame_untrusted_text`) and remote tool results
     (web_fetch / web_search and friends, via
     :class:`ToolResultSanitizationMiddleware`).
 
@@ -173,23 +172,8 @@ def neutralize_untrusted_tags(text: str) -> str:
     return _neutralize_boundary_tokens(text)
 
 
-def _is_genuine_user_message(message: object) -> bool:
-    """Return True for real user messages, excluding system-injected HumanMessages.
-
-    ``hide_from_ui`` is also used by hidden UI replies from HumanInputCard, so
-    only skip hidden HumanMessages that do not carry a valid user response.
-    """
-    if not isinstance(message, HumanMessage):
-        return False
-    if message.name == _SUMMARY_MESSAGE_NAME:
-        return False
-    if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
-        return False
-    return True
-
-
-def _check_user_content(text: str) -> str:
-    """Sanitize user content: escape blocked tags, then wrap in boundary markers.
+def frame_untrusted_text(text: str) -> str:
+    """Sanitize untrusted text, then wrap it in user-input boundary markers.
 
     * Empty/whitespace-only → return unchanged (no marker noise).
     * Blocked tags → HTML-escape ``<``/``>`` (e.g. ``<system>`` → ``&lt;system&gt;``).
@@ -216,6 +200,11 @@ def _check_user_content(text: str) -> str:
     # (end token creates a premature boundary inside the payload).
     text = _neutralize_boundary_tokens(text)
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
+
+
+def _check_user_content(text: str) -> str:
+    """Backward-compatible internal alias for untrusted text framing."""
+    return frame_untrusted_text(text)
 
 
 class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
@@ -297,7 +286,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         messages = list(request.messages)
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
-            if not _is_genuine_user_message(msg):
+            if not is_genuine_user_message(msg):
                 if isinstance(msg, HumanMessage):
                     logger.debug(
                         "_process_request: skipping non-genuine HumanMessage at pos=%d name=%s hide_from_ui=%s content_preview=%.80r",

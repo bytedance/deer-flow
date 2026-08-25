@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from typing import Any
 
+from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
@@ -31,7 +32,11 @@ from app.gateway.internal_auth import (
 )
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
+from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
+from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -103,12 +108,17 @@ _TERMINAL_RUN_STATUSES = {
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
 
-_SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
-    {
-        _DYNAMIC_CONTEXT_REMINDER_KEY,
-        _REMINDER_DATE_KEY,
-        _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
-    }
+_SERVER_OWNED_MESSAGE_METADATA_KEYS = (
+    frozenset(
+        {
+            _DYNAMIC_CONTEXT_REMINDER_KEY,
+            _REMINDER_DATE_KEY,
+            _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            TOOL_RECEIPT_KEY,
+            TOOL_TRANSFORMS_KEY,
+        }
+    )
+    | PROVENANCE_KEYS
 )
 
 
@@ -164,6 +174,7 @@ async def _ensure_thread_metadata(
     record: RunRecord,
     *,
     owner_user_id: str | None,
+    require_existing_thread: bool = False,
 ) -> None:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
@@ -175,6 +186,8 @@ async def _ensure_thread_metadata(
                 await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
             existing = await thread_store.get(record.thread_id)
     if existing is None:
+        if require_existing_thread:
+            raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
@@ -236,6 +249,46 @@ def _strip_external_message_metadata(message: Any) -> Any:
     return message.model_copy(update={"additional_kwargs": additional_kwargs})
 
 
+def _strip_external_metadata_from_message_like(item: Any) -> Any:
+    """Strip server-owned keys from a message, in object or raw-dict form.
+
+    Callers reach the checkpoint by two different routes and the message is a
+    ``BaseMessage`` on one and a plain dict on the other, so both shapes have
+    to be handled here rather than coercing — coercion would change what the
+    caller asked to be written.
+    """
+    if isinstance(item, BaseMessage):
+        return _strip_external_message_metadata(item)
+    if isinstance(item, dict) and isinstance(item.get("additional_kwargs"), dict):
+        additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
+        if additional_kwargs == item["additional_kwargs"]:
+            return item
+        return {**item, "additional_kwargs": additional_kwargs}
+    return item
+
+
+def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove server-owned message metadata from caller-supplied state values.
+
+    ``normalize_input`` does this for the run path. The thread-state mutation
+    route writes its values straight into a checkpoint, so without the same
+    treatment an authenticated client can persist forged provenance and
+    transform trails — and those keys exist precisely so a later reader can
+    treat them as facts about what the host did.
+
+    Every channel is walked, not just ``messages``: middleware-contributed
+    channels can carry messages too, and popping a key that was never there
+    costs nothing.
+    """
+    stripped: dict[str, Any] = {}
+    for channel, value in values.items():
+        if isinstance(value, list):
+            stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
+        else:
+            stripped[channel] = _strip_external_metadata_from_message_like(value)
+    return stripped
+
+
 def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool = False) -> dict[str, Any]:
     """Convert LangGraph Platform input format to LangChain state dict.
 
@@ -250,10 +303,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content``, dynamic-context reminder markers, and the
-    transient view-image context marker are server-owned. External callers
-    cannot supply them; trusted internal channel calls may preserve metadata
-    they added before invoking this boundary.
+    ``original_user_content``, dynamic-context reminder markers, the
+    transient view-image context marker, and tool receipts are server-owned.
+    External callers cannot supply them; trusted internal channel calls may
+    preserve metadata they added before invoking this boundary.
     """
     if raw_input is None:
         return {}
@@ -448,6 +501,18 @@ def inject_authenticated_user_context(
         for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
             configurable.pop(key, None)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
+    # ``user_id`` is server-owned for EXTERNAL callers: it now selects which
+    # user's credential user-scoped MCP auth injects, so a client-forged value
+    # must never survive any early return below — scrub it here and restamp it
+    # only from ``request.state.user``. Internal callers (IM channels, the
+    # scheduler) are the deliberate exception: they authenticate their own end
+    # users and supply that identity in run context (PR #3294), which the
+    # internal-role branch below preserves.
+    user = getattr(getattr(request, "state", None), "user", None)
+    if auth_source != AUTH_SOURCE_INTERNAL and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        runtime_context.pop("user_id", None)
+        if isinstance(configurable, dict):
+            configurable.pop("user_id", None)
     runtime_context["is_internal"] = auth_source == AUTH_SOURCE_INTERNAL
     if auth_source == AUTH_SOURCE_INTERNAL and request_context is not None:
         channel_user_id = request_context.get("channel_user_id")
@@ -490,12 +555,17 @@ def resolve_agent_factory(assistant_id: str | None):
     Custom agents are implemented as ``lead_agent`` + an ``agent_name``
     injected into ``configurable`` or ``context`` — see
     :func:`build_run_config`.  All ``assistant_id`` values therefore map to the
-    same factory; the routing happens inside ``make_lead_agent`` when it reads
+    same factory; the routing happens inside the assembly when it reads
     ``cfg["agent_name"]``.
-    """
-    from deerflow.agents.lead_agent.agent import make_lead_agent
 
-    return make_lead_agent
+    The result is ``assemble_lead_agent``, which returns a
+    ``LeadAgentAssembly(graph, descriptor)`` rather than a bare graph, so every
+    consumer must unwrap ``.graph``. A third-party factory that still returns a
+    bare graph keeps working: the unwrap sites are type-checked, not assumed.
+    """
+    from deerflow.agents.lead_agent.agent import assemble_lead_agent
+
+    return assemble_lead_agent
 
 
 # Lead-agent recursion budget bounds. The Gateway must NOT trust a
@@ -519,6 +589,43 @@ def _resolve_max_recursion_limit() -> int:
         return get_app_config().max_recursion_limit
     except Exception:
         return _DEFAULT_MAX_RECURSION_LIMIT
+
+
+def _resolve_scheduler_recursion_limit() -> int:
+    """Resolve the scheduled-run recursion_limit from ``AppConfig.scheduler``.
+
+    Falls back to ``_DEFAULT_RECURSION_LIMIT`` when the app config cannot be
+    loaded so a missing ``config.yaml`` in tests still launches with the server
+    default rather than crashing dispatch. The value is clamped to
+    ``max_recursion_limit`` here, at dispatch, so an operator value above the
+    ceiling never reaches ``build_run_config`` as an unclamped value — which
+    would otherwise be misattributed as a "client" overage and emit a
+    ``clamped client recursion_limit`` warning on every scheduled run.
+    ``build_run_config`` keeps its own clamp for genuine client-supplied
+    bodies (defense in depth; its warning then only fires for real clients).
+
+    Both silent paths now emit an operator-visible warning: the pre-clamp
+    (operator value above ``max_recursion_limit``) and the config-load failure
+    fallback (``_DEFAULT_RECURSION_LIMIT`` returned instead of the operator
+    value).
+    """
+    try:
+        raw = get_app_config().scheduler.recursion_limit
+        max_limit = _resolve_max_recursion_limit()
+        if raw > max_limit:
+            logger.warning(
+                "scheduler.recursion_limit %d exceeds max_recursion_limit %d; clamped to %d for scheduled runs",
+                raw,
+                max_limit,
+                max_limit,
+            )
+        return min(raw, max_limit)
+    except Exception:
+        logger.warning(
+            "failed to load app config; falling back to recursion_limit=%d for scheduled runs",
+            _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
 
 
 def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
@@ -723,7 +830,15 @@ def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: st
         return cached[2]
     if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
         _state_accessor_graph_cache.clear()
-    graph = agent_factory(config=config)
+    agent_result = agent_factory(config=config)
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+
+        graph = unwrap_agent_graph(agent_result)
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        graph = agent_result
     _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
     return graph
 
@@ -1051,6 +1166,9 @@ async def start_run(
     body: RunCreateRequest,
     thread_id: str,
     request: Request,
+    *,
+    idempotency_key: str | None = None,
+    require_existing_thread: bool = False,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1062,6 +1180,9 @@ async def start_run(
         Target thread.
     request : Request
         FastAPI request — used to retrieve singletons from ``app.state``.
+    require_existing_thread : bool
+        Reject a missing thread instead of auto-creating metadata. Internal
+        notification runs use this so a deleted chat cannot be resurrected.
     """
     try:
         validate_thread_id(thread_id)
@@ -1113,15 +1234,30 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
-    if user is not None:
-        allowed = await run_ctx.thread_store.check_access(thread_id, str(user.id))
+
+    async def thread_access_allowed() -> bool:
+        if user is None:
+            if not require_existing_thread:
+                return True
+            return await run_ctx.thread_store.get(thread_id) is not None
+        allowed = await run_ctx.thread_store.check_access(
+            thread_id,
+            str(user.id),
+            require_existing=require_existing_thread,
+        )
         if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
             # Channel workers may also act for the connection owner named in
             # the trusted header (e.g. claiming a legacy default-owned channel
             # thread for its real owner).
-            allowed = await run_ctx.thread_store.check_access(thread_id, owner_user_id)
-        if not allowed:
-            raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+            allowed = await run_ctx.thread_store.check_access(
+                thread_id,
+                owner_user_id,
+                require_existing=require_existing_thread,
+            )
+        return allowed
+
+    if not await thread_access_allowed():
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
 
     owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
     try:
@@ -1158,10 +1294,12 @@ async def start_run(
                     run_ctx,
                     record,
                     owner_user_id=owner_user_id,
+                    require_existing_thread=require_existing_thread,
                 )
             )
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
+            metadata_failure: Exception | None = None
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
@@ -1173,11 +1311,13 @@ async def start_run(
                         metadata_task.result()
                     except asyncio.CancelledError:
                         pass
-                    except Exception:
+                    except Exception as exc:
                         metadata_failure_logged = True
+                        metadata_failure = exc
                         logger.warning(
-                            "Failed to ensure thread_meta for %s (non-fatal)",
+                            "Failed to ensure thread_meta for %s%s",
                             sanitize_log_param(thread_id),
+                            "" if require_existing_thread else " (non-fatal)",
                             exc_info=True,
                         )
                 elif abort_task not in done:
@@ -1186,6 +1326,8 @@ async def start_run(
                         sanitize_log_param(thread_id),
                         _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     )
+                    if require_existing_thread:
+                        metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
             finally:
                 if metadata_task.done():
                     if not metadata_failure_logged:
@@ -1201,7 +1343,13 @@ async def start_run(
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            # Continue through run_agent even after metadata abort/timeout:
+            if metadata_failure is not None and require_existing_thread:
+                await run_mgr.fail_start_if_pending(
+                    record.run_id,
+                    error=str(metadata_failure),
+                )
+            # Continue through run_agent even after metadata abort, timeout,
+            # or strict verification failure:
             # its startup barrier is the single path that turns pending
             # cancellation into no-agent-construction plus publish_end.
             await run_agent(
@@ -1225,6 +1373,14 @@ async def start_run(
                     thread_id=thread_id,
                     assistant_id=body.assistant_id,
                 )
+                # A strict caller may have observed the thread before a
+                # concurrent delete removed it while checkpoint preparation
+                # yielded. Recheck immediately before durable admission. The
+                # delete route holds a durable thread-operation reservation,
+                # so after this point either the run or the delete wins; they
+                # cannot both succeed across Gateway workers.
+                if require_existing_thread and not await thread_access_allowed():
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,
@@ -1238,7 +1394,11 @@ async def start_run(
                     multitask_strategy=body.multitask_strategy,
                     model_name=model_name,
                     user_id=owner_user_id,
+                    idempotency_key=idempotency_key,
                 )
+
+                if record.idempotency_reused:
+                    return record
 
                 worker = run_after_metadata(record)
                 try:
@@ -1297,7 +1457,7 @@ async def launch_scheduled_thread_run(
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config=None,
+        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
@@ -1318,7 +1478,99 @@ async def launch_scheduled_thread_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    record = await start_run(body, thread_id, request)
+    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=idempotency_key,
+    )
+    return {"run_id": record.run_id, "thread_id": record.thread_id}
+
+
+def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
+    """Build the internal user turn for one immutable MCP task event snapshot."""
+    payload = frame_untrusted_text(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+    instruction = (
+        "A durable background MCP task has an update that requires the user's attention. "
+        "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "
+        "When status is input_required, show the question but explain that this MCP integration "
+        "cannot resume the remote task with user input yet. When tracking_degraded is true, explain "
+        "that DeerFlow will continue retrying at a lower frequency."
+    )
+    return f"{instruction}\n\n{payload}"
+
+
+async def launch_mcp_task_notification_run(
+    *,
+    app: Any,
+    thread_id: str,
+    assistant_id: str | None,
+    owner_user_id: str,
+    task_id: str,
+    dispatch_version: int,
+    dispatch_attempt: int,
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Idempotently launch the Agent run that delivers one task event."""
+    request = SimpleNamespace(
+        app=app,
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
+        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL),
+        cookies={},
+    )
+    body = RunCreateRequest(
+        assistant_id=assistant_id,
+        input={
+            "messages": [
+                {
+                    "role": "user",
+                    "content": _mcp_task_notification_prompt(event),
+                    "additional_kwargs": {"hide_from_ui": True},
+                }
+            ]
+        },
+        command=None,
+        metadata={
+            "mcp_task_notification": {
+                "task_id": task_id,
+                "dispatch_version": dispatch_version,
+                "dispatch_attempt": dispatch_attempt,
+            }
+        },
+        config=None,
+        context={"non_interactive": True, "user_id": owner_user_id},
+        webhook=None,
+        checkpoint_id=None,
+        checkpoint=None,
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=None,
+        stream_subgraphs=False,
+        stream_resumable=None,
+        on_disconnect="continue",
+        on_completion=None,
+        multitask_strategy="reject",
+        after_seconds=None,
+        if_not_exists="create",
+        feedback_keys=None,
+    )
+    idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    try:
+        record = await start_run(
+            body,
+            thread_id,
+            request,
+            idempotency_key=idempotency_key,
+            require_existing_thread=True,
+        )
+    except HTTPException as exc:
+        if exc.status_code == 409:
+            raise ConflictError(str(exc.detail)) from exc
+        if exc.status_code == 404:
+            raise PermanentNotificationError(str(exc.detail)) from exc
+        raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
