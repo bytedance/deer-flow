@@ -102,6 +102,25 @@ class LocalSandbox(Sandbox):
         shell_name = LocalSandbox._shell_name(shell)
         return shell_name in {"sh.exe", "bash.exe"} and any(part in normalized for part in ("/git/", "/mingw", "/msys"))
 
+    def _msys_path_conversion_exclusions(self) -> str:
+        """Return the MSYS argument prefixes owned by this sandbox.
+
+        The blanket conversion disable introduced for #2765 also affects child
+        processes launched by Git Bash, including Windows-native CLI shims that
+        need normal MSYS path conversion for their own installation paths.
+        Excluding only the configured virtual roots preserves DeerFlow path
+        arguments without changing unrelated child-process behavior. Root and
+        values containing MSYS exclusion syntax are omitted because they would
+        broaden the exclusion beyond one virtual path prefix.
+        """
+        safe_roots: dict[str, None] = {}
+        for mapping in self.path_mappings:
+            root = mapping.container_path.rstrip("/")
+            if not root or not root.startswith("/") or ";" in root or "*" in root:
+                continue
+            safe_roots[root] = None
+        return ";".join(safe_roots)
+
     @staticmethod
     def _find_first_available_shell(candidates: tuple[str, ...]) -> str | None:
         """Return the first executable shell path or command found from candidates."""
@@ -496,11 +515,12 @@ class LocalSandbox(Sandbox):
             else:
                 args = [shell, "-c", resolved_command]
                 if self._is_msys_shell(shell):
-                    sandbox_env = {
-                        **sandbox_env,
-                        "MSYS_NO_PATHCONV": "1",
-                        "MSYS2_ARG_CONV_EXCL": "*",
-                    }
+                    exclusions = self._msys_path_conversion_exclusions()
+                    if exclusions:
+                        sandbox_env = {
+                            **sandbox_env,
+                            "MSYS2_ARG_CONV_EXCL": exclusions,
+                        }
 
             try:
                 result = subprocess.run(
