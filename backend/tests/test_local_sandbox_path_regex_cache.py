@@ -49,7 +49,7 @@ def test_empty_mappings_yield_no_pattern(tmp_path):
 
 def test_command_paths_resolved_to_local(tmp_path):
     sb = _make_sandbox(tmp_path)
-    ws_local = str((tmp_path / "workspace").resolve())
+    ws_local = str((tmp_path / "workspace").resolve()).replace("\\", "/")
     out = sb._resolve_paths_in_command("cat /mnt/user-data/workspace/foo.txt")
     assert out == f"cat {ws_local}/foo.txt"
     # Calling again uses the cached pattern and produces the same result.
@@ -208,9 +208,9 @@ def test_resolved_paths_and_sorted_views_are_cached(tmp_path):
 
 def test_forward_resolution_behavior_unchanged(tmp_path):
     sb = _make_sandbox(tmp_path)
-    ws_local = str((tmp_path / "workspace").resolve())
+    ws_local = str((tmp_path / "workspace" / "sub" / "foo.txt").resolve())
     # Container path resolves to the mapped local path.
-    assert sb._resolve_path("/mnt/user-data/workspace/sub/foo.txt") == f"{ws_local}/sub/foo.txt"
+    assert sb._resolve_path("/mnt/user-data/workspace/sub/foo.txt") == ws_local
     # An unmapped path is returned unchanged.
     assert sb._resolve_path("/etc/hosts") == "/etc/hosts"
 
