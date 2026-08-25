@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 35
+config_version: 36
 
 # ============================================================================
 # Logging
@@ -1437,6 +1437,15 @@ sandbox:
 # Configure timeouts for subagent execution
 # Subagents are background workers delegated tasks by the lead agent
 
+# Process-wide execution capacity. These fields are restart-required and are
+# shared by ordinary `task` calls and durable batches. Waiting work is async;
+# queued subagents do not occupy a scheduler thread.
+subagent_runtime:
+  max_running: 3
+  max_queued: 64
+  admission_policy: queue       # queue or reject when all slots are occupied
+  queue_timeout_seconds: 300
+
 # subagents:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
 #   # Custom agents use their own timeout_seconds (default 900) unless overridden.
@@ -1507,6 +1516,25 @@ sandbox:
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
 #   # The model name must match a name defined in the `models:` section above.
+
+# Durable native-subagent batches. Disabled by default because enabling it can
+# materially increase model usage and requires database.backend sqlite/postgres.
+# The three limits are intentionally separate:
+# - total: all persisted items in one batch
+# - live: pending work admitted as queued/running at one time
+# - running: items from one batch allowed to hold real execution slots
+subagent_batches:
+  enabled: false
+  poll_interval_seconds: 1
+  lease_seconds: 120
+  max_items_per_batch: 5000
+  default_max_live_items: 100
+  max_live_items_per_batch: 1000
+  default_max_running_items: 3
+  max_running_items_per_batch: 64
+  max_attempts: 3
+  max_result_chars: 100000
+  result_preview_max_chars: 2000
 
 # ============================================================================
 # Tool Result Verification

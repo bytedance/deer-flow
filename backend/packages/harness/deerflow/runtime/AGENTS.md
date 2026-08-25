@@ -94,6 +94,39 @@ one accumulated receipt across multiple goal-continuation `_stream_once` calls;
 journal tests drive LangChain's real async callback dispatcher against a single
 journal to pin serialized, deduplicated parallel tool callbacks.
 
+**Targeted run-event attribution** (`runtime/events/store/`):
+`RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
+contract. Its default implementation walks `list_messages()` backward in
+1000-row pages, preserves the first page's high-watermark through the exclusive
+`before_seq` cursor, and raises when a full page has no safe progressing `seq`.
+Memory and database stores use that bounded path; the JSONL store overrides it
+with one complete thread-log read because each JSONL page would otherwise
+rescan every run file. The default and JSONL paths share the public
+`normalize_message_ids()` and `match_ai_message_run_id()` helpers from
+`events/store/base.py`. Database owner filtering is inherited on every page.
+Callers may use a missing key as proof that no valid AI event exists only after
+an ordinary return, never after an exception. A caller that crosses a run or
+checkpoint-write admission boundary must repeat the complete audit after
+admission; a pre-admission exact hit can be superseded by a later event just as
+a pre-admission miss can become an exact hit.
+
+Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
+messages. An exhaustive miss preserves the human-boundary fallback; an
+incomplete lookup removes unproven synthesized IDs. Its metadata-only
+write-on-read cache stores `run_message_ids` for every audited AI ID (including
+exhaustive misses) plus required `run_durations`; duration presence alone does
+not prove attribution. Historical `body.before` reads write the audit to the
+head, and the merge may retain IDs no longer in materialized history, which
+readers ignore. Migration must acquire the durable `checkpoint_write`
+reservation, then repeat the whole message audit and batch-reload required run
+rows before persisting. Post-admission exact hits replace foreground exact or
+boundary mappings, and recomputed final durations replace foreground snapshots.
+Successful workers keep their durable run row active through the final duration
+checkpoint write, so a peer migration cannot enter during terminalization.
+The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
+the number of required IDs, whichever is larger; missing exact runs use targeted
+`get()` calls.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`

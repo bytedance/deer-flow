@@ -15,6 +15,7 @@ from deerflow.models import create_chat_model
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.llm_text import extract_response_text
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ async def scan_skill_content(
             config=invoke_config,
         )
         model_responded = True
-        raw = str(getattr(response, "content", "") or "")
+        raw = extract_response_text(getattr(response, "content", ""))
         parsed = _extract_json_object(raw)
         if parsed:
             decision = str(parsed.get("decision", "")).lower()

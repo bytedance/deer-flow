@@ -163,6 +163,10 @@ modules that only need lightweight types, config, or registries should import
 the concrete submodule instead of adding eager package-root imports that pull in
 the tool graph or subagent executor during state/schema imports.
 
+`ThreadMetaStore.search()` keeps JSON filter semantics identical across memory,
+SQLite, and PostgreSQL: missing differs from null, bool differs from int, and
+float filters accept integer or real JSON numbers through `json_value_matches`.
+
 ## Development Workflow
 
 ### Test-Driven Development (TDD) — MANDATORY
