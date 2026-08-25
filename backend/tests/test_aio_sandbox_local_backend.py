@@ -184,13 +184,32 @@ def test_resolve_docker_bind_host_brackets_bare_ipv6_override(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "[fd00::1]")
     assert _resolve_docker_bind_host() == "[fd00::1]"
 
-    # IPv4 and hostnames pass through unchanged.
+    # IPv4 literals pass through unchanged.
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.168.64.1")
     assert _resolve_docker_bind_host() == "192.168.64.1"
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "0.0.0.0")
     assert _resolve_docker_bind_host() == "0.0.0.0"
+
+
+def test_resolve_docker_bind_host_resolves_hostname_override(monkeypatch):
+    """-p requires an IP literal as the host part, so a hostname override
+    resolves to the address the daemon actually maps before use."""
     monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "host.docker.internal")
-    assert _resolve_docker_bind_host() == "host.docker.internal"
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: "192.168.64.1" if host == "host.docker.internal" else None,
+    )
+    assert _resolve_docker_bind_host() == "192.168.64.1"
+
+
+def test_resolve_docker_bind_host_rejects_unresolvable_hostname_override(monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "not-a-resolvable-host.invalid")
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: None,
+    )
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_BIND_HOST"):
+        _resolve_docker_bind_host()
 
 
 def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution_fails(monkeypatch):
@@ -394,6 +413,9 @@ def test_start_container_seccomp_can_opt_out_to_default_profile(monkeypatch):
 
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "seccomp=unconfined" not in security_opts
+    # The opt-out must select the built-in profile explicitly: omitting the
+    # option would inherit the daemon's (possibly unconfined) default.
+    assert "seccomp=builtin" in security_opts
     assert "no-new-privileges" in security_opts
 
 
@@ -496,6 +518,38 @@ def test_start_container_passes_through_user_and_network(monkeypatch):
 
     assert captured_cmd[captured_cmd.index("--user") + 1] == "1000:1000"
     assert captured_cmd[captured_cmd.index("--network") + 1] == "deer-flow-sandbox-egress"
+
+
+def test_start_container_rejects_host_networking(monkeypatch):
+    """host mode discards -p/--publish, voiding the hardened bind and
+    re-exposing the unauthenticated exec API on the host's interfaces."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "host")
+
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_NETWORK"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_rejects_shared_container_network_namespace(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "container:gateway")
+
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_NETWORK"):
+        _capture_start_container_command(monkeypatch, backend)
 
 
 def test_start_container_does_not_add_docker_hardening_to_apple_container(monkeypatch):

@@ -141,6 +141,18 @@ def _is_loopback_sandbox_host(host: str) -> bool:
     return _normalize_sandbox_host(host) in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
 
 
+def _is_ip_bind_spec(value: str) -> bool:
+    """Return True when ``value`` (bare or bracketed) is an IP literal."""
+    inner = value.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    try:
+        ipaddress.ip_address(inner)
+        return True
+    except ValueError:
+        return False
+
+
 def _normalize_docker_bind_spec(value: str) -> str:
     """Bracket bare IPv6 literals for Docker's ``-p`` publish syntax.
 
@@ -237,9 +249,22 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     sandbox host, bind Docker to IPv6 loopback as well so the advertised
     sandbox URL and published socket use the same address family.
     """
-    explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
-    if explicit_bind is not None:
+    explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST", "").strip()
+    if explicit_bind:
         explicit_bind = _normalize_docker_bind_spec(explicit_bind)
+        if explicit_bind and not _is_ip_bind_spec(explicit_bind):
+            # -p requires an IP literal as the host part; Docker rejects a
+            # hostname there, which would prevent every sandbox from
+            # starting. Resolve hostname overrides to the address the daemon
+            # actually maps (e.g. host.docker.internal -> host-gateway-ip).
+            resolved = _resolve_sandbox_host_address(explicit_bind)
+            if resolved is None:
+                raise RuntimeError(
+                    f"DEER_FLOW_SANDBOX_BIND_HOST={explicit_bind!r} is not an IP literal and could not be resolved; "
+                    "Docker publish specs require an IP address as the host part. "
+                    "Set an IPv4/IPv6 literal (bare or bracketed) or a resolvable hostname."
+                )
+            explicit_bind = resolved
         if explicit_bind:
             logger.debug("Docker sandbox bind: %s (explicit bind host override)", explicit_bind)
             return explicit_bind
@@ -746,6 +771,13 @@ class LocalContainerBackend(SandboxBackend):
                 cmd.extend(["--security-opt", f"seccomp={seccomp_profile}"])
             elif not _env_flag_disabled("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED"):
                 cmd.extend(["--security-opt", "seccomp=unconfined"])
+            else:
+                # The documented opt-out must actually enable Docker's
+                # built-in filtering: merely omitting the option would
+                # inherit the daemon's configured default, which can itself
+                # be unconfined or a custom profile.
+                # https://docs.docker.com/reference/cli/docker/container/run/#optional-security-options---security-opt
+                cmd.extend(["--security-opt", "seccomp=builtin"])
 
             if memory := _docker_resource_limit("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY):
                 cmd.extend(["--memory", memory])
@@ -769,6 +801,20 @@ class LocalContainerBackend(SandboxBackend):
             # metadata endpoints directly, bypassing the gateway's SSRF
             # protections.
             if network := os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip():
+                lowered = network.lower()
+                if lowered == "host" or lowered.startswith("container:"):
+                    # Docker discards -p/--publish in host mode and
+                    # container:<name> shares another container's network
+                    # namespace, so either one voids the hardened bind below
+                    # and re-exposes the unauthenticated sandbox exec API on
+                    # the host's interfaces. Refuse instead of silently
+                    # losing the bind.
+                    # https://docs.docker.com/engine/network/drivers/host/
+                    raise RuntimeError(
+                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} would void the sandbox port bind "
+                        "(Docker drops -p/--publish in host mode and shares the network namespace "
+                        "for container:<name>). Use a dedicated egress-controlled bridge network instead."
+                    )
                 cmd.extend(["--network", network])
 
         if self._runtime == "docker":
