@@ -39,7 +39,7 @@ def test_main_skips_successfully_when_no_public_skill_changed(tmp_path: Path, mo
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     monkeypatch.setattr(runner, "run_review", fail_review)
     monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
-    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: {"findings": [], "completeness": {}})
 
     exit_code = runner.main(
         [
@@ -231,7 +231,7 @@ def test_main_reviews_package_when_only_support_file_changed(
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fake_review)
     monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
-    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: {"findings": [], "completeness": {}})
 
     exit_code = runner.main(
         [
@@ -269,7 +269,7 @@ def test_main_maps_eval_fixture_changes_to_owner_package(
     monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
     monkeypatch.setattr(runner, "run_review", fake_review)
     monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
-    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: [])
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: {"findings": [], "completeness": {}})
 
     exit_code = runner.main(
         [
@@ -390,6 +390,208 @@ def test_is_fully_removed_package_false_when_any_status_is_not_a_deletion(tmp_pa
     package_rel = PurePosixPath("skills/public/partial")
     assert runner.is_fully_removed_package(package_rel, ["D", "M"], tmp_path) is False
 
+
+
+def _baseline_facts(*findings):
+    return {"findings": list(findings), "completeness": {}}
+
+
+def _diff_stdout():
+    sep = bytes([0])
+    return b"M" + sep + b"skills/public/alpha/SKILL.md" + sep
+
+
+
+def test_main_fails_closed_when_head_review_crashes(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: None)
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "head review failed" in output
+
+
+def test_main_fails_closed_when_head_review_returns_invalid_json(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: "not-a-dict")
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "head review failed" in output
+
+
+def test_main_passes_when_baseline_finding_unchanged(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+    finding = {
+        "path": "skills/public/alpha/SKILL.md",
+        "rule_id": "R001",
+        "line": 20,
+        "message": "pre-existing",
+        "severity": "error",
+    }
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: tmp_path / "base-pkg")
+    monkeypatch.setattr(
+        runner,
+        "run_review_json",
+        lambda *a, **kw: _baseline_facts(finding)
+        if "base-pkg" in str(a[0])
+        else _baseline_facts({**finding, "line": 30}),
+    )
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no new gating findings" in output
+
+
+def test_main_fails_on_new_error_finding(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+    new_error = {
+        "path": "skills/public/alpha/SKILL.md",
+        "rule_id": "R002",
+        "line": 5,
+        "message": "new error",
+        "severity": "error",
+    }
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: _baseline_facts(new_error))
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "NEW error R002" in output
+
+
+def test_main_passes_on_new_info_finding_preserving_severity_gate(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+    new_info = {
+        "path": "skills/public/alpha/SKILL.md",
+        "rule_id": "R003",
+        "line": 5,
+        "message": "new info",
+        "severity": "info",
+    }
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(runner, "run_review_json", lambda *a, **kw: _baseline_facts(new_info))
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "no new gating findings" in output
+
+
+def test_main_fails_when_head_review_incomplete(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: None)
+    monkeypatch.setattr(
+        runner,
+        "run_review_json",
+        lambda *a, **kw: {"findings": [], "completeness": {"not_assessed": ["SKILL.md"]}},
+    )
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "review incomplete" in output
+
+
+def test_main_treats_all_as_new_when_baseline_review_fails(tmp_path, monkeypatch, capsys):
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+    head_error = {
+        "path": "skills/public/alpha/SKILL.md",
+        "rule_id": "R004",
+        "line": 5,
+        "message": "head error",
+        "severity": "error",
+    }
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: tmp_path / "base-pkg")
+    monkeypatch.setattr(
+        runner,
+        "run_review_json",
+        lambda *a, **kw: None
+        if "base-pkg" in str(a[0])
+        else _baseline_facts(head_error),
+    )
+
+    exit_code = runner.main(
+        ["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)]
+    )
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "baseline review failed" in output
+    assert "NEW error R004" in output
+
+
+def test_finding_key_excludes_line_number():
+    base = {"path": "p", "rule_id": "R", "line": 20, "message": "m"}
+    head = {"path": "p", "rule_id": "R", "line": 30, "message": "m"}
+    assert runner.finding_key(base) == runner.finding_key(head)
+
+
+def test_finding_gates_only_blocker_and_error():
+    assert runner.finding_gates({"severity": "error"}) is True
+    assert runner.finding_gates({"severity": "blocker"}) is True
+    assert runner.finding_gates({"severity": "warning"}) is False
+    assert runner.finding_gates({"severity": "info"}) is False
+    assert runner.finding_gates({}) is False
 
 def test_is_zero_sha_requires_full_sha_length() -> None:
     assert runner.is_zero_sha("0" * 40) is True

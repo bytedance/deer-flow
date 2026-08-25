@@ -88,8 +88,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         if use_baseline:
             base_pkg = extract_package_at_ref(package_rel, base_ref, repo_root)
             if base_pkg is not None:
-                base_findings = run_review_json(base_pkg, repo_root, args.python)
-                base_keys = {finding_key(f) for f in base_findings}
+                base_facts = run_review_json(base_pkg, repo_root, args.python)
+                if base_facts is not None:
+                    base_keys = {finding_key(f) for f in base_facts.get("findings", [])}
+                else:
+                    # Baseline review itself failed.  Do not silently pass:
+                    # treat every head finding as new (fail-closed).
+                    base_keys = set()
+                    print(
+                        f"[skill-review] WARNING: baseline review failed at {base_ref}; "
+                        f"treating all head findings as new"
+                    )
                 shutil.rmtree(base_pkg, ignore_errors=True)
                 # Clean up the temp root left behind by extract_package_at_ref.
                 tmp_root = base_pkg.parent
@@ -106,11 +115,27 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"[skill-review] Could not extract baseline at {base_ref}; treating all findings as new"
                 )
 
-            head_findings = run_review_json(package, repo_root, args.python)
-            new_findings = [f for f in head_findings if finding_key(f) not in base_keys]
+            head_facts = run_review_json(package, repo_root, args.python)
+            if head_facts is None:
+                # Head review crashed or produced invalid output.  This is NOT
+                # "no findings" — fail closed so the gate never silently passes.
+                print(
+                    f"[skill-review] Failed: {package_rel} (head review failed / "
+                    f"invalid output)"
+                )
+                failed = True
+                continue
 
-            if new_findings:
-                for f in new_findings:
+            new_findings = [
+                f
+                for f in head_facts.get("findings", [])
+                if finding_key(f) not in base_keys
+            ]
+            gate_findings = [f for f in new_findings if finding_gates(f)]
+            incomplete = review_incomplete(head_facts)
+
+            if gate_findings:
+                for f in gate_findings:
                     loc = f.get("path", "<package>")
                     if f.get("line") is not None:
                         loc = f"{loc}:{f['line']}"
@@ -118,11 +143,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                         f"[skill-review] NEW {f.get('severity')} {f.get('rule_id')} at {loc}: {f.get('message')}"
                     )
                 print(
-                    f"[skill-review] Failed: {package_rel} ({len(new_findings)} new finding(s))"
+                    f"[skill-review] Failed: {package_rel} "
+                    f"({len(gate_findings)} new gating finding(s))"
+                )
+                failed = True
+            elif incomplete:
+                # Preserve the original --fail-on-incomplete semantics: a
+                # review that did not assess all content must not pass just
+                # because no new gating finding appeared.
+                print(
+                    f"[skill-review] Failed: {package_rel} (review incomplete: "
+                    f"{','.join(head_facts.get('completeness', {}).get('not_assessed') or []) or 'unknown'})"
                 )
                 failed = True
             else:
-                print(f"[skill-review] Passed: {package_rel} (no new findings)")
+                print(f"[skill-review] Passed: {package_rel} (no new gating findings)")
         else:
             if run_review(package, repo_root, args.python) != 0:
                 failed = True
@@ -344,14 +379,22 @@ def finding_key(finding: dict) -> tuple:
 
 def run_review_json(
     package: Path, repo_root: Path, python_executable: str,
-) -> list[dict]:
-    """Run review with JSON output, return parsed findings."""
-    package_rel = package.relative_to(repo_root).as_posix()
+) -> dict | None:
+    """Run review with JSON output, return the full facts dict.
+
+    Returns ``None`` when the review itself failed (CLI crash, invalid JSON,
+    or empty output).  Callers MUST treat ``None`` as REVIEW FAILED
+    (fail-closed) and never as "no findings".
+    """
+    # The review CLI accepts an absolute skill directory path, so pass
+    # str(package) directly.  base_pkg lives in a temp extraction dir (not
+    # under repo_root), so relative_to(repo_root) would raise ValueError for
+    # baseline reviews; cwd and env still come from the real repo root.
     command = [
         python_executable,
         "-m",
         "deerflow.skills.review.cli",
-        package_rel,
+        str(package),
         "--format",
         "json",
     ]
@@ -362,13 +405,30 @@ def run_review_json(
         capture_output=True,
         check=False,
     )
-    if result.returncode != 0 and not result.stdout:
-        return []
+    if result.returncode != 0 or not result.stdout:
+        return None
     try:
         facts = json.loads(result.stdout.decode("utf-8", errors="replace"))
     except (json.JSONDecodeError, ValueError):
-        return []
-    return facts.get("findings", [])
+        return None
+    if not isinstance(facts, dict):
+        return None
+    return facts
+
+
+def finding_gates(finding: dict) -> bool:
+    """Whether a finding blocks the gate under the original ``--fail-on error``.
+
+    Only blocker/error findings gate; warning/info do not, matching the
+    pre-baseline CLI semantics so the baseline mode does not silently change
+    the severity policy.
+    """
+    return str(finding.get("severity", "")).lower() in {"blocker", "error"}
+
+
+def review_incomplete(facts: dict | None) -> bool:
+    """Whether the review left content not assessed (``--fail-on-incomplete``)."""
+    return bool((facts or {}).get("completeness", {}).get("not_assessed"))
 
 
 def extract_package_at_ref(package_rel: str, ref: str, repo_root: Path) -> Path | None:
