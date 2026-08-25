@@ -180,6 +180,19 @@ class Paths:
         """
         return self.base_dir / "agents"
 
+    @property
+    def managed_subagents_dir(self) -> Path:
+        """Deployment-level managed subagent definitions.
+
+        Each definition is stored as its own JSON file so an atomic replace
+        never targets a mounted directory or a single shared manifest file.
+        """
+        return self.base_dir / "managed-subagents"
+
+    def managed_subagent_file(self, name: str) -> Path:
+        """Path to one managed subagent definition."""
+        return self.managed_subagents_dir / f"{name.lower()}.json"
+
     def agent_dir(self, name: str) -> Path:
         """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""
         return self.agents_dir / name.lower()

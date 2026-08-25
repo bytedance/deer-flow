@@ -105,6 +105,55 @@ When an OAuth-protected MCP server is connected, DeerFlow will:
 
 The OAuth flow is transparent to the Lead Agent — it simply calls the tool, and DeerFlow handles the authentication.
 
+## Per-user credentials
+
+A single HTTP/SSE MCP server entry can serve several DeerFlow users, each
+authenticated to the remote service with their own credential. Declare a
+`user_auth` block mapping DeerFlow user ids to credential header values:
+
+```json
+{
+  "mcpServers": {
+    "shared-service": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": { "Authorization": "$SERVICE_DISCOVERY_TOKEN" },
+      "user_auth": {
+        "header": "Authorization",
+        "users": {
+          "alice-user-id": "$SERVICE_TOKEN_ALICE",
+          "bob-user-id": "$SERVICE_TOKEN_BOB"
+        }
+      }
+    }
+  }
+}
+```
+
+On every tool call, the built-in user-scoped auth interceptor resolves the
+authenticated DeerFlow user and injects that user's credential into the
+configured header. The entry's static `headers` are used only for startup tool
+discovery.
+
+- Values support the same `$ENV_VAR` resolution as the rest of the file, so raw
+  secrets can stay in the process environment.
+- **Fail-closed by default**: a user with no mapped credential — or a mapped
+  `$ENV_VAR` that is unset — gets a clear error instead of another user's
+  credential. Set `"on_missing": "passthrough"` to instead forward such calls
+  with the server's static headers.
+- Combined with per-`(user, thread)` MCP session scoping, users cannot reach
+  each other's authenticated sessions or credentials.
+- The Gateway API masks `user_auth.users` values in GET responses and preserves
+  stored credentials when masked values are round-tripped through PUT.
+
+**Finding the right `users` key.** The resolved user id depends on how the
+deployment authenticates: with LangGraph Server auth it is the safe-slug form
+of the authenticated identity (e.g. `alice-example-com-ab12cd34`), while the
+embedded Gateway resolves the DeerFlow user's raw id (a UUID). The simplest way
+to get the exact key is to have the user attempt a call before being mapped:
+the fail-closed error message includes their resolved id verbatim, ready to
+copy into `user_auth.users`.
+
 ## Managing MCP servers
 
 MCP servers can be managed in several ways:

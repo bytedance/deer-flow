@@ -11,16 +11,20 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
 
+import anyio
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
+from mcp import ClientSession
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
-from deerflow.mcp.interceptors import build_mcp_tool_interceptors
+from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.session_pool import MCPSessionPool, get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
@@ -46,13 +50,6 @@ logger = logging.getLogger(__name__)
 # the load-time validation skill names get (skills/storage/skill_storage.py).
 _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# Subdirectory under the thread's workspace used as the temp dir for stdio MCP
-# subprocesses. Pinning the process temp dir here (alongside its cwd) makes
-# tools that write to ``os.tmpdir()`` / ``tempfile.gettempdir()`` land inside
-# the mounted user-data tree, where their output is resolvable by the
-# sandbox/artifact API — instead of on an unreachable host temp path.
-_MCP_TMP_SUBDIR = ".mcp/tmp"
-
 # Matches local-file references embedded in free text returned by an MCP server.
 # Some servers (notably Playwright's ``browser_take_screenshot``) report saved
 # files only as text/markdown links rather than ``ResourceLink`` blocks. Those
@@ -66,6 +63,43 @@ _LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
 
 _FILE_SNAPSHOT = dict[Path, tuple[int, int]]
+
+_MCP_CLOSED_STREAM_ERRORS = (
+    anyio.ClosedResourceError,
+    anyio.BrokenResourceError,
+    anyio.EndOfStream,
+)
+
+
+def _is_mcp_transport_disconnect(error: Exception) -> bool:
+    if isinstance(error, _MCP_CLOSED_STREAM_ERRORS):
+        return True
+    return isinstance(error, McpError) and error.error.code == CONNECTION_CLOSED and error.error.message == "Connection closed"
+
+
+async def _call_pooled_session_tool(
+    session: ClientSession,
+    pool: MCPSessionPool,
+    *,
+    server_name: str,
+    scope_key: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    call_kwargs: dict[str, Any],
+) -> Any:
+    try:
+        return await session.call_tool(tool_name, arguments, **call_kwargs)
+    except Exception as error:
+        if _is_mcp_transport_disconnect(error):
+            try:
+                await pool.close_session_if_current(server_name, scope_key, session)
+            except Exception:
+                logger.warning(
+                    "Failed to close disconnected MCP session for server '%s'",
+                    server_name,
+                    exc_info=True,
+                )
+        raise
 
 
 def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | None:
@@ -184,7 +218,7 @@ def _prepare_stdio_workspace(paths: Paths, *, thread_id: str, user_id: str) -> t
     """
     paths.ensure_thread_dirs(thread_id, user_id=user_id)
     source_base_dir = paths.sandbox_work_dir(thread_id, user_id=user_id)
-    tmp_dir = source_base_dir / _MCP_TMP_SUBDIR
+    tmp_dir = source_base_dir / MCP_TMP_SUBDIR
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.chmod(0o700)
@@ -563,20 +597,17 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await session.call_tool(
-                    request.name,
-                    request.args,
-                    **kwargs,
+                return await _call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=server_name,
+                    scope_key=scope_key,
+                    tool_name=request.name,
+                    arguments=request.args,
+                    call_kwargs=kwargs,
                 )
 
-            handler = base_handler
-            for interceptor in reversed(tool_interceptors):
-                outer = handler
-
-                async def wrapped(req: Any, _i: Any = interceptor, _h: Any = outer) -> Any:
-                    return await _i(req, _h)
-
-                handler = wrapped
+            handler = compose_tool_interceptors(tool_interceptors, base_handler)
 
             request = MCPToolCallRequest(
                 name=original_name,
@@ -586,10 +617,14 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await session.call_tool(
-                original_name,
-                arguments,
-                **call_kwargs,
+            call_tool_result = await _call_pooled_session_tool(
+                session,
+                pool,
+                server_name=server_name,
+                scope_key=scope_key,
+                tool_name=original_name,
+                arguments=arguments,
+                call_kwargs=call_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -888,7 +923,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                         _VALID_MCP_TOOL_NAME.pattern,
                     )
                     continue
-                tag_mcp_tool(tool)
+                tag_mcp_tool(tool, server_name=source_name, transport=transport)
                 prefix = f"{source_name}_"
                 original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)

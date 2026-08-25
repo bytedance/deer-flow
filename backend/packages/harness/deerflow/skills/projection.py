@@ -94,15 +94,12 @@ def _projection_lock(root: Path) -> Iterator[None]:
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _link_or_copy(source: str, target: str, *, follow_symlinks: bool = True) -> str:
-    # Hardlinks share the source inode and provide no write isolation. Any
-    # read-only guarantee must come from the consuming sandbox or mount.
-    try:
-        os.link(source, target, follow_symlinks=follow_symlinks)
-    except OSError as exc:
-        if exc.errno not in {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOTSUP}:
-            raise
-        shutil.copy2(source, target, follow_symlinks=follow_symlinks)
+def _copy_into_view(source: str, target: str, *, follow_symlinks: bool = True) -> str:
+    # Always copy. Hardlinks share the source inode, so a LocalSandbox bash
+    # write through the projected view would mutate the canonical skill file.
+    # Isolation must live in the projection itself; PathMapping.read_only is
+    # only enforced by write_file / update_file, not execute_command.
+    shutil.copy2(source, target, follow_symlinks=follow_symlinks)
     return target
 
 
@@ -114,7 +111,7 @@ def _stage_skill(source: Path, target: Path, nested_skill_roots: set[Path]) -> N
     shutil.copytree(
         source,
         target,
-        copy_function=_link_or_copy,
+        copy_function=_copy_into_view,
         symlinks=True,
         ignore=_exclude_nested_skills,
         dirs_exist_ok=True,
@@ -158,11 +155,18 @@ def _validate_projection_relative_path(relative_path: Path) -> None:
 def _remove_projection_relative(root: Path, relative_path: Path) -> None:
     """Remove a projected package without following a drifted namespace symlink."""
     current = root
-    for part in relative_path.parts:
+    parts = relative_path.parts
+    for index, part in enumerate(parts):
         current /= part
         if current.is_symlink():
             current.unlink()
             return
+        # A namespace component that exists as a regular file means the
+        # projection was externally replaced (drifted). Fail closed on every
+        # platform: os.unlink() reports this as ENOTDIR on POSIX but ENOENT
+        # on Windows, where unlink(missing_ok=True) swallows the ENOENT.
+        if index < len(parts) - 1 and current.exists() and not current.is_dir():
+            raise NotADirectoryError(errno.ENOTDIR, f"Projection namespace drifted to a file: {current}")
     _remove_projection_entry(current)
 
 
@@ -212,7 +216,13 @@ def _clear_projection_scope(scope_root: Path, *category_roots: Path) -> None:
     _manifest_path(scope_root).unlink(missing_ok=True)
 
 
-def _update_tree_digest(digest, root: Path, label: str) -> None:
+def _update_tree_digest(
+    digest,
+    root: Path,
+    label: str,
+    *,
+    follow_package_directory_symlinks: bool = False,
+) -> None:
     """Hash directory metadata (inode/mode/size/mtime), not file contents.
 
     Trade-off: fast enough to run on every sandbox acquire (O(files), no
@@ -221,6 +231,11 @@ def _update_tree_digest(digest, root: Path, label: str) -> None:
     projection stale until the next explicit rebuild. Runtime writes through
     this codebase are covered regardless: the mutation path rebuilds under
     lock, and atomic-rename always changes the inode.
+
+    Custom skill roots may contain an operator-managed package directory
+    symlink. Follow only those links directly below the category root so
+    changes in their external target tree invalidate the projection, while
+    nested and unrelated symlinks remain boundary markers.
     """
     digest.update(f"root:{label}\0".encode())
     if not root.exists():
@@ -238,6 +253,9 @@ def _update_tree_digest(digest, root: Path, label: str) -> None:
             metadata = entry.stat(follow_symlinks=False)
             if entry.is_symlink():
                 kind = "link"
+                if follow_package_directory_symlinks and relative_root == Path(".") and entry.is_dir(follow_symlinks=True):
+                    digest.update(f"{label}:{relative.as_posix()}:target:{Path(entry.path).resolve(strict=False)}\0".encode())
+                    child_dirs.append((Path(entry.path), relative))
             elif entry.is_dir(follow_symlinks=False):
                 kind = "dir"
                 child_dirs.append((Path(entry.path), relative))
@@ -263,8 +281,18 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
     elif scope == "user":
         user_custom_root = storage.get_user_custom_root()
         integration_root = storage.get_user_integrations_root()
-        _update_tree_digest(digest, user_custom_root, "custom")
-        _update_tree_digest(digest, host_root / SkillCategory.CUSTOM.value, "legacy")
+        _update_tree_digest(
+            digest,
+            user_custom_root,
+            "custom",
+            follow_package_directory_symlinks=True,
+        )
+        _update_tree_digest(
+            digest,
+            host_root / SkillCategory.CUSTOM.value,
+            "legacy",
+            follow_package_directory_symlinks=True,
+        )
         _update_tree_digest(digest, integration_root, "integrations")
         # CUSTOM/LEGACY/INTEGRATION visibility is the intersection of the
         # per-user state and the global extensions default, so both belong in
@@ -291,18 +319,37 @@ def _read_manifest(scope_root: Path) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _write_manifest(scope_root: Path, source_signature: str) -> None:
+def _write_manifest(scope_root: Path, source_signature: str, view_signature: str | None = None) -> None:
     scope_root.mkdir(parents=True, exist_ok=True)
     target = _manifest_path(scope_root)
     fd, temporary_name = tempfile.mkstemp(prefix=".projection-manifest-", suffix=".tmp", dir=scope_root)
     temporary = Path(temporary_name)
+    payload = {
+        "version": _MANIFEST_VERSION,
+        "source_signature": source_signature,
+    }
+    if view_signature is not None:
+        payload["view_signature"] = view_signature
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump({"version": _MANIFEST_VERSION, "source_signature": source_signature}, stream, sort_keys=True)
+            json.dump(payload, stream, sort_keys=True)
         temporary.replace(target)
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _view_signature(paths: SkillProjectionPaths, scope: str) -> str:
+    digest = hashlib.sha256()
+    if scope == "public":
+        _update_tree_digest(digest, paths.public, "public_view")
+    elif scope == "user":
+        _update_tree_digest(digest, paths.custom, "custom_view")
+        _update_tree_digest(digest, paths.legacy, "legacy_view")
+        _update_tree_digest(digest, paths.integrations, "integrations_view")
+    else:  # pragma: no cover - internal invariant
+        raise ValueError(f"Unknown skill projection scope: {scope}")
+    return digest.hexdigest()
 
 
 def _load_public_skills(storage: SkillStorage, *, enabled_only: bool) -> list[Skill]:
@@ -356,7 +403,7 @@ def _rebuild_public_locked(storage: SkillStorage, paths: SkillProjectionPaths) -
             )
             after = _source_signature(storage, "public")
             if before == after:
-                _write_manifest(scope_root, after)
+                _write_manifest(scope_root, after, _view_signature(paths, "public"))
                 return
         raise RuntimeError("Public skills changed repeatedly while rebuilding the sandbox projection")
     except Exception:
@@ -388,7 +435,7 @@ def _rebuild_user_locked(storage: SkillStorage, paths: SkillProjectionPaths) -> 
             )
             after = _source_signature(storage, "user")
             if before == after:
-                _write_manifest(scope_root, after)
+                _write_manifest(scope_root, after, _view_signature(paths, "user"))
                 return
         raise RuntimeError("User skills changed repeatedly while rebuilding the sandbox projection")
     except Exception:
@@ -421,9 +468,10 @@ def _public_projection_is_fresh(storage: SkillStorage, paths: SkillProjectionPat
     manifest_before = _read_manifest(paths.public.parent)
     if manifest_before is None or manifest_before.get("version") != _MANIFEST_VERSION:
         return False
-    signature = _source_signature(storage, "public")
+    source_sig = _source_signature(storage, "public")
+    view_sig = _view_signature(paths, "public")
     manifest_after = _read_manifest(paths.public.parent)
-    return manifest_before == manifest_after and manifest_before.get("source_signature") == signature
+    return manifest_before == manifest_after and manifest_before.get("source_signature") == source_sig and manifest_before.get("view_signature") == view_sig
 
 
 def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
@@ -449,8 +497,17 @@ def ensure_skill_projections(storage: SkillStorage) -> SkillProjectionPaths:
         with _projection_lock(paths.custom.parent):
             try:
                 manifest = _read_manifest(paths.custom.parent)
-                signature = _source_signature(storage, "user")
-                if not paths.custom.is_dir() or not paths.legacy.is_dir() or not paths.integrations.is_dir() or manifest is None or manifest.get("version") != _MANIFEST_VERSION or manifest.get("source_signature") != signature:
+                source_sig = _source_signature(storage, "user")
+                view_sig = _view_signature(paths, "user")
+                if (
+                    not paths.custom.is_dir()
+                    or not paths.legacy.is_dir()
+                    or not paths.integrations.is_dir()
+                    or manifest is None
+                    or manifest.get("version") != _MANIFEST_VERSION
+                    or manifest.get("source_signature") != source_sig
+                    or manifest.get("view_signature") != view_sig
+                ):
                     _rebuild_user_locked(storage, paths)
             except Exception:
                 _clear_projection_scope(paths.custom.parent, paths.custom, paths.legacy, paths.integrations)

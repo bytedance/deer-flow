@@ -3,10 +3,11 @@ import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
@@ -33,6 +34,8 @@ from app.gateway.routers import (
     runs,
     scheduled_tasks,
     skills,
+    subagent_batches,
+    subagents,
     suggestions,
     thread_runs,
     threads,
@@ -200,6 +203,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
+        from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import configure_subagent_execution_capacity
+
+        subagent_runtime_config = getattr(startup_config, "subagent_runtime", None)
+        if not isinstance(subagent_runtime_config, SubagentRuntimeConfig):
+            subagent_runtime_config = SubagentRuntimeConfig()
+        subagent_batches_config = getattr(startup_config, "subagent_batches", None)
+        if not isinstance(subagent_batches_config, SubagentBatchesConfig):
+            subagent_batches_config = SubagentBatchesConfig()
+        configure_subagent_execution_capacity(subagent_runtime_config)
         configure_logging(startup_config)
         ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
@@ -323,6 +337,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     poll_interval_seconds=startup_config.scheduler.poll_interval_seconds,
                     lease_seconds=startup_config.scheduler.lease_seconds,
                     max_concurrent_runs=startup_config.scheduler.max_concurrent_runs,
+                    queue_timeout_seconds=startup_config.scheduler.queue_timeout_seconds,
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                 )
@@ -332,6 +347,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Failed to initialize scheduled task service")
 
+        from app.gateway.services import launch_mcp_task_notification_run
         from app.mcp_tasks import McpTaskService
         from deerflow.config.extensions_config import ExtensionsConfig
         from deerflow.config.mcp_tasks_config import McpTasksConfig
@@ -351,6 +367,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         task_extensions_config = ExtensionsConfig.from_file()
         mcp_tasks_config = getattr(startup_config, "mcp_tasks", McpTasksConfig())
         mcp_task_repo = getattr(app.state, "mcp_task_repo", None)
+        app.state.mcp_tasks_available = False
         set_mcp_task_submitter(None)
         set_mcp_task_config_snapshot(task_extensions_config)
         validate_mcp_task_runtime_configuration(
@@ -376,12 +393,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 tracking_degraded_after_errors=mcp_tasks_config.tracking_degraded_after_errors,
                 max_result_bytes=mcp_tasks_config.max_result_bytes,
                 result_preview_max_chars=mcp_tasks_config.result_preview_max_chars,
+                launch_notification=lambda **kwargs: launch_mcp_task_notification_run(app=app, **kwargs),
+                get_run=lambda run_id, **kwargs: app.state.run_manager.get(
+                    run_id,
+                    raise_on_store_error=True,
+                    **kwargs,
+                ),
             )
             app.state.mcp_task_drivers = mcp_task_drivers
             app.state.mcp_task_service = mcp_task_service
             if mcp_tasks_config.enabled:
                 await mcp_task_service.start()
                 set_mcp_task_submitter(mcp_task_service)
+                app.state.mcp_tasks_available = True
+
+        from app.subagent_batches import SubagentBatchService
+        from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+        batch_repo = getattr(app.state, "subagent_batch_repo", None)
+        app.state.subagent_batches_available = False
+        set_subagent_batch_submitter(None)
+        if subagent_batches_config.enabled and batch_repo is None:
+            raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
+        if batch_repo is not None:
+            batch_service = SubagentBatchService(
+                repository=batch_repo,
+                config=subagent_batches_config,
+                runtime_config=subagent_runtime_config,
+            )
+            app.state.subagent_batch_service = batch_service
+            if subagent_batches_config.enabled:
+                await batch_service.start()
+                set_subagent_batch_submitter(batch_service)
+                app.state.subagent_batches_available = True
 
         yield
 
@@ -413,6 +457,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 logger.exception("Failed to stop scheduled task service")
 
         if getattr(app.state, "mcp_task_service", None) is not None:
+            app.state.mcp_tasks_available = False
             try:
                 await app.state.mcp_task_service.stop()
             except Exception:
@@ -424,6 +469,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
 
         set_mcp_task_config_snapshot(None)
+
+        if getattr(app.state, "subagent_batch_service", None) is not None:
+            app.state.subagent_batches_available = False
+            try:
+                await app.state.subagent_batch_service.stop()
+            except Exception:
+                logger.exception("Failed to stop subagent batch service")
+            finally:
+                from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+                set_subagent_batch_submitter(None)
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
@@ -618,6 +674,40 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
     app.add_middleware(AuthMiddleware)
 
+    # Give contributed routers a neutral way to ask "is this caller an admin"
+    # without importing app.gateway.deps, which would pin them to an
+    # unpublished internal layer and defeat independent distribution. The
+    # resolver mirrors require_admin_user's primary path (deps.py): it reads
+    # request.state.user, which AuthMiddleware stamps before any router runs,
+    # rather than the async get_current_user_from_request/get_optional_user_from_request
+    # accessors that exist for tests and alternative ASGI compositions. Staying
+    # synchronous keeps resolve_principal/require_admin usable from both sync
+    # and async route handlers.
+    def _resolve_extension_principal(request):
+        """Project the host's auth context into the neutral extension shape.
+
+        Deliberately a projection, not a handle: an extension gets the
+        questions it may ask (who, is that an admin, and what role they
+        hold), not the host's AuthContext, which would pin every extension to
+        its internals.
+        """
+        user = getattr(request.state, "user", None)
+        if user is None:
+            return None
+        system_role = getattr(user, "system_role", None)
+        return ExtensionPrincipal(
+            user_id=str(user.id),
+            is_admin=system_role == "admin",
+            is_internal=getattr(request.state, "auth_source", None) == AUTH_SOURCE_INTERNAL,
+            # The host's only role concept is the single system_role column
+            # (e.g. "admin", "user") — there is no multi-role system to
+            # project, so a set role becomes the one-element tuple rather
+            # than reading a "roles" attribute the user model never had.
+            roles=(system_role,) if isinstance(system_role, str) and system_role else (),
+        )
+
+    setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, _resolve_extension_principal)
+
     # CSRF: Double Submit Cookie pattern for state-changing requests
     app.add_middleware(CSRFMiddleware)
 
@@ -701,6 +791,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)
+    app.include_router(subagent_batches.router)
 
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)
@@ -728,6 +819,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
+
+    # Deployment-level subagent catalog and admin management.
+    app.include_router(subagents.router)
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)

@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 34
+config_version: 36
 
 # ============================================================================
 # Logging
@@ -669,6 +669,7 @@ tool_groups:
   - name: file:write
   - name: bash
   - name: browser
+  - name: knowledge
 
 # ============================================================================
 # Tools Configuration
@@ -676,6 +677,30 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
+  # `datasets` is optional. Omit it to list every tenant-visible dataset at
+  # search time; an explicit `datasets: []` is invalid. Empty datasets are
+  # skipped; searchable datasets are grouped by
+  # embedding model and retrieved with at most four groups in parallel. Group
+  # ranks are interleaved under the global `page_size` limit; scores are omitted
+  # when multiple groups are searched because they are not comparable.
+  # Configure stable IDs only to restrict scope. IDs and catalog listing never
+  # reach the model.
+  # - name: knowledge_search
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+  #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
+  #   api_key: $RAGFLOW_API_KEY
+  #   datasets:  # Optional operator-controlled allowlist
+  #     - 0123456789abcdef0123456789abcdef  # Replace with a RAGFlow dataset ID
+  #   timeout: 30
+  #   page_size: 8
+  #   similarity_threshold: 0.2
+  #   vector_similarity_weight: 0.3
+  #   top_k: 256
+  #   max_chars_per_chunk: 800
+  #   max_total_chars: 8000
+
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
@@ -1411,11 +1436,40 @@ sandbox:
 #   # environment:                   # injected into every command (and as create-time env)
 #   #   PYTHONUNBUFFERED: "1"
 
+# Option 6: OpenSandbox remote Sandbox
+# Runs each sandbox through an OpenSandbox server. Released sandboxes stay in an
+# in-process warm pool and are reclaimed only by the same user/thread. Requires
+# the optional SDK: pip install "deerflow-harness[opensandbox]".
+# sandbox:
+#   use: deerflow.community.opensandbox:OpenSandboxProvider
+#   image: python:3.11
+#   # api_key: $OPEN_SANDBOX_API_KEY  # optional when the SDK env var is set
+#   # domain: localhost:8080          # optional; OPEN_SANDBOX_DOMAIN fallback
+#   # protocol: http                  # localhost only; use https for remote domains
+#   # request_timeout: 30             # management API request timeout seconds
+#   # ready_timeout: 30               # create/readiness timeout seconds
+#   # use_server_proxy: false         # proxy execd/file traffic through server
+#   # sandbox_timeout: 14400          # remote lifetime seconds; 0 = explicit cleanup
+#   # bash_command_timeout: 600       # default remote command timeout seconds
+#   # replicas: 3                     # active + warm cap per gateway process
+#   # idle_timeout: 600               # warm seconds before destroy; 0 disables
+#   # environment:                    # create-time and per-command defaults
+#   #   PYTHONUNBUFFERED: "1"
+
 # ============================================================================
 # Subagents Configuration
 # ============================================================================
 # Configure timeouts for subagent execution
 # Subagents are background workers delegated tasks by the lead agent
+
+# Process-wide execution capacity. These fields are restart-required and are
+# shared by ordinary `task` calls and durable batches. Waiting work is async;
+# queued subagents do not occupy a scheduler thread.
+subagent_runtime:
+  max_running: 3
+  max_queued: 64
+  admission_policy: queue       # queue or reject when all slots are occupied
+  queue_timeout_seconds: 300
 
 # subagents:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
@@ -1488,12 +1542,55 @@ sandbox:
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
 #   # The model name must match a name defined in the `models:` section above.
 
+# Durable native-subagent batches. Disabled by default because enabling it can
+# materially increase model usage and requires database.backend sqlite/postgres.
+# The three limits are intentionally separate:
+# - total: all persisted items in one batch
+# - live: pending work admitted as queued/running at one time
+# - running: items from one batch allowed to hold real execution slots
+subagent_batches:
+  enabled: false
+  poll_interval_seconds: 1
+  lease_seconds: 120
+  max_items_per_batch: 5000
+  default_max_live_items: 100
+  max_live_items_per_batch: 1000
+  default_max_running_items: 3
+  max_running_items_per_batch: 64
+  max_attempts: 3
+  max_result_chars: 100000
+  result_preview_max_chars: 2000
+
+# ============================================================================
+# Tool Result Verification
+# ============================================================================
+# Deterministic receipts are stamped onto tool results and injected into the
+# model context so final reports can cite executed actions. Disable them only
+# if the extra provenance context is not wanted. The selective judge settings
+# are reserved for acceptance-criteria review and remain off by default.
+verification:
+  receipts_enabled: true
+  # Lead-chain ledger rendering: 'delegation_only' renders only while
+  # processing subagent results (subagent chains always render).
+  receipts_render_mode: "delegation_only"
+  judge_enabled: false
+  judge_model_name: null
+
 # ============================================================================
 # ACP Agents Configuration
 # ============================================================================
 # Configure external ACP-compatible agents for the built-in `invoke_acp_agent` tool.
 
 # acp_agents:
+#   mcode:
+#     # MiniMax Code speaks ACP directly; no adapter package is required.
+#     # Install with `npm install --global @minimax-ai/code`, then run `mcode login`.
+#     command: mcode
+#     args: ["acp"]
+#     description: MiniMax Code for implementation, refactoring, debugging, and repository tasks
+#     # auto_approve_permissions: false  # Enable only for trusted tasks that need MCode to edit files or run commands
+#     # timeout_seconds: 1800            # Abort + kill the subprocess if it doesn't respond in time (default: 1800 = 30 min)
+#
 #   claude_code:
 #     # DeerFlow expects an ACP adapter here. The standard `claude` CLI does not
 #     # speak ACP directly. Install `claude-agent-acp` separately or use:
@@ -1760,6 +1857,26 @@ memory:
       # temperature:            # optional
     max_facts: 100 # Maximum number of facts to store
     fact_confidence_threshold: 0.7 # Minimum confidence for storing facts
+    # Capacity eviction defaults to the historical confidence-only ranking.
+    # Opt in to hybrid-v1 to score confidence (65%), explicit-confirmation
+    # freshness (25%, 90-day half-life), and query-driven access heat (10%,
+    # 30-day half-life). Actual memory_search hits count; default injection does
+    # not. A bounded 10% correction reserve aligns storage with guaranteed
+    # correction injection. Confirmation detection is batch-level: it checks
+    # human messages among the last six filtered messages, while the LLM binds
+    # that signal to a factsToReinforce ID without a second correspondence
+    # check. Shadow mode audits hybrid disagreements without changing which
+    # facts confidence-only keeps.
+    fact_eviction_policy: confidence # confidence | hybrid-v1
+    fact_eviction_shadow_enabled: false
+    eviction_confidence_weight: 0.65
+    eviction_confirmation_weight: 0.25
+    eviction_access_weight: 0.10
+    eviction_confirmation_half_life_days: 90
+    eviction_access_half_life_days: 30
+    eviction_correction_reserved_fraction: 0.10
+    eviction_correction_reserved_max: 10
+    eviction_audit_max_entries: 200 # metadata-only events per user/agent scope; 0 disables
     max_injection_tokens: 2000 # Maximum tokens for memory injection
     # Token counting strategy for memory-injection budgeting:
     #   tiktoken (default) - accurate, but the encoding BPE data may be
@@ -2028,18 +2145,20 @@ run_events:
 # ============================================================================
 # Agent Storage Configuration
 # ============================================================================
-# Where custom agent DEFINITIONS (config.yaml + SOUL.md) are stored. This is
-# separate from `database` (run/thread/event data) and from agent memory.
+# Where custom agent DEFINITIONS (config.yaml + SOUL.md) and deployment-level
+# managed subagent definitions are stored. This is separate from `database`
+# (run/thread/event data) and from agent memory.
 # Restart-required (the backend is captured at Gateway lifespan startup).
 #
-# backend: file  -- Per-user files under {base_dir}/users/{uid}/agents/ (default).
-#                   Single-node only: an agent created on one node is invisible
-#                   to other nodes without a shared mount.
-# backend: db    -- A row per agent in the shared SQL persistence layer, so every
-#                   node sees the same agents. Requires database.backend to be
+# backend: file  -- Custom Agents use per-user files; managed subagents use one
+#                   JSON file each under {base_dir}/managed-subagents/ (default).
+#                   Node-local without a shared mount.
+# backend: db    -- Both definition types use the shared SQL persistence layer,
+#                   so every node sees them. Requires database.backend to be
 #                   'sqlite' or 'postgres' (rejected at startup on 'memory').
 #
-# Switching an existing install to 'db'? Import the on-disk agents once with:
+# Switching an existing install to 'db'? Import the on-disk Custom Agents and
+# managed subagents once with:
 #     python backend/scripts/migrate_agents_to_db.py   # --dry-run to preview
 # The source files are left in place, so reverting to 'file' is a clean rollback.
 #
@@ -2052,7 +2171,12 @@ agent_storage:
 # Scheduled Tasks Configuration
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.
-# All fields are restart-required (captured at Gateway lifespan startup).
+# Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
+# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# recursion_limit is read at dispatch and applies to the next scheduled run
+# without a Gateway restart. The default (1000) matches the web UI's
+# interactive budget so scheduled and interactive runs behave identically out
+# of the box. Values above max_recursion_limit are clamped.
 #
 # The scheduler is single-instance by default. Set multi_instance: true only
 # when every Gateway instance shares Postgres, run ownership heartbeats, and
@@ -2060,17 +2184,22 @@ agent_storage:
 #
 # scheduler:
 #   enabled: false               # Master switch for the background poller
+#   multi_instance: false        # Opt into lease-aware recovery across Gateway instances
 #   poll_interval_seconds: 5     # How often to scan for due tasks
 #   lease_seconds: 120           # Claim lease; a crashed process's task becomes reclaimable after this
-#   max_concurrent_runs: 3       # Global cap on active scheduled runs/reservations across multi-instance Pods
+#   max_concurrent_runs: 3       # Global cap on launching/running scheduled runs across multi-instance Pods
+#   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Minimum future offset for one-time tasks at creation time
+#   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
 scheduler:
   enabled: false
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 
 # ============================================================================
 # Long-running MCP Tasks Configuration
@@ -2408,14 +2537,21 @@ run_ownership:
 #           tools: {allow: "*"}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         user:
 #           tools: {allow: "*", deny: ["update_agent"]}
 #           routes: {allow: "*"}
 #           models: {allow: "*"}
+#           sandbox: {allow: "*"}
 #         guest:
-#           tools: {allow: ["web_search", "read_file"]}
+#           # web-only role: sandbox-dependent tools (read_file, bash, glob,
+#           # grep, write_file, ...) are omitted — with sandbox:execute denied
+#           # they could only ever return the deny error, so allow just the
+#           # non-sandbox tools.
+#           tools: {allow: ["web_search"]}
 #           routes: {allow: ["threads:read", "runs:read"]}
 #           models: {allow: ["gpt-4o-mini"]}
+#           sandbox: {allow: false}  # deny sandbox execution
 authorization:
   enabled: false
 
@@ -2590,5 +2726,15 @@ authorization:
 #     enabled: true                       # false skips import and registration
 #     required: false                     # true makes load failure abort Gateway startup
 #                                         # (install --required opts in)
+#     table_prefix: example_ext_          # optional: table-name prefix this extension
+#                                         # owns under its own MetaData/migration chain.
+#                                         # Keeps `alembic revision --autogenerate`, run
+#                                         # directly against a live database, from seeing
+#                                         # those tables and proposing to drop them.
+#                                         # (`make migrate-rev` diffs a throwaway SQLite
+#                                         # built from the migration chain, so it never
+#                                         # sees them in the first place.)
+#                                         # Rejected at startup if empty, or if it would
+#                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any

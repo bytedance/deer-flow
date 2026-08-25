@@ -24,7 +24,9 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
+import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
 import { ThreadScheduledTasksLink } from "@/components/workspace/thread-scheduled-tasks-link";
+import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
@@ -289,6 +291,16 @@ export default function ChatPage() {
                 <ThreadTitle threadId={threadId} thread={thread} />
               </div>
               <div className="flex shrink-0 items-center gap-2">
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadBackgroundTasks threadId={threadId} />
+                  )}
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadSubagentBatches threadId={threadId} />
+                  )}
                 {!isNewThread && !isMock && (
                   <ThreadScheduledTasksLink threadId={threadId} />
                 )}

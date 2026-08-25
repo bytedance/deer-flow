@@ -3,10 +3,10 @@
 ``langgraph dev`` imports this custom application before entering the locked
 in-memory runtime lifespan. That ordering is intentional: runtime 0.30.0 loads
 and purges persisted ``created_by=system`` assistants before graph registration
-and before a user application lifespan can run.
+and before a user application lifespan can run. Keep annotations eager in this
+module: LangGraph's file loader executes it without first registering the module
+in ``sys.modules``, which breaks dataclasses with postponed annotations.
 """
-
-from __future__ import annotations
 
 import json
 import logging

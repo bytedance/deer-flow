@@ -471,6 +471,303 @@ def test_apply_mounts_continues_after_mount_exceeds_limit(monkeypatch, tmp_path)
     assert client.files.write_calls == [("/mnt/valid/small.bin", b"1234")]
 
 
+def test_apply_mounts_bounds_total_bytes_across_mounts(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 7)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5678")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.bin", b"1234")]
+    assert "total byte budget 7" in caplog.text
+    assert "attempted_files=1" in caplog.text
+    assert "attempted_bytes=4" in caplog.text
+
+
+def test_apply_mounts_bounds_total_files_across_mounts(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.txt", b"first")]
+    assert "file count cap 1" in caplog.text
+    assert "attempted_files=1" in caplog.text
+
+
+def test_read_only_mount_remains_read_only_when_pass_limit_stops_mid_mount(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    source = tmp_path / "read-only"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/read-only", read_only=True),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert "chmod -R a-w /mnt/read-only" in client.commands.calls
+
+
+def test_read_only_mount_is_not_chmodded_when_no_upload_starts(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    source = tmp_path / "read-only"
+    source.mkdir()
+    (source / "file.txt").write_text("content", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/read-only", read_only=True),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == []
+    assert client.commands.calls == []
+
+
+def test_failed_write_consumes_aggregate_upload_budget(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 4)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    class FailFirstWriteAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            if len(self.write_calls) == 1:
+                raise RuntimeError("response lost after upload")
+
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient(files=FailFirstWriteAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.bin", b"1234")]
+    assert "attempted_files=1" in caplog.text
+    assert "attempted_bytes=4" in caplog.text
+    assert "completed_files=0" in caplog.text
+    assert "completed_bytes=0" in caplog.text
+
+
+def test_apply_mounts_deadline_stops_before_next_file(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert client.files.write_calls[0] in {
+        ("/mnt/data/first.txt", b"first"),
+        ("/mnt/data/second.txt", b"second"),
+    }
+    assert "time budget 1s" in caplog.text
+    assert "attempted_files=1" in caplog.text
+
+
+def test_apply_mounts_deadline_stops_directory_preflight(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    source = tmp_path / "mount"
+    source.mkdir()
+    first = source / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = source / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    original_is_file = Path.is_file
+    inspected: list[Path] = []
+
+    def slow_rglob(path: Path, pattern: str):
+        assert path == source
+        assert pattern == "*"
+        yield first
+        clock[0] = 2.0
+        yield second
+
+    def record_is_file(path: Path) -> bool:
+        inspected.append(path)
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "rglob", slow_rglob)
+    monkeypatch.setattr(Path, "is_file", record_is_file)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert first in inspected
+    assert second not in inspected
+    assert client.files.write_calls == []
+    assert "time budget 1s" in caplog.text
+
+
+def test_apply_mounts_deadline_stops_before_next_mount_preflight(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+    original_is_file = Path.is_file
+    inspected: list[Path] = []
+
+    def record_is_file(path: Path) -> bool:
+        inspected.append(path)
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", record_is_file)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert first in inspected
+    assert second not in inspected
+    assert client.files.write_calls == [("/mnt/first/first.txt", b"first")]
+    assert "time budget 1s" in caplog.text
+
+
+def test_skill_projection_and_configured_mount_share_upload_budget(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    projection = tmp_path / "projection"
+    projection.mkdir()
+    (projection / "SKILL.md").write_text("skill", encoding="utf-8")
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    (configured / "notes.txt").write_text("notes", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [(projection, "/mnt/skills/public", True)])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(configured), container_path="/mnt/configured", read_only=False),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/skills/public/SKILL.md", b"skill")]
+
+
 def test_upload_tree_logs_upload_summary(caplog, tmp_path):
     source = tmp_path / "mount"
     source.mkdir()
@@ -1874,6 +2171,54 @@ def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeyp
 
     manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"outputs/live.txt"}
+
+
+def test_sync_outputs_to_host_preserves_trailing_space_in_filename(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    # "report " (trailing space) is a legal Linux filename; the NUL-delimited
+    # listing preserves it, but a .strip() on each entry would truncate it.
+    listing = "5\t2.000000000\t/home/user/outputs/report \x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/report ": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-space")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    expected = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "report "
+    assert expected.exists()
+    assert expected.read_bytes() == b"hello"
+
+
+def test_sync_outputs_to_host_skips_mtime_restoration_on_overflow(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    # os.utime raises OverflowError (not OSError) when the ns value is out of
+    # range; the exact threshold is platform-dependent (macOS clamps, Linux
+    # raises), so force the failure deterministically and assert the file is
+    # still written and the manifest still updated.
+    listing = "5\t1720000000.1234567890\t/home/user/outputs/far-future.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/far-future.txt": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-overflow")
+
+    e2b_provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    def _raise_overflow(path, times=None, ns=None):
+        raise OverflowError("timestamp out of range")
+
+    monkeypatch.setattr(e2b_provider_mod.os, "utime", _raise_overflow)
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    paths = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    target = paths / "user-data" / "outputs" / "far-future.txt"
+    assert target.exists()
+    assert target.read_bytes() == b"hello"
+    manifest = json.loads((paths / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert manifest["files"]["outputs/far-future.txt"]["remote_size"] == 5
 
 
 def test_sync_outputs_to_host_discards_manifest_from_another_sandbox(monkeypatch, tmp_path):

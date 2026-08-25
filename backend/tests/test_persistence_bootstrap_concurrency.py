@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0012_mcp_task_results"
+HEAD = "0016_subagent_batches"
 
 
 def _url(tmp_path: Path) -> str:

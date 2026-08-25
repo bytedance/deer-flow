@@ -3,10 +3,14 @@
 import asyncio
 import logging
 import stat
+import sys
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import anyio
 import pytest
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
 from deerflow.mcp.session_pool import MCPSessionPool, get_session_pool, reset_session_pool
 
@@ -254,6 +258,317 @@ def test_reset_session_pool():
 # ---------------------------------------------------------------------------
 
 
+def _make_test_pool_tool(*, pool, call_tool, tool_interceptors=None):
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    class Args(BaseModel):
+        value: int = Field(..., description="value")
+
+    original_tool = StructuredTool(
+        name="srv_act",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    session = AsyncMock()
+    if isinstance(call_tool, BaseException):
+        session.call_tool = AsyncMock(side_effect=call_tool)
+    else:
+        session.call_tool = AsyncMock(return_value=call_tool)
+    pool.get_session = AsyncMock(return_value=session)
+    pool.close_session_if_current = AsyncMock()
+
+    with patch("deerflow.mcp.tools.get_session_pool", return_value=pool):
+        wrapped = _make_session_pool_tool(
+            original_tool,
+            "srv",
+            {"transport": "stdio", "command": "x", "args": []},
+            tool_interceptors=tool_interceptors,
+        )
+    return wrapped, session
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_reconnects_after_real_stdio_process_disconnect(tmp_path):
+    """A dead stdio subprocess must not poison later calls in the same scope."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    server = """
+import os
+import sys
+from pathlib import Path
+
+from mcp.server.fastmcp import FastMCP
+
+marker = Path(sys.argv[1])
+mcp = FastMCP("crash-once")
+
+@mcp.tool()
+def crash_once() -> str:
+    if not marker.exists():
+        marker.write_text("crashed")
+        os._exit(17)
+    return "recovered"
+
+mcp.run(transport="stdio")
+"""
+
+    class Args(BaseModel):
+        pass
+
+    original_tool = StructuredTool(
+        name="crash_crash_once",
+        description="crash once",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    marker = tmp_path / "crashed"
+    connection = {
+        "transport": "stdio",
+        "command": sys.executable,
+        "args": ["-c", server, str(marker)],
+    }
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread", "user_id": "user"}
+    runtime.config = {}
+
+    with patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)):
+        wrapped = _make_session_pool_tool(original_tool, "crash", connection)
+        with pytest.raises(McpError, match="Connection closed") as exc_info:
+            await wrapped.coroutine(runtime=runtime)
+
+        assert exc_info.value.error.code == CONNECTION_CLOSED
+        assert ("crash", "user:thread") not in get_session_pool()._entries
+
+        content, _artifact = await wrapped.coroutine(runtime=runtime)
+
+    assert content[0]["text"] == "recovered"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transport_error",
+    [
+        anyio.ClosedResourceError(),
+        anyio.BrokenResourceError(),
+        anyio.EndOfStream(),
+    ],
+)
+async def test_session_pool_tool_evicts_session_after_transport_disconnect(tmp_path, transport_error):
+    """Low-level closed-stream signals evict the exact pooled session."""
+    from deerflow.config.paths import Paths
+
+    pool = MagicMock()
+    wrapped, session = _make_test_pool_tool(pool=pool, call_tool=transport_error)
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(type(transport_error)),
+    ):
+        await wrapped.coroutine(value=1)
+
+    pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_evicts_connection_closed_through_interceptor(tmp_path):
+    """A passthrough interceptor must retain transport-failure recovery."""
+    from deerflow.config.paths import Paths
+
+    async def passthrough(request, handler):
+        return await handler(request)
+
+    error = McpError(ErrorData(code=CONNECTION_CLOSED, message="Connection closed"))
+    pool = MagicMock()
+    wrapped, session = _make_test_pool_tool(
+        pool=pool,
+        call_tool=error,
+        tool_interceptors=[passthrough],
+    )
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(McpError, match="Connection closed"),
+    ):
+        await wrapped.coroutine(value=1)
+
+    pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        McpError(ErrorData(code=408, message="request timed out")),
+        McpError(ErrorData(code=CONNECTION_CLOSED, message="server-specific failure")),
+    ],
+)
+async def test_session_pool_tool_keeps_session_after_nonfatal_mcp_error(tmp_path, error):
+    """Protocol errors such as timeouts do not prove that the session is dead."""
+    from deerflow.config.paths import Paths
+
+    pool = MagicMock()
+    wrapped, _session = _make_test_pool_tool(pool=pool, call_tool=error)
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(McpError, match=str(error)),
+    ):
+        await wrapped.coroutine(value=1)
+
+    pool.close_session_if_current.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_preserves_disconnect_error_when_eviction_fails(tmp_path):
+    """Cleanup failure must not replace the transport error seen by the caller."""
+    from deerflow.config.paths import Paths
+
+    error = anyio.ClosedResourceError()
+    pool = MagicMock()
+    wrapped, session = _make_test_pool_tool(pool=pool, call_tool=error)
+    pool.close_session_if_current.side_effect = RuntimeError("cleanup failed")
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(anyio.ClosedResourceError) as exc_info,
+    ):
+        await wrapped.coroutine(value=1)
+
+    assert exc_info.value is error
+    pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_keeps_session_after_tool_error_result(tmp_path):
+    """An MCP tool-level error is a valid response from a live session."""
+    from langchain_core.tools import ToolException
+
+    from deerflow.config.paths import Paths
+
+    result = CallToolResult(
+        content=[TextContent(type="text", text="invalid input")],
+        isError=True,
+    )
+    pool = MagicMock()
+    wrapped, _session = _make_test_pool_tool(pool=pool, call_tool=result)
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(ToolException, match="invalid input"),
+    ):
+        await wrapped.coroutine(value=1)
+
+    pool.close_session_if_current.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_pool_tool_keeps_session_after_interceptor_error(tmp_path):
+    """Interceptor failures happen outside the transport and must not evict it."""
+    from deerflow.config.paths import Paths
+
+    async def failing_interceptor(_request, _handler):
+        raise RuntimeError("interceptor failed")
+
+    pool = MagicMock()
+    wrapped, session = _make_test_pool_tool(
+        pool=pool,
+        call_tool=CallToolResult(content=[], isError=False),
+        tool_interceptors=[failing_interceptor],
+    )
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        pytest.raises(RuntimeError, match="interceptor failed"),
+    ):
+        await wrapped.coroutine(value=1)
+
+    session.call_tool.assert_not_awaited()
+    pool.close_session_if_current.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_late_disconnect_from_old_session_does_not_evict_replacement(tmp_path):
+    """Concurrent late failures must not close a replacement for the same key."""
+    from langchain_core.tools import StructuredTool
+    from pydantic import BaseModel, Field
+
+    from deerflow.config.paths import Paths
+    from deerflow.mcp.tools import _make_session_pool_tool
+
+    first_failure = asyncio.Event()
+    late_failure = asyncio.Event()
+    both_started = asyncio.Event()
+    call_count = 0
+
+    async def old_call_tool(_name, arguments, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            both_started.set()
+        await (first_failure if arguments["value"] == 1 else late_failure).wait()
+        raise anyio.ClosedResourceError
+
+    old_session = AsyncMock()
+    old_session.call_tool = AsyncMock(side_effect=old_call_tool)
+    replacement = AsyncMock()
+    replacement.call_tool = AsyncMock(return_value=CallToolResult(content=[], isError=False))
+    sessions = iter([old_session, replacement])
+
+    def create_session(*_args, **_kwargs):
+        session = next(sessions)
+        context_manager = MagicMock()
+        context_manager.__aenter__ = AsyncMock(return_value=session)
+        context_manager.__aexit__ = AsyncMock(return_value=False)
+        return context_manager
+
+    class Args(BaseModel):
+        value: int = Field(..., description="value")
+
+    original_tool = StructuredTool(
+        name="srv_act",
+        description="test",
+        args_schema=Args,
+        coroutine=AsyncMock(),
+        response_format="content_and_artifact",
+    )
+    pool = get_session_pool()
+
+    with (
+        patch("deerflow.mcp.tools.get_paths", return_value=Paths(tmp_path)),
+        patch("langchain_mcp_adapters.sessions.create_session", side_effect=create_session),
+    ):
+        wrapped = _make_session_pool_tool(
+            original_tool,
+            "srv",
+            {"transport": "stdio", "command": "x", "args": []},
+        )
+        first_call = asyncio.create_task(wrapped.coroutine(value=1))
+        late_call = asyncio.create_task(wrapped.coroutine(value=2))
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+
+        first_failure.set()
+        with pytest.raises(anyio.ClosedResourceError):
+            await first_call
+
+        await wrapped.coroutine(value=3)
+        late_failure.set()
+        with pytest.raises(anyio.ClosedResourceError):
+            await late_call
+
+    assert pool._entries[("srv", "test-user-autouse:default")][0] is replacement
+    await pool.close_all()
+
+
 @pytest.mark.asyncio
 async def test_session_pool_tool_wrapping():
     """The wrapper tool delegates to a pool-managed session."""
@@ -302,7 +617,8 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     from pydantic import BaseModel, Field
 
     from deerflow.config.paths import Paths
-    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+    from deerflow.constants import MCP_TMP_SUBDIR
+    from deerflow.mcp.tools import _make_session_pool_tool
 
     class Args(BaseModel):
         url: str = Field(..., description="url")
@@ -336,7 +652,7 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
 
     session_connection = create_session.call_args.args[0]
     workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
-    tmp_dir = workspace / _MCP_TMP_SUBDIR
+    tmp_dir = workspace / MCP_TMP_SUBDIR
 
     assert session_connection["cwd"] == str(workspace)
     assert session_connection["env"]["KEEP"] == "1"
@@ -354,7 +670,8 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     from pydantic import BaseModel, Field
 
     from deerflow.config.paths import Paths
-    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+    from deerflow.constants import MCP_TMP_SUBDIR
+    from deerflow.mcp.tools import _make_session_pool_tool
 
     class Args(BaseModel):
         url: str = Field(..., description="url")
@@ -389,7 +706,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     session_connection = create_session.call_args.args[0]
     # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
     assert session_connection["env"]["TMPDIR"] == "/operator/tmp"
-    assert session_connection["env"]["TMP"].endswith(_MCP_TMP_SUBDIR)
+    assert session_connection["env"]["TMP"].endswith(MCP_TMP_SUBDIR)
 
 
 @pytest.mark.asyncio
@@ -399,7 +716,8 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
     from pydantic import BaseModel, Field
 
     from deerflow.config.paths import Paths
-    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+    from deerflow.constants import MCP_TMP_SUBDIR
+    from deerflow.mcp.tools import _make_session_pool_tool
 
     class Args(BaseModel):
         url: str = Field(..., description="url")
@@ -434,7 +752,7 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
 
     session_connection = create_session.call_args.args[0]
     workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
-    tmp_dir = workspace / _MCP_TMP_SUBDIR
+    tmp_dir = workspace / MCP_TMP_SUBDIR
 
     assert session_connection["cwd"] == operator_cwd
     assert session_connection["env"]["TMPDIR"] == str(tmp_dir)
