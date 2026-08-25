@@ -5,35 +5,20 @@ import { fetch } from "@/core/api/fetcher";
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
+import { sha256Hex } from "./sha256";
 import { urlOfArtifact } from "./utils";
 
-function fnv1aHash(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(16).padStart(8, "0");
-}
-
 async function sha256OfText(content: string): Promise<string> {
-  const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    // crypto.subtle is only exposed in secure contexts (HTTPS or localhost).
-    // On a non-secure origin such as http://<lan-ip>:<port> it is undefined, so
-    // hashing would throw and break artifact preview + inline editing
-    // (issue #4864). The Gateway returns the real SHA-256 via the ETag header,
-    // so this fallback is only a last-resort fingerprint used for draft
-    // reconciliation when that header is absent.
-    return fnv1aHash(content);
+  const bytes = new TextEncoder().encode(content);
+  if (globalThis.crypto?.subtle) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest), (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("");
   }
-  const digest = await subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(content),
-  );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("");
+  // Non-secure contexts (http over a non-localhost host) have no `crypto.subtle`;
+  // fall back to a pure-JS SHA-256 so preview and inline editing keep working.
+  return sha256Hex(bytes);
 }
 
 export const ARTIFACT_PREVIEW_MAX_BYTES = 1024 * 1024;

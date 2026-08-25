@@ -45,6 +45,27 @@ describe("loadArtifactContent", () => {
     );
   });
 
+  it("computes the same revision without crypto.subtle (non-secure context)", async () => {
+    // http://<non-localhost-host> is not a secure context, so crypto.subtle is
+    // undefined; the loader must fall back to the pure-JS SHA-256.
+    rs.stubGlobal("crypto", {});
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("content", {
+        status: 200,
+        headers: { ETag: '"starlette-file-etag"' },
+      }),
+    );
+
+    const loaded = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/page.html",
+      threadId: "thread-1",
+    });
+
+    expect(loaded.sha256).toBe(
+      "ed7002b439e9ac845f22357d822bac1444730fbdb6016d3ec9432297b9ec9f73",
+    );
+  });
+
   it("requests only the preview byte budget and reports truncation", async () => {
     const bytes = new TextEncoder().encode("preview");
     const fetchMock = rs.fn(async (_url: string, init?: RequestInit) => {
