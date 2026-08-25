@@ -93,8 +93,8 @@ Stop and report a structured blocked outcome when ambiguity affects an irreversi
     @property
     def thinking_guidance(self) -> str:
         if self.allows_clarification:
-            return "- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, use `ask_clarification` FIRST - do not proceed with work.**"
-        return "- **PRIORITY CHECK: Do not wait for clarification. Use the interaction policy below: make minimal-risk, reversible assumptions, state them, and block only irreversible or high-risk ambiguity.**"
+            return "**PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, use `ask_clarification` FIRST - do not proceed with work.**"
+        return "**PRIORITY CHECK: Do not wait for clarification. Use the interaction policy below: make minimal-risk, reversible assumptions, state them, and block only irreversible or high-risk ambiguity.**"
 
     @property
     def critical_reminder(self) -> str:

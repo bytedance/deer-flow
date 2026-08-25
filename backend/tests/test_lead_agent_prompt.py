@@ -122,6 +122,7 @@ def test_non_interactive_prompt_matches_policy_and_never_requests_clarification(
         assert "Do not wait for a human response" in prompt
         assert "minimal-risk, reversible assumptions" in prompt
         assert "structured blocked outcome" in prompt
+        assert "- - **PRIORITY CHECK" not in prompt
 
 
 @pytest.mark.parametrize("mode", ("webhook", "scheduled", "autonomous"))
@@ -184,6 +185,7 @@ def test_interactive_prompt_retains_clarification_guidance(monkeypatch):
 
     assert "ask_clarification" in prompt
     assert "Clarification First" in prompt
+    assert "- - **PRIORITY CHECK" not in prompt
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
