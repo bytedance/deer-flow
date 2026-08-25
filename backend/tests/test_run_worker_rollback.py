@@ -158,6 +158,45 @@ async def test_remote_cancel_wins_when_graph_finishes_before_owner_heartbeat():
     assert record.status == RunStatus.error
 
 
+@pytest.mark.anyio
+async def test_terminal_run_schedules_run_record_eviction():
+    """The run_agent finalization path must schedule RunManager eviction of the terminal record."""
+    run_manager = RunManager(store=MemoryRunStore())
+    record = await run_manager.create("thread-evict-wiring")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    scheduled = []
+
+    def fake_schedule_cleanup(run_id, *, delay=300):
+        scheduled.append((run_id, delay))
+
+    run_manager.schedule_cleanup = fake_schedule_cleanup
+
+    class _OkAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: _OkAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+    await asyncio.wait_for(task, timeout=5)
+
+    assert scheduled == [(record.run_id, 300)]
+
+
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
     materialized_messages = tuple(messages)
     return RollbackPoint(

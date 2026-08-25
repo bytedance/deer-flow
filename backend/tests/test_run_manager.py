@@ -1,9 +1,11 @@
 """Tests for RunManager."""
 
 import asyncio
+import gc
 import logging
 import re
 import sqlite3
+import weakref
 from typing import Any
 
 import pytest
@@ -669,6 +671,58 @@ async def test_cleanup(manager: RunManager):
 
     await manager.cleanup(run_id, delay=0)
     assert await manager.get(run_id) is None
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_evicts_terminal_run_with_durable_store():
+    """With a durable store, a scheduled cleanup evicts the record yet history stays readable."""
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-evict")
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    task = manager.schedule_cleanup(record.run_id, delay=0)
+    assert task is not None
+    await task
+
+    assert record.run_id not in manager._runs
+    assert "thread-evict" not in manager._runs_by_thread
+    hydrated = await manager.get(record.run_id)
+    assert hydrated is not None
+    assert hydrated.run_id == record.run_id
+    assert hydrated.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_noop_without_durable_store(manager: RunManager):
+    """Memory-only managers keep terminal records: memory is their only history source."""
+    record = await manager.create("thread-memory-only")
+
+    assert manager.schedule_cleanup(record.run_id, delay=0) is None
+    assert await manager.get(record.run_id) is record
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_retains_task_until_done(monkeypatch):
+    """The delayed eviction task must survive garbage collection until it completes."""
+    orig_sleep = asyncio.sleep
+    monkeypatch.setattr("deerflow.runtime.runs.manager.asyncio.sleep", lambda _delay: orig_sleep(0))
+
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create("thread-evict-gc")
+
+    task = manager.schedule_cleanup(record.run_id)
+    assert task is not None
+    assert task in manager._cleanup_tasks
+
+    weak_task = weakref.ref(task)
+    del task
+    gc.collect()
+    assert weak_task() is not None
+
+    await weak_task()
+    assert record.run_id not in manager._runs
+    assert not manager._cleanup_tasks
 
 
 @pytest.mark.anyio

@@ -109,3 +109,7 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
   /tmp/production-bench.jsonl
 ```
+
+### Terminal RunRecord Eviction
+
+`run_agent()`'s finalization path schedules `RunManager.schedule_cleanup(run_id)` after `bridge.publish_end` (worker.py). With a durable RunStore, the terminal record is evicted from `_runs`/`_runs_by_thread` after a 300-second grace period — `get`/`list_by_thread` re-hydrate from the store, so history reads are unaffected; without a store the call is a no-op because memory is the only history source. The delayed eviction task is strongly referenced in `RunManager._cleanup_tasks` until completion, so the event loop cannot garbage-collect it mid-sleep (same class of bug as the deferred-cleanup retention fixes).

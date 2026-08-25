@@ -250,6 +250,7 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -1860,6 +1861,25 @@ class RunManager:
             if record is not None:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
+
+    def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> asyncio.Task[None] | None:
+        """Schedule eviction of a terminal run's in-memory record after *delay*.
+
+        Only meaningful when a durable RunStore backs this manager: evicted
+        records stay readable through the store fallback in ``get`` and
+        ``list_by_thread``, so run history survives the eviction. Memory-only
+        managers keep terminal records in memory — it is their only history
+        source — and return ``None`` without scheduling.
+
+        The delayed task is strongly referenced until it completes, so the
+        event loop cannot garbage-collect a pending eviction mid-sleep.
+        """
+        if self._store is None:
+            return None
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
+        return task
 
     # ------------------------------------------------------------------
     # Lease heartbeat

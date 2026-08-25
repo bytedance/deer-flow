@@ -1342,6 +1342,10 @@ async def run_agent(
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        # Terminal RunRecords are evicted after a grace period when a durable
+        # RunStore is configured (historical reads fall back to the store);
+        # memory-only managers keep them as their only history source.
+        run_manager.schedule_cleanup(run_id)
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt

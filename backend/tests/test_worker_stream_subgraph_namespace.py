@@ -336,6 +336,9 @@ class _IntegrationRunManager:
     async def update_run_completion(self, *_args, **_kwargs):
         return None
 
+    def schedule_cleanup(self, *_args, **_kwargs):
+        return None
+
     async def has_later_started_run(self, *_args, **_kwargs):
         return False
 
