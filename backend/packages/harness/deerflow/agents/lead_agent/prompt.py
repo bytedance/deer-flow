@@ -14,6 +14,7 @@ from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     clamp_subagent_concurrency,
     clamp_total_subagents_per_run,
+    effective_subagent_concurrency,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -343,6 +344,8 @@ def _build_subagent_section(
     max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     *,
     app_config: AppConfig | None = None,
+    allowed_subagents: list[str] | None = None,
+    batch_enabled: bool = False,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -355,7 +358,12 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    if allowed_subagents is None:
+        available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    else:
+        available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    if not available_names:
+        return ""
     bash_available = "bash" in available_names
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
@@ -421,6 +429,24 @@ A single subagent is justified only by material specialist or context-isolation 
 - **Batch 2** may launch the next scopes if it still wins; otherwise continue directly.
 - **Synthesize all retained results** at the end.
 """
+    durable_batch_guidance = ""
+    if batch_enabled:
+        durable_batch_guidance = """
+## Explicit durable batch mode
+
+`batch_task` is a separate execution mode for a large collection of independent,
+idempotent or read-only items. It returns a durable batch id immediately and does
+not consume the ordinary `task` per-run total. Never infer batch mode from item
+count and never emulate it by repeatedly calling `task`.
+
+- Every item must be self-contained and must not depend on another item's output.
+- Give every item a stable unique key; retries reuse that key as idempotency identity.
+- Set total, live-window, and running concurrency separately. A high total never
+  implies that all items become live or run at once.
+- Use `batch_status` for compact progress and `cancel_batch` for cancellation.
+- Do not wait for or paste all item results into this run. The Web UI and results
+  export API own progress and result inspection.
+"""
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
 
@@ -470,6 +496,7 @@ Otherwise execute directly using available tools ({direct_tool_examples}):
 ```
 
 The `task` tool waits for the subagent and returns its result directly; no polling is needed.
+{durable_batch_guidance}
 </subagent_system>"""
 
 
@@ -1003,15 +1030,39 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    allowed_subagents: list[str] | None = None,
+    subagent_execution_capacity: int | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = clamp_subagent_concurrency(max_concurrent_subagents)
+    n = (
+        effective_subagent_concurrency(
+            max_concurrent_subagents,
+            app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
+        if app_config is not None
+        else clamp_subagent_concurrency(
+            max_concurrent_subagents,
+            execution_capacity=subagent_execution_capacity,
+        )
+    )
     total = max_total_subagents
     if total is None:
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
-    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
+    if subagent_enabled:
+        from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+
+        subagent_section = _build_subagent_section(
+            n,
+            total,
+            app_config=app_config,
+            allowed_subagents=allowed_subagents,
+            batch_enabled=is_subagent_batch_runtime_available(),
+        )
+    else:
+        subagent_section = ""
 
     # Add subagent reminder to critical_reminders if enabled
     reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"

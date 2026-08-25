@@ -11,6 +11,7 @@ from typing import Any
 
 from langgraph.store.base import BaseStore
 
+from deerflow.persistence.json_compat import json_value_matches
 from deerflow.persistence.thread_meta.base import THREAD_PINNED_METADATA_KEY, ThreadMetaStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso, now_iso
@@ -84,8 +85,6 @@ class MemoryThreadMetaStore(ThreadMetaStore):
         """
         resolved_user_id = resolve_user_id(user_id, method_name="MemoryThreadMetaStore.search")
         filter_dict: dict[str, Any] = {}
-        if metadata:
-            filter_dict.update(metadata)
         if status:
             filter_dict["status"] = status
         if resolved_user_id is not None:
@@ -108,6 +107,8 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             search_offset += len(page)
 
         records = [self._item_to_dict(item) for item in items]
+        if metadata:
+            records = [record for record in records if isinstance(record.get("metadata"), dict) and all(json_value_matches(record["metadata"], key, value) for key, value in metadata.items())]
         records.sort(key=self._sort_key, reverse=True)
         return records[offset : offset + limit]
 
@@ -120,11 +121,22 @@ class MemoryThreadMetaStore(ThreadMetaStore):
             return True
         return record_user_id == user_id
 
-    async def update_display_name(self, thread_id: str, display_name: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+    async def update_display_name(
+        self,
+        thread_id: str,
+        display_name: str,
+        *,
+        remove_metadata_keys: tuple[str, ...] = (),
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
         record = await self._get_owned_record(thread_id, user_id, "MemoryThreadMetaStore.update_display_name")
         if record is None:
             return
         record["display_name"] = display_name
+        metadata = dict(record.get("metadata") or {})
+        for key in remove_metadata_keys:
+            metadata.pop(key, None)
+        record["metadata"] = metadata
         record["updated_at"] = now_iso()
         await self._store.aput(THREADS_NS, thread_id, record)
 

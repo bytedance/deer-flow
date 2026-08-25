@@ -16,6 +16,31 @@ import abc
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
+_AI_MESSAGE_RUN_LOOKUP_PAGE_SIZE = 1000
+
+
+class IncompleteMessageRunLookupError(RuntimeError):
+    """Raised when a store cannot prove that a targeted lookup is complete."""
+
+
+def normalize_message_ids(message_ids: set[str]) -> set[str]:
+    """Return the non-empty string IDs that can participate in a lookup."""
+    return {message_id for message_id in message_ids if isinstance(message_id, str) and message_id}
+
+
+def match_ai_message_run_id(event: object, message_ids: set[str]) -> tuple[str, str] | None:
+    """Return a target AI message ID and its valid run ID, if present."""
+    if not isinstance(event, dict) or event.get("category") != "message":
+        return None
+    content = event.get("content")
+    run_id = event.get("run_id")
+    if not isinstance(content, dict) or content.get("type") != "ai" or not isinstance(run_id, str) or not run_id:
+        return None
+    message_id = content.get("id")
+    if not isinstance(message_id, str) or message_id not in message_ids:
+        return None
+    return message_id, run_id
+
 
 class RunEventStore(abc.ABC):
     """Run event stream storage interface.
@@ -27,6 +52,8 @@ class RunEventStore(abc.ABC):
     4. list_events() returns all events for the specified run
     5. Returned dicts contain the required RunEvent envelope fields; backends
        may add documented fields such as DbRunEventStore.user_id
+    6. find_latest_ai_message_run_ids() returns the newest valid AI message
+       event for each requested ID and performs no storage work for empty input
     """
 
     @abc.abstractmethod
@@ -91,6 +118,70 @@ class RunEventStore(abc.ABC):
         ``user_id`` may be passed explicitly by request-independent callers;
         user-scoped backends must apply it according to their isolation model.
         """
+
+    async def find_latest_ai_message_run_ids(
+        self,
+        thread_id: str,
+        message_ids: set[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, str]:
+        """Map target message IDs to their newest valid AI event's run ID.
+
+        Only ``category="message"`` events whose structured content has
+        ``type="ai"`` and whose ``run_id`` is a non-empty string qualify. An
+        empty target set must return immediately without storage work. The
+        default implementation pages backward in bounded windows. It raises
+        :class:`IncompleteMessageRunLookupError` instead of returning a
+        partial result when a full page lacks a safe, progressing ``seq``
+        cursor; callers may only treat an ordinary return as an exhaustive
+        lookup for unresolved IDs.
+
+        ``user_id`` follows the same explicit-caller semantics as
+        :meth:`list_messages`.
+        """
+        pending = normalize_message_ids(message_ids)
+        if not pending:
+            return {}
+
+        result: dict[str, str] = {}
+        before_seq: int | None = None
+        while pending:
+            page = await self.list_messages(
+                thread_id,
+                limit=_AI_MESSAGE_RUN_LOOKUP_PAGE_SIZE,
+                before_seq=before_seq,
+                user_id=user_id,
+            )
+            if not page:
+                break
+
+            for event in reversed(page):
+                match = match_ai_message_run_id(event, pending)
+                if match is None:
+                    continue
+                message_id, run_id = match
+                result[message_id] = run_id
+                pending.remove(message_id)
+                if not pending:
+                    break
+
+            if not pending or len(page) < _AI_MESSAGE_RUN_LOOKUP_PAGE_SIZE:
+                break
+
+            seqs: list[int] = []
+            for event in page:
+                seq = event.get("seq") if isinstance(event, dict) else None
+                if not isinstance(seq, int) or isinstance(seq, bool):
+                    raise IncompleteMessageRunLookupError("Run event lookup could not form a safe backward cursor from a full page")
+                seqs.append(seq)
+
+            next_before_seq = min(seqs)
+            if before_seq is not None and next_before_seq >= before_seq:
+                raise IncompleteMessageRunLookupError("Run event lookup could not form a safe backward cursor because seq did not progress")
+            before_seq = next_before_seq
+
+        return result
 
     @abc.abstractmethod
     async def list_events(

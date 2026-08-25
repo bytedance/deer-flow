@@ -11,7 +11,7 @@ from typing import BinaryIO
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
@@ -305,7 +305,14 @@ async def upload_files(
     files: list[UploadFile] = File(...),
     config: AppConfig = Depends(get_config),
 ) -> UploadResponse:
-    """Upload multiple files to a thread's uploads directory."""
+    """Upload multiple files to a thread's uploads directory.
+
+    When the sandbox provider is not thread-mounted, uploaded files are also
+    synced into the thread's sandbox. Under ``authorization.enabled``, a caller
+    denied ``sandbox:execute`` skips that sync (the upload itself still
+    succeeds — files stay in the uploads dir; a sandbox-denied agent cannot
+    consume them anyway).
+    """
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
@@ -333,9 +340,19 @@ async def upload_files(
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
     sandbox = None
     if sync_to_sandbox:
-        sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-        sandbox = sandbox_provider.get(sandbox_id)
-        if sandbox is None:
+        # Phase 3: enforce sandbox:execute before acquiring — a role denied
+        # sandbox execution must not trigger sandbox allocation just by
+        # uploading files. Deny skips the sync; the upload itself still
+        # succeeds (files stay in the thread uploads dir; the agent cannot
+        # consume them via sandbox anyway).
+        sandbox, _sandbox_id, sandbox_denied = await try_acquire_sandbox_for_request(
+            request,
+            sandbox_provider,
+            thread_id,
+            user_id=effective_user_id,
+            app_config=config,
+        )
+        if not sandbox_denied and sandbox is None:
             raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
     auto_convert_documents = _auto_convert_documents_enabled(config)
 
@@ -427,7 +444,7 @@ async def upload_files(
     # configuration can read the uploaded content.
     await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
 
-    if sync_to_sandbox:
+    if sync_to_sandbox and sandbox is not None:
         for file_path, virtual_path in sandbox_sync_targets:
             await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
 
