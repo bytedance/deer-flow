@@ -218,6 +218,67 @@ models:
 
 `PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
 
+### RAGFlow Knowledge Retrieval
+
+RAGFlow integration is disabled by default. It adds one read-only Agent tool,
+`knowledge_search`. DeerFlow does not persist a copy of dataset or document
+metadata; RAGFlow is the sole source of truth. The configured API key is
+tenant-scoped. An optional operator-controlled `datasets` list restricts every
+Agent on this deployment to the same dataset-ID allowlist; omitting it searches
+all datasets visible to that tenant API key. An explicitly empty `datasets: []`
+is rejected rather than being treated as tenant-wide access.
+
+```yaml
+tool_groups:
+  - name: knowledge
+
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.community.ragflow.tools:knowledge_search_tool
+    base_url: http://localhost:9380
+    api_key: $RAGFLOW_API_KEY
+    datasets:
+      - 0123456789abcdef0123456789abcdef
+      - fedcba9876543210fedcba9876543210
+    timeout: 30
+    page_size: 8
+    similarity_threshold: 0.2
+    vector_similarity_weight: 0.3
+    top_k: 256
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+```
+
+The tool is opt-in through the normal `tools:` list. `datasets` is optional but,
+when present, must contain at least one ID. If
+it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
+does not validate their existence while loading configuration; on each search
+it verifies them with ID-filtered requests. If `datasets` is omitted, each
+search paginates through the tenant-visible dataset catalog. Both paths resolve
+current names, embedding models, and chunk counts. Empty datasets are ignored;
+an empty dataset that has no embedding-model metadata is also skipped with a
+server warning. The remaining datasets are grouped by the exact embedding-model
+identifier and each group is sent to RAGFlow with a non-empty `dataset_ids`
+list. At most four groups are retrieved concurrently. Because raw similarity
+scores from different embedding spaces are not globally comparable, DeerFlow
+preserves each group's RAGFlow ranking, interleaves equal rank positions, omits
+score labels when more than one group is searched, and applies `page_size` as a
+single global chunk limit. If any searchable group fails, the whole tool call
+fails rather than silently omitting part of the configured scope. A deleted or
+inaccessible configured dataset identifies its ordinal entry in
+`knowledge_search.datasets` and produces guidance to check `config.yaml`.
+Dataset IDs and catalog listing are not exposed to the Agent.
+
+Use an allowlist to narrow the tenant-wide scope; compatible embedding models
+are no longer required across selected datasets. `base_url` must not contain
+embedded username or password information. For Docker or Kubernetes, it must be
+reachable from the Gateway container or Pod; `localhost` refers to that
+container or Pod, not the host machine.
+
+This integration is retrieval-only. Dataset creation, uploads, parsing, and
+deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+
 ### Tool Groups
 
 Organize tools into logical groups:

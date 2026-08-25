@@ -364,6 +364,23 @@ class MCPSessionPool:
             loop, _ready, task, close_evt = inflight
             await self._shutdown_entry(loop, task, close_evt, cancel=True)
 
+    async def close_session_if_current(
+        self,
+        server_name: str,
+        scope_key: str,
+        session: ClientSession,
+    ) -> bool:
+        """Close *session* only if it is still the registered entry for the key."""
+        key = (server_name, scope_key)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or entry[0] is not session:
+                return False
+            self._entries.pop(key)
+        _session, loop, task, close_evt = entry
+        await self._shutdown_entry(loop, task, close_evt)
+        return True
+
     async def close_server(self, server_name: str) -> None:
         """Close all sessions for a given server."""
         with self._lock:

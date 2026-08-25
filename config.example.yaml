@@ -669,6 +669,7 @@ tool_groups:
   - name: file:write
   - name: bash
   - name: browser
+  - name: knowledge
 
 # ============================================================================
 # Tools Configuration
@@ -676,6 +677,30 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
+  # `datasets` is optional. Omit it to list every tenant-visible dataset at
+  # search time; an explicit `datasets: []` is invalid. Empty datasets are
+  # skipped; searchable datasets are grouped by
+  # embedding model and retrieved with at most four groups in parallel. Group
+  # ranks are interleaved under the global `page_size` limit; scores are omitted
+  # when multiple groups are searched because they are not comparable.
+  # Configure stable IDs only to restrict scope. IDs and catalog listing never
+  # reach the model.
+  # - name: knowledge_search
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+  #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
+  #   api_key: $RAGFLOW_API_KEY
+  #   datasets:  # Optional operator-controlled allowlist
+  #     - 0123456789abcdef0123456789abcdef  # Replace with a RAGFlow dataset ID
+  #   timeout: 30
+  #   page_size: 8
+  #   similarity_threshold: 0.2
+  #   vector_similarity_weight: 0.3
+  #   top_k: 256
+  #   max_chars_per_chunk: 800
+  #   max_total_chars: 8000
+
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
