@@ -307,8 +307,30 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    # - name: knowledge  # Enable with the RAGFlow tool below.
 
   tools:
+    # Optional tenant-shared, read-only RAGFlow retrieval. Put RAGFLOW_API_KEY
+    # in `secrets`. `datasets` is an optional stable-ID allowlist; omit it to
+    # search all tenant-visible datasets. An explicit empty list is invalid.
+    # Empty datasets are skipped; remaining
+    # datasets are grouped by embedding model with up to four parallel retrieval
+    # requests and one global `page_size` limit. Multi-group scores are omitted
+    # because they are not comparable. The Agent cannot see the IDs.
+    # - name: knowledge_search
+    #   group: knowledge
+    #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+    #   base_url: http://ragflow:9380
+    #   api_key: $RAGFLOW_API_KEY
+    #   datasets:  # Optional operator-controlled allowlist
+    #     - 0123456789abcdef0123456789abcdef
+    #   timeout: 30
+    #   page_size: 8
+    #   similarity_threshold: 0.2
+    #   vector_similarity_weight: 0.3
+    #   top_k: 256
+    #   max_chars_per_chunk: 800
+    #   max_total_chars: 8000
     - name: web_search
       group: web
       use: deerflow.community.ddg_search.tools:web_search_tool
