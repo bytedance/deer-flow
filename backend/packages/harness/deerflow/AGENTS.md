@@ -37,20 +37,15 @@ drift.
 ### RAGFlow Knowledge Retrieval (`community/ragflow/`)
 
 The optional `knowledge` tool group exposes one `knowledge_search(query)` tool.
-Its normal `tools:` entry owns the provider connection, retrieval extras, and an
+Its normal `tools:` entry owns the provider connection, retrieval extras, and a
 optional operator allowlist of stable dataset IDs; there is no top-level
 provider configuration or Agent-visible listing tool. Configuration loading
 does not contact RAGFlow. Each invocation either verifies the bound IDs through
 ID-filtered requests or, when no IDs are bound, internally paginates through all
-tenant-visible datasets. It resolves current names, embedding models, and chunk
-counts, ignores empty datasets, and groups the searchable scope by exact
-embedding-model identifier. Up to four groups are retrieved concurrently with
-an explicit non-empty `dataset_ids` list per request. Results preserve each
-group's provider order, interleave equal rank positions, and use `page_size` as
-one global limit because cross-model raw similarity scores are not comparable.
-Any group failure fails the tool call rather than silently dropping scope. It
-never persists dataset metadata, exposes RAGFlow dataset IDs to the model, or
-provides write operations.
+tenant-visible datasets. It resolves their current names for citation formatting
+and sends an explicit non-empty `dataset_ids` list to retrieval. It never persists
+dataset metadata, exposes RAGFlow dataset IDs to the model, or provides write
+operations.
 Retrieval output is bounded at both the individual chunk and full-response
 levels. Provider-authored model-visible text is English. Every path must redact
 the configured tenant API key; dataset-UUID redaction is error-only so normal

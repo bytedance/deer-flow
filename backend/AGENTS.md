@@ -300,14 +300,9 @@ retrieval parameters, and an optional operator-controlled allowlist of exact
 dataset IDs. Configuration loading performs no network I/O. At invocation time,
 the provider either verifies configured IDs through ID-filtered requests or,
 when no IDs are configured, paginates through all tenant-visible datasets. It
-resolves current names, embedding models, and chunk counts, skips empty
-datasets, and groups the searchable scope by exact embedding-model identifier.
-Groups are retrieved with a four-request concurrency cap. Their provider-ranked
-chunks are interleaved by rank (raw scores from different embedding spaces are
-not compared) and globally truncated to `page_size`; any group failure fails
-the whole tool call. Every provider request still carries an explicit,
-non-empty `dataset_ids` list. Neither IDs nor tenant-wide listing is
-Agent-visible. RAGFlow remains the sole source of truth: there
+resolves current names for citation formatting and always sends an explicit,
+non-empty `dataset_ids` list to retrieval. Neither IDs nor tenant-wide listing
+is Agent-visible. RAGFlow remains the sole source of truth: there
 are no DeerFlow ORM models, migrations, or mirrored knowledge metadata.
 The configured tenant API key must never appear in logs or model-visible tool
 errors, and RAGFlow dataset UUIDs must not enter model context. Provider-authored
