@@ -902,6 +902,26 @@ export const zhCN: Translations = {
       description: "管理 MCP 工具的配置和启用状态。",
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
       empty: "暂无 MCP 工具。",
+      addServer: "添加服务器",
+      addServerDescription:
+        "粘贴 MCP 服务器提供的 JSON 定义。直接的服务器映射和带 `mcpServers` 外层的写法都可以。已有名称请通过“编辑”修改。",
+      addServerPlaceholder: `{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "@my-org/my-mcp-server"]
+    }
+  }
+}`,
+      editServer: "编辑 MCP 服务器",
+      editServerDescription:
+        "编辑“{name}”的完整 JSON 定义。服务器名称不可修改；如需重命名，请添加新服务器后移除当前服务器。",
+      editSingleServer: "每次只能编辑一个 MCP 服务器。",
+      editServerNameMismatch: "编辑时请保留现有服务器名称“{name}”。",
+      serverAlreadyExists: "MCP 服务器“{name}”已存在，请使用“编辑”。",
+      removeServer: "移除 MCP 服务器",
+      removeServerDescription:
+        "确定从 MCP 配置中移除“{name}”吗？它的工具将不再提供给智能体。",
     },
     subagents: {
       title: "子智能体",

@@ -14,7 +14,10 @@ rs.mock("sonner", () => ({
 
 import { fetch } from "@/core/api/fetcher";
 import { MCPConfigRequestError, loadMCPConfig } from "@/core/mcp/api";
-import { getEnableMCPServerMutationOptions } from "@/core/mcp/hooks";
+import {
+  getEnableMCPServerMutationOptions,
+  getUpdateMCPConfigMutationOptions,
+} from "@/core/mcp/hooks";
 
 const mockedFetch = rs.mocked(fetch);
 const mockedToastError = rs.mocked(toast.error);
@@ -133,6 +136,63 @@ describe("MCP server state mutation", () => {
 
     await expect(
       mutation.execute({ serverName: "semantic-scholar", enabled: true }),
+    ).rejects.toThrow(detail);
+
+    expect(mockedToastError).toHaveBeenCalledWith(detail);
+    expect(invalidateQueries).not.toHaveBeenCalled();
+  });
+});
+
+describe("MCP config mutation", () => {
+  beforeEach(() => {
+    mockedFetch.mockReset();
+    mockedToastError.mockReset();
+  });
+
+  it("PUTs the whole server map and invalidates the config", async () => {
+    mockedFetch.mockResolvedValue(
+      new Response(JSON.stringify({ mcp_servers: {} }), { status: 200 }),
+    );
+    const client = makeClient();
+    const invalidateQueries = rs
+      .spyOn(client, "invalidateQueries")
+      .mockResolvedValue();
+    const mutation = client
+      .getMutationCache()
+      .build(client, getUpdateMCPConfigMutationOptions(client));
+
+    const config = {
+      mcp_servers: {
+        github: { enabled: true, description: "GitHub" },
+      },
+    };
+    await mutation.execute(config);
+
+    const [, request] = mockedFetch.mock.calls[0] as [string, RequestInit];
+    expect(request.method).toBe("PUT");
+    expect(JSON.parse(request.body as string)).toEqual(config);
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: ["mcpConfig"],
+    });
+    expect(mockedToastError).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the Gateway rejection detail without invalidating", async () => {
+    const detail =
+      "MCP server 'evil' uses disallowed stdio command 'bash'. Allowed commands: npx, uvx.";
+    mockedFetch.mockResolvedValue(
+      new Response(JSON.stringify({ detail }), { status: 400 }),
+    );
+    const client = makeClient();
+    const invalidateQueries = rs.spyOn(client, "invalidateQueries");
+    const mutation = client
+      .getMutationCache()
+      .build(client, getUpdateMCPConfigMutationOptions(client));
+
+    await expect(
+      mutation.execute({
+        mcp_servers: { evil: { enabled: true, description: "" } },
+      }),
     ).rejects.toThrow(detail);
 
     expect(mockedToastError).toHaveBeenCalledWith(detail);
