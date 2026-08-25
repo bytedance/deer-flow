@@ -53,6 +53,20 @@ The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
 the number of required IDs, whichever is larger; missing exact runs use targeted
 `get()` calls.
 
+**Terminal run eviction (`RunManager.schedule_terminal_eviction`, #5009).**
+`run_agent`'s shared `finally` block schedules a delayed eviction of every
+terminal run next to the stream-bridge cleanup, so `_runs` / `_runs_by_thread`
+no longer grow linearly with completed work. With any `RunStore` configured
+(including `database.backend=memory`), later reads resolve through the existing
+store fallback in `get()`/`list_by_thread()` and durable idempotent admission
+resolves through `RunIdempotencyConflict`, so the grace period
+(`TERMINAL_RUN_EVICTION_DELAY_SECONDS`, default 300s) only needs to cover SSE
+consumers, post-completion hooks, and same-process fast paths. Memory-only
+managers (`store=None`) deliberately keep unbounded retention — without a store,
+eviction would lose run history entirely — and `schedule_terminal_eviction`
+is a no-op there. Pending eviction tasks are strongly referenced on the manager
+(`_eviction_tasks`) so a GC pass cannot destroy one mid-delay.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`

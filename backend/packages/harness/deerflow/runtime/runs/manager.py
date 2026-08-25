@@ -34,6 +34,12 @@ ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
 
+# Grace period a terminal run stays in the in-memory registries before eviction
+# when a durable RunStore backs historical reads. Matches the default delay of
+# :meth:`RunManager.cleanup`, whose only callers were tests before workers
+# started scheduling terminal evictions (bytedance/deer-flow#5009).
+TERMINAL_RUN_EVICTION_DELAY_SECONDS = 300.0
+
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
     "database table is locked",
@@ -250,6 +256,10 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Strong references for pending terminal-run eviction tasks so the
+        # event loop cannot garbage-collect a task sleeping through its grace
+        # period ("Task was destroyed but it is pending!").
+        self._eviction_tasks: set[asyncio.Task[None]] = set()
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -1880,6 +1890,33 @@ class RunManager:
             if record is not None:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
+
+    def schedule_terminal_eviction(self, run_id: str, *, delay: float = TERMINAL_RUN_EVICTION_DELAY_SECONDS) -> asyncio.Task[None] | None:
+        """Schedule removal of a terminal run from the in-memory registries.
+
+        When a durable ``RunStore`` backs this manager, historical reads fall
+        back to the store (see :meth:`get`/:meth:`list_by_thread`), so a
+        completed ``RunRecord`` — which retains its request ``kwargs``, result
+        metadata, and the finished worker ``asyncio.Task`` — need not stay
+        strongly referenced for the lifetime of the process. The eviction runs
+        after *delay* seconds so SSE consumers, post-completion hooks, and
+        idempotent-retry fast paths that inspect live records finish first;
+        durable idempotent admission resolves through
+        ``RunIdempotencyConflict`` regardless.
+
+        Memory-only managers (``store=None``) deliberately keep today's
+        semantics: without a backing store an eviction would lose the run's
+        history entirely, so this is a no-op there.
+
+        Returns the scheduled task (strongly referenced until it completes), or
+        ``None`` in memory-only mode.
+        """
+        if self._store is None:
+            return None
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
+        self._eviction_tasks.add(task)
+        task.add_done_callback(self._eviction_tasks.discard)
+        return task
 
     # ------------------------------------------------------------------
     # Lease heartbeat

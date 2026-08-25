@@ -1355,6 +1355,10 @@ async def run_agent(
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        # Evict the terminal run from the in-memory registries after its grace
+        # period: a durable RunStore serves later reads through the existing
+        # fallback, while memory-only managers keep today's semantics (#5009).
+        run_manager.schedule_terminal_eviction(run_id)
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
