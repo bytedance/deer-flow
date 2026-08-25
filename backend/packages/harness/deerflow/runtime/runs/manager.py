@@ -21,7 +21,7 @@ from deerflow.utils.time import is_lease_expired
 from deerflow.utils.time import now_iso as _now_iso
 
 from .schemas import DisconnectMode, RunStatus, ThreadOperationKind
-from .store.base import EditReplayVisibility
+from .store.base import EditReplayVisibility, RunIdempotencyConflict
 
 if TYPE_CHECKING:
     from deerflow.config.run_ownership_config import RunOwnershipConfig
@@ -196,6 +196,10 @@ class RunRecord:
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
     stop_reason: str | None = None
+    idempotency_key: str | None = None
+    # True only on the caller that recovered an existing idempotent admission;
+    # that caller must not attach a second worker to the durable run.
+    idempotency_reused: bool = False
 
 
 class RunStartOutcome(StrEnum):
@@ -292,6 +296,7 @@ class RunManager:
             "model_name": record.model_name,
             "owner_worker_id": record.owner_worker_id,
             "lease_expires_at": record.lease_expires_at,
+            "idempotency_key": record.idempotency_key,
         }
         if record.user_id is not None:
             payload["user_id"] = record.user_id
@@ -466,6 +471,7 @@ class RunManager:
             owner_worker_id=row.get("owner_worker_id"),
             lease_expires_at=row.get("lease_expires_at"),
             stop_reason=row.get("stop_reason"),
+            idempotency_key=row.get("idempotency_key"),
         )
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
@@ -543,6 +549,26 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
+    async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
+        """Persist final fields while the durable row is deliberately active."""
+        should_persist = False
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None and not record.ownership_lost:
+                should_persist = record.status not in (RunStatus.pending, RunStatus.running)
+                if should_persist:
+                    for key, value in kwargs.items():
+                        if hasattr(record, key) and value is not None:
+                            setattr(record, key, value)
+                    record.updated_at = _now_iso()
+        if should_persist and self._store is not None:
+            try:
+                # The local status is already staged as terminal, but the store
+                # row intentionally remains running until checkpoint finalization.
+                await self._store.update_run_progress(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
+
     async def create(
         self,
         thread_id: str,
@@ -599,12 +625,20 @@ class RunManager:
         logger.info("Run created: run_id=%s thread_id=%s", run_id, thread_id)
         return record
 
-    async def get(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def get(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, or ``None``.
 
         Args:
             run_id: The run ID to look up.
             user_id: Optional user ID for permission filtering when hydrating from store.
+            raise_on_store_error: Propagate store hydration/mapping failures so
+                lifecycle callers can distinguish them from a missing run.
         """
         async with self._lock:
             record = self._runs.get(run_id)
@@ -615,6 +649,8 @@ class RunManager:
         try:
             row = await self._store.get(run_id, user_id=user_id)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to hydrate run %s from store", run_id, exc_info=True)
             return None
         # Re-check after store await: a concurrent create() may have inserted the
@@ -628,15 +664,27 @@ class RunManager:
         try:
             return self._record_from_store(row)
         except Exception:
+            if raise_on_store_error:
+                raise
             logger.warning("Failed to map store row for run %s", run_id, exc_info=True)
             return None
 
-    async def aget(self, run_id: str, *, user_id: str | None = None) -> RunRecord | None:
+    async def aget(
+        self,
+        run_id: str,
+        *,
+        user_id: str | None = None,
+        raise_on_store_error: bool = False,
+    ) -> RunRecord | None:
         """Return a run record by ID, checking the persistent store as fallback.
 
         Alias for :meth:`get` for backward compatibility.
         """
-        return await self.get(run_id, user_id=user_id)
+        return await self.get(
+            run_id,
+            user_id=user_id,
+            raise_on_store_error=raise_on_store_error,
+        )
 
     async def list_by_thread(self, thread_id: str, *, user_id: str | None = None, limit: int = 100) -> list[RunRecord]:
         """Return runs for a given thread, newest first, at most ``limit`` records.
@@ -1384,6 +1432,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically admit a normal agent run for a thread."""
         return await self._admit_thread_operation(
@@ -1396,6 +1445,7 @@ class RunManager:
             multitask_strategy=multitask_strategy,
             model_name=model_name,
             user_id=user_id,
+            idempotency_key=idempotency_key,
         )
 
     async def _close_cancelled_admission(self, record: RunRecord) -> None:
@@ -1455,6 +1505,7 @@ class RunManager:
         multitask_strategy: str = "reject",
         model_name: str | None = None,
         user_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> RunRecord:
         """Atomically check for inflight runs and create a new one.
 
@@ -1497,9 +1548,31 @@ class RunManager:
             model_name=model_name,
             owner_worker_id=self._worker_id,
             lease_expires_at=lease_expires_at,
+            idempotency_key=idempotency_key,
         )
 
         async with self._lock:
+            if idempotency_key is not None:
+                for existing in self._runs.values():
+                    if existing.idempotency_key != idempotency_key:
+                        continue
+                    if existing.thread_id != thread_id or existing.user_id != user_id:
+                        raise RuntimeError("Run idempotency key resolved to a different thread or user")
+                    existing.idempotency_reused = True
+                    return existing
+
+            def reuse_idempotent_run(conflict: RunIdempotencyConflict) -> RunRecord:
+                existing = self._record_from_store(conflict.existing)
+                if existing.thread_id != thread_id or existing.user_id != user_id:
+                    raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
+                current = self._runs.get(existing.run_id)
+                if current is None:
+                    self._runs[existing.run_id] = existing
+                    self._index_run_locked(existing)
+                    current = existing
+                current.idempotency_reused = True
+                return current
+
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
             local_inflight = [r for r in self._thread_records_locked(thread_id) if r.status in (RunStatus.pending, RunStatus.running) or r.finalizing]
@@ -1522,26 +1595,31 @@ class RunManager:
             #    store is the source of truth for cross-process atomicity.
             if self._store is not None:
                 if multitask_strategy == "reject":
+                    create_kwargs = {
+                        "run_id": run_id,
+                        "thread_id": thread_id,
+                        "owner_worker_id": self._worker_id,
+                        "lease_expires_at": lease_expires_at,
+                        "operation_kind": operation_kind.value,
+                        "multitask_strategy": "reject",
+                        "assistant_id": assistant_id,
+                        "user_id": user_id,
+                        "model_name": model_name,
+                        "metadata": metadata,
+                        "kwargs": kwargs,
+                        "created_at": now,
+                        "grace_seconds": grace_seconds,
+                    }
+                    if idempotency_key is not None:
+                        create_kwargs["idempotency_key"] = idempotency_key
                     try:
                         await self._call_store_with_retry(
                             "create_thread_operation_atomic",
                             run_id,
-                            lambda: self._store.create_thread_operation_atomic(
-                                run_id=run_id,
-                                thread_id=thread_id,
-                                owner_worker_id=self._worker_id,
-                                lease_expires_at=lease_expires_at,
-                                operation_kind=operation_kind.value,
-                                multitask_strategy="reject",
-                                assistant_id=assistant_id,
-                                user_id=user_id,
-                                model_name=model_name,
-                                metadata=metadata,
-                                kwargs=kwargs,
-                                created_at=now,
-                                grace_seconds=grace_seconds,
-                            ),
+                            lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                         )
+                    except RunIdempotencyConflict as exc:
+                        return reuse_idempotent_run(exc)
                     except ConflictError:
                         raise
                     except Exception as exc:
@@ -1549,6 +1627,23 @@ class RunManager:
                             raise ConflictError(f"Thread {thread_id} already has an active run") from exc
                         raise
                 else:
+                    create_kwargs = {
+                        "run_id": run_id,
+                        "thread_id": thread_id,
+                        "owner_worker_id": self._worker_id,
+                        "lease_expires_at": lease_expires_at,
+                        "operation_kind": operation_kind.value,
+                        "multitask_strategy": multitask_strategy,
+                        "assistant_id": assistant_id,
+                        "user_id": user_id,
+                        "model_name": model_name,
+                        "metadata": metadata,
+                        "kwargs": kwargs,
+                        "created_at": now,
+                        "grace_seconds": grace_seconds,
+                    }
+                    if idempotency_key is not None:
+                        create_kwargs["idempotency_key"] = idempotency_key
                     # Interrupt / rollback: store-side claim + insert in one
                     # transaction. Retry on IntegrityError in case another
                     # worker races us between our SELECT FOR UPDATE and INSERT.
@@ -1558,23 +1653,11 @@ class RunManager:
                             await self._call_store_with_retry(
                                 "create_thread_operation_atomic",
                                 run_id,
-                                lambda: self._store.create_thread_operation_atomic(
-                                    run_id=run_id,
-                                    thread_id=thread_id,
-                                    owner_worker_id=self._worker_id,
-                                    lease_expires_at=lease_expires_at,
-                                    operation_kind=operation_kind.value,
-                                    multitask_strategy=multitask_strategy,
-                                    assistant_id=assistant_id,
-                                    user_id=user_id,
-                                    model_name=model_name,
-                                    metadata=metadata,
-                                    kwargs=kwargs,
-                                    created_at=now,
-                                    grace_seconds=grace_seconds,
-                                ),
+                                lambda: self._store.create_thread_operation_atomic(**create_kwargs),
                             )
                             break
+                        except RunIdempotencyConflict as exc:
+                            return reuse_idempotent_run(exc)
                         except Exception as exc:
                             is_unique = _is_unique_violation(exc)
                             if is_unique and attempt + 1 < max_retries:

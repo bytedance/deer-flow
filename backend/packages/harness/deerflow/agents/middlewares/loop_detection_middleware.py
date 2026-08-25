@@ -284,6 +284,17 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         # still drops it.
         self._stop_reason: BoundedDict[str, str] = BoundedDict(1000)
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {
+            "warn_threshold": self.warn_threshold,
+            "hard_limit": self.hard_limit,
+            "window_size": self.window_size,
+            "max_tracked_threads": self.max_tracked_threads,
+            "tool_freq_warn": self.tool_freq_warn,
+            "tool_freq_hard_limit": self.tool_freq_hard_limit,
+            "tool_freq_overrides": self._tool_freq_overrides,
+        }
+
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
         """Construct from a Pydantic-validated config, trusting its validation."""

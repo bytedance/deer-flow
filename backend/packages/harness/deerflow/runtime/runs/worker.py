@@ -34,6 +34,7 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.constants import TOOL_RESULTS_DIRNAME
@@ -112,6 +113,19 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
+
+def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the bounded model-state projection without trusting display names."""
+    return [
+        {
+            "task_id": row["id"],
+            "task_name": neutralize_untrusted_tags(str(row["task_name"])),
+            "status": row["status"],
+            "updated_at": row["updated_at"],
+        }
+        for row in task_rows
+    ]
 
 
 async def _persist_delivery_receipt(
@@ -425,6 +439,7 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
+    mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
@@ -468,6 +483,17 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
     except TypeError:
         # Some callable instances are unhashable; fall back to a direct check.
         return _compute_agent_factory_supports_app_config(agent_factory)
+
+
+def _agent_graph(agent_result: Any) -> Any:
+    """Unwrap the lead assembly, leaving any other factory result untouched."""
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        return agent_result
+    return unwrap_agent_graph(agent_result)
 
 
 class _SubagentEventBuffer:
@@ -600,11 +626,26 @@ async def run_agent(
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+
+    if ctx.mcp_task_repo is not None and record.user_id is not None:
+        try:
+            task_rows = await ctx.mcp_task_repo.list_by_thread(
+                thread_id,
+                user_id=record.user_id,
+                limit=20,
+            )
+            graph_input = {
+                **graph_input,
+                "background_tasks": _project_background_tasks(task_rows),
+            }
+        except Exception:
+            logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
 
     async def _finish_cancellation(
         action: str,
@@ -843,7 +884,7 @@ async def run_agent(
         from deerflow.extensions import bind_agent_build_extensions
 
         with bind_agent_build_extensions(extensions):
-            agent = agent_factory(**agent_factory_kwargs)
+            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -1186,6 +1227,37 @@ async def run_agent(
                     persist=False,
                 )
 
+        if not record.ownership_lost and journal is not None and persist_completion:
+            try:
+                # Advance the final completion fields and timestamp without
+                # terminalizing the durable row. That active row continues to
+                # fence peer checkpoint writers through the duration write.
+                completion_data = journal.get_completion_data()
+                await run_manager.update_finalizing_progress(run_id, **completion_data)
+            except Exception:
+                logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
+
+        # Keep the durable run row active through its final duration checkpoint
+        # write. A peer Gateway admits history migration from the durable row,
+        # not this worker's staged terminal status; terminalizing first would
+        # let that migration read an unfinished lifetime and race this write.
+        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+            try:
+                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                # Match legacy history semantics: turn_duration is the whole
+                # RunRecord lifetime in integer seconds, including admission
+                # delay. Persist zero for sub-second successful turns.
+                duration = max(0, int((updated - created).total_seconds()))
+                await _persist_run_duration(
+                    checkpointer=checkpointer,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    duration_seconds=duration,
+                )
+            except Exception:
+                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
+
         if not record.ownership_lost and event_store is not None:
             try:
                 # Even after bounded receipt retries are exhausted, persist the
@@ -1210,8 +1282,8 @@ async def run_agent(
         if not record.ownership_lost and journal is not None and persist_completion:
             try:
                 # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
+                completion_data = completion_data or journal.get_completion_data()
+                await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
             except Exception:
                 logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
@@ -1235,25 +1307,6 @@ async def run_agent(
                         await thread_store.update_display_name(thread_id, title)
             except Exception:
                 logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
-
-        # Persist run duration to checkpoint metadata so history reads
-        # don't need to correlate runs and events.
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
-            try:
-                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
-                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
-                # Match legacy history semantics: turn_duration is the whole
-                # RunRecord lifetime in integer seconds, including admission
-                # delay. Persist zero for sub-second successful turns.
-                duration = max(0, int((updated - created).total_seconds()))
-                await _persist_run_duration(
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    duration_seconds=duration,
-                )
-            except Exception:
-                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
         # Update threads_meta status based on run outcome
         if started and not record.ownership_lost and thread_store is not None:
@@ -2045,21 +2098,36 @@ def valid_duration_entry(run_id: Any, duration_seconds: Any) -> bool:
     return isinstance(run_id, str) and bool(run_id) and isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool)
 
 
-async def persist_run_durations(
+RUN_MESSAGE_IDS_METADATA_KEY = "run_message_ids"
+
+
+def valid_run_message_id_entry(message_id: Any, run_id: Any) -> bool:
+    """Check that a persisted legacy message-to-run attribution is well formed."""
+    return isinstance(message_id, str) and bool(message_id) and isinstance(run_id, str) and bool(run_id)
+
+
+async def persist_run_history_metadata(
     *,
     checkpointer: Any,
     thread_id: str,
-    durations: dict[str, int],
+    durations: dict[str, int] | None = None,
+    message_run_ids: dict[str, str] | None = None,
 ) -> bool:
-    """Merge validated run durations into a metadata-only checkpoint.
+    """Merge validated run history indexes into a metadata-only checkpoint.
 
     Durations accumulate so the history fast path can serve every known turn
-    from the latest checkpoint.  Per-entry overhead is negligible (~50 bytes
-    per run_id) compared to the messages channel blob written on every graph
-    checkpoint, so no pruning is needed.
+    from the latest checkpoint. Legacy AI-message attributions are persisted
+    alongside them for every audited AI ID, including boundary fallbacks whose
+    event lookup was exhaustively empty. The full mapping is deliberate: it is
+    both the exact-attribution cache and the negative-result coverage proof.
+    While the materialized message set at the head remains unchanged, later
+    reads query only uncached IDs. This metadata-only merge retains existing
+    entries, so compaction timing or historical migration may leave stale IDs;
+    reads ignore them because they only consult IDs in the materialized history.
     """
-    updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in durations.items() if valid_duration_entry(run_id, duration_seconds)}
-    if not updates:
+    duration_updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in (durations or {}).items() if valid_duration_entry(run_id, duration_seconds)}
+    message_run_id_updates = {message_id: run_id for message_id, run_id in (message_run_ids or {}).items() if valid_run_message_id_entry(message_id, run_id)}
+    if not duration_updates and not message_run_id_updates:
         return False
 
     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -2073,11 +2141,15 @@ async def persist_run_durations(
             metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
             raw_run_durations = metadata.get("run_durations")
             run_durations = {key: value for key, value in raw_run_durations.items() if valid_duration_entry(key, value)} if isinstance(raw_run_durations, dict) else {}
-            changed_durations = {run_id: duration for run_id, duration in updates.items() if run_durations.get(run_id) != duration}
-            if not changed_durations:
+            raw_message_run_ids = metadata.get(RUN_MESSAGE_IDS_METADATA_KEY)
+            run_message_ids = {message_id: run_id for message_id, run_id in raw_message_run_ids.items() if valid_run_message_id_entry(message_id, run_id)} if isinstance(raw_message_run_ids, dict) else {}
+            changed_durations = {run_id: duration for run_id, duration in duration_updates.items() if run_durations.get(run_id) != duration}
+            changed_message_run_ids = {message_id: run_id for message_id, run_id in message_run_id_updates.items() if run_message_ids.get(message_id) != run_id}
+            if not changed_durations and not changed_message_run_ids:
                 return False
 
             run_durations.update(changed_durations)
+            run_message_ids.update(changed_message_run_ids)
             parent_checkpoint_id = _checkpoint_identity(ckpt_tuple, checkpoint)
             latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
             latest_checkpoint = dict(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else {}
@@ -2089,7 +2161,16 @@ async def persist_run_durations(
             prev_step = metadata.get("step")
             metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
             metadata["run_durations"] = run_durations
-            metadata["writes"] = {"runtime_run_duration": {"run_ids": sorted(changed_durations)}}
+            if run_message_ids:
+                metadata[RUN_MESSAGE_IDS_METADATA_KEY] = run_message_ids
+            else:
+                metadata.pop(RUN_MESSAGE_IDS_METADATA_KEY, None)
+            metadata["writes"] = {
+                "runtime_run_duration": {
+                    "run_ids": sorted(changed_durations),
+                    "message_ids": sorted(changed_message_run_ids),
+                }
+            }
 
             checkpoint_ns = _checkpoint_namespace(ckpt_tuple)
             write_config = {
@@ -2110,6 +2191,20 @@ async def persist_run_durations(
             )
             return True
     return False
+
+
+async def persist_run_durations(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int],
+) -> bool:
+    """Merge validated run durations into a metadata-only checkpoint."""
+    return await persist_run_history_metadata(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations=durations,
+    )
 
 
 async def _persist_run_duration(

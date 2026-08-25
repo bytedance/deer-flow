@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -184,6 +185,59 @@ def test_skill_activation_middleware_reads_public_skill_from_real_user_scoped_st
     activation_msg, user_msg = captured["messages"]
     assert is_slash_skill_activation_reminder(activation_msg)
     assert "Presentation workflow" in activation_msg.content
+    assert user_msg is original
+
+
+def test_skill_activation_middleware_reads_external_custom_skill_directory_symlink(monkeypatch, tmp_path):
+    skills_root = tmp_path / "skills"
+    skill_dir = tmp_path / "external-skills" / "external-skill"
+    skill_dir.mkdir(parents=True)
+    skill_content = "---\nname: external-skill\ndescription: An external skill\n---\n\n# External skill\n"
+    (skill_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")
+
+    user_custom_root = tmp_path / "users" / "test-user" / "skills" / "custom"
+    user_custom_root.mkdir(parents=True)
+    try:
+        (user_custom_root / "external-skill").symlink_to(skill_dir, target_is_directory=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
+
+    app_config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        ),
+    )
+    extensions_config = ExtensionsConfig()
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(ExtensionsConfig, "from_file", classmethod(lambda cls, config_path=None: extensions_config))
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions_config)
+
+    storage = UserScopedSkillStorage("test-user", host_path=str(skills_root), app_config=app_config)
+    monkeypatch.setattr(middleware_module, "get_or_new_user_skill_storage", lambda user_id, **kwargs: storage)
+
+    middleware = SkillActivationMiddleware(
+        app_config=app_config,
+        user_id="test-user",
+        slash_source_owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    original = HumanMessage(content="/external-skill Run the external skill", id="msg-external-symlink")
+    request = _make_model_request([original])
+    captured = {}
+
+    def handler(model_request: ModelRequest):
+        captured["messages"] = model_request.messages
+        return AIMessage(content="ok")
+
+    result = middleware.wrap_model_call(request, handler)
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "ok"
+    activation_msg, user_msg = captured["messages"]
+    assert "# External skill" in activation_msg.content
     assert user_msg is original
 
 
@@ -727,7 +781,12 @@ def test_skill_activation_middleware_rejects_skill_file_outside_skills_root(monk
     outside_dir.mkdir()
     outside_file = outside_dir / "SKILL.md"
     outside_file.write_text("# Leaked\nDo not read me.", encoding="utf-8")
-    (skill_dir / "SKILL.md").symlink_to(outside_file)
+    try:
+        (skill_dir / "SKILL.md").symlink_to(outside_file)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+        raise
     skill = Skill(
         name="data-analysis",
         description="Description for data-analysis",

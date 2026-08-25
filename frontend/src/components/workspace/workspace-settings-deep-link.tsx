@@ -16,6 +16,7 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "integrations",
   "memory",
   "tools",
+  "subagents",
   "skills",
   "notification",
   "about",

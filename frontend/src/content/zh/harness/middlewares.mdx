@@ -216,16 +216,19 @@ summarization:
 自定义中间件可以注入到链中用于专业用途。中间件必须实现 `langchain.agents.middleware` 中的 `AgentMiddleware` 接口：
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(AgentMiddleware):
-    async def on_start(self, state, config):
-        # 在模型调用前运行
-        return state, config
 
-    async def on_end(self, state, config):
-        # 在模型调用后运行
-        return state, config
+class MyMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """在模型调用前运行。"""
+        return None
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """在模型调用后运行。"""
+        return None
 ```
 
 自定义中间件在链末尾 `ClarificationMiddleware` 之前注入。
