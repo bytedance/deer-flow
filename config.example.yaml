@@ -679,7 +679,8 @@ tool_groups:
 tools:
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
   # `datasets` is optional. Omit it to list every tenant-visible dataset at
-  # search time. Empty datasets are skipped; searchable datasets are grouped by
+  # search time; an explicit `datasets: []` is invalid. Empty datasets are
+  # skipped; searchable datasets are grouped by
   # embedding model and retrieved with at most four groups in parallel. Group
   # ranks are interleaved under the global `page_size` limit; scores are omitted
   # when multiple groups are searched because they are not comparable.

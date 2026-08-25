@@ -54,6 +54,8 @@ class _RAGFlowRetrievalSettings(BaseModel):
     def _normalize_dataset_ids(cls, value: list[str] | None) -> list[str] | None:
         if value is None:
             return None
+        if not value:
+            raise ValueError("datasets must not be empty when configured; omit it to search all accessible datasets")
         normalized: list[str] = []
         seen: set[str] = set()
         for dataset_id in value:
@@ -63,7 +65,7 @@ class _RAGFlowRetrievalSettings(BaseModel):
             if clean_id not in seen:
                 normalized.append(clean_id)
                 seen.add(clean_id)
-        return normalized or None
+        return normalized
 
     @field_validator("base_url")
     @classmethod
@@ -225,11 +227,7 @@ async def _resolve_datasets(
 
     resolved_datasets: list[_ResolvedDataset] = []
     for position, bound_id in enumerate(settings.datasets, start=1):
-        try:
-            datasets = await client.list_datasets(dataset_id=bound_id)
-        except RAGFlowAPIError as exc:
-            _log_missing_dataset(position=position, dataset_id=bound_id, code=exc.code)
-            return None, _missing_dataset_error(position)
+        datasets = await client.list_datasets(dataset_id=bound_id)
         resolved = _current_dataset(datasets, bound_id)
         if resolved is None:
             _log_missing_dataset(position=position, dataset_id=bound_id)

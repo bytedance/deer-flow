@@ -116,7 +116,13 @@ class RAGFlowClient:
             if not dataset_id:
                 raise ValueError("dataset_id must not be empty")
 
-            payload = await self._request("GET", "/datasets", params={"id": dataset_id})
+            # RAGFlow's singular `id` filter returns the generic DATA_ERROR code
+            # for an inaccessible or missing dataset, which is indistinguishable
+            # from several provider failures. Its `ids` filter instead returns a
+            # successful empty list for an inaccessible ID, allowing callers to
+            # classify only that result as a missing binding while preserving all
+            # real API errors.
+            payload = await self._request("GET", "/datasets", params={"ids": dataset_id})
             data = payload.get("data")
             if not isinstance(data, list):
                 raise RAGFlowProtocolError("RAGFlow returned an invalid dataset list.")
@@ -137,7 +143,9 @@ class RAGFlowClient:
             datasets.extend(item for item in data if isinstance(item, dict))
             received_count += len(data)
 
-            total = payload.get("total_datasets")
+            total = payload.get("total")
+            if not (isinstance(total, int) and not isinstance(total, bool) and total >= 0):
+                total = payload.get("total_datasets")
             has_valid_total = isinstance(total, int) and not isinstance(total, bool) and total >= 0
             if has_valid_total:
                 if received_count >= total:

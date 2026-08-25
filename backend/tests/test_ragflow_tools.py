@@ -183,19 +183,12 @@ async def test_knowledge_search_uses_id_filter_and_survives_dataset_rename(monke
 
 
 @pytest.mark.anyio
-async def test_missing_bound_dataset_api_error_returns_indexed_operator_guidance(
+async def test_missing_bound_dataset_returns_indexed_operator_guidance(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    tenant_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     fake = FakeRAGFlowClient(
         datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Existing")]},
-        dataset_errors_by_id={
-            MISSING_DATASET_ID: RAGFlowAPIError(
-                f"User '{tenant_id}' lacks permission for dataset '{MISSING_DATASET_ID}'",
-                code=102,
-            )
-        },
     )
     _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1, MISSING_DATASET_ID]))
 
@@ -204,30 +197,41 @@ async def test_missing_bound_dataset_api_error_returns_indexed_operator_guidance
 
     assert result == "Error: The 2nd entry of knowledge_search.datasets was not found or is inaccessible; check config.yaml."
     assert MISSING_DATASET_ID not in result
-    assert tenant_id not in result
-    assert "lacks permission" not in result
     assert fake.list_calls == [DATASET_ID_1, MISSING_DATASET_ID]
     assert fake.retrieve_calls == []
     assert MISSING_DATASET_ID in caplog.text
-    assert "code=102" in caplog.text
+    assert "code=None" in caplog.text
 
 
 @pytest.mark.anyio
 async def test_missing_bound_dataset_error_does_not_expose_configured_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(
-        dataset_errors_by_id={
-            MISSING_DATASET_ID: RAGFlowAPIError(
-                f"User '{DATASET_ID_1}' lacks permission for dataset '{MISSING_DATASET_ID}'",
-                code=102,
-            )
-        }
-    )
+    fake = FakeRAGFlowClient()
     _install(monkeypatch, fake, config=_config(datasets=[MISSING_DATASET_ID]))
 
     result = await ragflow_tools.knowledge_search("leave")
 
     assert MISSING_DATASET_ID not in result
     assert "[DATASET_ID]" not in result
+
+
+@pytest.mark.anyio
+async def test_bound_dataset_api_error_uses_normal_redacted_error_handler(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeRAGFlowClient(
+        dataset_errors_by_id={
+            DATASET_ID_1: RAGFlowAPIError("invalid credential ragflow-secret", code=102),
+        }
+    )
+    _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1]))
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
+        result = await ragflow_tools.knowledge_search("leave")
+
+    assert result == "Error: invalid credential [REDACTED]"
+    assert "code=102" in caplog.text
+    assert fake.retrieve_calls == []
 
 
 @pytest.mark.anyio
@@ -685,6 +689,18 @@ def test_retrieval_settings_allow_omitting_dataset_ids(monkeypatch: pytest.Monke
     assert error is None
     assert config is not None
     assert config.datasets is None
+
+
+@pytest.mark.anyio
+async def test_explicitly_empty_dataset_allowlist_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(all_datasets=[_dataset(DATASET_ID_1, "Must remain inaccessible")])
+    _install(monkeypatch, fake, config=_config(datasets=[]))
+
+    result = await ragflow_tools.knowledge_search("leave")
+
+    assert result == "Error: Invalid RAGFlow settings for knowledge_search; check config.yaml."
+    assert fake.list_calls == []
+    assert fake.retrieve_calls == []
 
 
 def test_agent_exposes_only_query_on_single_search_tool() -> None:

@@ -312,7 +312,8 @@ config: |
   tools:
     # Optional tenant-shared, read-only RAGFlow retrieval. Put RAGFLOW_API_KEY
     # in `secrets`. `datasets` is an optional stable-ID allowlist; omit it to
-    # search all tenant-visible datasets. Empty datasets are skipped; remaining
+    # search all tenant-visible datasets. An explicit empty list is invalid.
+    # Empty datasets are skipped; remaining
     # datasets are grouped by embedding model with up to four parallel retrieval
     # requests and one global `page_size` limit. Multi-group scores are omitted
     # because they are not comparable. The Agent cannot see the IDs.

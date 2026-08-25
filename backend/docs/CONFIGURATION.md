@@ -225,7 +225,8 @@ RAGFlow integration is disabled by default. It adds one read-only Agent tool,
 metadata; RAGFlow is the sole source of truth. The configured API key is
 tenant-scoped. An optional operator-controlled `datasets` list restricts every
 Agent on this deployment to the same dataset-ID allowlist; omitting it searches
-all datasets visible to that tenant API key.
+all datasets visible to that tenant API key. An explicitly empty `datasets: []`
+is rejected rather than being treated as tenant-wide access.
 
 ```yaml
 tool_groups:
@@ -249,7 +250,8 @@ tools:
     max_total_chars: 8000
 ```
 
-The tool is opt-in through the normal `tools:` list. `datasets` is optional. If
+The tool is opt-in through the normal `tools:` list. `datasets` is optional but,
+when present, must contain at least one ID. If
 it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
 does not validate their existence while loading configuration; on each search
 it verifies them with ID-filtered requests. If `datasets` is omitted, each

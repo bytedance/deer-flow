@@ -18,14 +18,14 @@ async def test_list_datasets_filters_by_bound_id_in_one_request() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.method == "GET"
-        assert request.url == httpx.URL("http://ragflow.test/api/v1/datasets?id=dataset-1")
+        assert request.url == httpx.URL("http://ragflow.test/api/v1/datasets?ids=dataset-1")
         assert request.headers["Authorization"] == "Bearer ragflow-secret"
         return httpx.Response(
             200,
             json={
                 "code": 0,
                 "data": [{"id": "dataset-1", "name": "HR Policies"}],
-                "total_datasets": 101,
+                "total": 1,
             },
         )
 
@@ -54,7 +54,7 @@ async def test_list_datasets_without_id_fetches_every_page() -> None:
             data = [{"id": "dataset-100", "name": "Dataset 100"}]
         else:
             pytest.fail(f"unexpected page {page}")
-        return httpx.Response(200, json={"code": 0, "data": data, "total_datasets": 101})
+        return httpx.Response(200, json={"code": 0, "data": data, "total": 101})
 
     client = RAGFlowClient(
         base_url="http://ragflow.test",
@@ -86,6 +86,29 @@ async def test_list_datasets_without_id_has_a_hard_page_cap() -> None:
     with pytest.raises(RAGFlowProtocolError, match="exceeded 100 pages"):
         await client.list_datasets()
 
+    assert len(requests) == 100
+
+
+@pytest.mark.anyio
+async def test_list_datasets_accepts_reported_total_at_the_page_cap() -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = int(request.url.params["page"])
+        start = (page - 1) * 100
+        data = [{"id": f"dataset-{index}", "name": f"Dataset {index}"} for index in range(start, start + 100)]
+        return httpx.Response(200, json={"code": 0, "data": data, "total": 10_000})
+
+    client = RAGFlowClient(
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    datasets = await client.list_datasets()
+
+    assert len(datasets) == 10_000
     assert len(requests) == 100
 
 
