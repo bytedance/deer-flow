@@ -76,12 +76,18 @@ def get_agent_store() -> AgentStore:
     downgraded to node-local ``file``. Pinned by
     ``test_get_agent_store_resolves_db_backend_from_on_disk_config``.
     """
-    from deerflow.config.app_config import get_app_config
+    from deerflow.config.app_config import AppConfig, get_app_config
 
     try:
         config = get_app_config()
     except FileNotFoundError:
-        return _file_store()
+        # ``get_app_config()`` also loads optional nested config files. Only
+        # fall back when the main config itself is absent.
+        try:
+            AppConfig.resolve_config_path()
+        except FileNotFoundError:
+            return _file_store()
+        raise
     return make_agent_store(config)
 
 

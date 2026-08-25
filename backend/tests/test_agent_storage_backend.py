@@ -294,3 +294,23 @@ def test_get_agent_store_propagates_invalid_on_disk_config(tmp_path, monkeypatch
             get_agent_store()
     finally:
         reset_app_config()
+
+
+def test_get_agent_store_does_not_fallback_when_extensions_config_is_missing(tmp_path, monkeypatch):
+    """A missing nested config must not look like a missing main config."""
+    cfg_path = tmp_path / "config.yaml"
+    _write_min_config(
+        cfg_path,
+        {
+            "agent_storage": {"backend": "db"},
+            "database": {"backend": "sqlite", "sqlite_dir": str(tmp_path / "db")},
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(tmp_path / "missing-extensions.json"))
+    try:
+        reset_app_config()
+        with pytest.raises(FileNotFoundError, match="Extensions config"):
+            get_agent_store()
+    finally:
+        reset_app_config()
