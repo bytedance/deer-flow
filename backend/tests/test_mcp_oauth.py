@@ -86,6 +86,58 @@ def test_oauth_token_manager_fetches_and_caches_token(monkeypatch):
     assert post_calls[0]["data"]["grant_type"] == "client_credentials"
 
 
+def test_oauth_extra_token_params_cannot_override_grant_type(monkeypatch):
+    post_calls: list[dict[str, Any]] = []
+
+    def _client_factory(*args, **kwargs):
+        return _MockAsyncClient(
+            payload={
+                "access_token": "token-123",
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            },
+            post_calls=post_calls,
+            **kwargs,
+        )
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                        # A careless copy-paste from another OAuth config.
+                        "extra_token_params": {
+                            "grant_type": "password",
+                            "resource": "https://api.example.com",
+                        },
+                    },
+                }
+            }
+        }
+    )
+
+    manager = OAuthTokenManager.from_extensions_config(config)
+
+    asyncio.run(manager.get_authorization_header("secure-http"))
+
+    # The reserved grant_type must win over the operator-supplied param so
+    # the value sent to the token endpoint matches the branch logic that
+    # picked client_credentials below. Other extension params still pass
+    # through unchanged.
+    assert post_calls[0]["data"]["grant_type"] == "client_credentials"
+    assert post_calls[0]["data"]["resource"] == "https://api.example.com"
+
+
 def test_build_oauth_interceptor_injects_authorization_header(monkeypatch):
     post_calls: list[dict[str, Any]] = []
 

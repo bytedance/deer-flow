@@ -11,9 +11,13 @@
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
+   - `batch_task`, `batch_status`, `cancel_batch` - Explicit durable batch submission/progress/cancellation. Added only while the startup SQL-backed batch submitter is installed; large results stay in the owner-scoped API/JSONL export rather than the lead context.
+   - Direct `create_deerflow_agent` integrations receive cloned tools bound to their explicit `SubagentRuntime`. The bound `task` forwards that runtime's exact execution controller and optional caller-owned `AppConfig` into registry/model/tool resolution and `SubagentExecutor`; bound batch tools use the same config snapshot and resolve only that runtime's submitter before falling back to no other application's active worker. Keep the original tool name/schema unchanged so model contracts and user-tool deduplication remain stable.
 
 Scheduled-task runtime note:
 - Scheduled background runs set `context.non_interactive=true` and therefore exclude `ask_clarification` from the lead-agent tool list. This keeps scheduler-triggered runs from stalling on human confirmation mid-execution. `non_interactive` is an internal-only context key: it is merged from `body.context` only when the request authenticated as the process-internal user (the scheduler path), never from arbitrary HTTP/IM clients.
+
+Durable MCP task-management tools are added only while the process-local task submitter is installed. They expose bounded local task fields, including whether cancellation was requested, but never the remote handle. Cancellation records that request durably and returns immediately; the background service owns the remote call and retries. These remain ordinary business tools under an active skill's `allowed-tools` policy and must be declared explicitly.
 
 **Community tools** (`packages/harness/deerflow/community/`): optional integrations, each in its own subpackage and wired through `config.yaml`. Documented examples:
 - `tavily/` - Web search (5 results default) and web fetch (4KB limit)

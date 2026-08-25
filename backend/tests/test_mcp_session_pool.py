@@ -302,7 +302,8 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
     from pydantic import BaseModel, Field
 
     from deerflow.config.paths import Paths
-    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+    from deerflow.constants import MCP_TMP_SUBDIR
+    from deerflow.mcp.tools import _make_session_pool_tool
 
     class Args(BaseModel):
         url: str = Field(..., description="url")
@@ -336,7 +337,7 @@ async def test_session_pool_tool_pins_cwd_and_temp_env(tmp_path):
 
     session_connection = create_session.call_args.args[0]
     workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
-    tmp_dir = workspace / _MCP_TMP_SUBDIR
+    tmp_dir = workspace / MCP_TMP_SUBDIR
 
     assert session_connection["cwd"] == str(workspace)
     assert session_connection["env"]["KEEP"] == "1"
@@ -354,7 +355,8 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     from pydantic import BaseModel, Field
 
     from deerflow.config.paths import Paths
-    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+    from deerflow.constants import MCP_TMP_SUBDIR
+    from deerflow.mcp.tools import _make_session_pool_tool
 
     class Args(BaseModel):
         url: str = Field(..., description="url")
@@ -389,7 +391,7 @@ async def test_session_pool_tool_does_not_override_explicit_tmpdir(tmp_path):
     session_connection = create_session.call_args.args[0]
     # Operator-provided TMPDIR is preserved; TMP/TEMP still get our default.
     assert session_connection["env"]["TMPDIR"] == "/operator/tmp"
-    assert session_connection["env"]["TMP"].endswith(_MCP_TMP_SUBDIR)
+    assert session_connection["env"]["TMP"].endswith(MCP_TMP_SUBDIR)
 
 
 @pytest.mark.asyncio
@@ -399,7 +401,8 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
     from pydantic import BaseModel, Field
 
     from deerflow.config.paths import Paths
-    from deerflow.mcp.tools import _MCP_TMP_SUBDIR, _make_session_pool_tool
+    from deerflow.constants import MCP_TMP_SUBDIR
+    from deerflow.mcp.tools import _make_session_pool_tool
 
     class Args(BaseModel):
         url: str = Field(..., description="url")
@@ -434,7 +437,7 @@ async def test_session_pool_tool_does_not_override_explicit_cwd(tmp_path):
 
     session_connection = create_session.call_args.args[0]
     workspace = paths.sandbox_work_dir("thread-42", user_id="user-7")
-    tmp_dir = workspace / _MCP_TMP_SUBDIR
+    tmp_dir = workspace / MCP_TMP_SUBDIR
 
     assert session_connection["cwd"] == operator_cwd
     assert session_connection["env"]["TMPDIR"] == str(tmp_dir)

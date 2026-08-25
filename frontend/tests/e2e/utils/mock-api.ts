@@ -95,6 +95,7 @@ export type MockAPIOptions = {
   features?: {
     agentsApiEnabled?: boolean;
     browserControlEnabled?: boolean;
+    mcpTasksEnabled?: boolean;
   };
   runStreamHandler?: (route: Route) => Promise<void>;
 };
@@ -255,8 +256,16 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       run_id: string | null;
       scheduled_for: string;
       trigger: "scheduled" | "manual";
-      status: "queued" | "running" | "success" | "failed" | "skipped";
+      status:
+        | "queued"
+        | "launching"
+        | "running"
+        | "success"
+        | "failed"
+        | "skipped"
+        | "interrupted";
       error: string | null;
+      attempt_count: number;
       started_at: string | null;
       finished_at: string | null;
       created_at: string;
@@ -306,6 +315,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
+    mcpTasksEnabled: options?.features?.mcpTasksEnabled ?? true,
   };
 
   const upsertThread = (thread: MockThread) => {
@@ -537,6 +547,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
             trigger: "manual",
             status: "success",
             error: null,
+            attempt_count: 1,
             started_at: "2026-07-01T00:00:00+00:00",
             finished_at: "2026-07-01T00:00:00+00:00",
             created_at: "2026-07-01T00:00:00+00:00",
@@ -875,7 +886,25 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       if (sourceThread?.metadata?.deerflow_branch === true) {
         sourceTitle = sourceTitle?.replace(/^(Branch:\s*)+/i, "").trim();
       }
-      const title = body.title ?? sourceTitle;
+      const sourceSequence =
+        sourceThread?.metadata?.deerflow_branch === true &&
+        Number.isSafeInteger(sourceThread.metadata.branch_title_sequence) &&
+        Number(sourceThread.metadata.branch_title_sequence) >= 2 &&
+        Number(sourceThread.metadata.branch_title_sequence) <
+          Number.MAX_SAFE_INTEGER
+          ? Number(sourceThread.metadata.branch_title_sequence)
+          : undefined;
+      const sequence = sourceSequence === undefined ? 2 : sourceSequence + 1;
+      const sourceSuffix = sourceSequence ? ` (${sourceSequence})` : undefined;
+      const baseTitle =
+        sourceSuffix && sourceTitle?.endsWith(sourceSuffix)
+          ? sourceTitle.slice(0, -sourceSuffix.length).trimEnd()
+          : sourceTitle;
+      const title =
+        body.title ??
+        (baseTitle
+          ? `${baseTitle.slice(0, 256 - ` (${sequence})`.length).trimEnd()} (${sequence})`
+          : undefined);
 
       upsertThread({
         thread_id: MOCK_THREAD_ID_2,
@@ -883,6 +912,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         updated_at: new Date().toISOString(),
         metadata: {
           deerflow_branch: true,
+          ...(!body.title && title ? { branch_title_sequence: sequence } : {}),
           branch_parent_thread_id: sourceThreadId,
           branch_parent_message_id: body.message_id,
           branch_parent_checkpoint_id: "mock-checkpoint",
@@ -1172,6 +1202,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         body: JSON.stringify({
           agents_api: { enabled: featureFlags.agentsApiEnabled },
           browser_control: { enabled: featureFlags.browserControlEnabled },
+          mcp_tasks: { enabled: featureFlags.mcpTasksEnabled },
         }),
       });
     }

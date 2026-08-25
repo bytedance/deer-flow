@@ -1,11 +1,14 @@
 """Unified extensions configuration for MCP servers and skills."""
 
+import errno
 import json
 import logging
 import os
 import stat
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,6 +22,9 @@ from deerflow.constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+_non_atomic_fallback_targets: set[Path] = set()
+_non_atomic_fallback_targets_lock = threading.Lock()
 
 
 def normalize_mcp_transport_alias(data: Any) -> Any:
@@ -92,6 +98,40 @@ class McpTaskToolsetConfig(BaseModel):
         return value
 
 
+class McpUserScopedAuthConfig(BaseModel):
+    """Per-user credential injection for a shared MCP server (HTTP/SSE transports).
+
+    Maps DeerFlow user ids to credential header values so that one configured
+    MCP server can serve several users, each authenticated to the remote
+    service with their own credential. The credential for the authenticated
+    user is injected into every tool call by the built-in user-scoped auth
+    interceptor; the server entry's static ``headers`` are only used for
+    startup tool discovery.
+
+    Values support the same ``$ENV_VAR`` resolution as the rest of this file,
+    so raw secrets can stay in the process environment.
+    """
+
+    enabled: bool = Field(default=True, description="Whether user-scoped credential injection is enabled")
+    header: str = Field(default="Authorization", description="HTTP header to set with the resolved user credential")
+    users: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of DeerFlow user id to full credential header value (e.g. 'Bearer <token>'); values support $ENV_VAR references",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(
+        default="deny",
+        description=("Behavior when the calling user has no mapped credential (or the mapped value resolved empty): 'deny' fails the tool call with an actionable error; 'passthrough' forwards the request with the server's static headers"),
+    )
+    model_config = ConfigDict(extra="allow")
+
+    @field_validator("header")
+    @classmethod
+    def _validate_header_not_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("user_auth.header must not be empty")
+        return value
+
+
 class McpOAuthConfig(BaseModel):
     """OAuth configuration for an MCP server (HTTP/SSE transports)."""
 
@@ -126,6 +166,10 @@ class McpServerConfig(BaseModel):
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfig | None = Field(default=None, description="OAuth configuration (for sse or http type)")
+    user_auth: McpUserScopedAuthConfig | None = Field(
+        default=None,
+        description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
+    )
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
@@ -420,8 +464,47 @@ def _fsync_directory_best_effort(directory: Path) -> None:
             logger.debug("Could not close extensions config directory: %s", directory, exc_info=True)
 
 
+def _overwrite_in_place(target_path: Path, source_path: Path) -> None:
+    """Copy *source_path* onto *target_path* without unlinking the destination inode.
+
+    Fallback for destinations that cannot be replaced by rename — see
+    :func:`atomic_write_extensions_config`. This deliberately truncates the
+    live file, so a crash mid-write leaves it short; the caller only reaches
+    this path when the atomic route is impossible.
+    """
+    payload = source_path.read_bytes()
+    with open(target_path, "wb") as target_file:
+        target_file.write(payload)
+        target_file.flush()
+        os.fsync(target_file.fileno())
+
+
+def _log_non_atomic_fallback(target_path: Path) -> None:
+    """Warn once per target when a bind mount forces the unsafe write path."""
+    warning_key = target_path.resolve(strict=False)
+    with _non_atomic_fallback_targets_lock:
+        first_fallback = warning_key not in _non_atomic_fallback_targets
+        _non_atomic_fallback_targets.add(warning_key)
+
+    logger.log(
+        logging.WARNING if first_fallback else logging.DEBUG,
+        "Cannot atomically replace %s (it is a bind-mount point); overwriting in place. A crash during this write can leave the file truncated.",
+        target_path,
+    )
+
+
 def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
-    """Write extensions config without exposing a truncated or partial file."""
+    """Write extensions config without exposing a truncated or partial file.
+
+    Falls back to a non-atomic in-place overwrite when the destination is a
+    bind-mounted file: Docker mounts ``extensions_config.json`` as its own
+    mount point, and the kernel refuses to rename over a mount point with
+    ``EBUSY`` regardless of whether the mount is read-only. Without the
+    fallback every Gateway write to this file fails in the production
+    compose stack (MCP enable/disable, ``PUT``/``PATCH /api/mcp/config``,
+    skill updates), contradicting the documented promise that the file is
+    editable at runtime through the API.
+    """
     path = Path(path)
     target_path = path.resolve(strict=False) if path.is_symlink() else path
     target_path.parent.mkdir(parents=True, exist_ok=True)
@@ -449,7 +532,13 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
             temporary_file.flush()
             os.fsync(temporary_file.fileno())
 
-        os.replace(temporary_path, target_path)
+        try:
+            os.replace(temporary_path, target_path)
+        except OSError as exc:
+            if exc.errno != errno.EBUSY:
+                raise
+            _log_non_atomic_fallback(target_path)
+            _overwrite_in_place(target_path, temporary_path)
         _fsync_directory_best_effort(target_path.parent)
     finally:
         if temporary_path is not None:
@@ -495,6 +584,47 @@ def get_extensions_config() -> ExtensionsConfig:
 #: has no event-loop affinity, so writers running on different loops still
 #: exclude each other.
 extensions_config_write_lock = threading.Lock()
+
+
+@contextmanager
+def extensions_config_file_lock(path: Path) -> Iterator[None]:
+    """Exclude read-modify-write cycles in other Gateway processes.
+
+    ``extensions_config_write_lock`` serializes threads in this process. This
+    sidecar advisory lock extends the same critical section across worker
+    processes and separate embedded clients that share the config directory.
+    Callers must hold both locks around the complete read, merge, write, and
+    reload cycle; locking only the final atomic replace still permits lost
+    updates.
+    """
+    target_path = Path(path)
+    target_path = target_path.resolve(strict=False) if target_path.is_symlink() else target_path.absolute()
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target_path.parent / f".{target_path.name}.lock"
+
+    with open(lock_path, "a+b") as lock_file:
+        if os.name == "nt":
+            import msvcrt
+
+            lock_file.seek(0, os.SEEK_END)
+            if lock_file.tell() == 0:
+                lock_file.write(b"\0")
+                lock_file.flush()
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def reload_extensions_config(config_path: str | None = None) -> ExtensionsConfig:
