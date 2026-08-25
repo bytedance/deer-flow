@@ -6,13 +6,18 @@ import posixpath
 import re
 import shlex
 from collections.abc import Callable
+from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import tool
 
 from deerflow.agents.thread_state import ThreadDataState
-from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+from deerflow.authz.sandbox_authz import (
+    authorize_sandbox_execution,
+    authorize_sandbox_execution_async,
+    safe_app_config,
+)
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
@@ -33,6 +38,14 @@ from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+# Async tool wrappers authorize before dispatching their synchronous body via
+# ``asyncio.to_thread``. Context variables are copied into that worker, making
+# this a task-local, one-invocation handoff rather than shared runtime state.
+_ASYNC_SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
+    "deerflow_async_sandbox_authorization_checked",
+    default=False,
+)
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])(?<!:/)/(?:[^\s\"'`;&|<>()]+)")
 # A ``{...}`` block holding a single identifier-like placeholder (e.g. ``{id}``
@@ -1398,10 +1411,11 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Authorization is a live execution policy, not a lifetime property of a
     # sandbox id. Re-check before both reuse and acquisition so a role or policy
     # change takes effect on the next sandbox-backed tool call.
-    authorize_sandbox_execution(
-        context=runtime.context or {},
-        app_config=safe_app_config(),
-    )
+    if not _ASYNC_SANDBOX_AUTHORIZATION_CHECKED.get():
+        authorize_sandbox_execution(
+            context=runtime.context or {},
+            app_config=safe_app_config(),
+        )
 
     # Check if sandbox already exists in state
     # Discarding fork_restored is safe: after_agent short-circuits on the
@@ -1456,7 +1470,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     # Keep the async path aligned with the sync path: persisted sandbox state
     # must not bypass a newly-revoked sandbox:execute grant.
-    authorize_sandbox_execution(
+    await authorize_sandbox_execution_async(
         context=runtime.context or {},
         app_config=safe_app_config(),
     )
@@ -1509,7 +1523,11 @@ async def _run_sync_tool_after_async_sandbox_init(
     if func is None:
         return "Error: Tool implementation not available"
 
-    return await asyncio.to_thread(func, runtime, *args)
+    token = _ASYNC_SANDBOX_AUTHORIZATION_CHECKED.set(True)
+    try:
+        return await asyncio.to_thread(func, runtime, *args)
+    finally:
+        _ASYNC_SANDBOX_AUTHORIZATION_CHECKED.reset(token)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:

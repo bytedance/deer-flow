@@ -720,6 +720,48 @@ def test_ensure_sandbox_initialized_async_rechecks_authz_for_reused_sandbox(monk
     sandbox_provider.acquire_async.assert_not_called()
 
 
+def test_async_sandbox_tool_authorizes_once_via_async_provider(monkeypatch):
+    """One async tool invocation must make one async authorization decision."""
+    from deerflow.sandbox import tools as sandbox_tools
+
+    provider = MagicMock()
+    provider.authorize.return_value = AuthzDecision(allow=True)
+    provider.aauthorize = AsyncMock(return_value=AuthzDecision(allow=True))
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.resolve_authorization_provider",
+        lambda config: provider,
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+
+    sandbox = MagicMock()
+    sandbox.list_dir.return_value = []
+    sandbox_provider = MagicMock()
+    sandbox_provider.get.return_value = sandbox
+    monkeypatch.setattr(sandbox_tools, "get_sandbox_provider", lambda: sandbox_provider)
+    monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda runtime: False)
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "sbx-existing"}},
+        context={"thread_id": "t1", "user_id": "u1", "user_role": "user"},
+        config=None,
+    )
+
+    import asyncio
+
+    result = asyncio.run(
+        sandbox_tools.ls_tool.coroutine(
+            runtime=runtime,
+            description="list workspace",
+            path="/mnt/user-data/workspace",
+        )
+    )
+
+    assert result == "(empty)"
+    provider.aauthorize.assert_awaited_once()
+    provider.authorize.assert_not_called()
+
+
 def test_abefore_agent_deny_skips_acquisition(monkeypatch):
     """Async eager path deny: acquisition skipped, no run-level error.
 

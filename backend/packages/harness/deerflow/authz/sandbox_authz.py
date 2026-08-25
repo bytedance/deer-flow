@@ -1,7 +1,7 @@
 """Sandbox execution authorization gate.
 
-Checks ``authorize("sandbox", "execute")`` before sandbox acquisition so a
-role-scoped policy can deny sandbox execution entirely. On deny, a
+Checks ``authorize("sandbox", "execute")`` before sandbox use so a role-scoped
+policy can deny sandbox execution entirely. On deny, a
 :class:`~deerflow.sandbox.exceptions.SandboxAuthorizationError` propagates up
 through the tool's execution; the agent's tool-error handling converts it to a
 friendly ``ToolMessage`` ("sandbox not permitted for your role") rather than
@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from deerflow.authz.principal import build_principal_from_context
-from deerflow.authz.provider import AuthzDecision, AuthzRequest
+from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.config.app_config import AppConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -52,21 +52,19 @@ def safe_app_config() -> AppConfig | None:
 _SANDBOX_TARGET = "*"
 
 
-def authorize_sandbox_execution(*, context: Mapping[str, Any], app_config: AppConfig | None) -> None:
-    """Check ``authorize("sandbox", "execute")`` before sandbox acquisition.
-
-    ``app_config=None`` (unreadable config) is treated the same as
-    ``authorization.enabled: false`` — a no-op. On deny (or provider error
-    with ``fail_closed``), raises :class:`SandboxAuthorizationError`; on
-    provider error with fail-open, returns silently (legacy allow behavior).
-    """
+def _resolve_authorization_inputs(
+    *,
+    context: Mapping[str, Any],
+    app_config: AppConfig | None,
+) -> tuple[AuthorizationProvider, Any, Principal] | None:
+    """Resolve the enabled provider and principal shared by both call paths."""
     # Guard against Mock/SimpleNamespace app_config objects in tests that
     # don't carry a real AuthorizationConfig. getattr avoids AttributeError
     # and the ``is not True`` identity check avoids truthy Mock attributes
     # (mirrors filter_available_skills_by_authorization in skill_filter.py).
     authz_config = getattr(app_config, "authorization", None)
     if authz_config is None or getattr(authz_config, "enabled", None) is not True:
-        return
+        return None
 
     # Provider *resolution* failures follow the same fail_closed/fail_open
     # decision as authorize() errors — a raw ValueError here would otherwise
@@ -77,25 +75,67 @@ def authorize_sandbox_execution(*, context: Mapping[str, Any], app_config: AppCo
         logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
         if authz_config.fail_closed:
             raise SandboxAuthorizationError() from None
-        # fail-open: allow sandbox acquisition despite the resolution error.
-        return
+        # fail-open: allow sandbox use despite the resolution error.
+        return None
     if provider is None:
-        return
+        return None
 
     principal = build_principal_from_context(context, default_role=authz_config.default_role)
-    try:
-        decision = provider.authorize(AuthzRequest(principal=principal, resource="sandbox", action="execute", target=_SANDBOX_TARGET))
-        if not isinstance(decision, AuthzDecision):
-            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
-        if decision.allow:
-            return
-        # Explicit deny → block sandbox acquisition with a friendly error.
+    return provider, authz_config, principal
+
+
+def _authorization_request(principal: Principal) -> AuthzRequest:
+    return AuthzRequest(principal=principal, resource="sandbox", action="execute", target=_SANDBOX_TARGET)
+
+
+def _enforce_decision(decision: AuthzDecision, *, principal: Principal, method_name: str) -> None:
+    if not isinstance(decision, AuthzDecision):
+        raise TypeError(f"AuthorizationProvider.{method_name} must return AuthzDecision")
+    if not decision.allow:
         raise SandboxAuthorizationError(role=principal.role)
+
+
+def authorize_sandbox_execution(*, context: Mapping[str, Any], app_config: AppConfig | None) -> None:
+    """Synchronously check ``authorize("sandbox", "execute")`` before use.
+
+    ``app_config=None`` (unreadable config) is treated the same as
+    ``authorization.enabled: false`` — a no-op. On deny (or provider error
+    with ``fail_closed``), raises :class:`SandboxAuthorizationError`; on
+    provider error with fail-open, returns silently (legacy allow behavior).
+    """
+    inputs = _resolve_authorization_inputs(context=context, app_config=app_config)
+    if inputs is None:
+        return
+    provider, authz_config, principal = inputs
+
+    try:
+        decision = provider.authorize(_authorization_request(principal))
+        _enforce_decision(decision, principal=principal, method_name="authorize")
     except SandboxAuthorizationError:
         raise
     except Exception:
         logger.warning("Authorization provider failed while checking sandbox:execute", exc_info=True)
         if authz_config.fail_closed:
             raise SandboxAuthorizationError(role=principal.role)
-        # fail-open: allow sandbox acquisition despite the provider error.
+        # fail-open: allow sandbox use despite the provider error.
+        return
+
+
+async def authorize_sandbox_execution_async(*, context: Mapping[str, Any], app_config: AppConfig | None) -> None:
+    """Asynchronously check ``authorize("sandbox", "execute")`` before use."""
+    inputs = _resolve_authorization_inputs(context=context, app_config=app_config)
+    if inputs is None:
+        return
+    provider, authz_config, principal = inputs
+
+    try:
+        decision = await provider.aauthorize(_authorization_request(principal))
+        _enforce_decision(decision, principal=principal, method_name="aauthorize")
+    except SandboxAuthorizationError:
+        raise
+    except Exception:
+        logger.warning("Authorization provider failed while checking sandbox:execute", exc_info=True)
+        if authz_config.fail_closed:
+            raise SandboxAuthorizationError(role=principal.role)
+        # fail-open: allow sandbox use despite the provider error.
         return

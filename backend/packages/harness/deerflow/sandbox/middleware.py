@@ -12,7 +12,11 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
-from deerflow.authz.sandbox_authz import authorize_sandbox_execution, safe_app_config
+from deerflow.authz.sandbox_authz import (
+    authorize_sandbox_execution,
+    authorize_sandbox_execution_async,
+    safe_app_config,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -116,7 +120,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             # ``ensure_sandbox_initialized`` denies per-tool with the RFC §9
             # friendly message on the first sandbox-touching tool call.
             try:
-                authorize_sandbox_execution(
+                await authorize_sandbox_execution_async(
                     context=runtime.context or {},
                     app_config=safe_app_config(),
                 )
