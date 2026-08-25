@@ -886,7 +886,25 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       if (sourceThread?.metadata?.deerflow_branch === true) {
         sourceTitle = sourceTitle?.replace(/^(Branch:\s*)+/i, "").trim();
       }
-      const title = body.title ?? sourceTitle;
+      const sourceSequence =
+        sourceThread?.metadata?.deerflow_branch === true &&
+        Number.isSafeInteger(sourceThread.metadata.branch_title_sequence) &&
+        Number(sourceThread.metadata.branch_title_sequence) >= 2 &&
+        Number(sourceThread.metadata.branch_title_sequence) <
+          Number.MAX_SAFE_INTEGER
+          ? Number(sourceThread.metadata.branch_title_sequence)
+          : undefined;
+      const sequence = sourceSequence === undefined ? 2 : sourceSequence + 1;
+      const sourceSuffix = sourceSequence ? ` (${sourceSequence})` : undefined;
+      const baseTitle =
+        sourceSuffix && sourceTitle?.endsWith(sourceSuffix)
+          ? sourceTitle.slice(0, -sourceSuffix.length).trimEnd()
+          : sourceTitle;
+      const title =
+        body.title ??
+        (baseTitle
+          ? `${baseTitle.slice(0, 256 - ` (${sequence})`.length).trimEnd()} (${sequence})`
+          : undefined);
 
       upsertThread({
         thread_id: MOCK_THREAD_ID_2,
@@ -894,6 +912,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         updated_at: new Date().toISOString(),
         metadata: {
           deerflow_branch: true,
+          ...(!body.title && title ? { branch_title_sequence: sequence } : {}),
           branch_parent_thread_id: sourceThreadId,
           branch_parent_message_id: body.message_id,
           branch_parent_checkpoint_id: "mock-checkpoint",
