@@ -209,6 +209,33 @@ def test_slash_activation_normalizes_unscoped_portable_tools_but_not_command_pat
     assert blocked.status == "error"
 
 
+def test_slash_activation_preserves_scalar_custom_tool_names(tmp_path):
+    skill_dir = tmp_path / "custom-tool"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: custom-tool\ndescription: Custom tool\nallowed-tools: mcp__arxiv__SearchPapers\n---\nBody\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, category=SkillCategory.CUSTOM)
+    assert skill is not None
+    context = {}
+    write_slash_skill_source_path(
+        context,
+        skill.get_container_file_path(),
+        owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    middleware = _middleware([skill])
+    request = ModelRequestStub(
+        [NamedTool("mcp__arxiv__SearchPapers"), NamedTool("mcp__arxiv__search_papers")],
+        context=context,
+    )
+
+    filtered = middleware.wrap_model_call(request, lambda model_request: model_request)
+
+    assert _tool_names(filtered) == ["mcp__arxiv__SearchPapers"]
+
+
 @pytest.mark.parametrize("active_source", ["slash", "skill_context"])
 def test_restrictive_skill_explicitly_allows_task_schema_and_execution(active_source):
     skill = _skill("delegating", ["task"])

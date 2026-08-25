@@ -10,31 +10,49 @@ logger = logging.getLogger(__name__)
 
 # Valid POSIX environment-variable name.
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_ACRONYM_BOUNDARY_RE = re.compile(r"(?<=[A-Z])(?=[A-Z][a-z])")
-_CAMEL_CASE_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _PORTABLE_TOOL_ALIASES = {
+    "bash": "bash",
     "edit": "str_replace",
     "read": "read_file",
+    "webfetch": "web_fetch",
+    "websearch": "web_search",
     "write": "write_file",
 }
 
 
 def _normalize_unscoped_allowed_tool(tool_name: str) -> str:
-    """Map unscoped portable names to DeerFlow runtime tool names."""
+    """Map known portable aliases while preserving unknown runtime names."""
     if "(" in tool_name or ")" in tool_name:
         return tool_name
-    snake_case = _ACRONYM_BOUNDARY_RE.sub("_", tool_name)
-    snake_case = _CAMEL_CASE_BOUNDARY_RE.sub("_", snake_case).casefold()
-    return _PORTABLE_TOOL_ALIASES.get(snake_case, snake_case)
+    return _PORTABLE_TOOL_ALIASES.get(tool_name.casefold(), tool_name)
 
 
 def _split_portable_allowed_tools(raw: str, skill_file: Path) -> list[str]:
-    """Split a portable scalar while keeping parenthesized patterns intact."""
+    """Split a portable scalar while preserving quoted parenthesized patterns."""
     tokens: list[str] = []
     current: list[str] = []
     depth = 0
+    quote: str | None = None
+    escaped = False
 
     for char in raw:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if quote is not None:
+            current.append(char)
+            if char == quote:
+                quote = None
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            current.append(char)
+            continue
         if char.isspace() and depth == 0:
             if current:
                 tokens.append("".join(current))
@@ -48,6 +66,8 @@ def _split_portable_allowed_tools(raw: str, skill_file: Path) -> list[str]:
             depth -= 1
         current.append(char)
 
+    if quote is not None:
+        raise ValueError(f"allowed-tools in {skill_file} contains an unclosed quote")
     if depth:
         raise ValueError(f"allowed-tools in {skill_file} contains an unclosed parenthesized pattern")
     if current:
@@ -85,10 +105,11 @@ def parse_allowed_tools(raw: object, skill_file: Path) -> tuple[str, ...] | None
     """Parse the optional allowed-tools frontmatter field.
 
     Returns None when the field is omitted. Accepts the Agent Skills standard
-    space-separated string or a YAML sequence of strings. Unscoped client names
-    normalize to DeerFlow runtime names. Command-scoped patterns remain literal
-    because DeerFlow does not inspect tool arguments. Returns an empty tuple for
-    an explicit empty value. Raises ValueError for malformed values.
+    space-separated string or a YAML sequence of strings. Known portable client
+    aliases normalize to DeerFlow runtime names. Unknown names and
+    command-scoped patterns remain literal because DeerFlow does not inspect
+    tool arguments. Returns an empty tuple for an explicit empty value. Raises
+    ValueError for malformed values.
     """
     if raw is None:
         return None
