@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import Mapping
 from pathlib import Path
@@ -14,6 +15,23 @@ from deerflow.tools.tools import get_available_tools
 DATASET_ID_1 = "0123456789abcdef0123456789abcdef"
 DATASET_ID_2 = "fedcba9876543210fedcba9876543210"
 MISSING_DATASET_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+EMBEDDING_V2 = "text-embedding-v2@primary@Tongyi-Qianwen"
+EMBEDDING_V3 = "text-embedding-v3@primary@Tongyi-Qianwen"
+
+
+def _dataset(
+    dataset_id: str,
+    name: str,
+    *,
+    embedding_model: str = EMBEDDING_V3,
+    chunk_count: int = 1,
+) -> dict:
+    return {
+        "id": dataset_id,
+        "name": name,
+        "embedding_model": embedding_model,
+        "chunk_count": chunk_count,
+    }
 
 
 class FakeRAGFlowClient:
@@ -23,11 +41,15 @@ class FakeRAGFlowClient:
         datasets_by_id: Mapping[str, list[dict]] | None = None,
         all_datasets: list[dict] | None = None,
         retrieval: dict | None = None,
+        retrieval_by_dataset_ids: Mapping[tuple[str, ...], dict] | None = None,
+        retrieval_errors_by_dataset_ids: Mapping[tuple[str, ...], Exception] | None = None,
         error: Exception | None = None,
     ) -> None:
         self.datasets_by_id = dict(datasets_by_id or {})
         self.all_datasets = list(all_datasets or [])
         self.retrieval = retrieval or {"chunks": [], "doc_aggs": [], "total": 0}
+        self.retrieval_by_dataset_ids = dict(retrieval_by_dataset_ids or {})
+        self.retrieval_errors_by_dataset_ids = dict(retrieval_errors_by_dataset_ids or {})
         self.error = error
         self.list_calls: list[str | None] = []
         self.retrieve_calls: list[tuple[str, dict]] = []
@@ -44,6 +66,12 @@ class FakeRAGFlowClient:
         if self.error is not None:
             raise self.error
         self.retrieve_calls.append((query, kwargs))
+        dataset_ids = kwargs.get("dataset_ids")
+        key = tuple(dataset_ids) if isinstance(dataset_ids, list) else ()
+        if error := self.retrieval_errors_by_dataset_ids.get(key):
+            raise error
+        if key in self.retrieval_by_dataset_ids:
+            return self.retrieval_by_dataset_ids[key]
         return self.retrieval
 
 
@@ -58,12 +86,13 @@ def _config(
     api_key: str | None = "ragflow-secret",
     base_url: str = "http://ragflow.test",
     datasets: list[str] | None = None,
+    page_size: int = 8,
 ) -> SimpleNamespace:
     extra: dict[str, object] = {
         "base_url": base_url,
         "api_key": api_key,
         "timeout": 30,
-        "page_size": 8,
+        "page_size": page_size,
         "similarity_threshold": 0.2,
         "vector_similarity_weight": 0.3,
         "top_k": 256,
@@ -92,8 +121,8 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: FakeRAGFlowClient, *, config
 async def test_knowledge_search_resolves_configured_ids_to_current_names(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
         datasets_by_id={
-            DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}],
-            DATASET_ID_2: [{"id": DATASET_ID_2, "name": "Engineering"}],
+            DATASET_ID_1: [_dataset(DATASET_ID_1, "HR Policies")],
+            DATASET_ID_2: [_dataset(DATASET_ID_2, "Engineering")],
         },
         retrieval={
             "chunks": [
@@ -136,7 +165,7 @@ async def test_knowledge_search_resolves_configured_ids_to_current_names(monkeyp
 @pytest.mark.anyio
 async def test_knowledge_search_uses_id_filter_and_survives_dataset_rename(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
-        datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "Renamed Policies"}]},
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Renamed Policies")]},
         retrieval={"chunks": [{"dataset_id": DATASET_ID_1, "document_keyword": "policy.pdf", "content": "Current policy."}]},
     )
     _install(monkeypatch, fake)
@@ -175,7 +204,7 @@ async def test_missing_bound_dataset_error_does_not_expose_configured_id(monkeyp
 
 @pytest.mark.anyio
 async def test_mismatched_id_filtered_response_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_2, "name": "Wrong dataset"}]})
+    fake = FakeRAGFlowClient(datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_2, "Wrong dataset")]})
     _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1]))
 
     result = await ragflow_tools.knowledge_search("leave")
@@ -188,8 +217,8 @@ async def test_mismatched_id_filtered_response_returns_operator_guidance(monkeyp
 async def test_missing_dataset_binding_lists_all_and_passes_every_id(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
         all_datasets=[
-            {"id": DATASET_ID_1, "name": "HR Policies"},
-            {"id": DATASET_ID_2, "name": "Engineering"},
+            _dataset(DATASET_ID_1, "HR Policies"),
+            _dataset(DATASET_ID_2, "Engineering"),
         ],
         retrieval={"chunks": [{"dataset_id": DATASET_ID_2, "document_keyword": "guide.pdf", "content": "Build guide."}]},
     )
@@ -202,6 +231,140 @@ async def test_missing_dataset_binding_lists_all_and_passes_every_id(monkeypatch
     assert "Engineering / guide.pdf" in result
     assert DATASET_ID_1 not in result
     assert DATASET_ID_2 not in result
+
+
+@pytest.mark.anyio
+async def test_mixed_embedding_models_are_retrieved_in_parallel_groups_and_rank_interleaved(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        datasets_by_id={
+            DATASET_ID_1: [_dataset(DATASET_ID_1, "Legacy", embedding_model=EMBEDDING_V2)],
+            DATASET_ID_2: [_dataset(DATASET_ID_2, "Current", embedding_model=EMBEDDING_V3)],
+        },
+        retrieval_by_dataset_ids={
+            (DATASET_ID_1,): {
+                "chunks": [
+                    {"dataset_id": DATASET_ID_1, "document_id": "legacy-1", "document_keyword": "legacy-1.txt", "content": "Legacy rank one.", "similarity": 0.41},
+                    {"dataset_id": DATASET_ID_1, "document_id": "legacy-2", "document_keyword": "legacy-2.txt", "content": "Legacy rank two.", "similarity": 0.99},
+                ],
+                "doc_aggs": [
+                    {"doc_id": "legacy-1", "doc_name": "legacy-1.txt", "count": 1},
+                    {"doc_id": "legacy-2", "doc_name": "legacy-2.txt", "count": 1},
+                ],
+                "total": 2,
+            },
+            (DATASET_ID_2,): {
+                "chunks": [
+                    {"dataset_id": DATASET_ID_2, "document_id": "current-1", "document_keyword": "current-1.txt", "content": "Current rank one.", "similarity": 0.87},
+                    {"dataset_id": DATASET_ID_2, "document_id": "current-2", "document_keyword": "current-2.txt", "content": "Current rank two.", "similarity": 0.86},
+                ],
+                "doc_aggs": [
+                    {"doc_id": "current-1", "doc_name": "current-1.txt", "count": 1},
+                    {"doc_id": "current-2", "doc_name": "current-2.txt", "count": 1},
+                ],
+                "total": 2,
+            },
+        },
+    )
+    _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1, DATASET_ID_2], page_size=3))
+
+    result = await ragflow_tools.knowledge_search("policy")
+
+    assert [call[1]["dataset_ids"] for call in fake.retrieve_calls] == [[DATASET_ID_1], [DATASET_ID_2]]
+    assert result.index("Legacy rank one.") < result.index("Current rank one.") < result.index("Legacy rank two.")
+    assert "Current rank two." not in result
+    assert "current-2.txt (1 chunk)" not in result
+    assert DATASET_ID_1 not in result
+    assert DATASET_ID_2 not in result
+
+
+@pytest.mark.anyio
+async def test_all_dataset_scope_skips_empty_datasets_before_grouped_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        all_datasets=[
+            _dataset(DATASET_ID_1, "Empty legacy", embedding_model=EMBEDDING_V2, chunk_count=0),
+            _dataset(DATASET_ID_2, "Current", embedding_model=EMBEDDING_V3, chunk_count=4),
+        ],
+        retrieval_by_dataset_ids={(DATASET_ID_2,): {"chunks": [{"dataset_id": DATASET_ID_2, "document_keyword": "guide.txt", "content": "Searchable."}], "doc_aggs": [], "total": 1}},
+    )
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("searchable")
+
+    assert [call[1]["dataset_ids"] for call in fake.retrieve_calls] == [[DATASET_ID_2]]
+    assert "Searchable." in result
+
+
+@pytest.mark.anyio
+async def test_all_empty_dataset_scope_returns_no_content_without_retrieval(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        all_datasets=[
+            _dataset(DATASET_ID_1, "Empty legacy", embedding_model=EMBEDDING_V2, chunk_count=0),
+            _dataset(DATASET_ID_2, "Empty current", embedding_model=EMBEDDING_V3, chunk_count=0),
+        ]
+    )
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("anything")
+
+    assert result == "No relevant content found."
+    assert fake.retrieve_calls == []
+
+
+@pytest.mark.anyio
+async def test_grouped_retrieval_limits_concurrency_to_four(monkeypatch: pytest.MonkeyPatch) -> None:
+    class ConcurrencyTrackingClient(FakeRAGFlowClient):
+        def __init__(self) -> None:
+            super().__init__(all_datasets=[_dataset(f"dataset-{index}", f"Dataset {index}", embedding_model=f"embedding-{index}@provider") for index in range(5)])
+            self.active_retrievals = 0
+            self.max_active_retrievals = 0
+
+        async def retrieve(self, query: str, **kwargs: object) -> dict:
+            self.retrieve_calls.append((query, kwargs))
+            self.active_retrievals += 1
+            self.max_active_retrievals = max(self.max_active_retrievals, self.active_retrievals)
+            try:
+                await asyncio.sleep(0.05)
+                return {"chunks": [], "doc_aggs": [], "total": 0}
+            finally:
+                self.active_retrievals -= 1
+
+    fake = ConcurrencyTrackingClient()
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("anything")
+
+    assert result == "No relevant content found."
+    assert len(fake.retrieve_calls) == 5
+    assert fake.max_active_retrievals == 4
+
+
+@pytest.mark.anyio
+async def test_dataset_without_embedding_metadata_returns_protocol_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(all_datasets=[{"id": DATASET_ID_1, "name": "Broken", "chunk_count": 1}])
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("anything")
+
+    assert result == "Error: RAGFlow request failed: RAGFlow returned a dataset without embedding model metadata."
+    assert fake.retrieve_calls == []
+
+
+@pytest.mark.anyio
+async def test_group_failure_remains_strict_and_redacts_secret_and_dataset_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = FakeRAGFlowClient(
+        all_datasets=[
+            _dataset(DATASET_ID_1, "Legacy", embedding_model=EMBEDDING_V2),
+            _dataset(DATASET_ID_2, "Current", embedding_model=EMBEDDING_V3),
+        ],
+        retrieval_by_dataset_ids={(DATASET_ID_2,): {"chunks": [], "doc_aggs": [], "total": 0}},
+        retrieval_errors_by_dataset_ids={(DATASET_ID_1,): RAGFlowAPIError(f"dataset {DATASET_ID_1} rejected ragflow-secret", code=102)},
+    )
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    result = await ragflow_tools.knowledge_search("anything")
+
+    assert result == "Error: dataset [DATASET_ID] rejected [REDACTED]"
+    assert len(fake.retrieve_calls) == 2
 
 
 @pytest.mark.anyio
@@ -272,7 +435,7 @@ async def test_success_path_preserves_legitimate_uuid_and_md5_text(monkeypatch: 
     uuid = "123e4567-e89b-12d3-a456-426614174000"
     md5 = "d41d8cd98f00b204e9800998ecf8427e"
     fake = FakeRAGFlowClient(
-        datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}]},
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "HR Policies")]},
         retrieval={
             "chunks": [
                 {
@@ -295,7 +458,7 @@ async def test_success_path_preserves_legitimate_uuid_and_md5_text(monkeypatch: 
 @pytest.mark.anyio
 async def test_success_path_still_redacts_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = FakeRAGFlowClient(
-        datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}]},
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "HR Policies")]},
         retrieval={
             "chunks": [
                 {
@@ -370,7 +533,7 @@ async def test_empty_query_has_english_error(monkeypatch: pytest.MonkeyPatch) ->
 
 @pytest.mark.anyio
 async def test_empty_retrieval_has_explicit_english_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(datasets_by_id={DATASET_ID_1: [{"id": DATASET_ID_1, "name": "HR Policies"}]})
+    fake = FakeRAGFlowClient(datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "HR Policies")]})
     _install(monkeypatch, fake)
 
     result = await ragflow_tools.knowledge_search("nothing")

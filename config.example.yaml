@@ -679,9 +679,10 @@ tool_groups:
 tools:
   # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
   # `datasets` is optional. Omit it to list every tenant-visible dataset at
-  # search time and explicitly pass all discovered IDs to retrieval. Configure
-  # stable IDs to restrict scope or avoid mixing incompatible embedding models.
-  # Dataset IDs and catalog listing are never shown to the model.
+  # search time. Empty datasets are skipped; searchable datasets are grouped by
+  # embedding model and retrieved with at most four groups in parallel. Group
+  # ranks are interleaved under the global `page_size` limit. Configure stable
+  # IDs only to restrict scope. IDs and catalog listing never reach the model.
   # - name: knowledge_search
   #   group: knowledge
   #   use: deerflow.community.ragflow.tools:knowledge_search_tool

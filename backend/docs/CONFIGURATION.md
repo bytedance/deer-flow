@@ -254,14 +254,19 @@ it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
 does not validate their existence while loading configuration; on each search
 it verifies them with ID-filtered requests. If `datasets` is omitted, each
 search paginates through the tenant-visible dataset catalog. Both paths resolve
-current names for citation formatting and explicitly send a non-empty
-`dataset_ids` list to retrieval. A deleted or inaccessible configured dataset
-produces guidance to check `config.yaml`. Dataset IDs and catalog listing are
-not exposed to the Agent.
+current names, embedding models, and chunk counts. Empty datasets are ignored.
+The remaining datasets are grouped by the exact embedding-model identifier and
+each group is sent to RAGFlow with a non-empty `dataset_ids` list. At most four
+groups are retrieved concurrently. Because raw similarity scores from different
+embedding spaces are not globally comparable, DeerFlow preserves each group's
+RAGFlow ranking, interleaves equal rank positions, and applies `page_size` as a
+single global chunk limit. If any searchable group fails, the whole tool call
+fails rather than silently omitting part of the configured scope. A deleted or
+inaccessible configured dataset produces guidance to check `config.yaml`.
+Dataset IDs and catalog listing are not exposed to the Agent.
 
-Configure an allowlist when tenant datasets use incompatible embedding models,
-because RAGFlow can reject cross-dataset retrieval when models differ.
-`base_url` must not contain
+Use an allowlist to narrow the tenant-wide scope; compatible embedding models
+are no longer required across selected datasets. `base_url` must not contain
 embedded username or password information. For Docker or Kubernetes, it must be
 reachable from the Gateway container or Pod; `localhost` refers to that
 container or Pod, not the host machine.

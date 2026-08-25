@@ -6,6 +6,8 @@ import asyncio
 import logging
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
+from typing import Any
 
 from langchain_core.tools import StructuredTool
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
@@ -19,6 +21,16 @@ logger = logging.getLogger(__name__)
 
 _warned: set[str] = set()
 _RAGFLOW_UUID_PATTERN = re.compile(r"(?<![0-9A-Fa-f])(?:[0-9A-Fa-f]{32}|[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12})(?![0-9A-Fa-f])")
+_MAX_PARALLEL_RETRIEVAL_GROUPS = 4
+_NO_RELEVANT_CONTENT = "No relevant content found."
+
+
+@dataclass(frozen=True, slots=True)
+class _ResolvedDataset:
+    dataset_id: str
+    name: str
+    embedding_model: str
+    chunk_count: int | None
 
 
 class _RAGFlowRetrievalSettings(BaseModel):
@@ -133,12 +145,34 @@ def _tool_error(exc: Exception, settings: _RAGFlowRetrievalSettings) -> str:
     return "Error: An unexpected RAGFlow retrieval error occurred; try again later."
 
 
-def _current_dataset_name(datasets: list[dict], bound_id: str) -> str | None:
+def _resolved_dataset(dataset: Mapping[str, object], *, expected_id: str | None = None) -> _ResolvedDataset | None:
+    dataset_id = dataset.get("id")
+    if not isinstance(dataset_id, str) or not dataset_id.strip():
+        return None
+    clean_id = dataset_id.strip()
+    if expected_id is not None and clean_id != expected_id:
+        return None
+
+    embedding_model = dataset.get("embedding_model")
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        raise RAGFlowProtocolError("RAGFlow returned a dataset without embedding model metadata.")
+
+    name = dataset.get("name")
+    raw_chunk_count = dataset.get("chunk_count")
+    chunk_count = raw_chunk_count if isinstance(raw_chunk_count, int) and not isinstance(raw_chunk_count, bool) and raw_chunk_count >= 0 else None
+    return _ResolvedDataset(
+        dataset_id=clean_id,
+        name=str(name).strip() if name else "Unknown dataset",
+        embedding_model=embedding_model.strip(),
+        chunk_count=chunk_count,
+    )
+
+
+def _current_dataset(datasets: list[dict], bound_id: str) -> _ResolvedDataset | None:
     for dataset in datasets:
-        dataset_id = dataset.get("id")
-        name = dataset.get("name")
-        if dataset_id == bound_id:
-            return str(name).strip() if name else "Unknown dataset"
+        resolved = _resolved_dataset(dataset, expected_id=bound_id)
+        if resolved is not None:
+            return resolved
     return None
 
 
@@ -149,36 +183,130 @@ def _missing_dataset_error() -> str:
 async def _resolve_datasets(
     client: RAGFlowClient,
     settings: _RAGFlowRetrievalSettings,
-) -> tuple[list[str] | None, dict[str, str] | None, str | None]:
+) -> tuple[list[_ResolvedDataset] | None, str | None]:
     if settings.datasets is None:
         datasets = await client.list_datasets()
-        names_by_id: dict[str, str] = {}
+        resolved_by_id: dict[str, _ResolvedDataset] = {}
         for dataset in datasets:
-            dataset_id = dataset.get("id")
-            if not isinstance(dataset_id, str) or not dataset_id.strip():
+            resolved = _resolved_dataset(dataset)
+            if resolved is None:
                 continue
-            clean_id = dataset_id.strip()
-            name = dataset.get("name")
-            names_by_id.setdefault(clean_id, str(name).strip() if name else "Unknown dataset")
+            resolved_by_id.setdefault(resolved.dataset_id, resolved)
 
-        if not names_by_id:
+        if not resolved_by_id:
             return (
-                None,
                 None,
                 "Error: No accessible RAGFlow datasets were found; configure knowledge_search.datasets or add a dataset in RAGFlow.",
             )
-        return list(names_by_id), names_by_id, None
+        return list(resolved_by_id.values()), None
 
     batches = await asyncio.gather(*(client.list_datasets(dataset_id=dataset_id) for dataset_id in settings.datasets))
 
-    names_by_id: dict[str, str] = {}
+    resolved_datasets: list[_ResolvedDataset] = []
     for bound_id, datasets in zip(settings.datasets, batches, strict=True):
-        current_name = _current_dataset_name(datasets, bound_id)
-        if current_name is None:
-            return None, None, _missing_dataset_error()
-        names_by_id[bound_id] = current_name
+        resolved = _current_dataset(datasets, bound_id)
+        if resolved is None:
+            return None, _missing_dataset_error()
+        resolved_datasets.append(resolved)
 
-    return list(settings.datasets), names_by_id, None
+    return resolved_datasets, None
+
+
+def _group_searchable_datasets(datasets: list[_ResolvedDataset]) -> list[tuple[str, list[str]]]:
+    groups: dict[str, list[str]] = {}
+    for dataset in datasets:
+        if dataset.chunk_count == 0:
+            continue
+        groups.setdefault(dataset.embedding_model, []).append(dataset.dataset_id)
+    return sorted(groups.items())
+
+
+def _result_chunks(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    chunks = result.get("chunks")
+    if not isinstance(chunks, list):
+        return []
+    return [chunk for chunk in chunks if isinstance(chunk, Mapping)]
+
+
+def _result_document_aggregates(result: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    aggregates = result.get("doc_aggs")
+    if isinstance(aggregates, list):
+        return [aggregate for aggregate in aggregates if isinstance(aggregate, Mapping)]
+    if isinstance(aggregates, Mapping):
+        return [aggregate for aggregate in aggregates.values() if isinstance(aggregate, Mapping)]
+    return []
+
+
+def _merge_group_results(results: list[dict[str, Any]], *, page_size: int) -> dict[str, Any]:
+    chunk_groups = [_result_chunks(result) for result in results]
+    merged_chunks: list[Mapping[str, Any]] = []
+    max_group_size = max((len(chunks) for chunks in chunk_groups), default=0)
+    # Similarity scores from different embedding spaces are not globally
+    # calibrated. Preserve each provider-ranked list and interleave equal rank
+    # positions instead of comparing raw scores across models.
+    for rank in range(max_group_size):
+        for chunks in chunk_groups:
+            if rank < len(chunks):
+                merged_chunks.append(chunks[rank])
+                if len(merged_chunks) >= page_size:
+                    break
+        if len(merged_chunks) >= page_size:
+            break
+
+    selected_document_ids: list[str] = []
+    for chunk in merged_chunks:
+        document_id = chunk.get("document_id")
+        if document_id is not None:
+            clean_id = str(document_id)
+            if clean_id not in selected_document_ids:
+                selected_document_ids.append(clean_id)
+
+    aggregates_by_document_id: dict[str, Mapping[str, Any]] = {}
+    for result in results:
+        for aggregate in _result_document_aggregates(result):
+            document_id = aggregate.get("doc_id")
+            if document_id is not None:
+                aggregates_by_document_id.setdefault(str(document_id), aggregate)
+
+    total = 0
+    for result in results:
+        value = result.get("total")
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            total += value
+    return {
+        "chunks": merged_chunks,
+        "doc_aggs": [aggregates_by_document_id[document_id] for document_id in selected_document_ids if document_id in aggregates_by_document_id],
+        "total": total,
+    }
+
+
+async def _retrieve_dataset_groups(
+    client: RAGFlowClient,
+    settings: _RAGFlowRetrievalSettings,
+    query: str,
+    groups: list[tuple[str, list[str]]],
+) -> dict[str, Any]:
+    semaphore = asyncio.Semaphore(_MAX_PARALLEL_RETRIEVAL_GROUPS)
+
+    async def retrieve_group(dataset_ids: list[str]) -> dict[str, Any]:
+        async with semaphore:
+            return await client.retrieve(
+                query,
+                dataset_ids=dataset_ids,
+                page_size=settings.page_size,
+                similarity_threshold=settings.similarity_threshold,
+                vector_similarity_weight=settings.vector_similarity_weight,
+                top_k=settings.top_k,
+            )
+
+    results = await asyncio.gather(*(retrieve_group(dataset_ids) for _, dataset_ids in groups), return_exceptions=True)
+    successful_results: list[dict[str, Any]] = []
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        successful_results.append(result)
+
+    return _merge_group_results(successful_results, page_size=settings.page_size)
 
 
 async def knowledge_search(query: str) -> str:
@@ -193,20 +321,18 @@ async def knowledge_search(query: str) -> str:
 
     client = _build_client(settings)
     try:
-        dataset_ids, names_by_id, resolution_error = await _resolve_datasets(client, settings)
+        datasets, resolution_error = await _resolve_datasets(client, settings)
         if resolution_error is not None:
             return resolution_error
-        if not dataset_ids or names_by_id is None:  # Defensive; both resolution paths return a non-empty scope.
+        if not datasets:  # Defensive; both resolution paths return a non-empty scope.
             return "Error: No RAGFlow datasets could be resolved; check knowledge_search in config.yaml."
 
-        result = await client.retrieve(
-            query,
-            dataset_ids=dataset_ids,
-            page_size=settings.page_size,
-            similarity_threshold=settings.similarity_threshold,
-            vector_similarity_weight=settings.vector_similarity_weight,
-            top_k=settings.top_k,
-        )
+        groups = _group_searchable_datasets(datasets)
+        if not groups:
+            return _NO_RELEVANT_CONTENT
+
+        result = await _retrieve_dataset_groups(client, settings, query, groups)
+        names_by_id = {dataset.dataset_id: dataset.name for dataset in datasets}
         formatted = format_retrieval_result(
             result,
             dataset_names_by_id=names_by_id,

@@ -312,7 +312,9 @@ config: |
   tools:
     # Optional tenant-shared, read-only RAGFlow retrieval. Put RAGFLOW_API_KEY
     # in `secrets`. `datasets` is an optional stable-ID allowlist; omit it to
-    # search all tenant-visible datasets. The Agent cannot list or see the IDs.
+    # search all tenant-visible datasets. Empty datasets are skipped; remaining
+    # datasets are grouped by embedding model with up to four parallel retrieval
+    # requests and one global `page_size` limit. The Agent cannot see the IDs.
     # - name: knowledge_search
     #   group: knowledge
     #   use: deerflow.community.ragflow.tools:knowledge_search_tool
