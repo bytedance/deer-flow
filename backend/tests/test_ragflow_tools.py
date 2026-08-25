@@ -39,6 +39,7 @@ class FakeRAGFlowClient:
         self,
         *,
         datasets_by_id: Mapping[str, list[dict]] | None = None,
+        dataset_errors_by_id: Mapping[str, Exception] | None = None,
         all_datasets: list[dict] | None = None,
         retrieval: dict | None = None,
         retrieval_by_dataset_ids: Mapping[tuple[str, ...], dict] | None = None,
@@ -46,6 +47,7 @@ class FakeRAGFlowClient:
         error: Exception | None = None,
     ) -> None:
         self.datasets_by_id = dict(datasets_by_id or {})
+        self.dataset_errors_by_id = dict(dataset_errors_by_id or {})
         self.all_datasets = list(all_datasets or [])
         self.retrieval = retrieval or {"chunks": [], "doc_aggs": [], "total": 0}
         self.retrieval_by_dataset_ids = dict(retrieval_by_dataset_ids or {})
@@ -60,6 +62,8 @@ class FakeRAGFlowClient:
         self.list_calls.append(dataset_id)
         if dataset_id is None:
             return self.all_datasets
+        if error := self.dataset_errors_by_id.get(dataset_id):
+            raise error
         return self.datasets_by_id.get(dataset_id, [])
 
     async def retrieve(self, query: str, **kwargs: object) -> dict:
@@ -179,21 +183,45 @@ async def test_knowledge_search_uses_id_filter_and_survives_dataset_rename(monke
 
 
 @pytest.mark.anyio
-async def test_missing_bound_dataset_returns_operator_guidance(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient()
-    _install(monkeypatch, fake, config=_config(datasets=[MISSING_DATASET_ID]))
+async def test_missing_bound_dataset_api_error_returns_indexed_operator_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tenant_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    fake = FakeRAGFlowClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Existing")]},
+        dataset_errors_by_id={
+            MISSING_DATASET_ID: RAGFlowAPIError(
+                f"User '{tenant_id}' lacks permission for dataset '{MISSING_DATASET_ID}'",
+                code=102,
+            )
+        },
+    )
+    _install(monkeypatch, fake, config=_config(datasets=[DATASET_ID_1, MISSING_DATASET_ID]))
 
-    result = await ragflow_tools.knowledge_search("leave")
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
+        result = await ragflow_tools.knowledge_search("leave")
 
-    assert result == "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
+    assert result == "Error: The 2nd entry of knowledge_search.datasets was not found or is inaccessible; check config.yaml."
     assert MISSING_DATASET_ID not in result
-    assert fake.list_calls == [MISSING_DATASET_ID]
+    assert tenant_id not in result
+    assert "lacks permission" not in result
+    assert fake.list_calls == [DATASET_ID_1, MISSING_DATASET_ID]
     assert fake.retrieve_calls == []
+    assert MISSING_DATASET_ID in caplog.text
+    assert "code=102" in caplog.text
 
 
 @pytest.mark.anyio
 async def test_missing_bound_dataset_error_does_not_expose_configured_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient()
+    fake = FakeRAGFlowClient(
+        dataset_errors_by_id={
+            MISSING_DATASET_ID: RAGFlowAPIError(
+                f"User '{DATASET_ID_1}' lacks permission for dataset '{MISSING_DATASET_ID}'",
+                code=102,
+            )
+        }
+    )
     _install(monkeypatch, fake, config=_config(datasets=[MISSING_DATASET_ID]))
 
     result = await ragflow_tools.knowledge_search("leave")
@@ -209,7 +237,7 @@ async def test_mismatched_id_filtered_response_returns_operator_guidance(monkeyp
 
     result = await ragflow_tools.knowledge_search("leave")
 
-    assert result == "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
+    assert result == "Error: The 1st entry of knowledge_search.datasets was not found or is inaccessible; check config.yaml."
     assert fake.retrieve_calls == []
 
 
@@ -273,6 +301,7 @@ async def test_mixed_embedding_models_are_retrieved_in_parallel_groups_and_rank_
     assert result.index("Legacy rank one.") < result.index("Current rank one.") < result.index("Legacy rank two.")
     assert "Current rank two." not in result
     assert "current-2.txt (1 chunk)" not in result
+    assert "(score " not in result
     assert DATASET_ID_1 not in result
     assert DATASET_ID_2 not in result
 
@@ -292,6 +321,44 @@ async def test_all_dataset_scope_skips_empty_datasets_before_grouped_retrieval(m
 
     assert [call[1]["dataset_ids"] for call in fake.retrieve_calls] == [[DATASET_ID_2]]
     assert "Searchable." in result
+
+
+@pytest.mark.anyio
+async def test_all_dataset_scope_skips_empty_dataset_without_embedding_model_and_warns(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake = FakeRAGFlowClient(
+        all_datasets=[
+            _dataset(DATASET_ID_1, "Unconfigured empty", embedding_model="", chunk_count=0),
+            _dataset(DATASET_ID_2, "Current", embedding_model=EMBEDDING_V3, chunk_count=4),
+        ],
+        retrieval_by_dataset_ids={
+            (DATASET_ID_2,): {
+                "chunks": [
+                    {
+                        "dataset_id": DATASET_ID_2,
+                        "document_keyword": "guide.txt",
+                        "content": "Remaining dataset result.",
+                        "similarity": 0.75,
+                    }
+                ],
+                "doc_aggs": [],
+                "total": 1,
+            }
+        },
+    )
+    _install(monkeypatch, fake, config=_config(datasets=None))
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.ragflow.tools"):
+        result = await ragflow_tools.knowledge_search("searchable")
+
+    assert [call[1]["dataset_ids"] for call in fake.retrieve_calls] == [[DATASET_ID_2]]
+    assert "Remaining dataset result." in result
+    assert "(score 0.75)" in result
+    assert DATASET_ID_1 not in result
+    assert "Skipping empty RAGFlow dataset without embedding model metadata" in caplog.text
+    assert DATASET_ID_1 in caplog.text
 
 
 @pytest.mark.anyio
@@ -345,7 +412,7 @@ async def test_dataset_without_embedding_metadata_returns_protocol_error(monkeyp
 
     result = await ragflow_tools.knowledge_search("anything")
 
-    assert result == "Error: RAGFlow request failed: RAGFlow returned a dataset without embedding model metadata."
+    assert result == "Error: RAGFlow request failed: RAGFlow returned a searchable dataset without embedding model metadata."
     assert fake.retrieve_calls == []
 
 
@@ -410,7 +477,10 @@ async def test_missing_knowledge_search_config_returns_english_guidance(monkeypa
 
 @pytest.mark.anyio
 async def test_api_error_is_returned_as_readable_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake = FakeRAGFlowClient(error=RAGFlowAPIError("embedding models do not match", code=102))
+    fake = FakeRAGFlowClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Policies")]},
+        retrieval_errors_by_dataset_ids={(DATASET_ID_1,): RAGFlowAPIError("embedding models do not match", code=102)},
+    )
     _install(monkeypatch, fake)
 
     result = await ragflow_tools.knowledge_search("leave")
@@ -421,7 +491,10 @@ async def test_api_error_is_returned_as_readable_text(monkeypatch: pytest.Monkey
 @pytest.mark.anyio
 async def test_error_path_redacts_dataset_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
     dataset_id = "0123456789abcdef0123456789abcdef"
-    fake = FakeRAGFlowClient(error=RAGFlowAPIError(f"dataset {dataset_id} failed", code=102))
+    fake = FakeRAGFlowClient(
+        datasets_by_id={DATASET_ID_1: [_dataset(DATASET_ID_1, "Policies")]},
+        retrieval_errors_by_dataset_ids={(DATASET_ID_1,): RAGFlowAPIError(f"dataset {dataset_id} failed", code=102)},
+    )
     _install(monkeypatch, fake)
 
     result = await ragflow_tools.knowledge_search("leave")

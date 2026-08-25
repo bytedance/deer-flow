@@ -153,13 +153,19 @@ def _resolved_dataset(dataset: Mapping[str, object], *, expected_id: str | None 
     if expected_id is not None and clean_id != expected_id:
         return None
 
-    embedding_model = dataset.get("embedding_model")
-    if not isinstance(embedding_model, str) or not embedding_model.strip():
-        raise RAGFlowProtocolError("RAGFlow returned a dataset without embedding model metadata.")
-
     name = dataset.get("name")
     raw_chunk_count = dataset.get("chunk_count")
     chunk_count = raw_chunk_count if isinstance(raw_chunk_count, int) and not isinstance(raw_chunk_count, bool) and raw_chunk_count >= 0 else None
+    embedding_model = dataset.get("embedding_model")
+    if not isinstance(embedding_model, str) or not embedding_model.strip():
+        if chunk_count == 0:
+            warning_key = f"empty_embedding:{clean_id}"
+            if warning_key not in _warned:
+                _warned.add(warning_key)
+                logger.warning("Skipping empty RAGFlow dataset without embedding model metadata (dataset_id=%s)", clean_id)
+            embedding_model = ""
+        else:
+            raise RAGFlowProtocolError("RAGFlow returned a searchable dataset without embedding model metadata.")
     return _ResolvedDataset(
         dataset_id=clean_id,
         name=str(name).strip() if name else "Unknown dataset",
@@ -176,8 +182,25 @@ def _current_dataset(datasets: list[dict], bound_id: str) -> _ResolvedDataset | 
     return None
 
 
-def _missing_dataset_error() -> str:
-    return "Error: A configured RAGFlow dataset was not found or is inaccessible; check knowledge_search.datasets in config.yaml."
+def _ordinal(value: int) -> str:
+    if 10 <= value % 100 <= 20:
+        suffix = "th"
+    else:
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(value % 10, "th")
+    return f"{value}{suffix}"
+
+
+def _missing_dataset_error(position: int) -> str:
+    return f"Error: The {_ordinal(position)} entry of knowledge_search.datasets was not found or is inaccessible; check config.yaml."
+
+
+def _log_missing_dataset(*, position: int, dataset_id: str, code: object = None) -> None:
+    logger.warning(
+        "Configured RAGFlow dataset binding could not be resolved (position=%d, dataset_id=%s, code=%s)",
+        position,
+        dataset_id,
+        code,
+    )
 
 
 async def _resolve_datasets(
@@ -200,13 +223,17 @@ async def _resolve_datasets(
             )
         return list(resolved_by_id.values()), None
 
-    batches = await asyncio.gather(*(client.list_datasets(dataset_id=dataset_id) for dataset_id in settings.datasets))
-
     resolved_datasets: list[_ResolvedDataset] = []
-    for bound_id, datasets in zip(settings.datasets, batches, strict=True):
+    for position, bound_id in enumerate(settings.datasets, start=1):
+        try:
+            datasets = await client.list_datasets(dataset_id=bound_id)
+        except RAGFlowAPIError as exc:
+            _log_missing_dataset(position=position, dataset_id=bound_id, code=exc.code)
+            return None, _missing_dataset_error(position)
         resolved = _current_dataset(datasets, bound_id)
         if resolved is None:
-            return None, _missing_dataset_error()
+            _log_missing_dataset(position=position, dataset_id=bound_id)
+            return None, _missing_dataset_error(position)
         resolved_datasets.append(resolved)
 
     return resolved_datasets, None
@@ -241,13 +268,17 @@ def _merge_group_results(results: list[dict[str, Any]], *, page_size: int) -> di
     chunk_groups = [_result_chunks(result) for result in results]
     merged_chunks: list[Mapping[str, Any]] = []
     max_group_size = max((len(chunks) for chunks in chunk_groups), default=0)
+    hide_cross_group_scores = len(results) > 1
     # Similarity scores from different embedding spaces are not globally
     # calibrated. Preserve each provider-ranked list and interleave equal rank
     # positions instead of comparing raw scores across models.
     for rank in range(max_group_size):
         for chunks in chunk_groups:
             if rank < len(chunks):
-                merged_chunks.append(chunks[rank])
+                chunk = chunks[rank]
+                if hide_cross_group_scores and "similarity" in chunk:
+                    chunk = {key: value for key, value in chunk.items() if key != "similarity"}
+                merged_chunks.append(chunk)
                 if len(merged_chunks) >= page_size:
                     break
         if len(merged_chunks) >= page_size:
