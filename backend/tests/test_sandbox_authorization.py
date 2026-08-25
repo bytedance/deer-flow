@@ -1,7 +1,7 @@
 """Phase 3 sandbox-level authorization tests.
 
-Covers the ``authorize("sandbox", "execute")`` gate at the sandbox-acquisition
-entry point. When denied, a :class:`SandboxAuthorizationError` propagates up
+Covers the ``authorize("sandbox", "execute")`` gate at the sandbox-use entry
+point. When denied, a :class:`SandboxAuthorizationError` propagates up
 through the tool so the agent's tool-error handling returns a friendly message
 (RFC §9), rather than crashing the run.
 
@@ -235,6 +235,34 @@ def test_ensure_sandbox_initialized_denies_on_authz_reject(monkeypatch):
 
     with pytest.raises(SandboxAuthorizationError):
         sandbox_tools.ensure_sandbox_initialized(runtime)
+    sandbox_provider.acquire.assert_not_called()
+
+
+def test_ensure_sandbox_initialized_rechecks_authz_for_reused_sandbox(monkeypatch):
+    """A persisted sandbox id must not outlive a revoked execute grant."""
+    from deerflow.sandbox import tools as sandbox_tools
+
+    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": []}}})
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.resolve_authorization_provider",
+        lambda config: provider,
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+
+    sandbox_provider = MagicMock()
+    sandbox_provider.get.return_value = MagicMock()
+    monkeypatch.setattr(sandbox_tools, "get_sandbox_provider", lambda: sandbox_provider)
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "sbx-existing"}},
+        context={"thread_id": "t1", "user_id": "u1", "user_role": "user"},
+        config=None,
+    )
+
+    with pytest.raises(SandboxAuthorizationError):
+        sandbox_tools.ensure_sandbox_initialized(runtime)
+    sandbox_provider.get.assert_not_called()
     sandbox_provider.acquire.assert_not_called()
 
 
@@ -659,6 +687,36 @@ def test_ensure_sandbox_initialized_async_denies_on_authz_reject(monkeypatch):
 
     with pytest.raises(SandboxAuthorizationError):
         asyncio.run(sandbox_tools.ensure_sandbox_initialized_async(runtime))
+    sandbox_provider.acquire_async.assert_not_called()
+
+
+def test_ensure_sandbox_initialized_async_rechecks_authz_for_reused_sandbox(monkeypatch):
+    """Async tool calls also re-check a revoked grant before sandbox reuse."""
+    from deerflow.sandbox import tools as sandbox_tools
+
+    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": []}}})
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.resolve_authorization_provider",
+        lambda config: provider,
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+
+    sandbox_provider = MagicMock()
+    sandbox_provider.get.return_value = MagicMock()
+    sandbox_provider.acquire_async = AsyncMock(return_value="sbx-new")
+    monkeypatch.setattr(sandbox_tools, "get_sandbox_provider", lambda: sandbox_provider)
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "sbx-existing"}},
+        context={"thread_id": "t1", "user_id": "u1", "user_role": "user"},
+        config=None,
+    )
+    import asyncio
+
+    with pytest.raises(SandboxAuthorizationError):
+        asyncio.run(sandbox_tools.ensure_sandbox_initialized_async(runtime))
+    sandbox_provider.get.assert_not_called()
     sandbox_provider.acquire_async.assert_not_called()
 
 

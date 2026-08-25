@@ -1395,6 +1395,14 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
+    # Authorization is a live execution policy, not a lifetime property of a
+    # sandbox id. Re-check before both reuse and acquisition so a role or policy
+    # change takes effect on the next sandbox-backed tool call.
+    authorize_sandbox_execution(
+        context=runtime.context or {},
+        app_config=safe_app_config(),
+    )
+
     # Check if sandbox already exists in state
     # Discarding fork_restored is safe: after_agent short-circuits on the
     # still-wrapped state before the context-based release branch, so this
@@ -1416,15 +1424,6 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
-
-    # Phase 3: enforce sandbox:execute authorization before acquiring. On deny
-    # a SandboxAuthorizationError propagates up through the tool so the agent's
-    # tool-error handling returns a friendly message (RFC §9). Skipped on the
-    # reuse path above (already authorized when first acquired).
-    authorize_sandbox_execution(
-        context=runtime.context or {},
-        app_config=safe_app_config(),
-    )
 
     provider = get_sandbox_provider()
     sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
@@ -1455,6 +1454,13 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
     if runtime.state is None:
         raise SandboxRuntimeError("Tool runtime state not available")
 
+    # Keep the async path aligned with the sync path: persisted sandbox state
+    # must not bypass a newly-revoked sandbox:execute grant.
+    authorize_sandbox_execution(
+        context=runtime.context or {},
+        app_config=safe_app_config(),
+    )
+
     # Same discard as the sync path above: the reuse path never releases,
     # because after_agent short-circuits on the still-wrapped state first.
     sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
@@ -1472,13 +1478,6 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
-
-    # Phase 3: enforce sandbox:execute authorization before acquiring (async
-    # counterpart of the sync gate in ``ensure_sandbox_initialized``).
-    authorize_sandbox_execution(
-        context=runtime.context or {},
-        app_config=safe_app_config(),
-    )
 
     provider = get_sandbox_provider()
     sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
