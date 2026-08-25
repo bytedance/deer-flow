@@ -590,6 +590,8 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    outlineLabel: "对话章节",
+    outlineAttachmentFallback: "图片或文件消息",
   },
 
   // Chats
