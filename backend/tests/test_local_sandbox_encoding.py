@@ -125,12 +125,10 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "/mnt/user-data")
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
-    output = LocalSandbox(
-        "t",
-        [PathMapping(container_path="/mnt/user-data", local_path=r"C:\data")],
-    ).execute_command("echo hello")
+    output = LocalSandbox("t").execute_command("echo hello")
 
     assert output == "ok"
     assert calls == [
@@ -160,12 +158,10 @@ def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monke
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "/mnt/user-data")
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
-    output = LocalSandbox(
-        "t",
-        [PathMapping(container_path="/mnt/user-data", local_path=r"C:\data")],
-    ).execute_command("cat /mnt/user-data/workspace/input.txt")
+    output = LocalSandbox("t").execute_command("cat /mnt/user-data/workspace/input.txt")
 
     assert output == "ok"
     assert calls[0][1]["env"] == {
@@ -184,12 +180,10 @@ def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "")
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
-    output = LocalSandbox(
-        "t",
-        [PathMapping(container_path="/", local_path="C:\\")],
-    ).execute_command("echo hello")
+    output = LocalSandbox("t").execute_command("echo hello")
 
     assert output == "ok"
     assert calls[0][1]["env"] == {"PATH": r"C:\Program Files\Git\bin"}
