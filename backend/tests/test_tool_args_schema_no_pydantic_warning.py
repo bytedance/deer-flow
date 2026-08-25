@@ -69,13 +69,38 @@ _TOOL_CASES = [
 ]
 
 _SANDBOX_TOOL_CASES = [
-    (bash_tool, {"command": "ls"}, {"command"}),
-    (ls_tool, {"path": "/tmp"}, {"path"}),
-    (glob_tool, {"pattern": "*.py", "path": "/tmp"}, {"pattern", "path"}),
-    (grep_tool, {"pattern": "x", "path": "/tmp"}, {"pattern", "path"}),
-    (read_file_tool, {"path": "/tmp/x"}, {"path"}),
-    (write_file_tool, {"path": "/tmp/x", "content": "hi"}, {"path", "content"}),
-    (str_replace_tool, {"path": "/tmp/x", "old_str": "a", "new_str": "b"}, {"path", "old_str", "new_str"}),
+    (bash_tool, {"command": "ls"}, ("command",), ("command", "description")),
+    (ls_tool, {"path": "/tmp"}, ("path",), ("path", "description")),
+    (
+        glob_tool,
+        {"pattern": "*.py", "path": "/tmp"},
+        ("pattern", "path"),
+        ("pattern", "path", "description", "include_dirs", "max_results"),
+    ),
+    (
+        grep_tool,
+        {"pattern": "x", "path": "/tmp"},
+        ("pattern", "path"),
+        ("pattern", "path", "description", "glob", "literal", "case_sensitive", "max_results"),
+    ),
+    (
+        read_file_tool,
+        {"path": "/tmp/x"},
+        ("path",),
+        ("path", "description", "start_line", "end_line"),
+    ),
+    (
+        write_file_tool,
+        {"path": "/tmp/x", "content": "hi"},
+        ("path", "content"),
+        ("path", "content", "description", "append"),
+    ),
+    (
+        str_replace_tool,
+        {"path": "/tmp/x", "old_str": "a", "new_str": "b"},
+        ("path", "old_str", "new_str"),
+        ("path", "old_str", "new_str", "description", "replace_all"),
+    ),
 ]
 
 _SANDBOX_TOOL_FORWARDING_CASES = [
@@ -161,15 +186,16 @@ def test_write_file_append_is_discoverable_in_tool_schema() -> None:
 
 
 @pytest.mark.parametrize(
-    ("tool_obj", "operational_args", "required_args"),
+    ("tool_obj", "operational_args", "required_args", "property_args"),
     _SANDBOX_TOOL_CASES,
     ids=[case[0].name for case in _SANDBOX_TOOL_CASES],
 )
-def test_sandbox_tool_description_is_optional_but_discoverable(tool_obj, operational_args, required_args) -> None:
+def test_sandbox_tool_description_is_optional_but_discoverable(tool_obj, operational_args, required_args, property_args) -> None:
     """Provider tool calls may omit UI-only descriptions without blocking execution."""
     parameters = convert_to_openai_tool(tool_obj)["function"]["parameters"]
 
-    assert set(parameters["required"]) == required_args
+    assert parameters["required"] == list(required_args)
+    assert list(parameters["properties"]) == list(property_args)
     assert parameters["properties"]["description"]["description"]
 
     validated = tool_obj.tool_call_schema.model_validate(operational_args)
@@ -200,12 +226,20 @@ async def test_sandbox_tool_sync_async_signatures_and_forwarding_stay_aligned(
     assert await tool_obj.coroutine(runtime=runtime, **call_args) == "forwarded"
     run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_args)
 
+    run_sync_tool.reset_mock()
+    call_args_without_description = {key: value for key, value in call_args.items() if key != "description"}
+    forwarded_without_description = tuple("" if value == "description" else value for value in forwarded_args)
+
+    assert await tool_obj.coroutine(runtime=runtime, **call_args_without_description) == "forwarded"
+    run_sync_tool.assert_awaited_once_with(tool_obj.func, runtime, *forwarded_without_description)
+
 
 def test_task_tool_description_is_optional_but_discoverable() -> None:
     """Subagent execution may not depend on its UI-only progress label."""
     parameters = convert_to_openai_tool(task_tool)["function"]["parameters"]
 
-    assert set(parameters["required"]) == {"prompt", "subagent_type"}
+    assert parameters["required"] == ["prompt", "subagent_type"]
+    assert list(parameters["properties"]) == ["prompt", "subagent_type", "description"]
     assert parameters["properties"]["description"]["description"]
 
     validated = task_tool.tool_call_schema.model_validate({"prompt": "go", "subagent_type": "general-purpose"})
