@@ -1,4 +1,4 @@
-"""One-time migration: move legacy thread dirs, memory, agents, and skills into per-user layout.
+"""One-time migration: move legacy thread dirs, memory, agents, skills, and the global USER.md profile into per-user layout.
 
 Usage:
     PYTHONPATH=. python scripts/migrate_user_isolation.py [--dry-run] [--user-id USER_ID]
@@ -244,6 +244,44 @@ def migrate_memory(
         shutil.move(str(legacy_mem), str(dest))
 
 
+def migrate_user_profile(
+    paths: Paths,
+    user_id: str = "default",
+    *,
+    dry_run: bool = False,
+) -> None:
+    """Move the legacy global USER.md profile into per-user layout.
+
+    The profile became per-user (``{base_dir}/users/{user_id}/USER.md``) so
+    one user's prompt context can never leak into another's; without this
+    migration an existing single-user or auth-disabled installation would
+    see ``content: null`` after upgrading and later strand the old file
+    next to a newly created per-user one.
+
+    Args:
+        paths: Paths instance.
+        user_id: Target user to receive the legacy profile.
+        dry_run: If True, only log.
+    """
+    legacy_profile = paths.base_dir / "USER.md"
+    if not legacy_profile.exists():
+        logger.info("No legacy USER.md found — nothing to migrate.")
+        return
+
+    dest = paths.user_md_file(user_id)
+    if dest.exists():
+        legacy_backup = paths.base_dir / "USER.legacy.md"
+        logger.warning("Destination %s exists; renaming legacy to %s", dest, legacy_backup)
+        if not dry_run:
+            legacy_profile.rename(legacy_backup)
+        return
+
+    logger.info("Migrating USER.md -> %s", dest)
+    if not dry_run:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(legacy_profile), str(dest))
+
+
 def _build_owner_map_from_db(paths: Paths) -> dict[str, str]:
     """Query threads_meta table for thread_id -> user_id mapping.
 
@@ -274,7 +312,7 @@ def main() -> None:
         "--user-id",
         default="default",
         metavar="USER_ID",
-        help=("User ID to claim un-owned legacy data (global memory.json and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."),
+        help=("User ID to claim un-owned legacy data (global memory.json, USER.md profile, and legacy custom agents). Defaults to 'default'. In multi-user installs, set this to the operator account that should inherit those legacy artifacts."),
     )
     args = parser.parse_args()
 
@@ -290,6 +328,7 @@ def main() -> None:
 
     report = migrate_thread_dirs(paths, owner_map, dry_run=args.dry_run)
     migrate_memory(paths, user_id=args.user_id, dry_run=args.dry_run)
+    migrate_user_profile(paths, user_id=args.user_id, dry_run=args.dry_run)
     agent_report = migrate_agents(paths, user_id=args.user_id, dry_run=args.dry_run)
     skill_report = migrate_skills(paths, user_id=args.user_id, dry_run=args.dry_run)
 

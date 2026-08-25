@@ -467,12 +467,22 @@ def require_permission(
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Bind the wrapped signature so a request passed positionally
+            # (direct calls in unit tests, non-FastAPI callers) is honored
+            # instead of colliding with an injected keyword stub.
+            signature = inspect.signature(func)
+            try:
+                bound = signature.bind(*args, **kwargs)
+            except TypeError:
+                bound = None
             request = kwargs.get("request")
+            if request is None and bound is not None:
+                request = bound.arguments.get("request")
             if request is None:
                 # Unit tests may call decorated route handlers directly without
                 # constructing a FastAPI Request object. Inject a minimal stub
                 # when the wrapped function declares `request`.
-                if "request" in inspect.signature(func).parameters:
+                if "request" in signature.parameters:
                     kwargs["request"] = _make_test_request_stub()
                 else:
                     return await func(*args, **kwargs)
@@ -509,6 +519,8 @@ def require_permission(
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
                 thread_id = kwargs.get("thread_id")
+                if thread_id is None and bound is not None:
+                    thread_id = bound.arguments.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 
