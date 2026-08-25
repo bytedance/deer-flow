@@ -336,6 +336,12 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Changed
 
+- **subagents:** Delegated subagents can now discover thread uploads with
+  `list_uploaded_files`. The lead agent's current-run `uploaded_files` snapshot
+  propagates into the subagent's initial state, so the tool's current-run
+  exclusion keeps working inside delegated work; previously the tool was
+  withheld from subagents entirely because their fresh state could not feed
+  that exclusion. ([#4214])
 - **frontend performance:** Keep the public root and localized docs static;
   lazy-load closed workspace panels and editor/highlighter dependencies;
   incrementally derive streamed message state; bound streaming Markdown work;
@@ -1789,6 +1795,7 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4203]: https://github.com/bytedance/deer-flow/pull/4203
 [#4208]: https://github.com/bytedance/deer-flow/pull/4208
 [#4209]: https://github.com/bytedance/deer-flow/pull/4209
+[#4214]: https://github.com/bytedance/deer-flow/issues/4214
 [#4215]: https://github.com/bytedance/deer-flow/pull/4215
 [#4217]: https://github.com/bytedance/deer-flow/pull/4217
 [#4218]: https://github.com/bytedance/deer-flow/pull/4218

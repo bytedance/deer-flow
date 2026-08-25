@@ -454,6 +454,7 @@ class SubagentExecutor:
         parent_model: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
+        uploaded_files: list[dict[str, Any]] | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
         user_id: str | None = None,
@@ -479,6 +480,10 @@ class SubagentExecutor:
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
+            uploaded_files: Parent's current-run uploaded-file metadata
+                (``ThreadState.uploaded_files``). Propagated so the delegated
+                ``list_uploaded_files`` tool keeps its current-run exclusion
+                contract (#4214).
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
@@ -512,6 +517,7 @@ class SubagentExecutor:
             self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
+        self.uploaded_files = uploaded_files
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
@@ -893,6 +899,10 @@ class SubagentExecutor:
             state["sandbox"] = self.sandbox_state
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
+        # Current-run uploads propagate so ``list_uploaded_files`` excludes the
+        # files the lead agent already received via <current_uploads> (#4214).
+        if self.uploaded_files:
+            state["uploaded_files"] = list(self.uploaded_files)
 
         return state, final_tools, deferred_setup
 

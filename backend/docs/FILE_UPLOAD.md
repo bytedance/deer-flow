@@ -250,7 +250,11 @@ backend/.deer-flow/threads/
    - 在 Agent 请求前生成并注入 `<current_uploads>` 文件上下文
    - 历史上传由 `list_uploaded_files` 按需查询，不会每轮自动注入
 
-3. **Nginx 配置** (`nginx.conf`)
+3. **Subagent 委派** (`packages/harness/deerflow/subagents/executor.py`)
+   - `task` 会把主代理当前运行的 `uploaded_files` 快照传入子代理的初始状态，并为子代理绑定 `list_uploaded_files`（#4214）
+   - 子代理链不包含 UploadsMiddleware，因此该快照在委派期间不会被重置，"当前运行文件排除"语义保持一致；持久化批量任务（`batch_task`）暂不传播
+
+4. **Nginx 配置** (`nginx.conf`)
    - 路由上传请求到 Gateway API
    - 配置大文件上传支持
 

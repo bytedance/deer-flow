@@ -354,6 +354,7 @@ async def task_tool(
     # Extract parent context from runtime
     sandbox_state = None
     thread_data = None
+    uploaded_files = None
     thread_id = None
     parent_model = None
     trace_id = None
@@ -362,6 +363,7 @@ async def task_tool(
     if runtime is not None:
         sandbox_state = runtime.state.get("sandbox")
         thread_data = runtime.state.get("thread_data")
+        uploaded_files = runtime.state.get("uploaded_files")
         thread_id = runtime.context.get("thread_id") if runtime.context else None
         if thread_id is None:
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
@@ -421,14 +423,16 @@ async def task_tool(
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
 
     # Subagents should not have subagent tools enabled (prevent recursive nesting).
-    # Subagents also must not get list_uploaded_files — they have an independent
-    # ThreadState where runtime.state["uploaded_files"] is absent, so the
-    # current-run file exclusion would not work.
+    # Subagents DO get list_uploaded_files: the parent's current-run
+    # ``uploaded_files`` snapshot is propagated into the subagent's initial
+    # ThreadState (see #4214), so the tool's current-run exclusion keeps working
+    # inside delegated work instead of listing already-injected files as historical.
+    uploaded_files_state = uploaded_files if isinstance(uploaded_files, list) and uploaded_files else None
     available_tools_kwargs = {
         "model_name": effective_model,
         "groups": parent_tool_groups,
         "subagent_enabled": False,
-        "include_upload_tool": False,
+        "include_upload_tool": True,
     }
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
@@ -441,6 +445,7 @@ async def task_tool(
         "parent_model": parent_model,
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
+        "uploaded_files": uploaded_files_state,
         "thread_id": thread_id,
         "trace_id": trace_id,
         "user_id": user_id,

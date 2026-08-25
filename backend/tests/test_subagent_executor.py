@@ -529,6 +529,62 @@ class TestAgentConstruction:
         assert isinstance(messages[1], HumanMessage)
 
     @pytest.mark.anyio
+    async def test_build_initial_state_propagates_uploaded_files(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Parent current-run uploads land in the subagent's initial state (#4214)."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+
+        uploads = [{"filename": "report.pdf", "size": 12, "path": "/mnt/user-data/uploads/report.pdf", "extension": ".pdf"}]
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            uploaded_files=uploads,
+        )
+
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        # A defensive copy is stored so later parent-side mutation cannot leak in.
+        assert state["uploaded_files"] == uploads
+        assert state["uploaded_files"] is not uploads
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_omits_uploaded_files_when_absent(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Without propagated uploads the state key stays unset."""
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        state, _final_tools, _deferred_setup = await executor._build_initial_state("Do the task")
+
+        assert "uploaded_files" not in state
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_system_prompt_with_skills(
         self,
         classes,

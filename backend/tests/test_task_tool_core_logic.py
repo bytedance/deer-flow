@@ -726,7 +726,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     # by SubagentExecutor and injected as conversation items (Codex pattern).
     assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"
 
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=True)
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
@@ -840,7 +840,105 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
     # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=True)
+
+
+def test_task_tool_propagates_uploaded_files_to_subagent_executor(monkeypatch):
+    """Parent current-run uploads must reach the executor so list_uploaded_files exclusion works (#4214)."""
+    config = _make_subagent_config()
+    uploads = [{"filename": "report.pdf", "size": 12, "path": "/mnt/user-data/uploads/report.pdf", "extension": ".pdf"}]
+    captured: dict = {}
+
+    class CapturingExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {"workspace_path": "/tmp/workspace"},
+            "uploaded_files": uploads,
+        },
+        context={"thread_id": "thread-1"},
+        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1"}},
+    )
+    events = []
+    get_available_tools = MagicMock(return_value=["tool-a"])
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", CapturingExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="分析上传文件",
+        prompt="analyze the uploaded report",
+        subagent_type="general-purpose",
+        tool_call_id="tc-uploads",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["uploaded_files"] == uploads
+    # The upload tool is bound so the delegated agent can discover historical files.
+    assert get_available_tools.call_args.kwargs["include_upload_tool"] is True
+
+
+def test_task_tool_omits_uploaded_files_when_parent_state_absent(monkeypatch):
+    """No parent uploads -> executor receives None instead of an empty list."""
+    config = _make_subagent_config()
+    captured: dict = {}
+
+    class CapturingExecutor:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {"workspace_path": "/tmp/workspace"},
+        },
+        context={"thread_id": "thread-1"},
+        config={"metadata": {"model_name": "ark-model", "trace_id": "trace-1"}},
+    )
+    events = []
+    get_available_tools = MagicMock(return_value=["tool-a"])
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", CapturingExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
+
+    output = _run_task_tool(
+        runtime=runtime,
+        description="普通任务",
+        prompt="no files involved",
+        subagent_type="general-purpose",
+        tool_call_id="tc-no-uploads",
+    )
+
+    assert _task_tool_message(output).content == "Task Succeeded. Result: done"
+    assert captured["uploaded_files"] is None
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
@@ -890,7 +988,7 @@ def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
         model_name="vision-subagent-model",
         groups=None,
         subagent_enabled=False,
-        include_upload_tool=False,
+        include_upload_tool=True,
     )
 
 
@@ -1015,7 +1113,7 @@ def test_task_tool_no_tool_groups_passes_none(monkeypatch):
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: ok"
     # No tool_groups in metadata → groups=None (default behavior preserved)
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=True)
 
 
 def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
@@ -1059,7 +1157,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
         model_name="default-model",
         groups=None,
         subagent_enabled=False,
-        include_upload_tool=False,
+        include_upload_tool=True,
         app_config=fallback_app_config,
     )
 
