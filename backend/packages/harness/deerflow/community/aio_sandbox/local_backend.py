@@ -267,9 +267,7 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     # override when their host-gateway-ip is customized or IPv6.
     gateway = _docker_bridge_gateway_ip() or _DOCKER_BRIDGE_GATEWAY_FALLBACK
     logger.warning(
-        "Could not resolve sandbox host %r for the Docker bind; falling back to the "
-        "default bridge gateway %s. If the daemon's host-gateway-ip is customized or "
-        "IPv6, set DEER_FLOW_SANDBOX_BIND_HOST to that address explicitly.",
+        "Could not resolve sandbox host %r for the Docker bind; falling back to the default bridge gateway %s. If the daemon's host-gateway-ip is customized or IPv6, set DEER_FLOW_SANDBOX_BIND_HOST to that address explicitly.",
         host,
         gateway,
     )
