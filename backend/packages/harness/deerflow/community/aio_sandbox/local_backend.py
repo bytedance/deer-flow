@@ -141,6 +141,26 @@ def _is_loopback_sandbox_host(host: str) -> bool:
     return _normalize_sandbox_host(host) in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
 
 
+def _normalize_docker_bind_spec(value: str) -> str:
+    """Bracket bare IPv6 literals for Docker's ``-p`` publish syntax.
+
+    Docker requires the host part of a publish spec to be a bracketed IPv6
+    literal (``[fd00::1]:port:8080``), but operators writing the bind override
+    naturally give the bare address. Raw and already-bracketed IPv6 forms are
+    normalized; IPv4 addresses and hostnames pass through unchanged.
+    """
+    candidate = value.strip()
+    inner = candidate
+    if candidate.startswith("[") and candidate.endswith("]"):
+        inner = candidate[1:-1]
+    try:
+        if ipaddress.ip_address(inner).version == 6:
+            return f"[{inner}]"
+    except ValueError:
+        pass
+    return candidate
+
+
 # Fallback gateway of Docker's default bridge network (docker0). Used when the
 # daemon cannot be queried (see _docker_bridge_gateway_ip) so non-loopback
 # sandbox deployments still get a host-only bind instead of 0.0.0.0.
@@ -219,7 +239,7 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     """
     explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
     if explicit_bind is not None:
-        explicit_bind = explicit_bind.strip()
+        explicit_bind = _normalize_docker_bind_spec(explicit_bind)
         if explicit_bind:
             logger.debug("Docker sandbox bind: %s (explicit bind host override)", explicit_bind)
             return explicit_bind

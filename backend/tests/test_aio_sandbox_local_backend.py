@@ -171,6 +171,28 @@ def test_resolve_docker_bind_host_brackets_ipv6_host_gateway(monkeypatch):
     assert _resolve_docker_bind_host() == "[fd00::1]"
 
 
+def test_resolve_docker_bind_host_brackets_bare_ipv6_override(monkeypatch):
+    """A bare IPv6 literal in the override becomes a valid Docker publish host.
+
+    Docker's ``-p`` syntax requires bracketed IPv6 literals
+    (``[fd00::1]:port:8080``); operators writing the escape hatch naturally
+    give the bare address, so it must be normalized before use.
+    """
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "fd00::1")
+    assert _resolve_docker_bind_host() == "[fd00::1]"
+
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "[fd00::1]")
+    assert _resolve_docker_bind_host() == "[fd00::1]"
+
+    # IPv4 and hostnames pass through unchanged.
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "192.168.64.1")
+    assert _resolve_docker_bind_host() == "192.168.64.1"
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "0.0.0.0")
+    assert _resolve_docker_bind_host() == "0.0.0.0"
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "host.docker.internal")
+    assert _resolve_docker_bind_host() == "host.docker.internal"
+
+
 def test_resolve_docker_bind_host_uses_discovered_bridge_gateway_when_resolution_fails(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
@@ -260,6 +282,23 @@ def test_start_container_binds_local_docker_port_to_loopback_by_default(monkeypa
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert captured_cmd[captured_cmd.index("-p") + 1] == "127.0.0.1:18080:8080"
+
+
+def test_start_container_brackets_bare_ipv6_bind_override(monkeypatch):
+    """A bare IPv6 override reaches -p as a bracketed, valid publish host."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_BIND_HOST", "fd00::1")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("-p") + 1] == "[fd00::1]:18080:8080"
 
 
 def test_start_container_binds_dood_port_to_bridge_gateway(monkeypatch):
