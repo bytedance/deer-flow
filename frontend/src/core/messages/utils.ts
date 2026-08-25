@@ -145,6 +145,10 @@ export function getMessageGroups(
       // same message later. Keep that unresolved message in the processing
       // group so its visible text does not jump from an assistant bubble into
       // the steps panel when the tool call arrives (#4304).
+      // A reasoning-bearing answer is treated as terminal until tool calls
+      // actually arrive. If they do arrive on that same message, it is
+      // deliberately reclassified as processing so its tool activity remains
+      // visible with the text that introduced it.
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&

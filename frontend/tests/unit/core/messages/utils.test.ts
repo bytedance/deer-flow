@@ -305,6 +305,39 @@ test("keeps streaming reasoning and answer text out of the processing group", ()
   expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
 });
 
+test("moves a reasoning-bearing message into processing when it gains tool calls", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will verify that with a source.",
+      additional_kwargs: {
+        reasoning_content: "I should verify the answer before replying.",
+      },
+    },
+  ] as Message[];
+
+  expect(
+    getMessageGroups(messages, { isCurrentTurnLoading: true }).map(
+      (group) => group.type,
+    ),
+  ).toEqual(["human", "assistant"]);
+
+  messages[1] = {
+    ...messages[1],
+    tool_calls: [{ id: "call-1", name: "web_search", args: {} }],
+  } as Message;
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
 test("keeps content with empty reasoning metadata in the processing group while streaming", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Explain the result" },
