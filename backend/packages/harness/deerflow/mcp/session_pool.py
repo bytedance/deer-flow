@@ -76,6 +76,12 @@ class MCPSessionPool:
         # threading.Lock is not bound to any event loop, so it is safe to
         # acquire from both async paths and sync/worker-thread paths.
         self._lock = threading.Lock()
+        # Strong references to detached teardown reaper tasks. The event loop
+        # only keeps weak references to tasks, so an unheld reaper — and with
+        # it the owner it is awaiting, mid-__aexit__ — could be
+        # garbage-collected before teardown completes; the done callback keeps
+        # the set from growing without bound.
+        self._teardown_tasks: set[asyncio.Task[Any]] = set()
 
     # ------------------------------------------------------------------
     # Session owner task
@@ -149,10 +155,13 @@ class MCPSessionPool:
         # Phase 1: inspect/mutate the registry under the thread lock (no awaits).
         # Decide one of three outcomes atomically: return an existing session,
         # join an in-flight creation, or become the creator for this key.
-        # Each item: (loop, owner_task, close_event, cancel). ``cancel`` is True
-        # for in-flight creations, whose owner may be blocked inside
-        # ``initialize()`` where close_evt cannot wake it — it must be cancelled.
-        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event, bool]] = []
+        # Each item: (loop, owner_task, close_event, cancel, ready_future).
+        # ``cancel`` is True for in-flight creations, whose owner may be blocked
+        # inside ``initialize()`` where close_evt cannot wake it — it must be
+        # cancelled (guarded: never when the owner already failed and is
+        # unwinding in __aexit__). ``ready`` is the creation's future, used only
+        # for that guard.
+        evicted: list[tuple[asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event, bool, asyncio.Future[ClientSession] | None]] = []
         join: asyncio.Future[ClientSession] | None = None
         ready: asyncio.Future[ClientSession] | None = None
         close_evt: asyncio.Event | None = None
@@ -165,7 +174,7 @@ class MCPSessionPool:
                     return session
                 # Session belongs to a different/closed event loop – evict it.
                 self._entries.pop(key)
-                evicted.append((loop, ent_task, ent_close, False))
+                evicted.append((loop, ent_task, ent_close, False, None))
 
             inflight = self._inflight.get(key)
             if inflight is not None and inflight[0] is current_loop and not inflight[0].is_closed():
@@ -180,7 +189,7 @@ class MCPSessionPool:
                     # wake it), it must be cancelled. We then create a fresh
                     # session here.
                     self._inflight.pop(key)
-                    evicted.append((inflight[0], inflight[2], inflight[3], True))
+                    evicted.append((inflight[0], inflight[2], inflight[3], True, inflight[1]))
                 # Become the creator: publish an in-flight record before any
                 # await so concurrent callers join us instead of racing.
                 ready = current_loop.create_future()
@@ -192,20 +201,49 @@ class MCPSessionPool:
             while len(self._entries) >= self.MAX_SESSIONS:
                 oldest_key, (_, loop, ent_task, ent_close) = next(iter(self._entries.items()))
                 self._entries.pop(oldest_key)
-                evicted.append((loop, ent_task, ent_close, False))
+                evicted.append((loop, ent_task, ent_close, False, None))
 
-        # Phase 2: shut down evicted sessions/creations. Same-loop owners are
-        # awaited so they finish deterministically; foreign-loop owners are
-        # routed to their own loop. In every case the owner task — never this
-        # one — runs __aexit__. In-flight owners are cancelled (cancel=True) so a
-        # blocking initialize() cannot leave them hung.
-        for loop, ent_task, ent_close, cancel in evicted:
-            if loop is current_loop and not loop.is_closed():
-                await self._shutdown(ent_close, ent_task, cancel)
-            elif cancel:
-                await self._shutdown_entry(loop, ent_task, ent_close, cancel=True)
-            else:
-                self._signal_close(loop, ent_close)
+        # Phase 2: shut down evicted sessions/creations. Signal EVERY removed
+        # owner first — the signal loop contains no awaits, so it completes
+        # atomically and a cancellation during the teardown awaits below can
+        # never strand an owner that was already removed from the registries.
+        # Then await teardowns (same-loop deterministically; foreign-loop
+        # in-flight creations routed to their loop). In every case the owner
+        # task — never this one — runs __aexit__.
+        for loop, ent_task, ent_close, cancel, ent_ready in evicted:
+            self._signal_close(loop, ent_close)
+            if cancel:
+                self._cancel_owner(loop, ent_task, ent_ready)
+        try:
+            for loop, ent_task, ent_close, cancel, ent_ready in evicted:
+                if loop is current_loop and not loop.is_closed():
+                    await self._shutdown(ent_close, ent_task, cancel=False, ready=ent_ready)
+                elif cancel:
+                    await self._shutdown_entry(loop, ent_task, ent_close, cancel=False, ready=ent_ready)
+                # else: foreign-loop registered entry — already signalled above;
+                # its teardown completes on its own loop.
+        except BaseException:
+            # We may already be the creator for ``key``: the in-flight record
+            # and owner task were published under the lock *before* these
+            # awaits. A cancellation here (routine — both production call
+            # sites wrap get_session in asyncio.wait_for(session_init_timeout))
+            # would otherwise orphan that owner: it finishes initialize(),
+            # publishes ready, and blocks on close_evt forever — invisible to
+            # LRU eviction, which only scans _entries. Unwind exactly like the
+            # Phase-3 path. Every evicted owner was already signalled in the
+            # atomic loop above, so skipping the remaining teardown *awaits*
+            # (not signals) on unwind is safe: each victim still tears down in
+            # its own task.
+            if task is not None:
+                assert ready is not None and close_evt is not None
+                try:
+                    await self._shutdown(close_evt, task, cancel=True, ready=ready)
+                except BaseException:
+                    logger.debug("Owner teardown interrupted during eviction unwind", exc_info=True)
+                with self._lock:
+                    if self._inflight.get(key) == (current_loop, ready, task, close_evt):
+                        self._inflight.pop(key)
+            raise
 
         # Phase 2b: a concurrent creation for this key is already in progress on
         # this loop — share its result rather than create a duplicate session.
@@ -257,7 +295,7 @@ class MCPSessionPool:
                 self._inflight.pop(key)
                 self._entries[key] = (session, current_loop, task, close_evt)
         if not still_ours:
-            await self._shutdown(close_evt, task)
+            await self._shutdown(close_evt, task, ready=ready)
             raise asyncio.CancelledError("MCP session pool was closed while the session was being created")
         logger.info("Created persistent MCP session for %s/%s", server_name, scope_key)
         return session
@@ -281,25 +319,109 @@ class MCPSessionPool:
             # Loop was closed between the is_closed() check and now.
             pass
 
+    @staticmethod
+    def _owner_unwinding_after_failure(ready: asyncio.Future[ClientSession] | None) -> bool:
+        """True when the owner already failed and is running ``__aexit__``.
+
+        Cancelling such an owner would interrupt that in-task cleanup — the
+        same-task exit anyio requires — so callers must skip the cancel.
+        """
+        return ready is not None and ready.done() and not ready.cancelled() and ready.exception() is not None
+
+    @classmethod
+    def _cancel_owner(cls, loop: asyncio.AbstractEventLoop, task: asyncio.Task[Any], ready: asyncio.Future[ClientSession] | None = None) -> None:
+        """Thread-safe guarded cancel of an owner task on its owning loop.
+
+        The failure-state recheck runs INSIDE the callback that executes on the
+        owning loop, immediately before ``task.cancel()``: evaluating it on the
+        caller's loop first and queueing the cancel after opens a
+        time-of-check/time-of-use window in which the owner can fail, publish
+        the exception to ``ready``, and enter ``__aexit__`` — the already-queued
+        cancel would then interrupt that in-task cleanup. On the owning loop
+        the check and the cancel are atomic with respect to owner-task
+        progress (the owner cannot advance between two non-awaiting
+        statements), so an owner already unwinding after failure is never
+        cancelled.
+        """
+
+        def _guarded_cancel() -> None:
+            if cls._owner_unwinding_after_failure(ready):
+                return
+            task.cancel()
+
+        if loop.is_closed():
+            return
+        try:
+            loop.call_soon_threadsafe(_guarded_cancel)
+        except RuntimeError:
+            # Loop was closed between the is_closed() check and now.
+            pass
+
+    def _track_owner_teardown(self, task: asyncio.Task[Any]) -> None:
+        """Keep an owner's teardown observable after its awaiter was cancelled.
+
+        The awaiter unwinds, but the owner still has to finish ``__aexit__`` in
+        its own task; the reaper awaits that completion so exceptions are
+        retrieved and the teardown stays observable instead of dangling. The
+        reaper is strongly retained in ``_teardown_tasks`` until it finishes —
+        the loop only keeps weak task references, so an unheld reaper (and
+        transitively the owner mid-``__aexit__``) could be garbage-collected
+        before the exit completes (#5008 review).
+        """
+
+        async def _reap() -> None:
+            try:
+                await task
+            except BaseException:
+                logger.debug("Owner task ended after caller cancellation", exc_info=True)
+
+        try:
+            reaper = asyncio.get_running_loop().create_task(_reap(), name=f"mcp-session-owner-reap:{task.get_name()}")
+        except RuntimeError:
+            return
+        self._teardown_tasks.add(reaper)
+        reaper.add_done_callback(self._teardown_tasks.discard)
+
     async def _shutdown(
         self,
         close_evt: asyncio.Event,
         task: asyncio.Task[Any],
         cancel: bool = False,
+        ready: asyncio.Future[ClientSession] | None = None,
     ) -> None:
         """Signal an owner task and wait for it to finish (runs on its loop).
 
         ``cancel=True`` is used for in-flight creations: the owner task may be
         blocked inside ``initialize()`` where ``close_evt`` cannot wake it, so it
-        must be cancelled. Its ``finally`` block still runs ``__aexit__`` in its
-        own task, satisfying anyio's same-task cancel-scope requirement.
+        must be cancelled — unless it already failed and is unwinding in its
+        ``finally`` block (``ready`` carries an exception), where a cancel would
+        interrupt the in-task ``__aexit__``. The exit always runs in the owner
+        task itself, satisfying anyio's same-task cancel-scope requirement.
+
+        The await is shielded: a cancellation of *this* awaiting task
+        propagates immediately without cancelling the owner, whose teardown
+        keeps running under a tracked reaper task. The victim's own
+        cancellation or exception is swallowed and logged as before.
         """
         close_evt.set()
-        if cancel:
+        if cancel and not self._owner_unwinding_after_failure(ready):
             task.cancel()
+        caller = asyncio.current_task()
+        caller_cancels = caller.cancelling() if caller is not None else 0
         try:
-            await task
-        except (Exception, asyncio.CancelledError):
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # ``shield`` surfaces the victim's cancellation (we cancelled it
+            # above, or someone else did). But if the count rose, the
+            # cancellation belongs to US — the awaiting task was cancelled
+            # while waiting (e.g. a get_session parked in eviction teardown
+            # under asyncio.wait_for). Propagate it while keeping the owner's
+            # teardown tracked so __aexit__ still completes.
+            if caller is not None and caller.cancelling() > caller_cancels:
+                self._track_owner_teardown(task)
+                raise
+            logger.debug("Owner task cancelled during shutdown")
+        except Exception:
             logger.debug("Owner task ended during shutdown", exc_info=True)
 
     async def _shutdown_entry(
@@ -308,15 +430,16 @@ class MCPSessionPool:
         task: asyncio.Task[Any],
         close_evt: asyncio.Event,
         cancel: bool = False,
+        ready: asyncio.Future[ClientSession] | None = None,
     ) -> None:
         """Shut down one entry, routing the close to its owning loop."""
         if loop.is_closed():
             return
         current_loop = asyncio.get_running_loop()
         if loop is current_loop:
-            await self._shutdown(close_evt, task, cancel)
+            await self._shutdown(close_evt, task, cancel, ready=ready)
         elif loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel), loop)
+            future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel, ready=ready), loop)
             try:
                 await asyncio.wrap_future(future)
             except Exception:
@@ -334,10 +457,31 @@ class MCPSessionPool:
             logger.warning("Owning loop for MCP session is idle; signalling close best-effort. Session may leak until the loop runs again.")
             self._signal_close(loop, close_evt)
             if cancel:
-                try:
-                    loop.call_soon_threadsafe(task.cancel)
-                except RuntimeError:
-                    pass
+                self._cancel_owner(loop, task, ready)
+
+    async def _close_owners(
+        self,
+        entries: list[tuple[ClientSession, asyncio.AbstractEventLoop, asyncio.Task[Any], asyncio.Event]],
+        inflight: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[ClientSession], asyncio.Task[Any], asyncio.Event]],
+    ) -> None:
+        """Shut down already-removed owners: signal all first, then await.
+
+        Signalling every removed owner BEFORE awaiting any teardown guarantees
+        a cancellation of the close call can never strand an owner that is no
+        longer reachable through the registries: each has its close event (and,
+        for in-flight creations, its guarded cancel) in hand and tears down in
+        its own task regardless. The awaiting phase adds best-effort
+        determinism on top; skipping the remaining awaits on unwind is safe.
+        """
+        for _session, loop, ent_task, ent_close in entries:
+            self._signal_close(loop, ent_close)
+        for loop, ent_ready, ent_task, ent_close in inflight:
+            self._signal_close(loop, ent_close)
+            self._cancel_owner(loop, ent_task, ent_ready)
+        for _session, loop, ent_task, ent_close in entries:
+            await self._shutdown_entry(loop, ent_task, ent_close)
+        for loop, ent_ready, ent_task, ent_close in inflight:
+            await self._shutdown_entry(loop, ent_task, ent_close, ready=ent_ready)
 
     async def close_scope(self, scope_key: str) -> None:
         """Close all sessions for a given scope (e.g. thread_id)."""
@@ -346,10 +490,7 @@ class MCPSessionPool:
             entries = [(self._entries.pop(k)) for k in keys]
             inflight_keys = [k for k in self._inflight if k[1] == scope_key]
             inflight = [self._inflight.pop(k) for k in inflight_keys]
-        for _session, loop, task, close_evt in entries:
-            await self._shutdown_entry(loop, task, close_evt)
-        for loop, _ready, task, close_evt in inflight:
-            await self._shutdown_entry(loop, task, close_evt, cancel=True)
+        await self._close_owners(entries, inflight)
 
     async def close_session(self, server_name: str, scope_key: str) -> None:
         """Close one exact server/scope session so a retry reconnects cleanly."""
@@ -357,12 +498,7 @@ class MCPSessionPool:
         with self._lock:
             entry = self._entries.pop(key, None)
             inflight = self._inflight.pop(key, None)
-        if entry is not None:
-            _session, loop, task, close_evt = entry
-            await self._shutdown_entry(loop, task, close_evt)
-        if inflight is not None:
-            loop, _ready, task, close_evt = inflight
-            await self._shutdown_entry(loop, task, close_evt, cancel=True)
+        await self._close_owners([entry] if entry is not None else [], [inflight] if inflight is not None else [])
 
     async def close_server(self, server_name: str) -> None:
         """Close all sessions for a given server."""
@@ -371,10 +507,7 @@ class MCPSessionPool:
             entries = [(self._entries.pop(k)) for k in keys]
             inflight_keys = [k for k in self._inflight if k[0] == server_name]
             inflight = [self._inflight.pop(k) for k in inflight_keys]
-        for _session, loop, task, close_evt in entries:
-            await self._shutdown_entry(loop, task, close_evt)
-        for loop, _ready, task, close_evt in inflight:
-            await self._shutdown_entry(loop, task, close_evt, cancel=True)
+        await self._close_owners(entries, inflight)
 
     async def close_all(self) -> None:
         """Close every managed session."""
@@ -383,10 +516,7 @@ class MCPSessionPool:
             self._entries.clear()
             inflight = list(self._inflight.values())
             self._inflight.clear()
-        for _session, loop, task, close_evt in entries:
-            await self._shutdown_entry(loop, task, close_evt)
-        for loop, _ready, task, close_evt in inflight:
-            await self._shutdown_entry(loop, task, close_evt, cancel=True)
+        await self._close_owners(entries, inflight)
 
     def close_all_sync(self) -> None:
         """Close all sessions on their owning event loops (synchronous).
@@ -414,14 +544,17 @@ class MCPSessionPool:
             self._inflight.clear()
 
         # Entries are initialized (gentle close_evt path). In-flight creations
-        # may be blocked mid-init, so they are cancelled to unblock teardown.
-        owners = [(loop, task, close_evt, False) for _s, loop, task, close_evt in entries]
-        owners += [(loop, task, close_evt, True) for loop, _r, task, close_evt in inflight]
+        # may be blocked mid-init, so they are cancelled to unblock teardown —
+        # but every guard below re-checks on the owning loop (or atomically on
+        # this thread for the current-loop branch), so an owner that has since
+        # failed and is unwinding in __aexit__ is never cancelled.
+        owners = [(loop, task, close_evt, False, None) for _s, loop, task, close_evt in entries]
+        owners += [(loop, task, ent_close, True, ent_ready) for loop, ent_ready, task, ent_close in inflight]
         try:
             current_running_loop = asyncio.get_running_loop()
         except RuntimeError:
             current_running_loop = None
-        for loop, task, close_evt, cancel in owners:
+        for loop, task, close_evt, cancel, ent_ready in owners:
             if loop.is_closed():
                 continue
             try:
@@ -430,16 +563,18 @@ class MCPSessionPool:
                     # waiting on run_coroutine_threadsafe(...).result() would
                     # deadlock until timeout. Signal the owner task directly and
                     # let it finish once this synchronous call returns control to
-                    # the running loop.
+                    # the running loop. Same-thread, no yield between the guard
+                    # and the cancel, so the check is atomic here.
                     close_evt.set()
-                    if cancel:
+                    if cancel and not self._owner_unwinding_after_failure(ent_ready):
                         task.cancel()
                 elif loop.is_running():
-                    # Schedule the shutdown on the owning loop from this thread.
-                    future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel), loop)
+                    # Schedule the shutdown on the owning loop from this thread;
+                    # _shutdown applies the failure guard on that loop.
+                    future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel, ready=ent_ready), loop)
                     future.result(timeout=self.SESSION_CLOSE_TIMEOUT)
                 else:
-                    loop.run_until_complete(self._shutdown(close_evt, task, cancel))
+                    loop.run_until_complete(self._shutdown(close_evt, task, cancel, ready=ent_ready))
             except Exception:
                 logger.debug("Error closing MCP session during sync close", exc_info=True)
 

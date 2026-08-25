@@ -1,9 +1,11 @@
 """Tests for the MCP persistent-session pool."""
 
 import asyncio
+import gc
 import logging
 import stat
 import threading
+import weakref
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1364,6 +1366,405 @@ async def test_get_session_cancelled_while_initializing_does_not_leak():
     current = asyncio.current_task()
     leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
     assert not leaked, "owner task must not be left pending after cancellation"
+
+
+@pytest.mark.asyncio
+async def test_get_session_cancelled_during_eviction_teardown_does_not_leak():
+    """Cancelling get_session while it awaits an evicted session's teardown
+    must not orphan the just-created owner task.
+
+    The in-flight record and owner task are published before the Phase-2
+    eviction awaits, so a caller cancelled there — routine, since both
+    production call sites wrap get_session in asyncio.wait_for(
+    session_init_timeout) — would otherwise leak the owner: it finishes
+    initialize(), publishes ready, and blocks on close_evt forever, invisible
+    to LRU eviction, which only scans _entries.
+    """
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+
+    # A pre-registered LRU victim whose teardown hangs (wedged server): the
+    # creator parks in Phase 2 awaiting it, so the cancel below is guaranteed
+    # to land between publishing the in-flight record and Phase 3.
+    victim_hang = asyncio.Event()
+
+    async def victim_owner() -> None:
+        await victim_hang.wait()
+
+    loop = asyncio.get_running_loop()
+    victim_task = asyncio.create_task(victim_owner())
+    pool._entries[("victim", "scope")] = (MagicMock(), loop, victim_task, asyncio.Event())
+
+    gate = asyncio.Event()
+    cms: list[_BlockingInitCm] = []
+    call: asyncio.Task | None = None
+
+    def make_cm(*args, **kwargs):
+        cm = _BlockingInitCm(gate)
+        cms.append(cm)
+        return cm
+
+    try:
+        with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+            call = asyncio.create_task(pool.get_session("srv", "scope-2", {"transport": "stdio", "command": "x", "args": []}))
+            # The creator publishes its in-flight record before awaiting the
+            # hung victim, so this is deterministic.
+            for _ in range(100):
+                if ("srv", "scope-2") in pool._inflight:
+                    break
+                await asyncio.sleep(0.01)
+            assert ("srv", "scope-2") in pool._inflight
+            await asyncio.sleep(0.02)
+
+            call.cancel()
+            # On the bug, the caller's cancellation is swallowed by the
+            # eviction teardown and the task never finishes; the shield keeps
+            # the timeout from cancelling it so the hang is observable.
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(call), timeout=5.0)
+
+        # The orphaned owner must have been torn down: its __aexit__ ran even
+        # though initialize() was never released.
+        for _ in range(50):
+            if cms and cms[0].closed:
+                break
+            await asyncio.sleep(0.01)
+        assert cms, "owner task must have been created"
+        assert cms[0].closed, "owner must run __aexit__ after Phase-2 cancellation"
+        assert ("srv", "scope-2") not in pool._inflight
+
+        current = asyncio.current_task()
+        leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
+        assert not leaked, "owner task must not be left pending after Phase-2 cancellation"
+    finally:
+        if call is not None and not call.done():
+            call.cancel()
+        victim_hang.set()
+        victim_task.cancel()
+        try:
+            await victim_task
+        except BaseException:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_eviction_teardown_completes_normally_then_session_is_returned():
+    """Non-cancelled path: eviction teardown runs to completion and the caller
+    proceeds to Phase 3 unchanged — guards the Phase-2 try/except against
+    happy-path drift."""
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    cms: list[CmFactory] = []
+
+    def make_cm(*a, **kw):
+        cm = CmFactory()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        first = await pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []})
+        # Pool is full (1): this call evicts t1 through Phase 2 and then
+        # returns the fresh session through Phase 3/4.
+        second = await pool.get_session("s", "t2", {"transport": "stdio", "command": "x", "args": []})
+
+    assert first is not second
+    assert cms[0].closed, "evicted owner must complete teardown before the caller proceeds"
+    assert ("s", "t2") in pool._entries
+    assert ("s", "t1") not in pool._entries
+
+
+@pytest.mark.asyncio
+async def test_close_scope_does_not_cancel_owner_already_unwinding_in_aexit():
+    """A failed in-flight owner is already running __aexit__ in its own task;
+    the close paths must not cancel it — the cancel would interrupt that
+    in-task cleanup and the exit would never finish."""
+    pool = MCPSessionPool()
+    cms: list[_InitFailCm] = []
+
+    def make_cm(*args, **kwargs):
+        cm = _InitFailCm()
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        call = asyncio.create_task(pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []}))
+        # Wait until the owner failed initialize() and entered its slow __aexit__.
+        for _ in range(100):
+            if cms and cms[0].exit_started:
+                break
+            await asyncio.sleep(0.01)
+        assert cms and cms[0].exit_started, "owner must reach its slow __aexit__ first"
+
+        await pool.close_scope("t1")
+
+        with pytest.raises(RuntimeError):
+            await call
+
+    assert cms[0].closed is True, "close_scope must not cancel an owner already unwinding in __aexit__"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_close_scope_does_not_strand_other_removed_owners():
+    """Cancelling close_scope mid-teardown must not strand the other owners it
+    already removed from the registry: every removed owner gets its close
+    signal before any teardown is awaited."""
+    pool = MCPSessionPool()
+    loop = asyncio.get_running_loop()
+
+    first_hang = asyncio.Event()  # first owner's slow teardown stand-in
+    first_close = asyncio.Event()
+    second_close = asyncio.Event()
+    second_done = asyncio.Event()
+
+    async def first_owner() -> None:
+        await first_close.wait()
+        await first_hang.wait()
+
+    async def second_owner() -> None:
+        await second_close.wait()
+        second_done.set()
+
+    first_task = asyncio.create_task(first_owner())
+    second_task = asyncio.create_task(second_owner())
+    pool._entries[("s1", "scope")] = (MagicMock(), loop, first_task, first_close)
+    pool._entries[("s2", "scope")] = (MagicMock(), loop, second_task, second_close)
+
+    closer = asyncio.create_task(pool.close_scope("scope"))
+    # Let the closer reach its teardown await (both signals are already out).
+    for _ in range(100):
+        if first_close.is_set() and second_close.is_set():
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.02)
+
+    closer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closer
+
+    assert second_close.is_set(), "every removed owner must be signalled before teardown awaits"
+    for _ in range(100):
+        if second_done.is_set():
+            break
+        await asyncio.sleep(0.01)
+    assert second_done.is_set(), "the second owner must finish its own teardown"
+
+    first_hang.set()
+    first_task.cancel()
+    try:
+        await first_task
+    except BaseException:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_owner_mid_aexit_survives_gc_after_closer_cancellation():
+    """The reaper spawned for a cancelled closer must be strongly retained.
+
+    The event loop holds only weak references to tasks, so an unheld reaper —
+    and transitively the owner it awaits, mid-``__aexit__`` — can be
+    garbage-collected before the teardown completes once the registry entry
+    is gone (#5008 review). The closer scenario runs in its own dropped task
+    so no harness frame (including the caught CancelledError's traceback)
+    keeps the teardown alive."""
+    pool = MCPSessionPool()
+
+    class GcProneCm:
+        def __init__(self):
+            self.entered = False
+            self.exit_started = False
+            self.closed = False
+
+        async def __aenter__(self):
+            self.entered = True
+            session = MagicMock()
+            session.initialize = self._initialize
+            return session
+
+        async def _initialize(self):
+            return None
+
+        async def __aexit__(self, *args):
+            self.exit_started = True
+            # An orphaned future: nothing external references it, so the
+            # awaiting owner forms a collectable cycle once no strong root
+            # holds the reaper.
+            await asyncio.get_running_loop().create_future()
+            self.closed = True
+
+    holder: dict[str, GcProneCm] = {}
+
+    def make_cm(*args, **kwargs):
+        cm = GcProneCm()
+        holder["cm"] = cm
+        return cm
+
+    async def scenario() -> None:
+        closer = asyncio.create_task(pool.close_scope("t1"))
+        for _ in range(200):
+            cm = cm_weak()
+            if cm is not None and cm.exit_started:
+                break
+            await asyncio.sleep(0.01)
+        closer.cancel()
+        try:
+            await closer
+        except asyncio.CancelledError:
+            pass
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await pool.get_session("s", "t1", {"transport": "stdio", "command": "x", "args": []})
+
+    cm_weak = weakref.ref(holder["cm"])
+    holder.clear()
+
+    scen = asyncio.create_task(scenario())
+    await scen
+    del scen
+
+    # Drop every remaining strong root and force collection: the registry
+    # entry is gone (close_scope popped it), the scenario task and its
+    # frames are gone, and the only thing that may keep the teardown alive
+    # is the retained reaper.
+    gc.collect()
+
+    assert cm_weak() is not None, "owner mid-__aexit__ must survive GC while teardown is pending"
+
+    # Cleanup: cancel the surviving owner/reaper tasks.
+    for t in [t for t in asyncio.all_tasks() if t is not asyncio.current_task() and ("_run_session" in str(t.get_coro()) or "_reap" in str(t.get_coro()))]:
+        t.cancel()
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_queued_cancel_rechecks_failure_on_owning_loop():
+    """A cancellation queued from another loop must recheck the owner's failure
+    state ON the owning loop, immediately before cancelling.
+
+    Reproduces the time-of-check/time-of-use window: the guard snapshot is
+    taken while the owner has not failed yet, the queued cancellation is
+    delivered (delayed here deterministically) only after the owner failed and
+    parked inside ``__aexit__`` — delivering it must be a no-op, not an
+    interruption of that cleanup (#5008 review)."""
+    pool = MCPSessionPool()
+    loop2 = asyncio.new_event_loop()
+    thread2 = threading.Thread(target=loop2.run_forever, daemon=True)
+    thread2.start()
+
+    class _DelayedLoop:
+        """Wraps the foreign loop; while holding, callbacks queue locally.
+
+        ``is_running()`` reports False so the pool's await phase takes its
+        harmless idle-loop branch instead of needing a real loop handle.
+        """
+
+        def __init__(self, wrapped: asyncio.AbstractEventLoop) -> None:
+            self._wrapped = wrapped
+            self.hold = False
+            self._held: list[tuple] = []
+
+        def is_closed(self) -> bool:
+            return self._wrapped.is_closed()
+
+        def is_running(self) -> bool:
+            return False
+
+        def call_soon_threadsafe(self, callback, *args) -> None:
+            if self.hold:
+                self._held.append((callback, args))
+            else:
+                self._wrapped.call_soon_threadsafe(callback, *args)
+
+        def flush(self) -> None:
+            held, self._held = self._held, []
+            for callback, args in held:
+                self._wrapped.call_soon_threadsafe(callback, *args)
+
+    class _GatedAexitCm:
+        def __init__(self):
+            self.exit_started = False
+            self.closed = False
+
+        async def __aexit__(self, *args):
+            self.exit_started = True
+            await gate2.wait()
+            self.closed = True
+
+    cm = _GatedAexitCm()
+    holder: dict[str, object] = {}
+
+    def _spawn() -> None:
+        ready2 = loop2.create_future()
+        release2 = asyncio.Event()
+        close_evt2 = asyncio.Event()
+
+        async def owner() -> None:
+            try:
+                await release2.wait()
+                raise RuntimeError("init boom")
+            except BaseException as exc:
+                if not ready2.done():
+                    ready2.set_exception(exc)
+            finally:
+                await cm.__aexit__(None, None, None)
+
+        task2 = asyncio.ensure_future(owner())
+        holder.update(ready=ready2, task=task2, close_evt=close_evt2, release=release2, gate=asyncio.Event())
+
+    gate2 = None
+    loop2.call_soon_threadsafe(_spawn)
+    for _ in range(200):
+        if "task" in holder:
+            break
+        await asyncio.sleep(0.005)
+    assert "task" in holder, "foreign owner must be spawned"
+    gate2 = holder["gate"]
+
+    proxy = _DelayedLoop(loop2)
+    pool._inflight[("s", "t1")] = (proxy, holder["ready"], holder["task"], holder["close_evt"])
+
+    # Snapshot moment: the owner has NOT failed yet. close_scope's signal phase
+    # queues the (guarded) cancellation into the holding proxy; its await phase
+    # takes the idle branch and returns.
+    proxy.hold = True
+    await pool.close_scope("t1")
+    assert pool._inflight == {}
+
+    # The owner now fails on its own loop and parks inside the gated __aexit__.
+    loop2.call_soon_threadsafe(holder["release"].set)
+    for _ in range(400):
+        if cm.exit_started:
+            break
+        await asyncio.sleep(0.005)
+    assert cm.exit_started, "owner must enter its gated __aexit__ before the cancel is delivered"
+
+    # Deliver the held cancellation — this is the stale-snapshot catch-up the
+    # on-owning-loop recheck must neutralize.
+    proxy.hold = False
+    proxy.flush()
+
+    # Let the exit finish: the delivered cancel must have been skipped.
+    loop2.call_soon_threadsafe(gate2.set)
+    for _ in range(400):
+        if cm.closed:
+            break
+        await asyncio.sleep(0.005)
+    assert cm.closed, "queued cancel must not interrupt an owner already unwinding in __aexit__"
+
+    loop2.call_soon_threadsafe(loop2.stop)
+    thread2.join(timeout=2)
+    loop2.close()
 
 
 class _InitFailCm:
