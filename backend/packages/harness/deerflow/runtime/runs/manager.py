@@ -34,6 +34,18 @@ ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
 
+TERMINAL_RUN_EVICTION_DELAY_SECONDS = 300.0
+TERMINAL_RUN_EVICTION_RETRY_SECONDS = 60.0
+_TERMINAL_RUN_STATUSES = frozenset(
+    {
+        RunStatus.success,
+        RunStatus.error,
+        RunStatus.timeout,
+        RunStatus.interrupted,
+    }
+)
+_TERMINAL_RUN_STATUS_VALUES = frozenset(status.value for status in _TERMINAL_RUN_STATUSES)
+
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
     "database table is locked",
@@ -250,6 +262,10 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Keying delayed eviction tasks by run ID both keeps them strongly
+        # referenced and prevents duplicate timers for the same terminal run.
+        self._terminal_eviction_tasks: dict[str, asyncio.Task[None]] = {}
+        self._shutting_down = False
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -476,13 +492,17 @@ class RunManager:
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
         """Persist token usage and completion data to the backing store."""
+        await self._update_run_completion(run_id, **kwargs)
+
+    async def _update_run_completion(self, run_id: str, **kwargs) -> bool:
+        """Persist completion data and report whether the write is durable."""
         row_recovery_payload: dict[str, Any] | None = None
         record: RunRecord | None = None
         async with self._lock:
             record = self._runs.get(run_id)
             if record is not None and record.ownership_lost:
                 logger.warning("Skipped completion persistence for run %s after lease ownership was lost", run_id)
-                return
+                return False
             if record is not None:
                 for key, value in kwargs.items():
                     if key == "status":
@@ -492,7 +512,7 @@ class RunManager:
                 record.updated_at = _now_iso()
                 row_recovery_payload = self._store_put_payload(record, error=kwargs.get("error"))
         if self._store is None:
-            return
+            return True
         try:
             updated = await self._call_store_with_retry(
                 "update_run_completion",
@@ -515,12 +535,12 @@ class RunManager:
                             reason="A peer terminalized the run before completion data was persisted.",
                             require_active=False,
                         )
-                    return
+                    return existing_status not in (RunStatus.pending.value, RunStatus.running.value)
                 if row_recovery_payload is None:
                     logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
-                    return
+                    return False
                 if not await self._persist_snapshot_to_store(run_id, row_recovery_payload):
-                    return
+                    return False
                 recovered = await self._call_store_with_retry(
                     "update_run_completion",
                     run_id,
@@ -528,8 +548,11 @@ class RunManager:
                 )
                 if recovered is False:
                     logger.warning("Run completion update for %s affected no rows after row recreation", run_id)
+                    return False
+            return True
         except Exception:
             logger.warning("Failed to persist run completion for %s", run_id, exc_info=True)
+            return False
 
     async def update_run_progress(self, run_id: str, **kwargs) -> None:
         """Persist a running token/message snapshot without changing status."""
@@ -1881,6 +1904,147 @@ class RunManager:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
 
+    @staticmethod
+    def _completion_payload(record: RunRecord) -> dict[str, Any]:
+        """Return the final fields that must survive terminal-record eviction."""
+        return {
+            "status": record.status.value,
+            "total_input_tokens": record.total_input_tokens,
+            "total_output_tokens": record.total_output_tokens,
+            "total_tokens": record.total_tokens,
+            "llm_call_count": record.llm_call_count,
+            "lead_agent_tokens": record.lead_agent_tokens,
+            "subagent_tokens": record.subagent_tokens,
+            "middleware_tokens": record.middleware_tokens,
+            "token_usage_by_model": record.token_usage_by_model,
+            "message_count": record.message_count,
+            "last_ai_message": record.last_ai_message,
+            "first_human_message": record.first_human_message,
+            "error": record.error,
+        }
+
+    async def _evict_if_durable_terminal(self, run_id: str) -> bool:
+        """Evict *run_id* only after its complete terminal snapshot is durable.
+
+        Returns ``True`` when no further retry is needed: either the record was
+        evicted or another path already removed it. Store failures and active
+        persisted rows return ``False`` so the supervising task retries later.
+        """
+        if self._store is None:
+            return True
+
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None:
+                return True
+            if record.finalizing or record.status not in _TERMINAL_RUN_STATUSES:
+                return False
+            local_status = record.status
+            ownership_lost = record.ownership_lost
+            error = record.error
+            stop_reason = record.stop_reason
+            completion_payload = self._completion_payload(record)
+
+        terminal_snapshot_persisted = ownership_lost
+        if not ownership_lost:
+            status_persisted = await self._persist_status(
+                record,
+                local_status,
+                error=error,
+                stop_reason=stop_reason,
+            )
+            completion_persisted = await self._update_run_completion(run_id, **completion_payload)
+            terminal_snapshot_persisted = status_persisted and completion_persisted
+
+        try:
+            stored = await self._call_store_with_retry(
+                "verify terminal run before eviction",
+                run_id,
+                lambda: self._store.get(run_id, user_id=record.user_id),
+            )
+        except Exception:
+            logger.warning("Failed to verify terminal run %s before eviction; retaining it in memory", run_id, exc_info=True)
+            return False
+
+        stored_status = stored.get("status") if stored is not None else None
+        if stored_status not in _TERMINAL_RUN_STATUS_VALUES:
+            logger.warning(
+                "Run %s is terminal in memory but durable status is %s; retaining it for persistence retry",
+                run_id,
+                stored_status or "missing",
+            )
+            return False
+        if stored_status == local_status.value and not terminal_snapshot_persisted:
+            logger.warning("Run %s terminal status is durable but its final snapshot is incomplete; retaining it for persistence retry", run_id)
+            return False
+
+        async with self._lock:
+            current = self._runs.get(run_id)
+            if current is None:
+                return True
+            if current is not record or current.finalizing or current.status not in _TERMINAL_RUN_STATUSES:
+                return False
+            self._runs.pop(run_id, None)
+            self._unindex_run_locked(run_id, current.thread_id)
+        logger.debug("Terminal run record %s evicted after durable verification", run_id)
+        return True
+
+    async def _evict_terminal_when_safe(self, run_id: str, *, delay: float, retry_delay: float) -> None:
+        if delay > 0:
+            await asyncio.sleep(delay)
+        while not self._shutting_down:
+            if await self._evict_if_durable_terminal(run_id):
+                return
+            await asyncio.sleep(max(0.0, retry_delay))
+
+    def _terminal_eviction_done(self, run_id: str, task: asyncio.Task[None]) -> None:
+        if self._terminal_eviction_tasks.get(run_id) is task:
+            self._terminal_eviction_tasks.pop(run_id, None)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.warning("Terminal eviction task failed for run %s", run_id, exc_info=True)
+
+    def schedule_terminal_eviction(
+        self,
+        run_id: str,
+        *,
+        delay: float = TERMINAL_RUN_EVICTION_DELAY_SECONDS,
+        retry_delay: float = TERMINAL_RUN_EVICTION_RETRY_SECONDS,
+    ) -> asyncio.Task[None] | None:
+        """Schedule one persistence-gated terminal eviction for *run_id*.
+
+        Memory-only managers preserve their existing in-process history. Once
+        shutdown starts no new delayed work is accepted.
+        """
+        if self._store is None or self._shutting_down:
+            return None
+        existing = self._terminal_eviction_tasks.get(run_id)
+        if existing is not None and not existing.done():
+            return existing
+        task = asyncio.create_task(
+            self._evict_terminal_when_safe(run_id, delay=delay, retry_delay=retry_delay),
+            name=f"run-terminal-eviction-{run_id}",
+        )
+        self._terminal_eviction_tasks[run_id] = task
+        task.add_done_callback(lambda done, run_id=run_id: self._terminal_eviction_done(run_id, done))
+        return task
+
+    async def _stop_terminal_evictions(self, *, timeout: float) -> None:
+        """Reject new eviction work and boundedly cancel existing timers."""
+        self._shutting_down = True
+        tasks = list(self._terminal_eviction_tasks.values())
+        self._terminal_eviction_tasks.clear()
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+        if pending:
+            logger.warning("Terminal eviction shutdown exceeded %.1fs; %d task(s) remain pending", timeout, len(pending))
+
     # ------------------------------------------------------------------
     # Lease heartbeat
     # ------------------------------------------------------------------
@@ -2249,6 +2413,11 @@ class RunManager:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+
+        # Set the shutdown fence before draining workers: a worker that reaches
+        # its finalizer during the drain must not create a fresh five-minute
+        # timer after the existing timers have been cancelled.
+        await self._stop_terminal_evictions(timeout=max(0.0, deadline - loop.time()))
 
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]

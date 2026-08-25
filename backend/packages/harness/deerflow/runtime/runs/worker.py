@@ -1353,8 +1353,14 @@ async def run_agent(
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        try:
+            await bridge.publish_end(run_id)
+        finally:
+            # Run-record retention is independent of stream availability. In
+            # particular, a Redis failure while publishing END must not leave a
+            # terminal record strongly referenced for the process lifetime.
+            run_manager.schedule_terminal_eviction(run_id)
+            asyncio.create_task(bridge.cleanup(run_id, delay=60))
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
