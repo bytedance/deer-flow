@@ -276,28 +276,28 @@ tools:
 
 ```python
 # packages/harness/deerflow/agents/middlewares/my_middleware.py
-from langchain.agents.middleware import BaseMiddleware
-from langchain_core.runnables import RunnableConfig
+from langchain.agents import AgentState
+from langchain.agents.middleware import AgentMiddleware
+from langgraph.runtime import Runtime
 
-class MyMiddleware(BaseMiddleware):
+class MyMiddleware(AgentMiddleware[AgentState]):
     """Middleware description."""
 
-    def transform_state(self, state: dict, config: RunnableConfig) -> dict:
-        """Transform the state before agent execution."""
-        # Modify state as needed
-        return state
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Runs before each model call. Return a dict of state updates, or None."""
+        return None
+
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Runs after each model call. Inspect or modify the result."""
+        return None
 ```
 
-2. Register in `packages/harness/deerflow/agents/lead_agent/agent.py`:
+2. Register via `custom_middlewares` when building the agent:
 
 ```python
-middlewares = [
-    ThreadDataMiddleware(),
-    SandboxMiddleware(),
-    MyMiddleware(),  # Add your middleware
-    TitleMiddleware(),
-    ClarificationMiddleware(),
-]
+middlewares = build_middlewares(
+    config, model_name, custom_middlewares=[MyMiddleware()], ...
+)
 ```
 
 ### Adding New API Endpoints
