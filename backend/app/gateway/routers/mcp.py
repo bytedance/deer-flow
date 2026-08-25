@@ -370,6 +370,38 @@ class McpUserScopedAuthConfigResponse(BaseModel):
         return value
 
 
+class McpContextHeadersConfigResponse(BaseModel):
+    """Per-request credential injection configuration for an MCP server.
+
+    Holds header names and run-context key names only — never a credential —
+    so unlike ``user_auth`` its declared fields are returned unmasked by GET.
+    """
+
+    enabled: bool = Field(default=True, description="Whether request-scoped header injection is enabled")
+    headers: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of HTTP header name to the key read from the run request's config.context.secrets",
+    )
+    on_missing: Literal["deny", "passthrough"] = Field(default="deny", description="Behavior when a mapped key is absent from the request secrets")
+    # Mirror the harness-side McpContextHeadersConfig (extra="allow"): without
+    # this, an operator's unknown key inside headers_from_context would be
+    # silently stripped by the next admin PUT.
+    model_config = ConfigDict(extra="allow")
+
+    # Mirror the harness-side entry check: a blank name accepted here would be
+    # persisted, then fail ExtensionsConfig validation on reload — wedging every
+    # subsequent config load until the file is hand-edited.
+    @field_validator("headers")
+    @classmethod
+    def _validate_mapping_entries(cls, value: dict[str, str]) -> dict[str, str]:
+        for header_name, secret_key in value.items():
+            if not header_name.strip():
+                raise ValueError("headers_from_context.headers must not contain a blank header name")
+            if not isinstance(secret_key, str) or not secret_key.strip():
+                raise ValueError(f"headers_from_context.headers[{header_name!r}] must name a non-blank secret key from config.context.secrets")
+        return value
+
+
 class McpOAuthConfigResponse(BaseModel):
     """OAuth configuration for an MCP server."""
 
@@ -401,6 +433,7 @@ class McpServerConfigResponse(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
     oauth: McpOAuthConfigResponse | None = Field(default=None, description="OAuth configuration for MCP HTTP/SSE servers")
     user_auth: McpUserScopedAuthConfigResponse | None = Field(default=None, description="Per-user credential injection for MCP HTTP/SSE servers")
+    headers_from_context: McpContextHeadersConfigResponse | None = Field(default=None, description="Per-request credential injection for MCP HTTP/SSE servers: map header names to config.context.secrets keys")
     description: str = Field(default="", description="Human-readable description of what this MCP server provides")
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
@@ -685,6 +718,14 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
         # cleartext from GET while the identical key at server level is masked.
         masked_ua_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.user_auth.model_extra or {}).items()}
         masked_user_auth = server.user_auth.model_copy(update={"users": {k: _MASKED_VALUE for k in server.user_auth.users}, **masked_ua_extra})
+    masked_headers_from_context = None
+    if server.headers_from_context is not None:
+        # The declared fields hold names only and stay in cleartext — masking
+        # them would show operators `***` where a header name belongs. Extras
+        # get the same treatment as everywhere else, since `extra="allow"` lets
+        # an operator store a secret-bearing key that round-trips through PUT.
+        masked_ch_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.headers_from_context.model_extra or {}).items()}
+        masked_headers_from_context = server.headers_from_context.model_copy(update=masked_ch_extra)
     masked_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.model_extra or {}).items()}
     return server.model_copy(
         update={
@@ -692,6 +733,7 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
             "headers": masked_headers,
             "oauth": masked_oauth,
             "user_auth": masked_user_auth,
+            "headers_from_context": masked_headers_from_context,
             **masked_extra,
         }
     )
@@ -809,6 +851,10 @@ def _merge_preserving_secrets(
     }
     if "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
+    # No masked round-trip to repair: the block stores names, not credentials,
+    # so an explicitly supplied value replaces the stored one verbatim.
+    if "headers_from_context" not in incoming.model_fields_set:
+        update["headers_from_context"] = existing.headers_from_context
     if "routing" not in incoming.model_fields_set:
         update["routing"] = existing.routing
     if "tools" not in incoming.model_fields_set:

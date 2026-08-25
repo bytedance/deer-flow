@@ -64,6 +64,15 @@ class McpTaskToolCaller:
                 config,
                 token_manager=self._oauth_token_manager,
             ),
+            # Request-scoped headers are deliberately excluded: this caller drives
+            # status/cancel polls from the task runtime, long after the Agent run
+            # that supplied ``config.context.secrets`` ended. There is no run
+            # context to read, so the fail-closed interceptor would deny every
+            # poll for a server that declares ``headers_from_context``. Durable
+            # tasks authenticate with server-level credentials (see
+            # docs/MCP_SERVER.md); ``build_context_headers_interceptor`` warns
+            # when a server configures both.
+            context_headers_builder=lambda _config: None,
         )
 
     async def call_tool(
