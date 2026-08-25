@@ -84,7 +84,8 @@ class SQLiteUserRepository(UserRepository):
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create_user(self, user: User) -> User:
-        """Insert a new user. Raises ``ValueError`` on duplicate email.
+        """Insert a new user. Raises ``ValueError`` on duplicate email or,
+        for an OAuth-linked account, a duplicate (provider, oauth_id) pair.
 
         The email is canonicalised to lowercase before insert so the existing
         unique constraint enforces case-insensitive uniqueness for new rows and
@@ -103,6 +104,20 @@ class SQLiteUserRepository(UserRepository):
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
+                # The email pre-check above already ruled out an email
+                # collision under normal (non-racing) conditions, so an
+                # IntegrityError reaching here is the OTHER unique
+                # constraint on this table -- idx_users_oauth_identity --
+                # firing instead, not email. Reporting it as "Email
+                # already registered" regardless was misleading: both
+                # backends' error text names the oauth columns
+                # ("UNIQUE constraint failed: users.oauth_provider,
+                # users.oauth_id" on SQLite; the index name plus a
+                # "Key (oauth_provider, oauth_id)=..." detail line on
+                # Postgres), so a substring check on "oauth" reliably
+                # tells the two cases apart on either backend.
+                if "oauth" in str(exc).lower():
+                    raise ValueError(f"OAuth account already linked: {user.oauth_provider}/{user.oauth_id}") from exc
                 raise ValueError(f"Email already registered: {user.email}") from exc
         return user
 

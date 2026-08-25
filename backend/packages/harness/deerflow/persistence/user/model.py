@@ -49,11 +49,28 @@ class UserRow(Base):
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
 
     __table_args__ = (
+        # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it
+        # does not apply on the postgresql dialect, so a table created
+        # against Postgres with only sqlite_where builds a FULL
+        # (non-partial) unique index instead of a partial one. This is
+        # NOT a correctness bug: verified empirically against a live
+        # Postgres instance that a full index already enforces the
+        # intended semantics on its own -- Postgres (like SQLite) treats
+        # NULL as never-equal-to-NULL in a unique index, so real
+        # (provider, id) duplicates are already rejected and unlimited
+        # (NULL, NULL) rows are already allowed, per standard SQL NULL
+        # handling, independent of the WHERE predicate. postgresql_where
+        # is added for two smaller, real reasons instead: (1) it matches
+        # the comment above literally (a partial index, on both
+        # backends), and (2) a partial index only indexes non-NULL rows,
+        # so it stays smaller and cheaper to maintain as the
+        # plain-password-account rows (the common case) accumulate.
         Index(
             "idx_users_oauth_identity",
             "oauth_provider",
             "oauth_id",
             unique=True,
             sqlite_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
+            postgresql_where=text("oauth_provider IS NOT NULL AND oauth_id IS NOT NULL"),
         ),
     )
