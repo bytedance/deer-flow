@@ -29,6 +29,7 @@ from deerflow.persistence.notification_deliveries.model import NotificationDeliv
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
@@ -47,6 +48,8 @@ __all__ = [
     "RunRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
+    "SubagentBatchRow",
+    "SubagentBatchItemRow",
     "ThreadMetaRow",
     "UserRow",
     "WebhookDeliveryRow",

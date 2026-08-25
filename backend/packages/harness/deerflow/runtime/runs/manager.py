@@ -549,6 +549,26 @@ class RunManager:
             except Exception:
                 logger.warning("Failed to persist run progress for %s", run_id, exc_info=True)
 
+    async def update_finalizing_progress(self, run_id: str, **kwargs) -> None:
+        """Persist final fields while the durable row is deliberately active."""
+        should_persist = False
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is not None and not record.ownership_lost:
+                should_persist = record.status not in (RunStatus.pending, RunStatus.running)
+                if should_persist:
+                    for key, value in kwargs.items():
+                        if hasattr(record, key) and value is not None:
+                            setattr(record, key, value)
+                    record.updated_at = _now_iso()
+        if should_persist and self._store is not None:
+            try:
+                # The local status is already staged as terminal, but the store
+                # row intentionally remains running until checkpoint finalization.
+                await self._store.update_run_progress(run_id, **kwargs)
+            except Exception:
+                logger.warning("Failed to persist finalizing progress for %s", run_id, exc_info=True)
+
     async def create(
         self,
         thread_id: str,

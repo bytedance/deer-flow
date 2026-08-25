@@ -1,7 +1,7 @@
 """Add parked_attempts counter for notification delivery parking cap.
 
-Revision ID: 0017_parked_attempts
-Revises: 0016_notification_deliveries
+Revision ID: 0018_parked_attempts
+Revises: 0017_notification_deliveries
 Create Date: 2026-08-19
 """
 
@@ -12,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017_parked_attempts"
-down_revision: str | Sequence[str] | None = "0016_notification_deliveries"
+revision: str = "0018_parked_attempts"
+down_revision: str | Sequence[str] | None = "0017_notification_deliveries"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
