@@ -18,6 +18,7 @@ from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
+from deerflow.utils.text_decoding import BOM_PREFIX_SIZE, detect_append_encoding, detect_text_encoding
 
 logger = logging.getLogger(__name__)
 
@@ -678,6 +679,20 @@ class LocalSandbox(Sandbox):
 
         return sorted(result)
 
+    @staticmethod
+    def _read_bom_prefix(resolved_path: str) -> bytes:
+        """Return the leading bytes a codec choice is made from.
+
+        A missing file yields an empty prefix rather than raising: append creates
+        the file, and the read path surfaces the real ``OSError`` from its own open
+        a moment later, with the caller-facing path already restored.
+        """
+        try:
+            with open(resolved_path, "rb") as probe:
+                return probe.read(BOM_PREFIX_SIZE)
+        except OSError:
+            return b""
+
     def read_file(
         self,
         path: str,
@@ -687,7 +702,12 @@ class LocalSandbox(Sandbox):
         resolved_path = self._resolve_path(path)
         should_slice = start_line is not None or end_line is not None
         try:
-            with open(resolved_path, encoding="utf-8") as f:
+            # Sniff the BOM before opening in text mode so a ranged read still
+            # streams (``enumerate(f)`` below) instead of buffering the file to
+            # pick a codec. ``deerflow.utils.text_decoding`` owns which prefixes
+            # mean what, shared with the workspace change scanner and grep.
+            encoding = detect_text_encoding(self._read_bom_prefix(resolved_path))
+            with open(resolved_path, encoding=encoding) as f:
                 if not should_slice:
                     content = f.read()
 
@@ -747,7 +767,13 @@ class LocalSandbox(Sandbox):
             # using the content-specific resolver (forward-slash safe)
             resolved_content = self._resolve_paths_in_content(content)
             mode = "a" if append else "w"
-            with open(resolved_path, mode, encoding="utf-8") as f:
+            # Appending must continue the file's existing codec. read_file accepts
+            # BOM-marked UTF-16, so the agent can now read a file that appending
+            # UTF-8 onto would corrupt into something no decoder — including the
+            # read it just did — can parse. A full overwrite carries no such
+            # obligation and stays UTF-8, the encoding agent-authored content uses.
+            encoding = detect_append_encoding(self._read_bom_prefix(resolved_path)) if append else "utf-8"
+            with open(resolved_path, mode, encoding=encoding) as f:
                 f.write(resolved_content)
             # Track this path so read_file knows to reverse-resolve on read.
             # Only agent-written files get reverse-resolved; user uploads and

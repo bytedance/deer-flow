@@ -3,10 +3,11 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
-from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
+from codecs import getincrementaldecoder
 from pathlib import Path
 
 from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOOL_RESULTS_DIRNAME
+from deerflow.utils.text_decoding import UTF16_BOMS, decode_text_bytes
 
 from .types import (
     DiffUnavailableReason,
@@ -92,7 +93,6 @@ SENSITIVE_PATH_PATTERNS = (
 )
 
 SAMPLE_BYTES = 4096
-_UTF16_BOMS = (BOM_UTF16_LE, BOM_UTF16_BE)
 
 
 def is_sensitive_workspace_path(path: str) -> bool:
@@ -236,7 +236,7 @@ def _snapshot_file(
             raw = host_file.read_bytes()
         except OSError:
             return None
-        decoded = _decode_text_bytes(raw)
+        decoded = decode_text_bytes(raw)
         if decoded is None:
             binary = True
             reason = "binary"
@@ -314,22 +314,6 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _decode_text_bytes(data: bytes) -> str | None:
-    for encoding in ("utf-8-sig", "utf-8"):
-        try:
-            return data.decode(encoding)
-        except UnicodeDecodeError:
-            continue
-
-    if data.startswith(_UTF16_BOMS):
-        try:
-            return data.decode("utf-16")
-        except UnicodeDecodeError:
-            return None
-
-    return None
-
-
 def _sample_decodes_as_text(sample: bytes, encoding: str) -> bool:
     try:
         decoder = getincrementaldecoder(encoding)()
@@ -340,7 +324,7 @@ def _sample_decodes_as_text(sample: bytes, encoding: str) -> bool:
 
 
 def _looks_binary(sample: bytes) -> bool:
-    if sample.startswith(_UTF16_BOMS) and _sample_decodes_as_text(sample, "utf-16"):
+    if sample.startswith(UTF16_BOMS) and _sample_decodes_as_text(sample, "utf-16"):
         return False
     if b"\x00" in sample:
         return True

@@ -7,6 +7,7 @@ import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+from deerflow.utils.text_decoding import BOM_PREFIX_SIZE
 
 
 def _symlink_to(target, link, *, target_is_directory=False):
@@ -833,7 +834,16 @@ class TestLocalSandboxProviderMounts:
             ],
         )
 
+        peeked: list[int] = []
+
         class GuardedFile:
+            """Fails the test on an unbounded read; records bounded ones.
+
+            The BOM sniff that picks the codec (``deerflow.utils.text_decoding``)
+            legitimately reads a couple of bytes, so the invariant is not "never
+            call read" but "never pull in more than the byte-order mark".
+            """
+
             def __init__(self, wrapped):
                 self._wrapped = wrapped
 
@@ -850,8 +860,13 @@ class TestLocalSandboxProviderMounts:
             def __next__(self):
                 return next(self._wrapped)
 
-            def read(self, *args, **kwargs):
-                raise AssertionError("full read() should not be used for ranged reads")
+            def read(self, size=-1, *args, **kwargs):
+                if size is None or size < 0:
+                    raise AssertionError("full read() should not be used for ranged reads")
+                if size > BOM_PREFIX_SIZE:
+                    raise AssertionError(f"ranged reads should peek at most {BOM_PREFIX_SIZE} bytes, got read({size})")
+                peeked.append(size)
+                return self._wrapped.read(size, *args, **kwargs)
 
             def __getattr__(self, name):
                 return getattr(self._wrapped, name)
@@ -870,6 +885,8 @@ class TestLocalSandboxProviderMounts:
             content = sandbox.read_file("/mnt/data/huge.log", start_line=1, end_line=10)
 
         assert content == "\n".join(f"line {i}" for i in range(1, 11))
+        # One BOM peek, and only one: the line range itself must come from iteration.
+        assert peeked == [BOM_PREFIX_SIZE]
 
     def test_read_file_single_sided_line_ranges_supported(self, tmp_path):
         """LocalSandbox should support partial reads when only one bound is provided."""

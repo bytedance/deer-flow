@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from deerflow.utils.text_decoding import UTF16_BOMS, detect_text_encoding
+
 IGNORE_PATTERNS = [
     ".git",
     ".svn",
@@ -60,6 +62,10 @@ IGNORE_PATTERNS = [
 DEFAULT_MAX_FILE_SIZE_BYTES = 1_000_000
 DEFAULT_LINE_SUMMARY_LENGTH = 200
 
+# Head bytes screened for NULs before a file is scanned, and the same bytes the
+# codec is chosen from.
+_BINARY_SAMPLE_BYTES = 8192
+
 
 @dataclass(frozen=True)
 class GrepMatch:
@@ -106,12 +112,27 @@ def truncate_line(line: str, max_chars: int = DEFAULT_LINE_SUMMARY_LENGTH) -> st
     return line[: max_chars - 3] + "..."
 
 
-def is_binary_file(path: Path, sample_size: int = 8192) -> bool:
+def _read_head(path: Path, sample_size: int = _BINARY_SAMPLE_BYTES) -> bytes | None:
+    """Return the file's leading bytes, or ``None`` when it cannot be opened."""
     try:
         with path.open("rb") as handle:
-            return b"\0" in handle.read(sample_size)
+            return handle.read(sample_size)
     except OSError:
-        return True
+        return None
+
+
+def _sample_is_binary(sample: bytes) -> bool:
+    """Screen a file's head for content grep should not scan.
+
+    Split from the read so one head serves both this screen and the codec choice.
+    UTF-16 is half NUL bytes by construction, so the NUL test alone would skip
+    every wide-encoded file: `read_file` and the workspace change panel both treat
+    a BOM-marked one as text, and grep returning "no matches" for a file the agent
+    can open and read is the same drift wearing an empty result instead of an error.
+    """
+    if sample.startswith(UTF16_BOMS):
+        return False
+    return b"\0" in sample
 
 
 def find_glob_matches(root: Path, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
@@ -203,9 +224,14 @@ def find_grep_matches(
             file_path = candidate_path.resolve()
             if not root_is_file and not file_path.is_relative_to(root):
                 continue
-            if file_path.stat().st_size > max_file_size or is_binary_file(file_path):
+            if file_path.stat().st_size > max_file_size:
                 continue
-            with file_path.open(encoding="utf-8", errors="replace") as handle:
+            # One head read serves both the binary screen and the codec choice;
+            # the line scan below then opens the file exactly once more.
+            sample = _read_head(file_path)
+            if sample is None or _sample_is_binary(sample):
+                continue
+            with file_path.open(encoding=detect_text_encoding(sample), errors="replace") as handle:
                 for line_number, line in enumerate(handle, start=1):
                     if len(line) > _max_line_chars:
                         continue

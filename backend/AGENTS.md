@@ -291,6 +291,16 @@ For models with `supports_vision: true`:
 - `view_image_tool` added to agent's toolset
 - Images are converted to base64 and injected into a hidden message carrying both a reserved ID prefix and a server-owned metadata marker for the model call; Gateway strips that marker from untrusted input, and the middleware requires both identifiers before removing the message. The `before_model` and `model` node checkpoints for that call still contain the payload; after `after_model` cleanup, subsequent checkpoints retain only lightweight `viewed_images` metadata, while client-chosen IDs survive
 
+### Text Decoding
+
+`deerflow.utils.text_decoding` owns which workspace bytes count as text, for all three readers: `LocalSandbox.read_file` (the agent's `read_file`), `sandbox.search.find_grep_matches` (`grep`), and `workspace_changes.scanner` (the change panel). Splitting the rule is what let them drift — #3966 taught the scanner UTF-8 BOM and BOM-marked UTF-16 while the read path kept a bare `utf-8` codec and grep's NUL screen rejected every wide file, so one file could render in the panel, be reported binary to the agent, and stay invisible to search.
+
+The rule accepts UTF-8 with or without a BOM (`utf-8-sig` is the default codec, not a special case, so a Windows-authored file no longer carries a stray `﻿` that breaks a leading `str_replace` match or a YAML parse) and UTF-16 only when a BOM declares byte order. Legacy encodings (CP949, Shift-JIS, GBK) are never guessed: a wrong guess decodes without raising and yields silently corrupted text. `read_file`'s `UnicodeDecodeError` message therefore names both causes — binary content vs. another encoding — and offers `iconv`, since blaming a spreadsheet sends the model to `view_image`/pandas for a plain `.txt`.
+
+`detect_text_encoding()` needs only `BOM_PREFIX_SIZE` bytes, so ranged reads still stream rather than buffering to pick a codec (pinned by `test_read_file_line_range_streams_without_full_read`), and grep derives its binary screen and codec from one head read. `detect_append_encoding()` binds the write side: append continues the file's existing codec (BOM-less UTF-16 variants, since `utf-16` would emit a second BOM mid-file), because appending UTF-8 onto UTF-16 leaves a file no decoder can read back — reachable only once `read_file` began accepting UTF-16. Overwrite stays UTF-8, so a `str_replace` round-trip still rewrites a wide file as UTF-8.
+
+Two divergences are deliberate. BOM-less UTF-16 is not recognized: ASCII-range UTF-16-LE is itself valid UTF-8, so it decodes NUL-riddled instead of raising, and the NUL screen that saves the scanner would reject files that read (badly) today. Legacy-encoded text is the one input where grep and `read_file` differ, correctly: grep uses `errors="replace"` and still matches ASCII, because a search that silently skips a file is worse than a lossy preview, while a read must be faithful or fail.
+
 ## Code Style
 
 - Uses `ruff` for linting and formatting
