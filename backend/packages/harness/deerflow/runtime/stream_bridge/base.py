@@ -8,9 +8,12 @@ architecture.
 from __future__ import annotations
 
 import abc
+import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
+
+from deerflow.config.stream_bridge_config import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, MAX_HEARTBEAT_INTERVAL_SECONDS
 
 
 @dataclass(frozen=True)
@@ -56,6 +59,25 @@ class StreamBridge(abc.ABC):
 
     supports_cross_process: bool = False
 
+    def __init__(self, *, heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS) -> None:
+        self._heartbeat_interval = self._validate_heartbeat_interval(heartbeat_interval)
+
+    @property
+    def heartbeat_interval(self) -> float:
+        """Default number of idle seconds between subscriber heartbeats."""
+        return self._heartbeat_interval
+
+    def _resolve_heartbeat_interval(self, heartbeat_interval: float | None) -> float:
+        if heartbeat_interval is None:
+            return self._heartbeat_interval
+        return self._validate_heartbeat_interval(heartbeat_interval)
+
+    @staticmethod
+    def _validate_heartbeat_interval(heartbeat_interval: float) -> float:
+        if isinstance(heartbeat_interval, bool) or not isinstance(heartbeat_interval, (int, float)) or not math.isfinite(heartbeat_interval) or heartbeat_interval <= 0 or heartbeat_interval > MAX_HEARTBEAT_INTERVAL_SECONDS:
+            raise ValueError(f"heartbeat_interval must be a positive finite number no greater than {MAX_HEARTBEAT_INTERVAL_SECONDS:g} seconds")
+        return float(heartbeat_interval)
+
     @abc.abstractmethod
     async def publish(self, run_id: str, event: str, data: Any) -> None:
         """Enqueue a single event for *run_id* (producer side)."""
@@ -70,14 +92,15 @@ class StreamBridge(abc.ABC):
         run_id: str,
         *,
         last_event_id: str | None = None,
-        heartbeat_interval: float = 15.0,
+        heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamItem]:
         """Async iterator that yields events for *run_id* (consumer side).
 
         Yields :data:`HEARTBEAT_SENTINEL` when no event arrives within
-        *heartbeat_interval* seconds.  Yields :data:`END_SENTINEL` once
-        the producer calls :meth:`publish_end`. Yields :class:`StreamGap` and
-        stops when the subscriber has fallen behind retained history.
+        *heartbeat_interval* seconds, or the bridge's configured default when
+        omitted. Yields :data:`END_SENTINEL` once the producer calls
+        :meth:`publish_end`. Yields :class:`StreamGap` and stops when the
+        subscriber has fallen behind retained history.
         """
 
     @abc.abstractmethod
