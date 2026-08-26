@@ -326,11 +326,12 @@ const ChatBox: React.FC<{
               <header className="shrink-0">
                 <h2 className="text-lg font-medium">Artifacts</h2>
               </header>
-              <main className="min-h-0 grow">
+              <main className="min-h-0 grow overflow-y-auto">
                 <ArtifactFileList
-                  className="max-w-(--container-width-sm) p-4 pt-12"
+                  className="max-w-(--container-width-sm) p-2 pt-4"
                   files={artifacts}
                   threadId={threadId}
+                  variant="tree"
                 />
               </main>
             </div>
