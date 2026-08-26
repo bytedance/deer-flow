@@ -4,6 +4,7 @@ from .clarification_tool import ask_clarification_tool
 from .list_uploaded_files_tool import list_uploaded_files
 from .present_file_tool import present_file_tool
 from .review_skill_package_tool import review_skill_package
+from .run_host_program_tool import run_host_program_tool
 from .setup_agent_tool import setup_agent
 from .task_tool import task_tool
 from .update_agent_tool import update_agent
@@ -14,6 +15,7 @@ __all__ = [
     "update_agent",
     "present_file_tool",
     "review_skill_package",
+    "run_host_program_tool",
     "ask_clarification_tool",
     "view_image_tool",
     "task_tool",

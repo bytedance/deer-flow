@@ -683,6 +683,28 @@ A custom image that is already fully initialized as a non-root user (no runtime 
 
 These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation.
 
+On Windows with `LocalSandboxProvider`, DeerFlow also accepts the configured
+`host_path` spelling at the local tool boundary. For example, with
+`C:/Users/lichen` mapped to `/root`, chat requests and tool arguments may use
+`C:\\Users\\lichen\\config.tfx-dms`, `C:/Users/lichen/config.tfx-dms`, or
+Git Bash's `/c/Users/lichen/config.tfx-dms`; the local adapter checks that the
+path is inside the configured mount and translates it to `/root/config.tfx-dms`
+before normal sandbox validation. Unconfigured host paths remain rejected.
+
+Trusted Windows local mode also exposes `run_host_program` when
+`sandbox.allow_host_bash: true`. It runs `.exe` files directly, `.cmd`/`.bat`
+files through an explicit `cmd.exe` wrapper, and `.ps1` files through
+PowerShell `-File`, without changing the target program or its configuration
+files. Its optional model-supplied timeout must be positive and is capped by
+`sandbox.bash_command_timeout` (600 seconds by default). This is host code
+execution, not an isolation boundary; use it only for trusted single-user
+deployments. AIO, E2B, provisioner, and other remote sandbox providers do not
+run Windows host programs. Keep every mount `container_path` as a POSIX virtual
+path; drive-shaped values such as `/c/projects` are rejected during config
+validation.
+
+For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
 inside the client. This prevents an inherited proxy from returning a misleading

@@ -60,6 +60,25 @@ def test_build_custom_mounts_section_lists_configured_mounts(monkeypatch):
     assert "read-only" in section
 
 
+def test_build_custom_mounts_section_explains_windows_host_path_aliases(monkeypatch):
+    mounts = [SimpleNamespace(container_path="/root", host_path=r"C:\Users\lichen", read_only=False)]
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=mounts,
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+        )
+    )
+    monkeypatch.setattr(prompt_module.os, "name", "nt")
+
+    section = prompt_module._build_custom_mounts_section(app_config=config)
+
+    assert "host path supplied by the user" in section
+    assert "translated to `/root`" in section
+    assert "run_host_program" in section
+    assert r"C:\Users\lichen" not in section
+
+
 def test_build_custom_mounts_section_uses_explicit_app_config_without_global_read(monkeypatch):
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     config = SimpleNamespace(sandbox=SimpleNamespace(mounts=mounts))

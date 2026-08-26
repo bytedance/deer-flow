@@ -1202,6 +1202,10 @@ def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
 
     # Cleanup
     monkeypatch.delattr(_get_custom_mounts, "_cached")
+    if hasattr(_get_custom_mounts, "_cache_key"):
+        monkeypatch.delattr(_get_custom_mounts, "_cache_key")
+    if hasattr(_get_custom_mounts, "_cache_config_path"):
+        monkeypatch.delattr(_get_custom_mounts, "_cache_config_path")
 
 
 def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) -> None:
@@ -1228,6 +1232,41 @@ def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) 
 
     # Cleanup
     monkeypatch.delattr(_get_custom_mounts, "_cached")
+    if hasattr(_get_custom_mounts, "_cache_key"):
+        monkeypatch.delattr(_get_custom_mounts, "_cache_key")
+    if hasattr(_get_custom_mounts, "_cache_config_path"):
+        monkeypatch.delattr(_get_custom_mounts, "_cache_config_path")
+
+
+def test_get_custom_mounts_refreshes_when_configured_mounts_change(monkeypatch, tmp_path) -> None:
+    """A removed mount must stop authorizing its former host path."""
+    if hasattr(_get_custom_mounts, "_cached"):
+        monkeypatch.delattr(_get_custom_mounts, "_cached")
+    if hasattr(_get_custom_mounts, "_cache_key"):
+        monkeypatch.delattr(_get_custom_mounts, "_cache_key")
+    if hasattr(_get_custom_mounts, "_cache_config_path"):
+        monkeypatch.delattr(_get_custom_mounts, "_cache_config_path")
+
+    from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+
+    mounted = tmp_path / "mounted"
+    mounted.mkdir()
+    first = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[VolumeMountConfig(host_path=str(mounted), container_path="/mnt/mounted")],
+        )
+    )
+    second = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            mounts=[],
+        )
+    )
+
+    with patch("deerflow.config.get_app_config", side_effect=[first, second]):
+        assert _get_custom_mounts()[0].container_path == "/mnt/mounted"
+        assert _get_custom_mounts() == []
 
 
 def test_get_custom_mount_for_path_boundary_no_false_prefix_match() -> None:

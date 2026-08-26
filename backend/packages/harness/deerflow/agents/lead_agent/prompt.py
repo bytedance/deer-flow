@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -1007,12 +1008,19 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
         return ""
 
     lines = []
+    host_path_notes = []
     for mount in mounts:
         access = "read-only" if mount.read_only else "read-write"
         lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
+        if os.name == "nt" and "LocalSandboxProvider" in str(getattr(config.sandbox, "use", "")):
+            host_path_notes.append(f"- In trusted local Windows mode, a host path supplied by the user is accepted when it falls inside this mount and is translated to `{mount.container_path}` automatically")
+            if getattr(config.sandbox, "allow_host_bash", False):
+                host_path_notes.append("- Use `run_host_program` for `.exe`, `.cmd`, `.bat`, or `.ps1` files; it preserves Windows-native argument handling")
 
     mounts_list = "\n".join(lines)
-    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory"
+    notes = "\n".join(host_path_notes)
+    suffix = f"\n{notes}" if notes else ""
+    return f"\n**Custom Mounted Directories:**\n{mounts_list}\n- If the user needs files outside `/mnt/user-data`, use these absolute container paths directly when they match the requested directory{suffix}"
 
 
 def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:

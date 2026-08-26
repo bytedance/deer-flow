@@ -670,6 +670,15 @@ DeerFlow 不只是“会说它能做”，它是真的有一台自己的“电�
 └── outputs/          ← 最终交付物
 ```
 
+在 Windows 的受信任本地模式下，`sandbox.mounts[].host_path` 的主机路径也
+可以直接出现在聊天请求和工具参数中。例如将 `C:/Users/lichen` 映射到
+`/root` 后，`C:\\Users\\lichen\\config.tfx-dms`、`C:/Users/lichen/config.tfx-dms`
+和 `/c/Users/lichen/config.tfx-dms` 都会先被授权并转换为 `/root` 路径。
+未配置的主机路径仍会被拒绝。设置 `allow_host_bash: true` 后，Windows
+LocalSandbox 还会提供 `run_host_program`，用于运行 `.exe`、`.cmd`/`.bat` 和
+`.ps1`，但这些程序实际运行在 Gateway 主机上，不具备容器隔离能力；AIO
+或其他远程沙盒不会提供该工具。
+
 ### Context Engineering
 
 **隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。

@@ -92,6 +92,34 @@ class ResolvedPath(NamedTuple):
     mapping: PathMapping | None
 
 
+_CMD_META_CHARS = frozenset('&|<>()^%!"')
+
+
+def _quote_cmd_argument(value: str) -> str:
+    """Quote one argv value for the explicit ``cmd /c`` wrapper.
+
+    ``subprocess.list2cmdline`` follows CommandLineToArgvW rules, not cmd.exe
+    parsing rules. Rejecting cmd metacharacters is the safest contract here:
+    callers can still pass spaces and ordinary punctuation without handing a
+    user-controlled argument a second command language.
+    """
+    if any(char in _CMD_META_CHARS or ord(char) < 32 for char in value):
+        raise PermissionError("cmd.exe arguments may not contain shell metacharacters: & | < > ( ) ^ % !")
+    return f'"{value}"' if any(char.isspace() for char in value) or not value else value
+
+
+def _build_cmd_invocation(args: list[str]) -> str:
+    return " ".join(_quote_cmd_argument(value) for value in args)
+
+
+def _resolve_program_argument(sandbox: "LocalSandbox", value: str) -> str:
+    if "=" in value:
+        prefix, separator, candidate = value.partition("=")
+        if sandbox._find_path_mapping(candidate):
+            return f"{prefix}{separator}{sandbox._resolve_path(candidate)}"
+    return sandbox._resolve_path(value) if sandbox._find_path_mapping(value) else value
+
+
 class LocalSandbox(Sandbox):
     @staticmethod
     def _shell_name(shell: str) -> str:
@@ -551,11 +579,77 @@ class LocalSandbox(Sandbox):
         # Reverse resolve local paths back to container paths in output
         return self._reverse_resolve_paths_in_output(final_output)
 
+    def execute_program(
+        self,
+        program_path: str,
+        args: list[str] | None = None,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        """Run one Windows-native program without a shell command string.
+
+        ``program_path``, ``args`` and ``cwd`` are virtual sandbox paths. The
+        caller is responsible for translating configured host spellings to
+        virtual paths before entering this method. ``.cmd``/``.bat`` files use
+        an explicit ``cmd.exe`` wrapper and ``.ps1`` files use PowerShell's
+        ``-File`` mode; executables are launched directly with ``shell=False``.
+        """
+        _validate_extra_env(env)
+        if os.name != "nt":
+            raise RuntimeError("Windows native program execution is only available on Windows")
+
+        program_mapping = self._find_path_mapping(program_path)
+        if program_mapping is None:
+            raise PermissionError("Program path must be inside a configured sandbox mount")
+        resolved_program = self._resolve_path(program_path)
+        resolved_args = [_resolve_program_argument(self, value) for value in (args or [])]
+        resolved_cwd = self._resolve_path(cwd) if cwd and self._find_path_mapping(cwd) else cwd
+        resolved_program = resolved_program.replace("/", "\\")
+        if resolved_cwd:
+            resolved_cwd = resolved_cwd.replace("/", "\\")
+
+        sandbox_env = build_sandbox_env(env)
+        timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS if timeout is None else timeout
+        suffix = Path(resolved_program).suffix.lower()
+        if suffix in {".cmd", ".bat"}:
+            shell = self._find_first_available_shell(("cmd.exe", "cmd"))
+            if shell is None:
+                raise RuntimeError("cmd.exe is required to run .cmd/.bat programs")
+            command_line = _build_cmd_invocation(["call", resolved_program, *resolved_args])
+            # Passing nested quotes as a list makes Python escape them for
+            # CommandLineToArgvW; cmd.exe then sees the backslashes literally.
+            # Build the complete process command line after validating every
+            # command token, while retaining shell=False at the CreateProcess
+            # boundary.
+            command_args: list[str] | str = f'{subprocess.list2cmdline([shell])} /d /s /c "{command_line}"'
+        elif suffix == ".ps1":
+            shell = self._find_first_available_shell(("pwsh", "pwsh.exe", "powershell", "powershell.exe"))
+            if shell is None:
+                raise RuntimeError("PowerShell is required to run .ps1 programs")
+            command_args = [shell, "-NoProfile", "-File", resolved_program, *resolved_args]
+        else:
+            command_args = [resolved_program, *resolved_args]
+
+        stdout, stderr, returncode, timed_out = self._run_windows_command(command_args, timeout, sandbox_env, cwd=resolved_cwd)
+        output = stdout
+        if stderr:
+            output += f"\nStd Error:\n{stderr}" if output else stderr
+        if timed_out:
+            notice = self._format_timeout_notice(timeout)
+            output += f"\n{notice}" if output else notice
+        elif returncode != 0:
+            output += f"\nExit Code: {returncode}"
+        return self._reverse_resolve_paths_in_output(output if output else "(no output)")
+
     @staticmethod
     def _run_windows_command(
-        args: list[str],
+        args: list[str] | str,
         timeout: float,
         env: dict[str, str] | None = None,
+        *,
+        cwd: str | None = None,
     ) -> tuple[str, str, int, bool]:
         """Run a Windows command with bounded capture and process-tree timeout."""
         timed_out = False
@@ -570,6 +664,7 @@ class LocalSandbox(Sandbox):
                 stderr=stderr_write_fd,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
                 env=env,
+                cwd=cwd,
             )
         except Exception:
             for fd in (stdout_read_fd, stdout_write_fd, stderr_read_fd, stderr_write_fd):

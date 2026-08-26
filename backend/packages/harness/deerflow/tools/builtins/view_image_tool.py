@@ -26,8 +26,14 @@ _EXTENSION_TO_MIME = {
 }
 
 
-def _is_allowed_image_virtual_path(image_path: str) -> bool:
-    return any(image_path == root or image_path.startswith(f"{root}/") for root in _ALLOWED_IMAGE_VIRTUAL_ROOTS)
+def _is_allowed_image_virtual_path(image_path: str, *, allow_custom_mount: bool = False) -> bool:
+    if any(image_path == root or image_path.startswith(f"{root}/") for root in _ALLOWED_IMAGE_VIRTUAL_ROOTS):
+        return True
+    if allow_custom_mount:
+        from deerflow.sandbox.tools import _is_custom_mount_path
+
+        return _is_custom_mount_path(image_path)
+    return False
 
 
 def _detect_image_mime(image_data: bytes) -> str | None:
@@ -70,19 +76,25 @@ def view_image_tool(
     """
     from deerflow.sandbox.exceptions import SandboxRuntimeError
     from deerflow.sandbox.tools import (
+        ensure_sandbox_initialized,
         get_thread_data,
+        is_local_sandbox,
+        normalize_local_tool_path,
         resolve_and_validate_user_data_path,
         validate_local_tool_path,
     )
 
     thread_data = get_thread_data(runtime)
+    local_runtime = is_local_sandbox(runtime)
+    if local_runtime:
+        image_path = normalize_local_tool_path(image_path)
 
-    if not _is_allowed_image_virtual_path(image_path):
+    if not _is_allowed_image_virtual_path(image_path, allow_custom_mount=local_runtime):
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error: Only image paths under {_ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT} are allowed",
+                        f"Error: Only image paths under {_ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT} or configured local mounts are allowed",
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -91,7 +103,14 @@ def view_image_tool(
 
     try:
         validate_local_tool_path(image_path, thread_data, read_only=True)
-        actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
+        if local_runtime:
+            sandbox = ensure_sandbox_initialized(runtime)
+        if local_runtime and _is_allowed_image_virtual_path(image_path, allow_custom_mount=True):
+            from deerflow.sandbox.tools import _is_custom_mount_path
+
+            actual_path = sandbox._resolve_path(image_path) if _is_custom_mount_path(image_path) else resolve_and_validate_user_data_path(image_path, thread_data)
+        else:
+            actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
     except (PermissionError, SandboxRuntimeError) as e:
         return Command(
             update={"messages": [ToolMessage(f"Error: {str(e)}", tool_call_id=tool_call_id)]},
