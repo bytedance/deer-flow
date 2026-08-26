@@ -63,6 +63,12 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
+            try:
+                stuck = await self._task_repo.cancel_stuck_once_tasks(error=_LEASE_RECOVERY_ERROR)
+                if stuck:
+                    logger.warning("Cancelled %d stuck once task(s) in poll loop", stuck)
+            except Exception:
+                logger.exception("Failed to reconcile stuck once tasks in poll loop")
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
@@ -553,6 +559,9 @@ class ScheduledTaskService:
             self._skip_next_lease_reconciliation = True
         else:
             try:
+                # ORDER MATTERS: run-row sweep must happen before parent
+                # reconciliation so cancel_stuck_once_tasks can see the
+                # terminal status written by mark_stale_active_runs.
                 stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
                 if stale:
                     logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
