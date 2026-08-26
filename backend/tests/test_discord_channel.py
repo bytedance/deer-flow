@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import gc
 import threading
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.channels import discord as discord_module
 from app.channels.discord import DiscordChannel
 from app.channels.manager import CHANNEL_CAPABILITIES
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
@@ -267,18 +270,18 @@ async def test_send_file_closes_handle_when_send_fails(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_ack_reaction_task_retained_under_gc() -> None:
-    """The ack-reaction task survives GC and still runs to completion.
+    """The ack-reaction task is retained and runs to completion.
+
+    This pins the retention contract (scheduled → in the set, done →
+    discarded): the fake coroutine never suspends on an unrooted future, so
+    actual mid-flight GC cannot be reproduced deterministically here — the
+    same limitation the #4928 precedent test has.
 
     A bare ``asyncio.create_task`` holds only a weak loop reference, so the
     ✅ acknowledgment could be garbage-collected mid-flight. The module-level
     retention set keeps the task strongly referenced until completion (same
     pattern as #4928 / #4931).
     """
-    import gc
-    import weakref
-
-    from app.channels import discord as discord_module
-
     bus = MessageBus()
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
 
@@ -308,8 +311,6 @@ async def test_ack_reaction_task_retained_under_gc() -> None:
 async def test_ack_reaction_task_survives_reaction_failure() -> None:
     """A failing add_reaction completes quietly and is discarded from the set."""
 
-    from app.channels import discord as discord_module
-
     bus = MessageBus()
     channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
 
@@ -321,3 +322,46 @@ async def test_ack_reaction_task_survives_reaction_failure() -> None:
     task = channel._schedule_ack_reaction(message)
     await asyncio.wait_for(task, timeout=1.0)
     assert task not in discord_module._ack_reaction_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_in_flight_ack_reaction_tasks() -> None:
+    """stop()'s cleanup path cancels in-flight ack reactions on the owning loop.
+
+    Without the drain, a task interrupted mid-HTTP-call would sit in the
+    module retention set forever, pinning the channel and Message graph.
+    """
+    release = asyncio.Event()
+
+    async def _hang(_emoji: str) -> None:
+        await release.wait()
+
+    channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    message = SimpleNamespace(id=333, add_reaction=_hang)
+
+    task = channel._schedule_ack_reaction(message)
+    assert task in discord_module._ack_reaction_tasks
+
+    await channel._cancel_ephemeral_tasks()
+
+    assert task.cancelled() or task.done()
+    assert task not in discord_module._ack_reaction_tasks
+    release.set()
+
+
+@pytest.mark.asyncio
+async def test_ack_reaction_task_failure_is_logged_and_discarded(caplog) -> None:
+    """An exception escaping _add_reaction is logged at error and discarded."""
+    bus = MessageBus()
+    channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
+
+    async def _explode(_self, _message) -> None:
+        raise RuntimeError("unexpected boom")
+
+    with patch.object(DiscordChannel, "_add_reaction", _explode), caplog.at_level("ERROR", logger="app.channels.discord"):
+        task = channel._schedule_ack_reaction(SimpleNamespace(id=444))
+        with pytest.raises(RuntimeError, match="unexpected boom"):
+            await asyncio.wait_for(task, timeout=1.0)
+
+    assert task not in discord_module._ack_reaction_tasks
+    assert any("ack reaction task failed" in record.message for record in caplog.records)

@@ -192,12 +192,12 @@ class DiscordChannel(Channel):
         discord_loop = self._discord_loop
         current_loop = asyncio.get_running_loop()
         if discord_loop is None or discord_loop is current_loop:
-            await self._cancel_typing_tasks()
+            await self._cancel_ephemeral_tasks()
         elif discord_loop.is_running():
             # Serialize cleanup with _start_typing() on the owning loop.  The
             # loop may exit between is_running() and scheduling, so neither
             # scheduling nor waiting is allowed to block the rest of stop().
-            cleanup_coro = self._cancel_typing_tasks()
+            cleanup_coro = self._cancel_ephemeral_tasks()
             try:
                 cleanup_future = asyncio.run_coroutine_threadsafe(cleanup_coro, discord_loop)
             except RuntimeError:
@@ -237,7 +237,7 @@ class DiscordChannel(Channel):
         # discard the stale references here; awaiting them from this loop would
         # raise a cross-loop RuntimeError.
         if discord_loop and discord_loop is not current_loop and not discord_loop.is_running():
-            self._discard_typing_tasks()
+            self._discard_ephemeral_tasks()
 
         self._client = None
         self._discord_loop = None
@@ -329,6 +329,36 @@ class DiscordChannel(Channel):
                     target_id,
                 )
         self._typing_tasks.clear()
+
+    async def _cancel_ack_reaction_tasks(self) -> None:
+        """Cancel in-flight ack reactions so stop() does not strand them.
+
+        A task interrupted mid-HTTP-call would otherwise stay in the module
+        retention set forever, pinning this channel instance and the discord
+        Message object graph after shutdown.
+        """
+        pending = [task for task in _ack_reaction_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    def _discard_ack_reaction_tasks(self) -> None:
+        """Forget stale ack-reaction tasks after the owning loop stopped."""
+        for task in _ack_reaction_tasks:
+            if not task.done():
+                logger.warning("[Discord] discarding pending ack-reaction task for stopped loop")
+        _ack_reaction_tasks.clear()
+
+    async def _cancel_ephemeral_tasks(self) -> None:
+        """Cancel typing indicators and in-flight ack reactions together."""
+        await self._cancel_typing_tasks()
+        await self._cancel_ack_reaction_tasks()
+
+    def _discard_ephemeral_tasks(self) -> None:
+        """Forget stale typing and ack-reaction tasks (stopped-loop fallback)."""
+        self._discard_typing_tasks()
+        self._discard_ack_reaction_tasks()
 
     async def _stop_typing(self, chat_id: str, thread_ts: str | None = None) -> None:
         """Stops the typing loop for a specific target."""
@@ -668,7 +698,7 @@ class DiscordChannel(Channel):
                 logger.exception("Discord client error")
         finally:
             try:
-                self._discord_loop.run_until_complete(self._cancel_typing_tasks())
+                self._discord_loop.run_until_complete(self._cancel_ephemeral_tasks())
             except Exception:
                 logger.exception("Error while cleaning up Discord typing tasks")
             try:
