@@ -25,6 +25,9 @@ const config = {
     locales: ["en", "zh"],
     defaultLocale: "en",
   },
+  turbopack: {
+    root: import.meta.dirname,
+  },
   devIndicators: false,
   allowedDevOrigins: getAllowedDevOrigins(),
   async rewrites() {
