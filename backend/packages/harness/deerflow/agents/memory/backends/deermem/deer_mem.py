@@ -236,8 +236,8 @@ class DeerMem(MemoryManager):
                 trace_id=trace_id,
                 signals=signals,
             )
-            # The enqueue stamps the current scope generation, so a recreated
-            # agent's fresh turns carry the bumped value and run normally.
+            # The enqueue stamps the current cancellation epoch, so a recreated
+            # agent's fresh turns carry it and run normally.
         except QueueFull as e:
             logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
@@ -465,10 +465,11 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
     ) -> dict[str, Any]:
         # Cancel buffered extractions before clearing stored data, matching the
-        # clear's own scope (#5037 Finding 2): a scoped clear fences that agent
-        # bucket; a global clear removes every agent's facts for the user and
-        # must fence all of them, otherwise a debounce timer firing after the
-        # clear re-persists facts the caller just deleted (#3364).
+        # clear's own scope (#5037 Finding 2): a scoped clear advances that
+        # agent bucket's cancellation epoch; a global clear removes every
+        # agent's facts for the user and must advance the user-wide epoch,
+        # otherwise a debounce timer firing after the clear re-persists facts
+        # the caller just deleted (#3364).
         try:
             if agent_name is None:
                 cancelled = self.cancel_by_user(user_id)

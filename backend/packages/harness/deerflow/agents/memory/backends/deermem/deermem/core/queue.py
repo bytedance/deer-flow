@@ -68,13 +68,17 @@ class ConversationContext:
     # so a flush cannot drop a pending normal update's un-extracted tail. See
     # ``_enqueue_locked``'s match-key + backpressure handling.
     bypass_watermark: bool = False
-    # Scope generation stamped at enqueue time (``_generation_for_locked``).
-    # ``cancel_by_agent`` / ``cancel_by_user`` bump the scope's counter, so work
-    # snapshotted by a worker before the cancel carries an older generation and
-    # is dropped at processing time — even across delete -> recreate-same-name
-    # -> fresh enqueue (#3364/#5037). Fresh enqueues stamp the bumped value
-    # naturally; there is no fence to lift and no way for new work to resurrect
-    # cancelled work.
+    # Scope generation epoch stamped at enqueue time. Invariant:
+    #
+    #   A queued memory update may run only if no newer cancellation epoch
+    #   covers its scope.
+    #
+    # ``cancel_by_agent`` / ``cancel_by_user`` assign the scope's next
+    # cancellation epoch, so work snapshotted by a worker before the cancel
+    # carries an older epoch and is dropped at processing time — even across
+    # delete -> recreate-same-name -> fresh enqueue (#3364/#5037). Fresh
+    # enqueues stamp the current epoch naturally; cancelled work cannot be
+    # resurrected by newer work on the same scope.
     generation: int = 0
 
 
@@ -100,15 +104,14 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
-        # Monotonic per-scope generation EPOCHS, keyed like the fences they
-        # replaced: ``(agent_name_or_None, user_id_or_None)`` with ``None`` as a
-        # wildcard. Every cancel assigns the next value of one process-wide
-        # clock to its scope key, so counters stay comparable through
+        # Per-scope cancellation epochs, keyed by
+        # ``(agent_name_or_None, user_id_or_None)`` with ``None`` as a wildcard.
+        # Every cancel assigns the next value of one process-wide clock to its
+        # scope key, so epochs stay comparable through
         # ``_generation_for_locked``'s max(): a later user-wide cancel always
         # outdates earlier exact-key work for that user (#5037 round 3).
-        # Independent per-key ``+= 1`` would break that ordering. Entries only
-        # appear for scopes actually cancelled — small tuples + ints, bounded
-        # by distinct deleted/cleared scopes per process lifetime.
+        # Entries only appear for scopes actually cancelled — small tuples +
+        # ints, bounded by distinct deleted/cleared scopes per process lifetime.
         self._generation_clock = 0
         self._scope_generations: dict[tuple[str | None, str | None], int] = {}
 
@@ -278,10 +281,11 @@ class MemoryUpdateQueue:
         stale = 0
         try:
             for context in contexts_to_process:
-                # Generation staleness (#5037): this context may have been
-                # snapshotted before a cancel_by_agent/cancel_by_user bumped its
-                # scope; it must not be extracted against anymore. Fresh enqueues
-                # carry the bumped generation, so recreated-scope work is safe.
+                # The invariant on ``ConversationContext.generation``: drop the
+                # context when a newer cancellation epoch covers its scope.
+                # This happens for batch items snapshotted before a
+                # cancel_by_agent/cancel_by_user ran; fresh enqueues carry the
+                # current epoch, so recreated-scope work is safe.
                 if context.generation != self._current_generation(context.agent_name, context.user_id):
                     stale += 1
                     logger.info("Skipping stale memory update for thread %s (agent=%s user=%s)", context.thread_id, context.agent_name, context.user_id)
@@ -443,6 +447,9 @@ class MemoryUpdateQueue:
             self._processing_thread = None
             self._reprocess_pending = False
 
+    # Invariant: a queued memory update may run only if no newer cancellation
+    # epoch covers its scope.
+
     def cancel_by_agent(self, agent_name: str, *, user_id: str | None = None) -> int:
         """Drop pending updates for one agent scope; return the removed count.
 
@@ -455,13 +462,14 @@ class MemoryUpdateQueue:
 
         Pending removal alone cannot stop a worker that already snapshotted its
         batch into ``_process_queue`` (the cancel would see an empty ``_items``
-        while the LLM calls still go out), so this also bumps the scope's
-        generation: every context stamped before the bump is stale at
-        processing time, while enqueues after it — including a recreated agent's
-        fresh turns — carry the new generation and run normally (#5037).
+        while the LLM calls still go out), so this also assigns the scope its
+        next cancellation epoch: every context stamped before the new epoch is
+        stale at processing time, while enqueues after it — including a
+        recreated agent's fresh turns — carry the current epoch and run
+        normally (#5037).
         """
         with self._lock:
-            self._bump_generation_locked((agent_name, user_id))
+            self._next_cancellation_epoch_locked((agent_name, user_id))
             remaining = [context for context in self._items if not (context.agent_name == agent_name and (user_id is None or context.user_id == user_id))]
             removed = len(self._items) - len(remaining)
             self._items = remaining
@@ -477,7 +485,7 @@ class MemoryUpdateQueue:
         dropped too — not just the reserved default bucket (#5037 Finding 2).
         """
         with self._lock:
-            self._bump_generation_locked((None, user_id))
+            self._next_cancellation_epoch_locked((None, user_id))
             if user_id is None:
                 removed = len(self._items)
                 self._items = []
@@ -495,18 +503,18 @@ class MemoryUpdateQueue:
             return self._generation_for_locked(agent_name, user_id)
 
     def _generation_for_locked(self, agent_name: str | None, user_id: str | None) -> int:
-        """Max covering-scope epoch; caller must hold ``self._lock``.
+        """Current generation epoch for ``(agent_name, user_id)``; lock held.
 
-        A context is governed by the strictest (highest) epoch among the exact
-        key and any wildcard that covers it. Epochs come from one shared clock,
-        so they are globally comparable — a later broader cancel always
-        outdates earlier narrower work.
+        The effective epoch is the max over the exact key and any wildcard
+        that covers it. Epochs come from one shared clock, so they are
+        globally comparable — a later broader cancel always outdates earlier
+        narrower work.
         """
         candidates = ((agent_name, user_id), (agent_name, None), (None, user_id), (None, None))
         return max(self._scope_generations.get(key, 0) for key in candidates)
 
-    def _bump_generation_locked(self, key: tuple[str | None, str | None]) -> None:
-        """Assign the next process-wide epoch to ``key``; caller holds the lock."""
+    def _next_cancellation_epoch_locked(self, key: tuple[str | None, str | None]) -> None:
+        """Assign the next process-wide cancellation epoch to ``key``; lock held."""
         self._generation_clock += 1
         self._scope_generations[key] = self._generation_clock
 

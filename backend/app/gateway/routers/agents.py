@@ -566,12 +566,13 @@ async def delete_agent(name: str) -> None:
     if not await asyncio.to_thread(store.exists, name, user_id=user_id):
         raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
 
-    # Fence BEFORE deleting (#5037): cancel buffered extraction work first so a
-    # debounce timer racing the rmtree cannot fire an extraction against the
-    # removed scope and resurrect its directory (#3364). The queue's writer-side
-    # fence also stops batch items a worker already snapshotted before this
-    # cancel ran. Ordering cost: a rare failed delete after this point only
-    # loses that scope's debounced extractions.
+    # Advance the scope's cancellation epoch BEFORE deleting (#5037): cancel
+    # buffered extraction work first so a debounce timer racing the rmtree
+    # cannot fire an extraction against the removed scope and resurrect its
+    # directory (#3364). The queue's epoch check also stops batch items a
+    # worker already snapshotted before this cancel ran. Ordering cost: a rare
+    # failed delete after this point only loses that scope's debounced
+    # extractions.
     try:
         manager = await asyncio.to_thread(get_memory_manager)
         cancelled = await asyncio.to_thread(manager.cancel_by_agent, name, user_id=user_id)
