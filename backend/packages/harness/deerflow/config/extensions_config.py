@@ -245,6 +245,23 @@ class McpServerConfig(BaseModel):
     )
     model_config = ConfigDict(extra="allow")
 
+    @field_validator("headers")
+    @classmethod
+    def _validate_header_names(cls, value: dict[str, str]) -> dict[str, str]:
+        # HTTP field names are case-insensitive, so two spellings of one header
+        # are one field with two candidate values. The adapter copies the static
+        # mapping verbatim, so both would reach the wire; a later per-request or
+        # OAuth override only replaces one spelling, leaving the other to leak a
+        # shared credential across tenant authority. Reject at config time so a
+        # bad mapping cannot reach the connection.
+        seen: dict[str, str] = {}
+        for header_name in value:
+            lowered = header_name.lower()
+            if lowered in seen:
+                raise ValueError(f"headers maps the same HTTP header under two spellings ({seen[lowered]!r} and {header_name!r}); header names are case-insensitive, so keep only one")
+            seen[lowered] = header_name
+        return value
+
     @model_validator(mode="before")
     @classmethod
     def _accept_transport_alias(cls, data: Any) -> Any:

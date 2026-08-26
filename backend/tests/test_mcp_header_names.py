@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from langchain_mcp_adapters.interceptors import MCPToolCallRequest
+from pydantic import ValidationError
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpUserScopedAuthConfig
 from deerflow.mcp.headers import apply_header_overrides, header_spellings
@@ -61,6 +62,52 @@ def test_override_does_not_mutate_the_base():
     base = {"Authorization": DISCOVERY}
     apply_header_overrides(base, {"authorization": "Bearer new"})
     assert base == {"Authorization": DISCOVERY}
+
+
+# ---------------------------------------------------------------------------
+# Static header spelling validation
+# ---------------------------------------------------------------------------
+
+
+def test_static_headers_reject_case_insensitive_duplicates():
+    """Two spellings of one header in the static map must be rejected at config time."""
+    with pytest.raises(ValueError, match="two spellings"):
+        McpServerConfig(
+            type="http",
+            url="https://mcp.example.com/mcp",
+            headers={"Authorization": "Bearer a", "authorization": "Bearer b"},
+        )
+
+
+def test_static_headers_allow_distinct_names():
+    config = McpServerConfig(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers={"X-Tenant": "acme", "X-Org": "engineering"},
+    )
+    assert config.headers == {"X-Tenant": "acme", "X-Org": "engineering"}
+
+
+def test_extensions_config_rejects_static_header_duplicates():
+    with pytest.raises(ValidationError, match="two spellings"):
+        ExtensionsConfig.model_validate(
+            {
+                "mcpServers": {
+                    "shared-http": {
+                        "type": "http",
+                        "url": "https://mcp.example.com/mcp",
+                        "headers": {"Authorization": "Bearer a", "authorization": "Bearer b"},
+                    }
+                }
+            }
+        )
+
+
+def test_gateway_rejects_static_header_case_insensitive_duplicates():
+    from app.gateway.routers.mcp import McpServerConfigResponse
+
+    with pytest.raises(ValidationError, match="two spellings"):
+        McpServerConfigResponse(headers={"Authorization": "Bearer a", "AUTHORIZATION": "Bearer b"})
 
 
 # ---------------------------------------------------------------------------
