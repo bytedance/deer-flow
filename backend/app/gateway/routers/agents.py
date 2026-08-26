@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from deerflow.agents.memory import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
     AgentConfig,
@@ -581,5 +582,18 @@ async def delete_agent(name: str) -> None:
             status_code=409,
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
+
+    # Best-effort (#3364): drop queued memory-extraction work for the deleted
+    # scope so its debounce timer cannot fire extraction against a removed
+    # agent and re-persist state that blocks recreating the same name.
+    # Deletion itself must not fail when memory cleanup fails.
+    try:
+        manager = await asyncio.to_thread(get_memory_manager)
+        cancelled = await asyncio.to_thread(manager.cancel_by_agent, name, user_id=user_id)
+    except Exception:
+        logger.warning("Could not cancel pending memory updates for deleted agent '%s'", name, exc_info=True)
+    else:
+        if cancelled:
+            logger.info("Cancelled %d pending memory update(s) for deleted agent '%s'", cancelled, name)
 
     logger.info(f"Deleted agent '{name}'")

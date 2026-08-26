@@ -414,6 +414,28 @@ class MemoryUpdateQueue:
             self._processing_thread = None
             self._reprocess_pending = False
 
+    def cancel_by_agent(self, agent_name: str, *, user_id: str | None = None) -> int:
+        """Drop pending updates for one agent scope; return the removed count.
+
+        Agent deletion and scoped memory clearing call this so a debounce Timer
+        can no longer fire an extraction LLM call for a scope that no longer
+        exists (#3364): the extraction would re-persist state that blocks
+        recreating an agent with the same name. ``user_id=None`` cancels the
+        scope for every user; a specific id limits cancellation to that owner's
+        entries.
+
+        In-flight contexts already pulled out of ``_items`` by
+        ``_process_queue`` are NOT interrupted; they complete and persist as
+        before. The durable outbox design owns full in-flight fencing later.
+        """
+        with self._lock:
+            remaining = [context for context in self._items if not (context.agent_name == agent_name and (user_id is None or context.user_id == user_id))]
+            removed = len(self._items) - len(remaining)
+            self._items = remaining
+        if removed:
+            logger.info("Cancelled %d pending memory update(s) for agent %s (user_id=%s)", removed, agent_name, user_id)
+        return removed
+
     @property
     def pending_count(self) -> int:
         """Get the number of pending updates."""

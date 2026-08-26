@@ -768,6 +768,40 @@ class TestAgentsAPI:
         assert response.status_code == 409
         assert fact_path.read_text(encoding="utf-8") == "memory data"
 
+    def test_delete_agent_cancels_pending_memory_updates(self, agent_client, monkeypatch):
+        """#3364 stopgap: deletion drops the scope's still-debouncing extraction
+        contexts so a timer cannot re-persist state after the agent is gone."""
+        agent_client.post("/api/agents", json={"name": "cancel-me", "soul": "bye"})
+
+        calls: list[tuple[str, str | None]] = []
+
+        class _RecordingManager:
+            def cancel_by_agent(self, agent_name, *, user_id=None):
+                calls.append((agent_name, user_id))
+                return 2
+
+        monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _RecordingManager())
+
+        response = agent_client.delete("/api/agents/cancel-me")
+
+        assert response.status_code == 204
+        assert calls == [("cancel-me", "test-user-autouse")]
+
+    def test_delete_agent_survives_memory_cancel_failure(self, agent_client, monkeypatch):
+        """Memory cleanup is best-effort: a broken manager must not fail deletion."""
+        agent_client.post("/api/agents", json={"name": "flaky-cancel", "soul": "bye"})
+
+        class _BrokenManager:
+            def cancel_by_agent(self, agent_name, *, user_id=None):
+                raise RuntimeError("memory backend down")
+
+        monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _BrokenManager())
+
+        response = agent_client.delete("/api/agents/flaky-cancel")
+
+        assert response.status_code == 204
+        assert agent_client.get("/api/agents/flaky-cancel").status_code == 404
+
     def test_reserved_default_bucket_cannot_be_created_as_custom_agent(self, agent_client):
         response = agent_client.post("/api/agents", json={"name": "__default__", "soul": "must fail"})
         assert response.status_code == 422

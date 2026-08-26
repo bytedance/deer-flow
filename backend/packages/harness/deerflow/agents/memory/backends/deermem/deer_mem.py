@@ -460,11 +460,31 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
+        # Cancel the scope's pending extractions before clearing stored data:
+        # otherwise a debounce timer firing after the clear re-persists facts
+        # the caller just deleted (#3364). A global clear (agent_name=None)
+        # resolves to the reserved default bucket here; cross-agent residue on
+        # global clears stays outside this stopgap's scope.
+        try:
+            cancelled = self.cancel_by_agent(agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to cancel pending memory updates during clear_memory", exc_info=True)
+        else:
+            if cancelled:
+                logger.info("Cancelled %d pending memory update(s) while clearing agent '%s'", cancelled, agent_name)
         if agent_name is None:
             memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
         else:
             memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
         return _compat_document(memory_data)
+
+    def cancel_by_agent(self, agent_name: str | None = None, *, user_id: str | None = None) -> int:
+        """Drop this scope's still-debouncing extraction updates (#3364).
+
+        Public agent identifiers are canonicalized exactly like ``add`` /
+        ``clear_memory``. Returns the number of dropped contexts.
+        """
+        return self._queue.cancel_by_agent(_resolve_agent_name(agent_name), user_id=user_id)
 
     def import_memory(
         self,

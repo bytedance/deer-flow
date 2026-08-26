@@ -314,6 +314,17 @@ class MemoryManager(BaseModel):
         """
         raise NotImplementedError(f"clear_memory not supported by {type(self).__name__}")
 
+    def cancel_by_agent(self, agent_name: str | None = None, *, user_id: str | None = None) -> int:
+        """Drop still-buffered extraction work for one agent scope.
+
+        Agent deletion and scoped memory clearing call this so a backend's
+        debounce buffer cannot fire an extraction for a removed scope (#3364).
+        Backends without buffered work (noop, synchronous remote adapters) have
+        nothing to cancel and keep the ``0`` default, so route-level callers
+        stay unconditional instead of duck-typing. Returns the removed count.
+        """
+        return 0
+
     def import_memory(
         self,
         memory_data: dict[str, Any],
