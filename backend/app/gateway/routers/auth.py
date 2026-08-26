@@ -31,6 +31,7 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.pat import PAT_MAX_NAME_LENGTH
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
@@ -474,7 +475,7 @@ def require_session_source(request: Request) -> None:
 
 
 class PATCreateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=128)
+    name: str = Field(min_length=1, max_length=PAT_MAX_NAME_LENGTH)
     scopes: list[str] = Field(min_length=1)
     expires_in_days: int | None = Field(default=None, ge=1, le=365)  # None = never expires
 

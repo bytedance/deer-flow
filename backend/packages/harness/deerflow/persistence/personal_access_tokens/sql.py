@@ -106,6 +106,11 @@ class PersonalAccessTokenRepository:
         last = self._last_used_written_at.get(pat_id)
         if last is not None and (now - last) < self._last_used_write_interval:
             return False
+        # Bound the stamp cache: revoked/expired tokens never return here, so
+        # their entries are stale by definition once the cache outgrows very
+        # active token populations.
+        if len(self._last_used_written_at) > 4096:
+            self._last_used_written_at.clear()
         self._last_used_written_at[pat_id] = now
         return True
 

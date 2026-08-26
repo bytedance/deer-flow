@@ -8,6 +8,7 @@ and the self-protection rules (a PAT may not manage PATs or auth state).
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -38,11 +39,11 @@ class _FakeProvider:
         return self._users.get(str(user_id))
 
 
-def _fake_user(user_id: str = "user-1"):
+def _fake_user(user_id: str = "user-1", *, system_role: str = "user"):
     return SimpleNamespace(
         id=user_id,
         email=f"{user_id}@example.com",
-        system_role="user",
+        system_role=system_role,
         needs_setup=False,
         token_version=0,
         oauth_provider=None,
@@ -73,6 +74,12 @@ def _make_pat_app(with_pat_repo: bool = True):
     async def whoami(request: Request):
         return {"user_id": str(request.state.user.id), "auth_source": request.state.auth_source}
 
+    @app.get("/api/admin-check")
+    async def admin_check(request: Request):
+        from app.gateway.deps import is_admin_user
+
+        return {"is_admin": await is_admin_user(request)}
+
     @app.post("/api/threads/{thread_id}/runs/stream")
     async def run_stream(request: Request):
         return {"ok": True, "permissions": list(request.state.auth.permissions)}
@@ -87,7 +94,7 @@ def pat_env(tmp_path, monkeypatch):
     asyncio.run(_create_tables(engine))
     repo = PersonalAccessTokenRepository(async_sessionmaker(engine, expire_on_commit=False))
 
-    fake_provider = _FakeProvider(_fake_user("user-1"), _fake_user("user-2"))
+    fake_provider = _FakeProvider(_fake_user("user-1"), _fake_user("user-2"), _fake_user("admin-1", system_role="admin"))
     monkeypatch.setattr("app.gateway.deps.get_local_provider", lambda: fake_provider)
     monkeypatch.setattr("app.gateway.routers.auth.get_local_provider", lambda: fake_provider)
 
@@ -117,16 +124,19 @@ def _session_cookie(client: TestClient, user_id: str = "user-1", token_version: 
     return token
 
 
-def _create_pat(client: TestClient, *, scopes: list[str] | None = None, user_id: str = "user-1") -> dict:
+def _create_pat(client: TestClient, *, scopes: list[str] | None = None, user_id: str = "user-1", expires_in_days: int | None = None) -> dict:
     """Create a PAT via the management API with session auth + CSRF pair."""
     from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 
     _session_cookie(client, user_id=user_id)
     csrf = generate_csrf_token()
     client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    payload = {"name": "test-token", "scopes": scopes or ["runs:read", "threads:read"]}
+    if expires_in_days is not None:
+        payload["expires_in_days"] = expires_in_days
     response = client.post(
         "/api/v1/auth/pats",
-        json={"name": "test-token", "scopes": scopes or ["runs:read", "threads:read"]},
+        json=payload,
         headers={CSRF_HEADER_NAME: csrf},
     )
     assert response.status_code == 201, response.text
@@ -314,3 +324,55 @@ def test_successful_pat_auth_stamps_last_used(client, pat_env):
 
     records = asyncio.run(repo.list_for_user("user-1"))
     assert records[0]["last_used_at"] is not None
+
+
+def test_expired_pat_rejected_at_middleware(client, pat_env):
+    _app, repo, _engine = pat_env
+    from app.gateway.auth.pat import generate_pat_token, pat_token_digest
+
+    token = generate_pat_token()
+    asyncio.run(
+        repo.create(
+            user_id="user-1",
+            name="already-expired",
+            scopes=["runs:read"],
+            token_digest=pat_token_digest(token),
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+    )
+    client.cookies.clear()
+    response = client.get("/api/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 401
+
+
+def test_create_with_expiry_returns_expires_at(client):
+    created = _create_pat(client, expires_in_days=30)
+    assert created["expires_at"] is not None
+
+
+def test_pat_never_carries_admin_capability_even_for_admin_owner(client):
+    created = _create_pat(client, user_id="admin-1", scopes=["runs:read"])
+    client.cookies.clear()
+    response = client.get("/api/admin-check", headers={"Authorization": f"Bearer {created['token']}"})
+    assert response.status_code == 200
+    assert response.json() == {"is_admin": False}
+
+    # Control: the same admin over a session cookie keeps admin capability.
+    _session_cookie(client, user_id="admin-1")
+    control = client.get("/api/admin-check")
+    assert control.status_code == 200
+    assert control.json() == {"is_admin": True}
+
+
+def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
+    """DEER_FLOW_AUTH_DISABLED is an operator override of all authentication.
+
+    A stray Authorization header (e.g. added by a proxy in front of an E2E
+    sandbox) must not turn into a 401 in that mode.
+    """
+    monkeypatch.setattr("app.gateway.auth_middleware.is_auth_disabled", lambda: True)
+    app = _make_pat_app()
+    with TestClient(app) as disabled_client:
+        response = disabled_client.get("/api/whoami", headers={"Authorization": "Bearer dfp_garbage"})
+    assert response.status_code == 200
+    assert response.json()["auth_source"] == "auth_disabled"

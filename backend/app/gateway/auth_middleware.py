@@ -114,13 +114,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if internal_user is not None:
             user = internal_user
             auth_source = AUTH_SOURCE_INTERNAL
-        elif authorization is not None:
+        elif authorization is not None and not is_auth_disabled():
             # Bearer (PAT) credential precedence (#4849): a present-but-invalid
             # Authorization header is a hard 401 and never silently falls back
             # to the session cookie. This is also what makes the CSRF
             # middleware's Bearer skip safe — a cross-site attacker cannot ride
             # a victim's cookie by padding the request with a garbage Bearer
             # header, because the request dies here before any route runs.
+            # Auth-disabled mode is an operator override of all authentication,
+            # so it stays ahead of the Bearer check (a stray Authorization
+            # header from a proxy must not 401 an E2E sandbox).
             from app.gateway.auth.pat import authenticate_pat
 
             try:

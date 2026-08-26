@@ -458,7 +458,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
-            app.state.pat_repo = PersonalAccessTokenRepository(sf)
+            from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
+
+            app.state.pat_repo = PersonalAccessTokenRepository(sf, last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -836,6 +838,13 @@ async def is_admin_user(request: Request) -> bool:
     per-router copies that previously existed in ``mcp``, ``channel_connections``
     and ``channels``.
     """
+    # PAT credentials never carry admin capability: no scope in the PAT
+    # universe grants it, so an admin's automation token must not unlock
+    # admin-only routes (skill installs, integration credentials, MCP config).
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        return False
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)

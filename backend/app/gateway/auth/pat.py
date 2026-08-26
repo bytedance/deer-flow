@@ -84,10 +84,11 @@ def extract_bearer_token(authorization: str | None) -> str | None:
 async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, frozenset[str]]:
     """Validate the Bearer credential and resolve its owning user.
 
-    Returns ``(user, scopes)``. Every failure mode — malformed token, unknown
-    or revoked or expired token, PAT store not configured, missing owning
-    user — raises the same generic 401 so responses cannot serve as an oracle
-    on which check failed.
+    Returns ``(user, scopes)``. Every token-verdict failure mode — malformed
+    token, unknown/revoked/expired token, PAT store not configured, missing
+    owning user — raises the same generic 401 so responses cannot serve as an
+    oracle on which check failed. Infrastructure errors (store I/O failures)
+    propagate and fail closed; they are not part of the token verdict.
     """
     from fastapi import HTTPException
 
