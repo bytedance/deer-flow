@@ -100,12 +100,16 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
-        # Monotonic per-scope generation counters, keyed like the fences they
+        # Monotonic per-scope generation EPOCHS, keyed like the fences they
         # replaced: ``(agent_name_or_None, user_id_or_None)`` with ``None`` as a
-        # wildcard. Cancels bump; enqueues stamp the current value onto the
-        # context; processing drops stale generations (#5037). Entries only
-        # appear for scopes that were actually cancelled — small tuples + ints,
-        # bounded by distinct deleted/cleared scopes per process lifetime.
+        # wildcard. Every cancel assigns the next value of one process-wide
+        # clock to its scope key, so counters stay comparable through
+        # ``_generation_for_locked``'s max(): a later user-wide cancel always
+        # outdates earlier exact-key work for that user (#5037 round 3).
+        # Independent per-key ``+= 1`` would break that ordering. Entries only
+        # appear for scopes actually cancelled — small tuples + ints, bounded
+        # by distinct deleted/cleared scopes per process lifetime.
+        self._generation_clock = 0
         self._scope_generations: dict[tuple[str | None, str | None], int] = {}
 
     def add(
@@ -457,7 +461,7 @@ class MemoryUpdateQueue:
         fresh turns — carry the new generation and run normally (#5037).
         """
         with self._lock:
-            self._scope_generations[(agent_name, user_id)] = self._scope_generations.get((agent_name, user_id), 0) + 1
+            self._bump_generation_locked((agent_name, user_id))
             remaining = [context for context in self._items if not (context.agent_name == agent_name and (user_id is None or context.user_id == user_id))]
             removed = len(self._items) - len(remaining)
             self._items = remaining
@@ -473,7 +477,7 @@ class MemoryUpdateQueue:
         dropped too — not just the reserved default bucket (#5037 Finding 2).
         """
         with self._lock:
-            self._scope_generations[(None, user_id)] = self._scope_generations.get((None, user_id), 0) + 1
+            self._bump_generation_locked((None, user_id))
             if user_id is None:
                 removed = len(self._items)
                 self._items = []
@@ -491,13 +495,20 @@ class MemoryUpdateQueue:
             return self._generation_for_locked(agent_name, user_id)
 
     def _generation_for_locked(self, agent_name: str | None, user_id: str | None) -> int:
-        """Max covering-scope generation; caller must hold ``self._lock``.
+        """Max covering-scope epoch; caller must hold ``self._lock``.
 
-        A context is governed by the strictest (highest) counter among the
-        exact key and any wildcard that covers it.
+        A context is governed by the strictest (highest) epoch among the exact
+        key and any wildcard that covers it. Epochs come from one shared clock,
+        so they are globally comparable — a later broader cancel always
+        outdates earlier narrower work.
         """
         candidates = ((agent_name, user_id), (agent_name, None), (None, user_id), (None, None))
         return max(self._scope_generations.get(key, 0) for key in candidates)
+
+    def _bump_generation_locked(self, key: tuple[str | None, str | None]) -> None:
+        """Assign the next process-wide epoch to ``key``; caller holds the lock."""
+        self._generation_clock += 1
+        self._scope_generations[key] = self._generation_clock
 
     @property
     def pending_count(self) -> int:

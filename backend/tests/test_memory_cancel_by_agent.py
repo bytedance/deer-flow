@@ -209,6 +209,56 @@ def test_generation_is_per_scope_not_global() -> None:
     assert executed == [["survivor"]]
 
 
+# ---------------------------------------------------------------------------
+# Round-3 finding: per-key independent counters compared via max() are not a
+# total order. Epochs from ONE shared clock fix it; these tests pin that.
+# ---------------------------------------------------------------------------
+
+
+def test_later_user_wide_cancel_outdates_higher_exact_epoch() -> None:
+    """exact bumped twice (epoch 2), then a user-wide cancel (epoch 3): the
+    effective generation for the scope must exceed the earlier exact epoch.
+    Under independent per-key counters max(2,1)==2 kept old work alive."""
+    queue = _queue()
+    queue.cancel_by_agent("agent-a", user_id="alice")
+    queue.cancel_by_agent("agent-a", user_id="alice")
+
+    assert queue._current_generation("agent-a", "alice") == 2
+
+    queue.cancel_by_user("alice")
+
+    assert queue._current_generation("agent-a", "alice") > 2
+
+
+def test_user_wide_cancel_stales_snapshotted_batch_with_higher_exact_epoch() -> None:
+    """Behavioral variant of the round-3 collision: an old batch enqueued at
+    exact epoch 2 is snapshotted by a worker, THEN a user-wide cancel lands at
+    epoch 3; the old tail must still die."""
+    mock_updater = MagicMock(return_value=True)
+    queue = _queue(mock_updater)
+
+    # Two earlier cancels push the exact key to epoch 2 before this batch exists.
+    queue.cancel_by_agent("agent-a", user_id="alice")
+    queue.cancel_by_agent("agent-a", user_id="alice")
+    queue.add(thread_id="t1", messages=["old-1"], agent_name="agent-a", user_id="alice")
+    queue.add(thread_id="t2", messages=["old-2"], agent_name="agent-a", user_id="alice")
+    assert queue._items[0].generation == 2
+
+    gate = threading.Event()
+    started = threading.Event()
+    worker = _start_blocked_worker(queue, mock_updater, gate, started)
+    try:
+        queue.cancel_by_user("alice")
+        assert queue._current_generation("agent-a", "alice") > 2
+    finally:
+        gate.set()
+        worker.join(timeout=5.0)
+
+    executed = [call.kwargs["messages"] for call in mock_updater.update_memory.call_args_list]
+    # old-1 is the documented in-flight residual; old-2 must be stale now.
+    assert executed == [["old-1"]]
+
+
 def test_cancel_by_user_drops_every_agent_for_that_user() -> None:
     queue = _queue()
     queue._items = [
