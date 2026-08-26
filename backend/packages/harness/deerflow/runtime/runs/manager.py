@@ -1923,6 +1923,32 @@ class RunManager:
             "error": record.error,
         }
 
+    @staticmethod
+    def _stored_completion_matches(stored: dict[str, Any], completion_payload: dict[str, Any]) -> bool:
+        """Return whether *stored* already contains the local completion snapshot.
+
+        RunStore completion writes are snapshot-shaped rather than sparse
+        patches. Nullable values are therefore ignored here because store
+        implementations deliberately do not clear an existing value when the
+        corresponding completion argument is ``None``. SQL-backed stores also
+        bound convenience text fields to 2,000 characters.
+        """
+        for key, expected in completion_payload.items():
+            if key == "status" or expected is None:
+                continue
+            actual = stored.get(key)
+            if key == "token_usage_by_model":
+                if (actual or {}) != (expected or {}):
+                    return False
+                continue
+            if key in {"last_ai_message", "first_human_message"} and isinstance(expected, str):
+                if actual not in {expected, expected[:2000]}:
+                    return False
+                continue
+            if actual != expected:
+                return False
+        return True
+
     async def _evict_if_durable_terminal(self, run_id: str) -> bool:
         """Evict *run_id* only after its complete terminal snapshot is durable.
 
@@ -1945,17 +1971,6 @@ class RunManager:
             stop_reason = record.stop_reason
             completion_payload = self._completion_payload(record)
 
-        terminal_snapshot_persisted = ownership_lost
-        if not ownership_lost:
-            status_persisted = await self._persist_status(
-                record,
-                local_status,
-                error=error,
-                stop_reason=stop_reason,
-            )
-            completion_persisted = await self._update_run_completion(run_id, **completion_payload)
-            terminal_snapshot_persisted = status_persisted and completion_persisted
-
         try:
             stored = await self._call_store_with_retry(
                 "verify terminal run before eviction",
@@ -1967,14 +1982,46 @@ class RunManager:
             return False
 
         stored_status = stored.get("status") if stored is not None else None
-        if stored_status not in _TERMINAL_RUN_STATUS_VALUES:
+        durable_terminal = stored_status in _TERMINAL_RUN_STATUS_VALUES
+        completion_matches = bool(stored is not None and stored_status == local_status.value and self._stored_completion_matches(stored, completion_payload))
+
+        # A different terminal result belongs to a competing terminalization
+        # path (for example peer takeover) and remains authoritative. When the
+        # local result matches, avoid any repair write if the durable snapshot
+        # is already complete.
+        if not durable_terminal or (stored_status == local_status.value and not completion_matches):
+            if not ownership_lost:
+                if stored_status != local_status.value:
+                    await self._persist_status(
+                        record,
+                        local_status,
+                        error=error,
+                        stop_reason=stop_reason,
+                    )
+                if not completion_matches:
+                    await self._update_run_completion(run_id, **completion_payload)
+
+                try:
+                    stored = await self._call_store_with_retry(
+                        "verify repaired terminal run before eviction",
+                        run_id,
+                        lambda: self._store.get(run_id, user_id=record.user_id),
+                    )
+                except Exception:
+                    logger.warning("Failed to verify repaired terminal run %s before eviction; retaining it in memory", run_id, exc_info=True)
+                    return False
+                stored_status = stored.get("status") if stored is not None else None
+                durable_terminal = stored_status in _TERMINAL_RUN_STATUS_VALUES
+                completion_matches = bool(stored is not None and stored_status == local_status.value and self._stored_completion_matches(stored, completion_payload))
+
+        if not durable_terminal:
             logger.warning(
                 "Run %s is terminal in memory but durable status is %s; retaining it for persistence retry",
                 run_id,
                 stored_status or "missing",
             )
             return False
-        if stored_status == local_status.value and not terminal_snapshot_persisted:
+        if stored_status == local_status.value and not completion_matches:
             logger.warning("Run %s terminal status is durable but its final snapshot is incomplete; retaining it for persistence retry", run_id)
             return False
 
@@ -1992,9 +2039,17 @@ class RunManager:
     async def _evict_terminal_when_safe(self, run_id: str, *, delay: float, retry_delay: float) -> None:
         if delay > 0:
             await asyncio.sleep(delay)
+        retry_count = 0
         while not self._shutting_down:
             if await self._evict_if_durable_terminal(run_id):
                 return
+            retry_count += 1
+            logger.debug(
+                "Terminal run %s retained pending durable terminal state; retry=%d next_retry_seconds=%.1f",
+                run_id,
+                retry_count,
+                retry_delay,
+            )
             await asyncio.sleep(max(0.0, retry_delay))
 
     def _terminal_eviction_done(self, run_id: str, task: asyncio.Task[None]) -> None:

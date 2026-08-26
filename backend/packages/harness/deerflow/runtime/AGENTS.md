@@ -57,12 +57,15 @@ the number of required IDs, whichever is larger; missing exact runs use targeted
 `run_agent` schedules one delayed eviction after finalization, including when
 publishing the stream END marker fails. Memory-only managers retain terminal
 records so history is not lost. Store-backed managers keep one strongly
-referenced task per run; after the grace period it retries the terminal status
-and completion snapshot, verifies that the stored row is terminal, and only then
-removes the record from `_runs` and `_runs_by_thread`. A missing, active, or
-unreadable stored row must retain the local record and retry later. Shutdown
-fences new eviction schedules and boundedly cancels existing timers before
-draining workers.
+referenced task per run; after the grace period it reads the stored row first,
+skips redundant writes when the matching terminal completion snapshot is already
+durable, and repairs only the stale status and/or completion snapshot before
+verification. Only a verified terminal row permits removal from `_runs` and
+`_runs_by_thread`. A missing, active, incomplete, or unreadable stored row retains
+the local record, emits a retry-attempt debug record, and retries later. The
+`finalizing` barrier applies to every terminal status, including `timeout` and
+`interrupted`. Shutdown fences new eviction schedules and boundedly cancels
+existing timers before draining workers.
 
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types

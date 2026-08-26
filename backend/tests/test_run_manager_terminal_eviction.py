@@ -20,19 +20,25 @@ class RecoveringRunStore(MemoryRunStore):
     def __init__(self) -> None:
         super().__init__()
         self.fail_terminal_writes = False
+        self.status_write_calls = 0
+        self.completion_write_calls = 0
+        self.get_calls = 0
         self.read_while_stale = asyncio.Event()
 
     async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+        self.status_write_calls += 1
         if self.fail_terminal_writes:
             raise RuntimeError("simulated terminal status outage")
         return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
+        self.completion_write_calls += 1
         if self.fail_terminal_writes:
             raise RuntimeError("simulated completion outage")
         return await super().update_run_completion(run_id, status=status, **kwargs)
 
     async def get(self, run_id, *, user_id=None):
+        self.get_calls += 1
         row = await super().get(run_id, user_id=user_id)
         if row is not None and row.get("status") in {RunStatus.pending.value, RunStatus.running.value}:
             self.read_while_stale.set()
@@ -73,7 +79,31 @@ async def test_terminal_eviction_prunes_both_indexes_and_hydrates_from_store():
 
 
 @pytest.mark.asyncio
-async def test_eviction_waits_for_terminal_persistence_and_retries_after_recovery():
+async def test_terminal_eviction_skips_redundant_writes_when_store_snapshot_matches():
+    store = RecoveringRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create("thread-already-durable")
+    await manager.set_status(record.run_id, RunStatus.success)
+    completion_payload = manager._completion_payload(record)
+    completion_payload["total_tokens"] = 42
+    await manager.update_run_completion(record.run_id, **completion_payload)
+    status_writes = store.status_write_calls
+    completion_writes = store.completion_write_calls
+    reads = store.get_calls
+
+    task = manager.schedule_terminal_eviction(record.run_id, delay=0)
+    assert task is not None
+    await task
+
+    assert store.status_write_calls == status_writes
+    assert store.completion_write_calls == completion_writes
+    assert store.get_calls == reads + 1
+    assert record.run_id not in manager._runs
+
+
+@pytest.mark.asyncio
+async def test_eviction_waits_for_terminal_persistence_and_retries_after_recovery(caplog):
+    caplog.set_level("DEBUG", logger="deerflow.runtime.runs.manager")
     store = RecoveringRunStore()
     manager = RunManager(
         store=store,
@@ -97,6 +127,7 @@ async def test_eviction_waits_for_terminal_persistence_and_retries_after_recover
     assert task is not None
     await asyncio.wait_for(store.read_while_stale.wait(), timeout=1)
     assert record.run_id in manager._runs
+    assert "retained pending durable terminal state" in caplog.text
 
     store.fail_terminal_writes = False
     await asyncio.wait_for(task, timeout=1)
@@ -108,6 +139,27 @@ async def test_eviction_waits_for_terminal_persistence_and_retries_after_recover
     assert hydrated.stop_reason == "tool_capped"
     assert hydrated.total_tokens == 42
     assert hydrated.store_only is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [RunStatus.timeout, RunStatus.interrupted])
+async def test_terminal_eviction_waits_for_finalizing_barrier(status):
+    manager = RunManager(store=MemoryRunStore())
+    record = await manager.create(f"thread-finalizing-{status.value}")
+    await manager.set_finalizing(record.run_id, True)
+    await manager.set_status(record.run_id, status)
+
+    task = manager.schedule_terminal_eviction(record.run_id, delay=0, retry_delay=0.01)
+    assert task is not None
+    await asyncio.sleep(0.03)
+
+    assert record.run_id in manager._runs
+    assert task.done() is False
+
+    await manager.set_finalizing(record.run_id, False)
+    await asyncio.wait_for(task, timeout=1)
+
+    assert record.run_id not in manager._runs
 
 
 @pytest.mark.asyncio
