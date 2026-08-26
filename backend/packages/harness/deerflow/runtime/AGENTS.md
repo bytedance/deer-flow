@@ -65,10 +65,18 @@ the number of required IDs, whichever is larger; missing exact runs use targeted
 **Checkpoint channel benchmark**: `scripts/benchmark/checkpoint/bench_channels.py`
 runs paired `full`/`delta` message-only StateGraphs in a fresh child process per
 case, using sync `InMemorySaver` or `SqliteSaver` so reducer, serialization, and
-saver costs stay separate from Gateway/async scheduling. It reports deterministic
+saver costs stay separate from Gateway/async scheduling. Optional
+`AsyncPostgresSaver` cases are enabled only when `TEST_POSTGRES_URI` is set.
+Postgres cases use a unique thread and remove only that benchmark thread through
+the saver's public `adelete_thread` API after measurement. It reports deterministic
 correctness digests, write windows/percentiles, warm and graph-rebuilt cold reads,
-logical checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time,
-and peak RSS as versioned JSONL. The controller alternates mode order and rejects
+backend-neutral checkpoint/blob/write row and byte fields, aggregate logical
+checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time, and
+peak RSS as versioned JSONL. SQLite embeds channel blobs in its checkpoint
+payload, so its separate blob metrics are zero; Postgres reports its
+`checkpoint_blobs` table separately. Byte fields describe each saver's serialized
+representation and should not be treated as identical encodings across backends.
+The controller alternates mode order and rejects
 performance data when paired modes materialize different state. Its default 1 GiB
 estimated cumulative full-payload cap skips both modes of an oversized pair when
 `full` is selected, including every delta cadence in a `--snapshot-frequencies`
@@ -90,6 +98,10 @@ cd backend
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
   --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
   --repetitions 7 --output /tmp/checkpoint-bench.jsonl
+TEST_POSTGRES_URI=postgresql://... \
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
+  --backends sqlite,postgres --updates 100 --payload-bytes 128 \
+  --output /tmp/checkpoint-cross-backend.jsonl
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
   /tmp/checkpoint-bench.jsonl
 ```
