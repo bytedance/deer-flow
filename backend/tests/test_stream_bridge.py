@@ -1073,6 +1073,22 @@ async def test_memory_malformed_last_event_id_is_not_reported_as_gap():
 
 
 @pytest.mark.anyio
+async def test_memory_make_gap_handles_empty_events_buffer():
+    """_make_gap returns StreamGap with None bounds when events deque is empty."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-empty-stream-gap"
+    stream = bridge._get_or_create_stream(run_id)
+    assert len(stream.events) == 0
+
+    gap = bridge._make_gap(stream, "100-0")
+    assert gap == StreamGap(
+        requested_event_id="100-0",
+        earliest_available_event_id=None,
+        latest_available_event_id=None,
+    )
+
+
+@pytest.mark.anyio
 async def test_make_stream_bridge_uses_docker_redis_env(monkeypatch):
     """Docker can enable Redis bridge without editing config.yaml."""
     set_stream_bridge_config(None)

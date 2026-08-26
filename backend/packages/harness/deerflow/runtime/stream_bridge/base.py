@@ -41,8 +41,8 @@ class StreamGap:
     """
 
     requested_event_id: str | None
-    earliest_available_event_id: str
-    latest_available_event_id: str
+    earliest_available_event_id: str | None
+    latest_available_event_id: str | None
 
 
 HEARTBEAT_SENTINEL = StreamEvent(id="", event="__heartbeat__", data=None)

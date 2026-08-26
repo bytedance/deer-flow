@@ -67,8 +67,8 @@ class MemoryStreamBridge(StreamBridge):
     def _make_gap(stream: _RunStream, requested_event_id: str | None) -> StreamGap:
         return StreamGap(
             requested_event_id=requested_event_id,
-            earliest_available_event_id=stream.events[0].id,
-            latest_available_event_id=stream.events[-1].id,
+            earliest_available_event_id=stream.events[0].id if stream.events else None,
+            latest_available_event_id=stream.events[-1].id if stream.events else None,
         )
 
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int | StreamGap:
