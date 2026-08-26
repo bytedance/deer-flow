@@ -288,7 +288,11 @@ export default function ChatPage() {
             >
               {!isMock && <SidebarTrigger className="md:hidden" />}
               <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
-                <ThreadTitle threadId={threadId} thread={thread} />
+                <ThreadTitle
+                  threadId={threadId}
+                  thread={thread}
+                  canonicalTitle={threadMetadata.data?.values?.title}
+                />
               </div>
               <div className="flex shrink-0 items-center gap-2">
                 {!isNewThread &&

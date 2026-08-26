@@ -1733,47 +1733,10 @@ export function useThreadStream({
       );
       for (const update of updates) {
         if (update && "title" in update && update.title) {
-          void queryClient.setQueriesData(
-            {
-              queryKey: ["threads", "search"],
-              exact: false,
-            },
-            (oldData: Array<AgentThread> | undefined) => {
-              return oldData?.map((t) => {
-                if (t.thread_id === threadIdRef.current) {
-                  return {
-                    ...t,
-                    values: {
-                      ...t.values,
-                      title: update.title,
-                    },
-                  };
-                }
-                return t;
-              });
-            },
-          );
-          const nextTitle: string = update.title;
-          void queryClient.setQueriesData(
-            {
-              queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-              exact: false,
-            },
-            (oldData: InfiniteData<AgentThread[]> | undefined) =>
-              mapInfiniteThreadsCache(
-                oldData,
-                (t): AgentThread =>
-                  t.thread_id === threadIdRef.current
-                    ? {
-                        ...t,
-                        values: {
-                          ...t.values,
-                          title: nextTitle,
-                        },
-                      }
-                    : t,
-              ),
-          );
+          const currentThreadId = threadIdRef.current;
+          if (currentThreadId) {
+            setThreadTitleInCaches(queryClient, currentThreadId, update.title);
+          }
         }
       }
     },
@@ -2846,6 +2809,16 @@ function mergeThreadMetadata(
   };
 }
 
+function mergeThreadTitle(thread: AgentThread, title: string): AgentThread {
+  return {
+    ...thread,
+    values: {
+      ...thread.values,
+      title,
+    },
+  };
+}
+
 function setThreadMetadataInCaches(
   queryClient: QueryClient,
   threadId: string,
@@ -2886,6 +2859,49 @@ function setThreadMetadataInCaches(
     },
     (oldData: AgentThread | null | undefined) =>
       oldData ? mergeThreadMetadata(oldData, metadata) : oldData,
+  );
+}
+
+export function setThreadTitleInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  title: string,
+): void {
+  queryClient.setQueriesData(
+    {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    (oldData: Array<AgentThread> | undefined) => {
+      if (!oldData) {
+        return oldData;
+      }
+      return oldData.map((thread) =>
+        thread.thread_id === threadId
+          ? mergeThreadTitle(thread, title)
+          : thread,
+      );
+    },
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+      mapInfiniteThreadsCache(oldData, (thread) =>
+        thread.thread_id === threadId
+          ? mergeThreadTitle(thread, title)
+          : thread,
+      ),
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: ["thread", "metadata", threadId],
+      exact: false,
+    },
+    (oldData: AgentThread | null | undefined) =>
+      oldData ? mergeThreadTitle(oldData, title) : oldData,
   );
 }
 
@@ -3245,44 +3261,7 @@ export function useRenameThread() {
       });
     },
     onSuccess(_, { threadId, title }) {
-      queryClient.setQueriesData(
-        {
-          queryKey: ["threads", "search"],
-          exact: false,
-        },
-        (oldData: Array<AgentThread>) => {
-          return oldData.map((t) => {
-            if (t.thread_id === threadId) {
-              return {
-                ...t,
-                values: {
-                  ...t.values,
-                  title,
-                },
-              };
-            }
-            return t;
-          });
-        },
-      );
-      queryClient.setQueriesData(
-        {
-          queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-          exact: false,
-        },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
-          mapInfiniteThreadsCache(oldData, (t) =>
-            t.thread_id === threadId
-              ? {
-                  ...t,
-                  values: {
-                    ...t.values,
-                    title,
-                  },
-                }
-              : t,
-          ),
-      );
+      setThreadTitleInCaches(queryClient, threadId, title);
     },
   });
 }
