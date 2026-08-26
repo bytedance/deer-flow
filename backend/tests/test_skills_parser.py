@@ -156,6 +156,18 @@ def test_parse_allowed_tools_string_preserves_scalar_custom_tool_names(tmp_path)
     assert skill.allowed_tools == ("mcp__arxiv__SearchPapers", "MyCustomTool", "write")
 
 
+def test_parse_allowed_tools_string_normalizes_glob_and_grep_aliases(tmp_path):
+    skill_file = _write_skill(
+        tmp_path,
+        "name: my-skill\ndescription: Test\nallowed-tools: Glob Grep",
+    )
+
+    skill = parse_skill_file(skill_file, category="custom")
+
+    assert skill is not None
+    assert skill.allowed_tools == ("glob", "grep")
+
+
 @pytest.mark.parametrize(
     "allowed_tools",
     [

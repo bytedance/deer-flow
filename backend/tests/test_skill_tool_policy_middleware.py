@@ -268,6 +268,33 @@ def test_slash_activation_preserves_lowercase_exact_tool_authority(tmp_path):
     assert _tool_names(filtered) == ["write"]
 
 
+def test_slash_activation_normalizes_glob_and_grep_aliases(tmp_path):
+    skill_dir = tmp_path / "search-tools"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: search-tools\ndescription: Search tools\nallowed-tools: Glob Grep\n---\nBody\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, category=SkillCategory.CUSTOM)
+    assert skill is not None
+    context = {}
+    write_slash_skill_source_path(
+        context,
+        skill.get_container_file_path(),
+        owner_token=_SLASH_SOURCE_OWNER_TOKEN,
+    )
+    middleware = _middleware([skill])
+    request = ModelRequestStub(
+        [NamedTool("glob"), NamedTool("grep"), NamedTool("Glob"), NamedTool("Grep")],
+        context=context,
+    )
+
+    filtered = middleware.wrap_model_call(request, lambda model_request: model_request)
+
+    assert _tool_names(filtered) == ["glob", "grep"]
+
+
 @pytest.mark.parametrize("active_source", ["slash", "skill_context"])
 def test_restrictive_skill_explicitly_allows_task_schema_and_execution(active_source):
     skill = _skill("delegating", ["task"])

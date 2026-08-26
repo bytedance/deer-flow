@@ -13,6 +13,8 @@ _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PORTABLE_TOOL_ALIASES = {
     "Bash": "bash",
     "Edit": "str_replace",
+    "Glob": "glob",
+    "Grep": "grep",
     "Read": "read_file",
     "WebFetch": "web_fetch",
     "WebSearch": "web_search",
