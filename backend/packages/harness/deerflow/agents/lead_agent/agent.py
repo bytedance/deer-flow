@@ -54,9 +54,9 @@ from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthzDecision, AuthzRequest
 from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.authz.tool_filter import apply_tool_authorization
-from deerflow.config.agents_config import load_agent_config, validate_agent_name
+from deerflow.config.agents_config import AgentConfig, load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.config.memory_config import should_use_memory_tools
+from deerflow.config.memory_config import disabled_memory_config, should_use_memory_tools
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     effective_subagent_concurrency,
@@ -189,6 +189,48 @@ def _append_memory_tools_without_name_conflicts(tools: list) -> None:
             continue
         tools.append(memory_tool)
         existing_names.add(memory_tool.name)
+
+
+def agent_memory_opt_out(agent_config: AgentConfig | None) -> bool:
+    """Whether the agent itself asked to run without memory (issue #3626).
+
+    Read from the agent's own ``memory`` field, not from whether
+    :func:`apply_agent_memory_override` happened to return a copy: the flag
+    must survive a future always-copy refactor of the fold.
+    """
+    memory_override = getattr(agent_config, "memory", None) if agent_config is not None else None
+    return memory_override is not None and not memory_override.enabled
+
+
+def apply_agent_memory_override(app_config: AppConfig, agent_config: AgentConfig | None) -> AppConfig:
+    """Fold a custom agent's memory opt-out into the effective app config (issue #3626).
+
+    When a custom agent sets ``memory: {enabled: false}`` in its ``config.yaml``,
+    return a shallow copy of ``app_config`` whose ``memory`` section is switched
+    off (see :func:`deerflow.config.memory_config.disabled_memory_config`).
+    Otherwise return ``app_config`` unchanged — the *same* object, no copy — so
+    every existing agent (and any agent that leaves memory on) is unaffected.
+
+    Resolving the override once, here, means the four downstream memory gates all
+    read the already-resolved ``app_config.memory`` and need no per-gate flag:
+    MemoryMiddleware capture, the ``memory_*`` tools, the ``<memory>`` injection
+    in DynamicContextMiddleware, and the summarization memory-flush hook. The
+    override is narrow by design — an agent may only disable memory, never force
+    it on when the operator disabled it globally.
+
+    Invariant: this "fold once" only holds while every gate reads the *passed*
+    ``app_config.memory``. A future memory gate that reaches for the global
+    ``get_memory_config()`` / ``get_app_config()`` directly would bypass the
+    opt-out and must instead take its memory config from the resolved config
+    threaded through here.
+    """
+    # A missing ``memory`` attribute is treated the same as ``memory=None``
+    # (inherit the global config): a real AgentConfig always declares the field,
+    # so this only softens the duck-typed agent configs used in some tests.
+    memory_override = getattr(agent_config, "memory", None) if agent_config is not None else None
+    if memory_override is not None and not memory_override.enabled:
+        return app_config.model_copy(update={"memory": disabled_memory_config(app_config.memory)})
+    return app_config
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -465,6 +507,7 @@ def build_middlewares(
     deferred_setup=None,
     mcp_routing_middleware: AgentMiddleware | None = None,
     user_id: str | None = None,
+    memory_opt_out: bool = False,
     authorization_provider=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
@@ -488,6 +531,11 @@ def build_middlewares(
             deferred MCP schemas before the deferred filter runs.
         user_id: Effective user ID for user-scoped skill loading. Passed through
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
+        memory_opt_out: True when ``app_config.memory`` was switched off by a
+            custom agent's explicit opt-out rather than by the operator's global
+            config. Suppresses the mode/enabled mismatch warning below — that
+            signal is meant for a genuinely misconfigured global ``config.yaml``,
+            not for an intentional per-agent opt-out.
         authorization_provider: Provider already resolved for assembly-time
             filtering. Reused by the execution-time authorization middleware.
         subagent_execution_capacity: Startup-frozen process capacity used to
@@ -594,7 +642,7 @@ def build_middlewares(
         if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
             middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
     else:
-        if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
+        if not memory_opt_out and resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
         middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
 
@@ -903,6 +951,20 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     if isinstance(config.get("context"), dict):
         config["context"]["subagent_enabled"] = subagent_enabled
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+
+    # Fold the custom agent's memory opt-out (issue #3626) into the effective app
+    # config before anything reads it, so a custom agent with
+    # ``memory: {enabled: false}`` gets no memory capture, tools, or injection.
+    # A no-op for every other agent (returns the same object), so behavior is
+    # unchanged unless an agent explicitly disables memory.
+    resolved_app_config = apply_agent_memory_override(resolved_app_config, agent_config)
+    # Read the opt-out straight from the agent's own config rather than the
+    # fold's return identity, so a future always-copy refactor of the helper
+    # cannot flip this flag. It tells build_middlewares to skip the
+    # mode/enabled mismatch warning — that signal is for a misconfigured
+    # global config.yaml, not for a deliberate per-agent opt-out.
+    memory_opt_out = agent_memory_opt_out(agent_config)
+
     # Custom agent model from agent config (if any), or None to let _resolve_model_name pick the default
     agent_model_name = agent_config.model if agent_config and agent_config.model else None
 
@@ -1145,6 +1207,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         deferred_setup=setup,
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
+        memory_opt_out=memory_opt_out,
         authorization_provider=_authz_provider,
         subagent_execution_capacity=subagent_execution_capacity,
     )
