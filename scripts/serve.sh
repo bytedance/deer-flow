@@ -268,7 +268,7 @@ stop_all() {
     _kill_repo_port 8001
     _kill_repo_port 3000
     _kill_repo_port 2026
-    ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
+    bash ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
 
@@ -377,7 +377,7 @@ if ! { \
     exit 1
 fi
 
-"$REPO_ROOT/scripts/config-upgrade.sh"
+bash "$REPO_ROOT/scripts/config-upgrade.sh"
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
@@ -471,7 +471,7 @@ run_service() {
         sh -c "$cmd" &
     fi
 
-    ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
+    bash ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
