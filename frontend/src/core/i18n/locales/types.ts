@@ -966,6 +966,10 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      installFromFile: string;
+      installingArchive: string;
+      invalidArchive: string;
+      installFailed: string;
     };
     notification: {
       title: string;
