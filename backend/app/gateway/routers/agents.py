@@ -563,6 +563,24 @@ async def delete_agent(name: str) -> None:
     user_id = get_effective_user_id()
     store = get_agent_store()
 
+    if not await asyncio.to_thread(store.exists, name, user_id=user_id):
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+
+    # Fence BEFORE deleting (#5037): cancel buffered extraction work first so a
+    # debounce timer racing the rmtree cannot fire an extraction against the
+    # removed scope and resurrect its directory (#3364). The queue's writer-side
+    # fence also stops batch items a worker already snapshotted before this
+    # cancel ran. Ordering cost: a rare failed delete after this point only
+    # loses that scope's debounced extractions.
+    try:
+        manager = await asyncio.to_thread(get_memory_manager)
+        cancelled = await asyncio.to_thread(manager.cancel_by_agent, name, user_id=user_id)
+    except Exception:
+        logger.warning("Could not cancel pending memory updates for deleted agent '%s'", name, exc_info=True)
+        cancelled = 0
+    if cancelled:
+        logger.info("Cancelled %d pending memory update(s) before deleting agent '%s'", cancelled, name)
+
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
         outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
@@ -582,18 +600,5 @@ async def delete_agent(name: str) -> None:
             status_code=409,
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
-
-    # Best-effort (#3364): drop queued memory-extraction work for the deleted
-    # scope so its debounce timer cannot fire extraction against a removed
-    # agent and re-persist state that blocks recreating the same name.
-    # Deletion itself must not fail when memory cleanup fails.
-    try:
-        manager = await asyncio.to_thread(get_memory_manager)
-        cancelled = await asyncio.to_thread(manager.cancel_by_agent, name, user_id=user_id)
-    except Exception:
-        logger.warning("Could not cancel pending memory updates for deleted agent '%s'", name, exc_info=True)
-    else:
-        if cancelled:
-            logger.info("Cancelled %d pending memory update(s) for deleted agent '%s'", cancelled, name)
 
     logger.info(f"Deleted agent '{name}'")

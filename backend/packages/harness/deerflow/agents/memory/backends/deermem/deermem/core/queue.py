@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -27,6 +28,13 @@ from ..config import DeerMemConfig
 
 if TYPE_CHECKING:
     from .updater import MemoryUpdater
+
+# Writer-side scope fences (#5037): how long a cancelled scope stays fenced and
+# how many scopes are remembered. The TTL must comfortably exceed the longest
+# debounce window plus one in-flight extraction so a late worker is still
+# stopped; the bound keeps the map from growing with deleted scopes.
+_CANCELLED_SCOPE_TTL_SECONDS = 600.0
+_CANCELLED_SCOPES_MAX = 256
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +100,12 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
+        # Writer-side fences recorded by cancel_by_agent / cancel_by_user:
+        # (agent_name_or_None, user_id_or_None) -> monotonic deadline. ``None``
+        # on either side is a wildcard. Checked by ``_process_queue`` before
+        # each extraction so a batch snapshotted before a cancel is still
+        # stopped (#5037).
+        self._cancelled_scopes: OrderedDict[tuple[str | None, str | None], float] = OrderedDict()
 
     def add(
         self,
@@ -255,8 +269,16 @@ class MemoryUpdateQueue:
 
         succeeded = 0
         failed = 0
+        fenced = 0
         try:
             for context in contexts_to_process:
+                # Writer-side fence (#5037): this context may have been
+                # snapshotted before a cancel_by_agent/cancel_by_user ran; its
+                # scope must not be extracted against anymore.
+                if self._scope_is_cancelled(context.agent_name, context.user_id):
+                    fenced += 1
+                    logger.info("Skipping fenced memory update for thread %s (agent=%s user=%s)", context.thread_id, context.agent_name, context.user_id)
+                    continue
                 try:
                     logger.info("Updating memory for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
                     success = self._updater.update_memory(
@@ -289,8 +311,8 @@ class MemoryUpdateQueue:
             # (every extraction persisted): per-item ``update_memory`` failures are
             # swallowed above, so without this an operator debugging missing
             # memories would see only the happy-path "Processing N" line.
-            if succeeded or failed:
-                logger.info("Memory update batch done: %d succeeded, %d failed", succeeded, failed)
+            if succeeded or failed or fenced:
+                logger.info("Memory update batch done: %d succeeded, %d failed, %d fenced", succeeded, failed, fenced)
             with self._lock:
                 self._processing = False
                 self._processing_thread = None
@@ -424,17 +446,74 @@ class MemoryUpdateQueue:
         scope for every user; a specific id limits cancellation to that owner's
         entries.
 
-        In-flight contexts already pulled out of ``_items`` by
-        ``_process_queue`` are NOT interrupted; they complete and persist as
-        before. The durable outbox design owns full in-flight fencing later.
+        Pending removal alone cannot stop a worker that already snapshotted its
+        batch into ``_process_queue`` (the cancel would see an empty ``_items``
+        while the LLM calls still go out), so this also records a writer-side
+        scope fence that the processing loop checks before each extraction call.
+        The fence expires after ``_CANCELLED_SCOPE_TTL_SECONDS`` and is lifted by
+        fresh work via :meth:`mark_scope_active`.
         """
         with self._lock:
+            self._record_cancelled_scope_locked(agent_name, user_id)
             remaining = [context for context in self._items if not (context.agent_name == agent_name and (user_id is None or context.user_id == user_id))]
             removed = len(self._items) - len(remaining)
             self._items = remaining
         if removed:
             logger.info("Cancelled %d pending memory update(s) for agent %s (user_id=%s)", removed, agent_name, user_id)
         return removed
+
+    def cancel_by_user(self, user_id: str | None = None) -> int:
+        """Drop every pending update owned by ``user_id``; wildcard when ``None``.
+
+        Backs global ``clear_memory(user_id=...)``: it removes all agents'
+        stored facts, so buffered extractions for any of those agents must be
+        dropped too — not just the reserved default bucket (#5037 Finding 2).
+        """
+        with self._lock:
+            self._record_cancelled_scope_locked(None, user_id)
+            if user_id is None:
+                removed = len(self._items)
+                self._items = []
+            else:
+                remaining = [context for context in self._items if context.user_id != user_id]
+                removed = len(self._items) - len(remaining)
+                self._items = remaining
+        if removed:
+            logger.info("Cancelled %d pending memory update(s) for user %s", removed, user_id)
+        return removed
+
+    def mark_scope_active(self, agent_name: str, user_id: str | None) -> None:
+        """Lift fences covering ``(agent_name, user_id)`` because fresh work arrived.
+
+        Called on every successful enqueue. Exact, wildcard-user, and user-wide
+        fences recorded BEFORE this call are obsolete — the scope demonstrably
+        exists again, so a recreated agent must keep extracting. Fences recorded
+        after a later cancel still win, which is correct: that cancel targets
+        exactly the work enqueued before it.
+        """
+        with self._lock:
+            for key in [key for key in self._cancelled_scopes if MemoryUpdateQueue._covers(key, agent_name, user_id)]:
+                del self._cancelled_scopes[key]
+
+    def _scope_is_cancelled(self, agent_name: str | None, user_id: str | None) -> bool:
+        now = time.monotonic()
+        with self._lock:
+            for key in [key for key in self._cancelled_scopes if self._cancelled_scopes[key] <= now]:
+                del self._cancelled_scopes[key]
+            return any(MemoryUpdateQueue._covers(key, agent_name, user_id) for key in self._cancelled_scopes)
+
+    @staticmethod
+    def _covers(key: tuple[str | None, str | None], agent_name: str | None, user_id: str | None) -> bool:
+        key_agent, key_user = key
+        return (key_agent is None or key_agent == agent_name) and (key_user is None or key_user == user_id)
+
+    def _record_cancelled_scope_locked(self, agent_name: str | None, user_id: str | None) -> None:
+        """Record a fence; caller must hold ``self._lock``."""
+        key = (agent_name, user_id)
+        self._cancelled_scopes[key] = time.monotonic() + _CANCELLED_SCOPE_TTL_SECONDS
+        self._cancelled_scopes.move_to_end(key)
+        while len(self._cancelled_scopes) > _CANCELLED_SCOPES_MAX:
+            self._cancelled_scopes.popitem(last=False)
 
     @property
     def pending_count(self) -> int:

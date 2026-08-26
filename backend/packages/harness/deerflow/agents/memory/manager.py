@@ -325,6 +325,15 @@ class MemoryManager(BaseModel):
         """
         return 0
 
+    def cancel_by_user(self, user_id: str | None = None) -> int:
+        """Drop still-buffered extraction work for every agent of one user.
+
+        Backs global ``clear_memory(user_id=...)``, which removes all of the
+        user's stored facts across agent buckets (#5037 Finding 2). Same ``0``
+        default rationale as :meth:`cancel_by_agent`.
+        """
+        return 0
+
     def import_memory(
         self,
         memory_data: dict[str, Any],

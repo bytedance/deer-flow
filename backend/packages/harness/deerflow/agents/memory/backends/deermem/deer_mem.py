@@ -219,6 +219,7 @@ class DeerMem(MemoryManager):
         if prepared is None:
             return
         filtered, signals = prepared
+        resolved_agent = _resolve_agent_name(agent_name)
         # DeerMem owns the queue, so it owns the backpressure degradation: a
         # QueueFull here is logged + dropped so memory backpressure degrades to
         # "update skipped" rather than propagating into
@@ -230,11 +231,14 @@ class DeerMem(MemoryManager):
             self._queue.add(
                 thread_id=thread_id,
                 messages=filtered,
-                agent_name=_resolve_agent_name(agent_name),
+                agent_name=resolved_agent,
                 user_id=user_id,
                 trace_id=trace_id,
                 signals=signals,
             )
+            # Fresh work proves the scope is alive again (e.g. the agent was
+            # recreated after deletion): lift fences covering this exact key.
+            self._queue.mark_scope_active(resolved_agent, user_id)
         except QueueFull as e:
             logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
@@ -255,6 +259,7 @@ class DeerMem(MemoryManager):
         if prepared is None:
             return
         filtered, signals = prepared
+        resolved_agent = _resolve_agent_name(agent_name)
         # Defense-in-depth: the emergency path always admits under backpressure
         # (see _enqueue_locked), so QueueFull is not expected here -- but the
         # emergency flush is invoked from summarization_hook, so a propagated
@@ -263,10 +268,11 @@ class DeerMem(MemoryManager):
             self._queue.add_nowait(
                 thread_id=thread_id,
                 messages=filtered,
-                agent_name=_resolve_agent_name(agent_name),
+                agent_name=resolved_agent,
                 user_id=user_id,
                 signals=signals,
             )
+            self._queue.mark_scope_active(resolved_agent, user_id)
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
 
@@ -460,18 +466,21 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
-        # Cancel the scope's pending extractions before clearing stored data:
-        # otherwise a debounce timer firing after the clear re-persists facts
-        # the caller just deleted (#3364). A global clear (agent_name=None)
-        # resolves to the reserved default bucket here; cross-agent residue on
-        # global clears stays outside this stopgap's scope.
+        # Cancel buffered extractions before clearing stored data, matching the
+        # clear's own scope (#5037 Finding 2): a scoped clear fences that agent
+        # bucket; a global clear removes every agent's facts for the user and
+        # must fence all of them, otherwise a debounce timer firing after the
+        # clear re-persists facts the caller just deleted (#3364).
         try:
-            cancelled = self.cancel_by_agent(agent_name, user_id=user_id)
+            if agent_name is None:
+                cancelled = self.cancel_by_user(user_id)
+            else:
+                cancelled = self.cancel_by_agent(agent_name, user_id=user_id)
         except Exception:
             logger.warning("Failed to cancel pending memory updates during clear_memory", exc_info=True)
-        else:
-            if cancelled:
-                logger.info("Cancelled %d pending memory update(s) while clearing agent '%s'", cancelled, agent_name)
+            cancelled = 0
+        if cancelled:
+            logger.info("Cancelled %d pending memory update(s) while clearing memory (agent=%s)", cancelled, agent_name)
         if agent_name is None:
             memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
         else:
@@ -485,6 +494,10 @@ class DeerMem(MemoryManager):
         ``clear_memory``. Returns the number of dropped contexts.
         """
         return self._queue.cancel_by_agent(_resolve_agent_name(agent_name), user_id=user_id)
+
+    def cancel_by_user(self, user_id: str | None = None) -> int:
+        """Drop every buffered extraction update owned by ``user_id``."""
+        return self._queue.cancel_by_user(user_id)
 
     def import_memory(
         self,
