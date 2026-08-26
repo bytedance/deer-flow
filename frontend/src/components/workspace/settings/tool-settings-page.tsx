@@ -26,10 +26,11 @@ import { MCPConfigRequestError } from "@/core/mcp/api";
 import {
   useEnableMCPServer,
   useMCPConfig,
-  useUpdateMCPConfig,
+  useMCPServerMutation,
 } from "@/core/mcp/hooks";
 import {
   formatMCPServerDefinition,
+  MCPServerDefinitionError,
   parseMCPServerDefinition,
 } from "@/core/mcp/parse";
 import type { MCPServerConfig } from "@/core/mcp/types";
@@ -69,7 +70,7 @@ function MCPServerList({
 }) {
   const { t } = useI18n();
   const { isPending, mutate: enableMCPServer } = useEnableMCPServer();
-  const { isPending: isWriting, mutate: updateConfig } = useUpdateMCPConfig();
+  const { isPending: isWriting, mutate: mutateServer } = useMCPServerMutation();
   const [editor, setEditor] = useState<
     { mode: "add" } | { mode: "edit"; name: string } | null
   >(null);
@@ -81,6 +82,12 @@ function MCPServerList({
   const current = servers ?? {};
   const entries = Object.entries(current);
   const isMutating = isPending || isWriting;
+
+  function displayServerName(name: string | null) {
+    return name === null || name.length === 0
+      ? t.settings.tools.unnamedServer
+      : name;
+  }
 
   function closeEditor() {
     setEditor(null);
@@ -109,13 +116,25 @@ function MCPServerList({
     try {
       parsed = parseMCPServerDefinition(definition);
     } catch (parseError) {
-      setDefinitionError(
-        parseError instanceof Error ? parseError.message : String(parseError),
-      );
+      if (parseError instanceof MCPServerDefinitionError) {
+        const messages = {
+          emptyDefinition: t.settings.tools.definitionEmpty,
+          invalidJson: t.settings.tools.definitionInvalidJson,
+          rootNotObject: t.settings.tools.definitionRootNotObject,
+          emptyServerMap: t.settings.tools.definitionNoServers,
+          serverConfigNotObject:
+            t.settings.tools.definitionServerNotObject.replace(
+              "{name}",
+              parseError.serverName ?? "",
+            ),
+        };
+        setDefinitionError(messages[parseError.code]);
+      } else {
+        setDefinitionError(t.settings.tools.definitionInvalidJson);
+      }
       return;
     }
 
-    let next: Record<string, MCPServerConfig>;
     if (editor.mode === "add") {
       const duplicate = Object.keys(parsed).find((name) =>
         Object.hasOwn(current, name),
@@ -126,7 +145,11 @@ function MCPServerList({
         );
         return;
       }
-      next = { ...current, ...parsed };
+      setDefinitionError(null);
+      mutateServer(
+        { operation: "create", servers: parsed },
+        { onSuccess: closeEditor },
+      );
     } else {
       const editedEntries = Object.entries(parsed);
       if (editedEntries.length !== 1) {
@@ -143,25 +166,21 @@ function MCPServerList({
         );
         return;
       }
-      next = { ...current, [editor.name]: editedConfig };
+      setDefinitionError(null);
+      mutateServer(
+        {
+          operation: "update",
+          serverName: editor.name,
+          server: editedConfig,
+        },
+        { onSuccess: closeEditor },
+      );
     }
-
-    setDefinitionError(null);
-    // PUT replaces the whole map, so the existing servers ride along
-    // untouched — including fields this page never renders.
-    updateConfig(
-      { mcp_servers: next },
-      {
-        onSuccess: closeEditor,
-      },
-    );
   }
 
   function handleRemove(name: string) {
-    const next = { ...current };
-    delete next[name];
-    updateConfig(
-      { mcp_servers: next },
+    mutateServer(
+      { operation: "delete", serverName: name },
       { onSuccess: () => setPendingRemoval(null) },
     );
   }
@@ -184,47 +203,50 @@ function MCPServerList({
           {t.settings.tools.empty}
         </div>
       ) : (
-        entries.map(([name, config]) => (
-          <Item className="w-full" variant="outline" key={name}>
-            <ItemContent>
-              <ItemTitle>
-                <div className="flex items-center gap-2">
-                  <div>{name}</div>
-                </div>
-              </ItemTitle>
-              <ItemDescription className="line-clamp-4">
-                {config.description}
-              </ItemDescription>
-            </ItemContent>
-            <ItemActions className="gap-1">
-              <Switch
-                checked={config.enabled}
-                disabled={readOnly || isMutating}
-                onCheckedChange={(checked) =>
-                  enableMCPServer({ serverName: name, enabled: checked })
-                }
-              />
-              <Button
-                size="icon"
-                variant="ghost"
-                aria-label={`${t.common.edit} ${name}`}
-                disabled={readOnly || isMutating}
-                onClick={() => openEditEditor(name, config)}
-              >
-                <PencilIcon className="size-4" />
-              </Button>
-              <Button
-                size="icon"
-                variant="ghost"
-                aria-label={`${t.common.delete} ${name}`}
-                disabled={readOnly || isMutating}
-                onClick={() => setPendingRemoval(name)}
-              >
-                <Trash2 className="size-4" />
-              </Button>
-            </ItemActions>
-          </Item>
-        ))
+        entries.map(([name, config]) => {
+          const displayName = displayServerName(name);
+          return (
+            <Item className="w-full" variant="outline" key={name}>
+              <ItemContent>
+                <ItemTitle>
+                  <div className="flex items-center gap-2">
+                    <div>{displayName}</div>
+                  </div>
+                </ItemTitle>
+                <ItemDescription className="line-clamp-4">
+                  {config.description}
+                </ItemDescription>
+              </ItemContent>
+              <ItemActions className="gap-1">
+                <Switch
+                  checked={config.enabled}
+                  disabled={readOnly || isMutating}
+                  onCheckedChange={(checked) =>
+                    enableMCPServer({ serverName: name, enabled: checked })
+                  }
+                />
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={`${t.common.edit} ${displayName}`}
+                  disabled={readOnly || isMutating}
+                  onClick={() => openEditEditor(name, config)}
+                >
+                  <PencilIcon className="size-4" />
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  aria-label={`${t.common.delete} ${displayName}`}
+                  disabled={readOnly || isMutating}
+                  onClick={() => setPendingRemoval(name)}
+                >
+                  <Trash2 className="size-4" />
+                </Button>
+              </ItemActions>
+            </Item>
+          );
+        })
       )}
 
       <Dialog
@@ -249,13 +271,16 @@ function MCPServerList({
           </DialogHeader>
           <Textarea
             className="min-h-52 font-mono text-xs"
+            aria-label={t.settings.tools.serverDefinitionLabel}
             spellCheck={false}
             value={definition}
             placeholder={t.settings.tools.addServerPlaceholder}
             onChange={(event) => setDefinition(event.target.value)}
           />
           {definitionError && (
-            <div className="text-destructive text-sm">{definitionError}</div>
+            <div className="text-destructive text-sm" role="alert">
+              {definitionError}
+            </div>
           )}
           <DialogFooter>
             <Button
@@ -282,7 +307,7 @@ function MCPServerList({
             <DialogDescription>
               {t.settings.tools.removeServerDescription.replace(
                 "{name}",
-                pendingRemoval ?? "",
+                displayServerName(pendingRemoval),
               )}
             </DialogDescription>
           </DialogHeader>
@@ -297,7 +322,9 @@ function MCPServerList({
             <Button
               variant="destructive"
               disabled={isWriting}
-              onClick={() => pendingRemoval && handleRemove(pendingRemoval)}
+              onClick={() =>
+                pendingRemoval !== null && handleRemove(pendingRemoval)
+              }
             >
               {isWriting ? t.common.loading : t.common.delete}
             </Button>

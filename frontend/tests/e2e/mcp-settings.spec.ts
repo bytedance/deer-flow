@@ -24,17 +24,29 @@ test.describe("MCP server settings", () => {
         routing: { mode: "prefer" },
       },
     };
-    let submittedServers: typeof servers | undefined;
+    let submittedUpdate:
+      | { server_name: string; server: (typeof servers)["remote"] }
+      | undefined;
 
     await page.route("**/api/mcp/config", async (route) => {
-      if (route.request().method() === "PUT") {
-        const request = route.request().postDataJSON() as {
-          mcp_servers: typeof servers;
-        };
-        submittedServers = request.mcp_servers;
-        servers = request.mcp_servers;
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ mcp_servers: servers }),
+      });
+    });
+    await page.route("**/api/mcp/config/server", async (route) => {
+      if (route.request().method() !== "PUT") {
+        await route.fallback();
+        return;
       }
-
+      submittedUpdate = route
+        .request()
+        .postDataJSON() as typeof submittedUpdate;
+      servers = {
+        ...servers,
+        [submittedUpdate!.server_name]: submittedUpdate!.server,
+      };
       await route.fulfill({
         status: 200,
         contentType: "application/json",
@@ -61,14 +73,9 @@ test.describe("MCP server settings", () => {
     await expect(
       settingsDialog.getByText("Updated remote tools"),
     ).toBeVisible();
-    expect(submittedServers).toEqual({
-      local: {
-        enabled: true,
-        description: "Local tools",
-        command: "uvx",
-        args: ["local-tools"],
-      },
-      remote: {
+    expect(submittedUpdate).toEqual({
+      server_name: "remote",
+      server: {
         enabled: false,
         description: "Updated remote tools",
         type: "http",

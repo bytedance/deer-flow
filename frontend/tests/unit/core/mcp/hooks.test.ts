@@ -16,7 +16,7 @@ import { fetch } from "@/core/api/fetcher";
 import { MCPConfigRequestError, loadMCPConfig } from "@/core/mcp/api";
 import {
   getEnableMCPServerMutationOptions,
-  getUpdateMCPConfigMutationOptions,
+  getMCPServerMutationOptions,
 } from "@/core/mcp/hooks";
 
 const mockedFetch = rs.mocked(fetch);
@@ -143,39 +143,72 @@ describe("MCP server state mutation", () => {
   });
 });
 
-describe("MCP config mutation", () => {
+describe("MCP server CRUD mutation", () => {
   beforeEach(() => {
     mockedFetch.mockReset();
     mockedToastError.mockReset();
   });
 
-  it("PUTs the whole server map and invalidates the config", async () => {
-    mockedFetch.mockResolvedValue(
-      new Response(JSON.stringify({ mcp_servers: {} }), { status: 200 }),
-    );
-    const client = makeClient();
-    const invalidateQueries = rs
-      .spyOn(client, "invalidateQueries")
-      .mockResolvedValue();
-    const mutation = client
-      .getMutationCache()
-      .build(client, getUpdateMCPConfigMutationOptions(client));
-
-    const config = {
-      mcp_servers: {
-        github: { enabled: true, description: "GitHub" },
+  it.each([
+    {
+      variables: {
+        operation: "create" as const,
+        servers: { github: { enabled: true, description: "GitHub" } },
       },
-    };
-    await mutation.execute(config);
+      path: "/api/mcp/config/servers",
+      method: "POST",
+      body: {
+        mcp_servers: { github: { enabled: true, description: "GitHub" } },
+      },
+    },
+    {
+      variables: {
+        operation: "update" as const,
+        serverName: "github",
+        server: { enabled: false, description: "GitHub tools" },
+      },
+      path: "/api/mcp/config/server",
+      method: "PUT",
+      body: {
+        server_name: "github",
+        server: { enabled: false, description: "GitHub tools" },
+      },
+    },
+    {
+      variables: {
+        operation: "delete" as const,
+        serverName: "github",
+      },
+      path: "/api/mcp/config/server",
+      method: "DELETE",
+      body: { server_name: "github" },
+    },
+  ])(
+    "sends a targeted $method request and invalidates the config",
+    async ({ variables, path, method, body }) => {
+      mockedFetch.mockResolvedValue(
+        new Response(JSON.stringify({ mcp_servers: {} }), { status: 200 }),
+      );
+      const client = makeClient();
+      const invalidateQueries = rs
+        .spyOn(client, "invalidateQueries")
+        .mockResolvedValue();
+      const mutation = client
+        .getMutationCache()
+        .build(client, getMCPServerMutationOptions(client));
 
-    const [, request] = mockedFetch.mock.calls[0] as [string, RequestInit];
-    expect(request.method).toBe("PUT");
-    expect(JSON.parse(request.body as string)).toEqual(config);
-    expect(invalidateQueries).toHaveBeenCalledWith({
-      queryKey: ["mcpConfig"],
-    });
-    expect(mockedToastError).not.toHaveBeenCalled();
-  });
+      await mutation.execute(variables);
+
+      const [url, request] = mockedFetch.mock.calls[0] as [string, RequestInit];
+      expect(url.endsWith(path)).toBe(true);
+      expect(request.method).toBe(method);
+      expect(JSON.parse(request.body as string)).toEqual(body);
+      expect(invalidateQueries).toHaveBeenCalledWith({
+        queryKey: ["mcpConfig"],
+      });
+      expect(mockedToastError).not.toHaveBeenCalled();
+    },
+  );
 
   it("surfaces the Gateway rejection detail without invalidating", async () => {
     const detail =
@@ -187,11 +220,12 @@ describe("MCP config mutation", () => {
     const invalidateQueries = rs.spyOn(client, "invalidateQueries");
     const mutation = client
       .getMutationCache()
-      .build(client, getUpdateMCPConfigMutationOptions(client));
+      .build(client, getMCPServerMutationOptions(client));
 
     await expect(
       mutation.execute({
-        mcp_servers: { evil: { enabled: true, description: "" } },
+        operation: "create",
+        servers: { evil: { enabled: true, description: "" } },
       }),
     ).rejects.toThrow(detail);
 

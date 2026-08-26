@@ -1,15 +1,40 @@
 import type { MCPServerConfig } from "./types";
 
+export type MCPServerDefinitionErrorCode =
+  | "emptyDefinition"
+  | "invalidJson"
+  | "rootNotObject"
+  | "emptyServerMap"
+  | "serverConfigNotObject";
+
 /** A pasted definition that is not a usable `mcpServers` map. */
 export class MCPServerDefinitionError extends Error {
-  constructor(message: string) {
-    super(message);
+  readonly code: MCPServerDefinitionErrorCode;
+  readonly serverName?: string;
+
+  constructor(code: MCPServerDefinitionErrorCode, serverName?: string) {
+    super(code);
     this.name = "MCPServerDefinitionError";
+    this.code = code;
+    this.serverName = serverName;
   }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isWrappedServerMap(value: Record<string, unknown>): value is Record<
+  string,
+  unknown
+> & {
+  mcpServers: Record<string, unknown>;
+} {
+  if (!Object.hasOwn(value, "mcpServers") || !isPlainObject(value.mcpServers)) {
+    return false;
+  }
+  const candidates = Object.values(value.mcpServers);
+  return candidates.length === 0 || candidates.every(isPlainObject);
 }
 
 /** Serialize one existing server into the same copy-paste format the parser accepts. */
@@ -36,48 +61,33 @@ export function parseMCPServerDefinition(
 ): Record<string, MCPServerConfig> {
   const trimmed = input.trim();
   if (!trimmed) {
-    throw new MCPServerDefinitionError("Paste an MCP server definition.");
+    throw new MCPServerDefinitionError("emptyDefinition");
   }
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(trimmed);
-  } catch (error) {
-    throw new MCPServerDefinitionError(
-      error instanceof Error ? error.message : "Invalid JSON.",
-    );
+  } catch {
+    throw new MCPServerDefinitionError("invalidJson");
   }
 
   if (!isPlainObject(parsed)) {
-    throw new MCPServerDefinitionError(
-      "Expected a JSON object describing one or more MCP servers.",
-    );
+    throw new MCPServerDefinitionError("rootNotObject");
   }
 
-  const wrapped = parsed.mcpServers;
-  const servers = wrapped === undefined ? parsed : wrapped;
-  if (!isPlainObject(servers)) {
-    throw new MCPServerDefinitionError(
-      "Expected `mcpServers` to be an object keyed by server name.",
-    );
-  }
+  // A bare server is allowed to be named `mcpServers`. Treat that key as the
+  // wrapper only when its value itself looks like a name-to-config map.
+  const servers = isWrappedServerMap(parsed) ? parsed.mcpServers : parsed;
 
   const entries = Object.entries(servers);
   if (entries.length === 0) {
-    throw new MCPServerDefinitionError(
-      "No MCP server found in the definition.",
-    );
+    throw new MCPServerDefinitionError("emptyServerMap");
   }
 
   return Object.fromEntries(
     entries.map(([name, config]) => {
-      if (!name.trim()) {
-        throw new MCPServerDefinitionError("Server names cannot be empty.");
-      }
       if (!isPlainObject(config)) {
-        throw new MCPServerDefinitionError(
-          `Server "${name}" must be a JSON object.`,
-        );
+        throw new MCPServerDefinitionError("serverConfigNotObject", name);
       }
       // Servers are enabled on add: a definition the operator just pasted is
       // one they want running, and an entry that silently lands disabled reads

@@ -949,6 +949,14 @@ export const enUS: Translations = {
     }
   }
 }`,
+      serverDefinitionLabel: "MCP server JSON definition",
+      definitionEmpty: "Paste an MCP server definition.",
+      definitionInvalidJson: "Enter valid JSON.",
+      definitionRootNotObject:
+        "Enter a JSON object describing one or more MCP servers.",
+      definitionNoServers: "No MCP server was found in the definition.",
+      definitionServerNotObject:
+        'The configuration for server "{name}" must be a JSON object.',
       editServer: "Edit MCP server",
       editServerDescription:
         'Edit the complete JSON definition for "{name}". The server name is fixed; add a new server and remove this one to rename it.',
@@ -960,6 +968,7 @@ export const enUS: Translations = {
       removeServer: "Remove MCP server",
       removeServerDescription:
         'Remove "{name}" from the MCP configuration? Its tools stop being available to agents.',
+      unnamedServer: "(empty name)",
     },
     subagents: {
       title: "Subagents",

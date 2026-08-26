@@ -913,6 +913,12 @@ export const zhCN: Translations = {
     }
   }
 }`,
+      serverDefinitionLabel: "MCP 服务器 JSON 定义",
+      definitionEmpty: "请粘贴 MCP 服务器定义。",
+      definitionInvalidJson: "请输入有效的 JSON。",
+      definitionRootNotObject: "请输入描述一个或多个 MCP 服务器的 JSON 对象。",
+      definitionNoServers: "定义中未找到 MCP 服务器。",
+      definitionServerNotObject: "服务器“{name}”的配置必须是 JSON 对象。",
       editServer: "编辑 MCP 服务器",
       editServerDescription:
         "编辑“{name}”的完整 JSON 定义。服务器名称不可修改；如需重命名，请添加新服务器后移除当前服务器。",
@@ -922,6 +928,7 @@ export const zhCN: Translations = {
       removeServer: "移除 MCP 服务器",
       removeServerDescription:
         "确定从 MCP 配置中移除“{name}”吗？它的工具将不再提供给智能体。",
+      unnamedServer: "（空名称）",
     },
     subagents: {
       title: "子智能体",

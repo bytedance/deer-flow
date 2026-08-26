@@ -3,8 +3,22 @@ import { describe, expect, it } from "@rstest/core";
 import {
   formatMCPServerDefinition,
   MCPServerDefinitionError,
+  type MCPServerDefinitionErrorCode,
   parseMCPServerDefinition,
 } from "@/core/mcp/parse";
+
+function expectDefinitionError(
+  input: string,
+  code: MCPServerDefinitionErrorCode,
+) {
+  try {
+    parseMCPServerDefinition(input);
+    throw new Error("Expected the definition to be rejected");
+  } catch (error) {
+    expect(error).toBeInstanceOf(MCPServerDefinitionError);
+    expect((error as MCPServerDefinitionError).code).toBe(code);
+  }
+}
 
 describe("formatMCPServerDefinition", () => {
   it("serializes one complete server into the wrapped edit format", () => {
@@ -60,6 +74,23 @@ describe("parseMCPServerDefinition", () => {
     });
   });
 
+  it("accepts a bare server named mcpServers", () => {
+    const parsed = parseMCPServerDefinition(
+      `{"mcpServers": {"command": "npx"}}`,
+    );
+
+    expect(parsed.mcpServers).toMatchObject({
+      command: "npx",
+      enabled: true,
+    });
+  });
+
+  it("accepts an existing empty server name", () => {
+    const parsed = parseMCPServerDefinition(`{"": {"command": "npx"}}`);
+
+    expect(parsed[""]).toMatchObject({ command: "npx", enabled: true });
+  });
+
   it("enables a pasted server by default", () => {
     const parsed = parseMCPServerDefinition(`{"a": {"command": "uvx"}}`);
 
@@ -98,38 +129,26 @@ describe("parseMCPServerDefinition", () => {
   });
 
   it("rejects blank input", () => {
-    expect(() => parseMCPServerDefinition("   ")).toThrow(
-      MCPServerDefinitionError,
-    );
+    expectDefinitionError("   ", "emptyDefinition");
   });
 
   it("rejects invalid JSON", () => {
-    expect(() => parseMCPServerDefinition("{not json")).toThrow(
-      MCPServerDefinitionError,
-    );
+    expectDefinitionError("{not json", "invalidJson");
   });
 
   it("rejects a non-object payload", () => {
-    expect(() => parseMCPServerDefinition("[1, 2]")).toThrow(
-      MCPServerDefinitionError,
-    );
+    expectDefinitionError("[1, 2]", "rootNotObject");
   });
 
   it("rejects an empty server map", () => {
-    expect(() => parseMCPServerDefinition(`{"mcpServers": {}}`)).toThrow(
-      MCPServerDefinitionError,
-    );
+    expectDefinitionError(`{"mcpServers": {}}`, "emptyServerMap");
   });
 
   it("rejects a server entry that is not an object", () => {
-    expect(() => parseMCPServerDefinition(`{"a": "npx"}`)).toThrow(
-      MCPServerDefinitionError,
-    );
+    expectDefinitionError(`{"a": "npx"}`, "serverConfigNotObject");
   });
 
   it("rejects a non-object mcpServers value", () => {
-    expect(() => parseMCPServerDefinition(`{"mcpServers": []}`)).toThrow(
-      MCPServerDefinitionError,
-    );
+    expectDefinitionError(`{"mcpServers": []}`, "serverConfigNotObject");
   });
 });

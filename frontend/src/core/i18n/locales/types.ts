@@ -803,6 +803,12 @@ export interface Translations {
       addServer: string;
       addServerDescription: string;
       addServerPlaceholder: string;
+      serverDefinitionLabel: string;
+      definitionEmpty: string;
+      definitionInvalidJson: string;
+      definitionRootNotObject: string;
+      definitionNoServers: string;
+      definitionServerNotObject: string;
       editServer: string;
       editServerDescription: string;
       editSingleServer: string;
@@ -810,6 +816,7 @@ export interface Translations {
       serverAlreadyExists: string;
       removeServer: string;
       removeServerDescription: string;
+      unnamedServer: string;
     };
     subagents: {
       title: string;

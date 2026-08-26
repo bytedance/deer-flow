@@ -7,12 +7,14 @@ import {
 import { toast } from "sonner";
 
 import {
+  createMCPServers,
+  deleteMCPServer,
   loadMCPConfig,
   MCPConfigRequestError,
-  updateMCPConfig,
+  updateMCPServer,
   updateMCPServerState,
 } from "./api";
-import type { MCPConfig } from "./types";
+import type { MCPServerConfig } from "./types";
 
 export function useMCPConfig() {
   const { data, isLoading, error } = useQuery({
@@ -45,9 +47,33 @@ export function useEnableMCPServer() {
   return useMutation(getEnableMCPServerMutationOptions(queryClient));
 }
 
-export function getUpdateMCPConfigMutationOptions(queryClient: QueryClient) {
+export type MCPServerMutationVariables =
+  | {
+      operation: "create";
+      servers: Record<string, MCPServerConfig>;
+    }
+  | {
+      operation: "update";
+      serverName: string;
+      server: MCPServerConfig;
+    }
+  | {
+      operation: "delete";
+      serverName: string;
+    };
+
+export function getMCPServerMutationOptions(queryClient: QueryClient) {
   return {
-    mutationFn: (config: MCPConfig) => updateMCPConfig(config),
+    mutationFn: (variables: MCPServerMutationVariables) => {
+      switch (variables.operation) {
+        case "create":
+          return createMCPServers(variables.servers);
+        case "update":
+          return updateMCPServer(variables.serverName, variables.server);
+        case "delete":
+          return deleteMCPServer(variables.serverName);
+      }
+    },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["mcpConfig"] }),
     onError: (error: Error) => {
       toast.error(error.message);
@@ -55,15 +81,7 @@ export function getUpdateMCPConfigMutationOptions(queryClient: QueryClient) {
   };
 }
 
-/**
- * Write the whole `mcpServers` map.
- *
- * `PUT /api/mcp/config` replaces that key with what it receives, so callers
- * must send the complete map — adding is a merge into the current servers,
- * removing is omitting one from them. Values masked as `***` by the GET
- * response round-trip safely; the Gateway restores the real secrets from disk.
- */
-export function useUpdateMCPConfig() {
+export function useMCPServerMutation() {
   const queryClient = useQueryClient();
-  return useMutation(getUpdateMCPConfigMutationOptions(queryClient));
+  return useMutation(getMCPServerMutationOptions(queryClient));
 }

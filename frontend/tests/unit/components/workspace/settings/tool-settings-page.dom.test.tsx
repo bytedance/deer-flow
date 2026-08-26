@@ -42,6 +42,13 @@ rs.mock("@/core/i18n/hooks", () => ({
           addServer: "Add server",
           addServerDescription: "Paste the definition",
           addServerPlaceholder: "{}",
+          serverDefinitionLabel: "MCP server JSON definition",
+          definitionEmpty: "Paste a definition",
+          definitionInvalidJson: "Enter valid JSON",
+          definitionRootNotObject: "Enter a JSON object",
+          definitionNoServers: "No server found",
+          definitionServerNotObject:
+            'The configuration for server "{name}" must be an object',
           editServer: "Edit MCP server",
           editServerDescription: 'Edit "{name}"',
           editSingleServer: "Edit exactly one server",
@@ -49,6 +56,7 @@ rs.mock("@/core/i18n/hooks", () => ({
           serverAlreadyExists: 'Server "{name}" already exists',
           removeServer: "Remove MCP server",
           removeServerDescription: 'Remove "{name}"?',
+          unnamedServer: "(empty name)",
         },
       },
     },
@@ -65,7 +73,7 @@ rs.mock("@/core/mcp/hooks", () => ({
     isPending: mcpMockState.isPending,
     mutate: mcpMockState.mutate,
   }),
-  useUpdateMCPConfig: () => ({
+  useMCPServerMutation: () => ({
     isPending: mcpMockState.updateIsPending,
     mutate: mcpMockState.updateMutate,
   }),
@@ -86,10 +94,10 @@ function twoServers() {
   });
 }
 
-/** The config map handed to the update mutation by the last call. */
-function lastWrittenServers() {
+/** The targeted mutation variables handed to the last call. */
+function lastMutation() {
   const call = mcpMockState.updateMutate.mock.calls.at(-1);
-  return (call?.[0] as { mcp_servers: Record<string, unknown> }).mcp_servers;
+  return call?.[0] as Record<string, unknown>;
 }
 
 function openAddDialog() {
@@ -151,7 +159,7 @@ describe("ToolSettingsPage MCP switches", () => {
 });
 
 describe("ToolSettingsPage add server", () => {
-  it("merges the pasted server into the existing map", () => {
+  it("submits only the pasted servers to the atomic create endpoint", () => {
     twoServers();
 
     render(<ToolSettingsPage />);
@@ -163,12 +171,15 @@ describe("ToolSettingsPage add server", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    const written = lastWrittenServers();
-    expect(Object.keys(written).sort()).toEqual(["added", "github", "remote"]);
-    expect(written.added).toMatchObject({ command: "npx", enabled: true });
+    expect(lastMutation()).toEqual({
+      operation: "create",
+      servers: {
+        added: { command: "npx", args: [], enabled: true, description: "" },
+      },
+    });
   });
 
-  it("round-trips fields the page never renders", () => {
+  it("does not submit stale sibling configurations while adding", () => {
     twoServers();
 
     render(<ToolSettingsPage />);
@@ -178,11 +189,11 @@ describe("ToolSettingsPage add server", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    // Rebuilding entries from rendered fields would drop these and wipe the
-    // durable-task and routing config of an untouched server.
-    expect(lastWrittenServers().remote).toEqual({
-      ...DURABLE_TASK_SERVER,
-      enabled: false,
+    expect(lastMutation()).toEqual({
+      operation: "create",
+      servers: {
+        added: { command: "uvx", enabled: true, description: "" },
+      },
     });
   });
 
@@ -197,6 +208,10 @@ describe("ToolSettingsPage add server", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     expect(mcpMockState.updateMutate).not.toHaveBeenCalled();
+    expect(screen.getByRole("alert").textContent).toBe("Enter valid JSON");
+    expect(
+      screen.getByRole("textbox", { name: "MCP server JSON definition" }),
+    ).toBeDefined();
   });
 
   it("offers the add action when no server is configured yet", () => {
@@ -244,7 +259,7 @@ describe("ToolSettingsPage edit server", () => {
     });
   });
 
-  it("updates one server while preserving its hidden fields and siblings", () => {
+  it("updates only one server while preserving all of its hidden fields", () => {
     twoServers();
 
     render(<ToolSettingsPage />);
@@ -259,14 +274,14 @@ describe("ToolSettingsPage edit server", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
-    expect(lastWrittenServers().github).toEqual({
-      enabled: true,
-      description: "GitHub tools",
-    });
-    expect(lastWrittenServers().remote).toEqual({
-      ...DURABLE_TASK_SERVER,
-      enabled: false,
-      description: "Updated remote tools",
+    expect(lastMutation()).toEqual({
+      operation: "update",
+      serverName: "remote",
+      server: {
+        ...DURABLE_TASK_SERVER,
+        enabled: false,
+        description: "Updated remote tools",
+      },
     });
   });
 
@@ -305,16 +320,17 @@ describe("ToolSettingsPage edit server", () => {
 });
 
 describe("ToolSettingsPage remove server", () => {
-  it("omits only the removed server from the written map", () => {
+  it("submits only the selected server name", () => {
     twoServers();
 
     render(<ToolSettingsPage />);
     fireEvent.click(screen.getByRole("button", { name: "Delete github" }));
     fireEvent.click(screen.getByRole("button", { name: "Delete" }));
 
-    const written = lastWrittenServers();
-    expect(Object.keys(written)).toEqual(["remote"]);
-    expect(written.remote).toEqual({ ...DURABLE_TASK_SERVER, enabled: false });
+    expect(lastMutation()).toEqual({
+      operation: "delete",
+      serverName: "github",
+    });
   });
 
   it("does not write when the confirmation is dismissed", () => {
@@ -325,5 +341,20 @@ describe("ToolSettingsPage remove server", () => {
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
 
     expect(mcpMockState.updateMutate).not.toHaveBeenCalled();
+  });
+
+  it("deletes a configured server whose name is empty", () => {
+    setServers({ "": { enabled: false, description: "Legacy server" } });
+
+    render(<ToolSettingsPage />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete (empty name)" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+
+    expect(lastMutation()).toEqual({
+      operation: "delete",
+      serverName: "",
+    });
   });
 });

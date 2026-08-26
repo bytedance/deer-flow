@@ -1,7 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { MCPConfig } from "./types";
+import type { MCPConfig, MCPServerConfig } from "./types";
 
 export class MCPConfigRequestError extends Error {
   readonly status: number;
@@ -51,6 +51,55 @@ export async function updateMCPConfig(config: MCPConfig) {
     );
   }
   return response.json();
+}
+
+async function mutateMCPServerConfig(
+  path: string,
+  method: "POST" | "PUT" | "DELETE",
+  body: unknown,
+  fallback: string,
+) {
+  const response = await fetch(`${getBackendBaseURL()}${path}`, {
+    method,
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    throw new MCPConfigRequestError(
+      response.status,
+      await readErrorDetail(response, fallback),
+    );
+  }
+  return response.json() as Promise<MCPConfig>;
+}
+
+export function createMCPServers(servers: Record<string, MCPServerConfig>) {
+  return mutateMCPServerConfig(
+    "/api/mcp/config/servers",
+    "POST",
+    { mcp_servers: servers },
+    "Failed to add MCP servers",
+  );
+}
+
+export function updateMCPServer(serverName: string, server: MCPServerConfig) {
+  return mutateMCPServerConfig(
+    "/api/mcp/config/server",
+    "PUT",
+    { server_name: serverName, server },
+    "Failed to update MCP server",
+  );
+}
+
+export function deleteMCPServer(serverName: string) {
+  return mutateMCPServerConfig(
+    "/api/mcp/config/server",
+    "DELETE",
+    { server_name: serverName },
+    "Failed to delete MCP server",
+  );
 }
 
 export async function updateMCPServerState(
