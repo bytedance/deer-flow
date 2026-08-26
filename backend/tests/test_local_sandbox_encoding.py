@@ -2,7 +2,7 @@ import builtins
 from types import SimpleNamespace
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
-from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 
 
 def _open(base, file, mode="r", *args, **kwargs):
@@ -115,7 +115,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
     ]
 
 
-def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
+def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows(monkeypatch):
     calls: list[tuple[object, dict]] = []
 
     def fake_run(*args, **kwargs):
@@ -125,6 +125,7 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "/mnt/user-data")
     monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
 
     output = LocalSandbox("t").execute_command("echo hello")
@@ -140,12 +141,66 @@ def test_execute_command_uses_posix_shell_command_mode_on_windows(monkeypatch):
                 "timeout": 600,
                 "env": {
                     "PATH": r"C:\Program Files\Git\bin",
-                    "MSYS_NO_PATHCONV": "1",
-                    "MSYS2_ARG_CONV_EXCL": "*",
+                    "MSYS2_ARG_CONV_EXCL": "/mnt/user-data",
                 },
             },
         )
     ]
+
+
+def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monkeypatch):
+    calls: list[tuple[object, dict]] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "/mnt/user-data")
+    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+
+    output = LocalSandbox("t").execute_command("cat /mnt/user-data/workspace/input.txt")
+
+    assert output == "ok"
+    assert calls[0][1]["env"] == {
+        "PATH": r"C:\Program Files\Git\bin",
+        "MSYS2_ARG_CONV_EXCL": "/mnt/user-data",
+    }
+
+
+def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(monkeypatch):
+    calls: list[tuple[object, dict]] = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args[0], kwargs))
+        return SimpleNamespace(stdout="ok", stderr="", returncode=0)
+
+    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": r"C:\Program Files\Git\bin"})
+    monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: r"C:\Program Files\Git\bin\sh.exe"))
+    monkeypatch.setattr(LocalSandbox, "_msys_path_conversion_exclusions", lambda self: "")
+    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+
+    output = LocalSandbox("t").execute_command("echo hello")
+
+    assert output == "ok"
+    assert calls[0][1]["env"] == {"PATH": r"C:\Program Files\Git\bin"}
+
+
+def test_msys_path_conversion_exclusions_omit_blanket_patterns():
+    sandbox = LocalSandbox(
+        "t",
+        [
+            PathMapping(container_path="/", local_path="C:\\"),
+            PathMapping(container_path="/mnt/data;*", local_path=r"C:\data"),
+            PathMapping(container_path="/mnt/user-data/", local_path=r"C:\user-data"),
+            PathMapping(container_path="/mnt/user-data", local_path=r"C:\user-data"),
+        ],
+    )
+
+    assert sandbox._msys_path_conversion_exclusions() == "/mnt/user-data"
 
 
 def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windows(monkeypatch):
