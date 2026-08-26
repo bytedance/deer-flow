@@ -236,9 +236,8 @@ class DeerMem(MemoryManager):
                 trace_id=trace_id,
                 signals=signals,
             )
-            # Fresh work proves the scope is alive again (e.g. the agent was
-            # recreated after deletion): lift fences covering this exact key.
-            self._queue.mark_scope_active(resolved_agent, user_id)
+            # The enqueue stamps the current scope generation, so a recreated
+            # agent's fresh turns carry the bumped value and run normally.
         except QueueFull as e:
             logger.warning("Memory update rejected under backpressure (thread=%s): %s", thread_id, e)
 
@@ -272,7 +271,6 @@ class DeerMem(MemoryManager):
                 user_id=user_id,
                 signals=signals,
             )
-            self._queue.mark_scope_active(resolved_agent, user_id)
         except QueueFull as e:
             logger.warning("Memory emergency flush rejected under backpressure (thread=%s): %s", thread_id, e)
 

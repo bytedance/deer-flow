@@ -4,11 +4,14 @@ Deleting an agent (or clearing its memory) must drop that scope's
 still-debouncing extraction contexts. Otherwise the debounce Timer fires after
 deletion, invokes the extraction LLM for a scope that no longer exists, and
 re-persists state that blocks recreating an agent with the same name. This file
-pins the in-process stopgap: ``MemoryUpdateQueue.cancel_by_agent``, the
-``MemoryManager.cancel_by_agent`` contract default, DeerMem's override plus its
-``clear_memory`` linkage, and the best-effort hookup in the agent-deletion
-route. In-flight contexts already pulled out of the queue are NOT interrupted;
-the durable outbox design owns full fencing later.
+pins the in-process stopgap: ``MemoryUpdateQueue.cancel_by_agent`` /
+``cancel_by_user`` backed by per-scope generations — each context stamps the
+generation at enqueue time and the processing loop drops contexts whose
+generation no longer matches, so cancelled work stays dead even across a
+delete -> recreate-same-name -> fresh-enqueue sequence while a fresh turn still
+runs. Also covered: the ``MemoryManager`` contract defaults, DeerMem's
+overrides plus its ``clear_memory`` linkage, and the best-effort hookup in the
+agent-deletion route.
 """
 
 import threading
@@ -83,11 +86,10 @@ def test_cancel_by_agent_is_safe_while_worker_holds_processing_flag() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Writer-side fence: cancellation must hold against a worker that snapshotted
-# its batch BEFORE the cancel ran (the #5037 HIGH finding). Pending removal
-# alone cannot do that: _process_queue moves _items into a local list and
-# clears the queue under the lock, so a cancel racing the worker sees an empty
-# list while the LLM calls still go out.
+# Scope generations: cancellation must hold against a worker that snapshotted
+# its batch BEFORE the cancel ran (#5037 HIGH), AND against a delete ->
+# recreate-same-name -> fresh-enqueue sequence: old-generation work must never
+# execute as if it belonged to the recreated scope.
 # ---------------------------------------------------------------------------
 
 
@@ -104,30 +106,44 @@ def _start_blocked_worker(queue: MemoryUpdateQueue, mock_updater: MagicMock, gat
     return worker
 
 
-def test_fence_blocks_batch_items_snapshotted_before_cancel() -> None:
-    """Deterministic #5037 race: worker snapshots two same-scope contexts and
-    starts the first LLM call; cancel runs mid-call; the second context must be
-    fenced off even though it left ``_items`` before the cancel executed."""
-    import time as _time
+def test_old_batch_dies_but_recreated_agent_fresh_work_runs() -> None:
+    """The #5037 blocker scenario, end to end:
 
+    worker snapshots old-1 + old-2 and starts old-1's LLM call
+        -> cancel (delete)
+        -> recreate same name, fresh conversation enqueues
+        -> release the worker
+
+    old-2 MUST NOT run (it predates the cancel). Fresh work MUST run. Pending
+    removal alone cannot express this: the fresh enqueue must not resurrect the
+    old batch, and the cancel must not kill the fresh turn.
+    """
     mock_updater = MagicMock(return_value=True)
     queue = _queue(mock_updater)
     queue._items = [
-        ConversationContext(thread_id="t1", messages=["first"], agent_name="doomed"),
-        ConversationContext(thread_id="t2", messages=["second"], agent_name="doomed"),
+        ConversationContext(thread_id="t-old", messages=["old-1"], agent_name="phoenix"),
+        ConversationContext(thread_id="t-old", messages=["old-2"], agent_name="phoenix"),
     ]
     gate = threading.Event()
     started = threading.Event()
     worker = _start_blocked_worker(queue, mock_updater, gate, started)
     try:
-        # The batch was snapshotted (_items is now empty), yet the fence must
-        # still stop the not-yet-started second extraction.
-        assert queue.cancel_by_agent("doomed") == 0
+        # Delete: the batch was already snapshotted (_items is empty), so this
+        # removes zero pending entries but must invalidate their generation.
+        assert queue.cancel_by_agent("phoenix") == 0
+        # Recreate + fresh conversation turn enqueues under the same scope.
+        queue.add(thread_id="t-new", messages=["fresh"], agent_name="phoenix")
     finally:
         gate.set()
         worker.join(timeout=5.0)
-    assert _time.monotonic() >= 0  # keep import meaningful for lints
-    assert mock_updater.update_memory.call_count == 1
+        # Drain whatever the finishing worker rescheduled for the fresh item.
+        queue.flush()
+
+    executed = [call.kwargs["messages"] for call in mock_updater.update_memory.call_args_list]
+    # old-1 was already inside its LLM call when the cancel landed — the
+    # documented residual window this stopgap does not claim to close. The
+    # blocker requirement: old TAIL (old-2) must not run; fresh work must.
+    assert executed == [["old-1"], ["fresh"]], f"old tail leaked or fresh work dropped: {executed}"
 
 
 def test_cancelled_scope_prevents_entire_subsequent_batch() -> None:
@@ -141,34 +157,56 @@ def test_cancelled_scope_prevents_entire_subsequent_batch() -> None:
     mock_updater.update_memory.assert_not_called()
 
 
-def test_fresh_add_unfences_exact_and_covering_scopes() -> None:
-    """New work proves the scope is alive again: an exact fence, a wildcard-user
-    fence, and a user-wide fence covering this key must all be lifted so a
-    recreated agent keeps extracting."""
-    import time as _time  # noqa: F401
+def test_user_wide_cancel_kills_other_agents_old_batch_without_touching_new_work() -> None:
+    """A user-wide cancel invalidates every agent's buffered work for that
+    user, yet a later legitimate turn for any of them still runs."""
+    mock_updater = MagicMock(return_value=True)
+    queue = _queue(mock_updater)
+    queue._items = [
+        ConversationContext(thread_id="t1", messages=["a-old"], agent_name="agent-a", user_id="alice"),
+        ConversationContext(thread_id="t2", messages=["b-old"], agent_name="agent-b", user_id="alice"),
+    ]
+    gate = threading.Event()
+    started = threading.Event()
+    worker = _start_blocked_worker(queue, mock_updater, gate, started)
+    try:
+        assert queue.cancel_by_user("alice") == 0
+        queue.add(thread_id="t3", messages=["a-new"], agent_name="agent-a", user_id="alice")
+    finally:
+        gate.set()
+        worker.join(timeout=5.0)
+        queue.flush()
 
-    queue = _queue()
-
-    queue.cancel_by_agent("agent-a")
-    queue.mark_scope_active("agent-a", "alice")
-    assert queue._scope_is_cancelled("agent-a", "alice") is False
-
-    queue.cancel_by_agent("agent-a", user_id=None)
-    queue.mark_scope_active("agent-a", "bob")
-    assert queue._scope_is_cancelled("agent-a", "bob") is False
-
-    queue.cancel_by_user("alice")
-    queue.mark_scope_active("agent-z", "alice")
-    assert queue._scope_is_cancelled("agent-z", "alice") is False
+    executed = [call.kwargs["messages"] for call in mock_updater.update_memory.call_args_list]
+    # a-old is the documented in-flight residual; b-old (old tail) must be gone.
+    assert executed == [["a-old"], ["a-new"]]
 
 
-def test_unrelated_scope_still_fenced_after_other_scope_reactivated() -> None:
-    queue = _queue()
-    queue.cancel_by_user("alice")
+def test_cancelled_scope_prevents_subsequent_batch_after_user_wide_cancel() -> None:
+    mock_updater = MagicMock(return_value=True)
+    queue = _queue(mock_updater)
+    queue._items = [ConversationContext(thread_id="t1", messages=["late"], agent_name="agent-a", user_id="alice")]
 
-    queue.mark_scope_active("agent-a", "bob")
+    assert queue.cancel_by_user("alice") == 1
+    queue.flush()
 
-    assert queue._scope_is_cancelled("agent-b", "alice") is True
+    mock_updater.update_memory.assert_not_called()
+
+
+def test_generation_is_per_scope_not_global() -> None:
+    """Cancelling one agent must not invalidate another agent's buffered work."""
+    mock_updater = MagicMock(return_value=True)
+    queue = _queue(mock_updater)
+    queue._items = [
+        ConversationContext(thread_id="t1", messages=["doomed"], agent_name="doomed"),
+        ConversationContext(thread_id="t2", messages=["survivor"], agent_name="survivor"),
+    ]
+
+    assert queue.cancel_by_agent("doomed") == 1
+    queue.flush()
+
+    executed = [call.kwargs["messages"] for call in mock_updater.update_memory.call_args_list]
+    assert executed == [["survivor"]]
 
 
 def test_cancel_by_user_drops_every_agent_for_that_user() -> None:
