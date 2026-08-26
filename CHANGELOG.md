@@ -392,6 +392,13 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **sandbox:** BoxLite now mirrors guest `/mnt/user-data/{outputs,workspace}` files
+  back to the owning user/thread host directory on release, so artifacts the agent
+  writes in the micro-VM reach the artifacts API and run delivery verification
+  instead of leaving the host outputs directory empty. The E2B mirroring core moved
+  to the shared `deerflow.sandbox.output_sync` module; both providers now bound
+  listing metadata and transfer deadlines, reconcile guest deletions only from a
+  complete inventory, and use race-resistant host path operations.
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead

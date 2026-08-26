@@ -26,11 +26,18 @@ from typing import TYPE_CHECKING, Any, TypeVar
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.sandbox.output_sync import (
+    SYNC_BACK_SUBDIRS,
+    OutputSyncLimits,
+    build_bounded_listing_command,
+    parse_bounded_listing_output,
+    sync_listing_to_host,
+)
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from ..warm_pool_lifecycle import WarmPoolLifecycleMixin
-from .box import BoxliteBox
+from .box import _MAX_DOWNLOAD_SIZE, BoxliteBox
 
 if TYPE_CHECKING:
     from boxlite import SimpleBox
@@ -172,6 +179,17 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
     _idle_checker_thread_name = "boxlite-idle-reaper"
+
+    # ── Output mirroring ────────────────────────────────────────────────
+    # BoxLite has no host bind mount, so artifacts the agent writes under
+    # /mnt/user-data/{outputs,workspace} are copied back to the host thread
+    # directory on release (see ``deerflow.sandbox.output_sync``). Ceilings
+    # match the E2B provider; the per-file cap is ``BoxliteBox._MAX_DOWNLOAD_SIZE``.
+    _SYNC_BACK_SUBDIRS = SYNC_BACK_SUBDIRS
+    _SYNC_MANIFEST_NAME = ".boxlite-output-sync.json"
+    _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024  # total bytes downloaded per pass
+    _MAX_SYNC_FILES = 2000  # files downloaded per pass
+    _SYNC_DEADLINE_SECONDS = 120  # wall-clock budget per pass
 
     @staticmethod
     def _sandbox_id(thread_id: str, user_id: str) -> str:
@@ -454,33 +472,108 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
     def release(self, sandbox_id: str) -> None:
         """Release a sandbox into the warm pool — VM stays running.
 
-        The box is moved from _boxes to _warm_pool; _thread_boxes entries are
-        cleared so the thread no longer holds an active reference. The VM is
-        NOT stopped unless shutdown has already begun.
+        Artifacts under the guest's ``/mnt/user-data/{outputs,workspace}`` are
+        first mirrored to the owning user/thread host directory, because the
+        gateway serves artifacts and verifies run delivery from that host tree.
+        The box is then moved from _boxes to _warm_pool; _thread_boxes entries
+        are cleared so the thread no longer holds an active reference. The VM
+        is NOT stopped unless shutdown has already begun.
         """
-        close_box: BoxliteBox | None = None
-        with self._lock:
-            box = self._boxes.pop(sandbox_id, None)
-            released_keys = [k for k, sid in self._thread_boxes.items() if sid == sandbox_id]
-            for key in released_keys:
-                self._thread_boxes.pop(key, None)
-            active_identity = self._active_box_identity.pop(sandbox_id, None)
-            if box is None:
-                return
-            if self._shutdown_called:
-                close_box = box
-                self._skip_health_check_warm_ids.discard(sandbox_id)
-                self._warm_pool_identity.pop(sandbox_id, None)
-            else:
-                self._warm_pool[sandbox_id] = (box, time.time())
-                self._warm_pool_identity[sandbox_id] = released_keys[0] if released_keys else active_identity
-                self._skip_health_check_warm_ids.add(sandbox_id)
+        # Serialize with ``acquire`` for the deterministic sandbox id. Without
+        # this lock, a concurrent turn can reacquire the still-active box while
+        # release is mirroring outputs, after which release removes and parks a
+        # box that is already in use again.
+        with self._lock_for_sandbox(sandbox_id):
+            with self._lock:
+                active_box = self._boxes.get(sandbox_id)
+                identity = self._active_box_identity.get(sandbox_id)
+            if active_box is not None and identity is not None:
+                # Mirror while the box is still active so a terminal transport
+                # failure during the copy routes through ``_invalidate_box`` and
+                # the pop below then finds nothing to park.
+                self._sync_outputs_to_host(active_box, thread_id=identity[1], user_id=identity[0] or None)
 
-        if close_box is not None:
-            close_box.close()
-            logger.info("Closed released sandbox %s because shutdown is in progress", sandbox_id)
-        else:
-            logger.info("Released sandbox %s to warm pool (VM still running)", sandbox_id)
+            close_box: BoxliteBox | None = None
+            with self._lock:
+                box = self._boxes.pop(sandbox_id, None)
+                released_keys = [k for k, sid in self._thread_boxes.items() if sid == sandbox_id]
+                for key in released_keys:
+                    self._thread_boxes.pop(key, None)
+                active_identity = self._active_box_identity.pop(sandbox_id, None)
+                if box is None:
+                    return
+                if self._shutdown_called:
+                    close_box = box
+                    self._skip_health_check_warm_ids.discard(sandbox_id)
+                    self._warm_pool_identity.pop(sandbox_id, None)
+                else:
+                    self._warm_pool[sandbox_id] = (box, time.time())
+                    self._warm_pool_identity[sandbox_id] = released_keys[0] if released_keys else active_identity
+                    self._skip_health_check_warm_ids.add(sandbox_id)
+
+            if close_box is not None:
+                close_box.close()
+                logger.info("Closed released sandbox %s because shutdown is in progress", sandbox_id)
+            else:
+                logger.info("Released sandbox %s to warm pool (VM still running)", sandbox_id)
+
+    def _sync_outputs_to_host(self, box: BoxliteBox, *, thread_id: str, user_id: str | None) -> None:
+        """Copy guest artifacts to the host thread directory (best effort, bounded).
+
+        One shell round-trip lists every regular file under the mirrored
+        sub-trees as ``size\\tmtime\\tpath\\0`` records. GNU ``find -printf`` is
+        tried first; images with BusyBox ``find`` use a per-file
+        ``stat``/``printf`` fallback. A completion frame authenticates a fully
+        successful scan; the shared core separately rejects byte-, record-, or
+        parser-truncated inventories before pruning host files absent from the
+        guest. It downloads only files whose size/mtime changed since the last
+        manifest, subject to the ``_MAX_SYNC_*`` ceilings.
+
+        Failures are logged and never raised: mirroring must not break the
+        warm-pool lifecycle, and a truncated pass is reconciled on the next
+        release.
+        """
+        if box.is_closed:
+            return
+        limits = OutputSyncLimits(
+            max_file_bytes=_MAX_DOWNLOAD_SIZE,
+            max_total_bytes=self._MAX_SYNC_TOTAL_BYTES,
+            max_files=self._MAX_SYNC_FILES,
+            deadline_seconds=self._SYNC_DEADLINE_SECONDS,
+        )
+        deadline = time.monotonic() + limits.deadline_seconds
+        targets = tuple(f"{VIRTUAL_PATH_PREFIX}/{sub}" for sub in self._SYNC_BACK_SUBDIRS)
+        list_cmd = build_bounded_listing_command(
+            targets,
+            limits,
+            busybox_stat_fallback=True,
+        )
+        try:
+            result = box._sh(
+                list_cmd,
+                timeout=max(0.001, deadline - time.monotonic()),
+            )
+        except Exception as e:
+            logger.warning("boxlite sync: list command failed for sandbox %s: %s", box.id, e)
+            return
+        try:
+            listing, listing_complete = parse_bounded_listing_output(result.stdout or "")
+            sync_listing_to_host(
+                listing,
+                remote_root=VIRTUAL_PATH_PREFIX,
+                thread_id=thread_id,
+                user_id=user_id,
+                sandbox_id=box.id,
+                manifest_name=self._SYNC_MANIFEST_NAME,
+                download=box.download_file,
+                limits=limits,
+                subdirs=self._SYNC_BACK_SUBDIRS,
+                log_prefix="boxlite sync",
+                deadline=deadline,
+                listing_complete=listing_complete,
+            )
+        except Exception as e:
+            logger.warning("boxlite sync: failed to mirror sandbox %s outputs to host: %s", box.id, e)
 
     def _reclaim_warm_pool(self, sandbox_id: str, expected_key: tuple[str, str]) -> str | None:
         """Try to reclaim a warm-pool box by sandbox_id.

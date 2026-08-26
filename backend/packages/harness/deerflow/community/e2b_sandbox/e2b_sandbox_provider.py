@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import atexit
 import hashlib
-import json
 import logging
 import os
 import shlex
@@ -48,7 +47,6 @@ import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -59,6 +57,7 @@ from e2b_code_interpreter import Sandbox as E2BClientSandbox
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.output_sync import SYNC_BACK_SUBDIRS
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -1866,65 +1865,15 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
 
     # ── Output mirroring ────────────────────────────────────────────────
-    _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
+    _SYNC_BACK_SUBDIRS = SYNC_BACK_SUBDIRS
     _SYNC_MANIFEST_NAME = ".e2b-output-sync.json"
 
     # Aggregate ceilings for a single release-time output-sync pass, layered on
-    # top of the per-file ``_MAX_DOWNLOAD_SIZE`` cap. The per-file cap bounds one
-    # artefact; these bound the whole pass so a pathological outputs tree
-    # (thousands of files, or many sub-cap files summing to gigabytes, or a slow
-    # VM) cannot make release download unboundedly. When a ceiling is hit the
-    # pass stops early, logs what it dropped, and leaves the manifest un-pruned
-    # so files it never reached are reconciled on the next release rather than
-    # being forgotten.
+    # top of the per-file ``_MAX_DOWNLOAD_SIZE`` cap; see
+    # ``deerflow.sandbox.output_sync.OutputSyncLimits`` for the semantics.
     _MAX_SYNC_TOTAL_BYTES = 512 * 1024 * 1024  # total bytes downloaded per pass
     _MAX_SYNC_FILES = 2000  # files downloaded per pass
     _SYNC_DEADLINE_SECONDS = 120  # wall-clock budget per pass
-
-    @staticmethod
-    def _load_sync_manifest(manifest_path: Path, sandbox_id: str) -> tuple[dict[str, dict[str, int]], bool]:
-        """Load verified remote and host versions from a prior output sync."""
-        try:
-            data = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            return {}, False
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("e2b sync: failed to load manifest %s: %s", manifest_path, e)
-            return {}, True
-
-        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("files"), dict):
-            logger.warning("e2b sync: ignoring invalid manifest %s", manifest_path)
-            return {}, True
-        if data.get("sandbox_id") != sandbox_id:
-            logger.debug("e2b sync: ignoring manifest from another sandbox %s", manifest_path)
-            return {}, True
-
-        files: dict[str, dict[str, int]] = {}
-        for key, value in data["files"].items():
-            if not isinstance(key, str) or not isinstance(value, dict):
-                continue
-            required = ("remote_size", "remote_mtime_ns", "host_size", "host_mtime_ns")
-            if all(isinstance(value.get(field), int) for field in required):
-                files[key] = {field: value[field] for field in required}
-        return files, False
-
-    @staticmethod
-    def _write_sync_manifest(
-        manifest_path: Path,
-        sandbox_id: str,
-        files: dict[str, dict[str, int]],
-    ) -> None:
-        """Atomically store output-sync versions after host files are written."""
-        try:
-            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = manifest_path.with_name(f"{manifest_path.name}.tmp")
-            tmp_path.write_text(
-                json.dumps({"version": 1, "sandbox_id": sandbox_id, "files": files}, sort_keys=True),
-                encoding="utf-8",
-            )
-            tmp_path.replace(manifest_path)
-        except OSError as e:
-            logger.warning("e2b sync: failed to write manifest %s: %s", manifest_path, e)
 
     def _sync_outputs_to_host(
         self,
@@ -1935,27 +1884,25 @@ class E2BSandboxProvider(SandboxProvider):
     ) -> None:
         """Mirror agent artifacts from the e2b VM back to host thread dirs.
 
-        DeerFlow's ``/api/threads/{tid}/artifacts/...`` endpoint resolves
-        files against the host-side per-thread ``user-data/`` tree (see
-        :meth:`Paths.sandbox_outputs_dir`). LocalSandbox writes there
-        directly via path mappings, so the endpoint just works for the
-        local provider. The e2b VM has no shared host filesystem, so we
-        explicitly pull artifacts back at release time.
-
-        We mirror files whose host-side counterpart is missing, has a different
-        size, or has a different remote modification time. A thread-local
-        manifest stores the remote version and the actual host metadata after
-        each write. This avoids false updates on host filesystems that round
-        modification times.
-
-        The remote file is the source of truth. The next sync overwrites a
-        host-side edit when its size or modification time differs.
+        The e2b VM has no shared host filesystem, so artifacts are pulled back
+        at release time through the shared
+        :func:`deerflow.sandbox.output_sync.sync_listing_to_host` core, which
+        owns change detection, the per-thread manifest, path safety, and the
+        aggregate ``_MAX_SYNC_*`` ceilings. This method only produces the
+        remote listing and adapts e2b's dead-VM detection.
 
         Failures are logged at WARNING level but never raised: artifact
         download is non-critical for sandbox lifecycle, and we already log
         the underlying e2b SDK errors elsewhere.
         """
-        from deerflow.config.paths import get_paths  # lazy import to avoid cycles
+        from deerflow.sandbox.output_sync import (
+            OutputSyncLimits,
+            build_bounded_listing_command,
+            parse_bounded_listing_output,
+            sync_listing_to_host,
+        )
+
+        from .e2b_sandbox import _MAX_DOWNLOAD_SIZE
 
         client = sandbox.client
         if client is None:
@@ -1963,14 +1910,6 @@ class E2BSandboxProvider(SandboxProvider):
             return
 
         home_dir = sandbox.home_dir.rstrip("/") or "/home/user"
-        paths = get_paths()
-
-        thread_dir = paths.thread_dir(thread_id, user_id=user_id)
-        thread_root = thread_dir / "user-data"
-        host_targets: dict[str, Path] = {sub: thread_root / sub for sub in self._SYNC_BACK_SUBDIRS}
-        manifest_path = thread_dir / self._SYNC_MANIFEST_NAME
-        remote_sandbox_id = sandbox.sandbox_id
-        manifest, manifest_dirty = self._load_sync_manifest(manifest_path, remote_sandbox_id)
 
         # Build a single shell command that lists all files in the sync dirs
         # with size, modification time, and path, NUL-separated for safe
@@ -1978,16 +1917,31 @@ class E2BSandboxProvider(SandboxProvider):
         # regardless of how many subdirs we mirror.
         #
         # We list using the *physical* /home/user paths (the bootstrap symlink
-        # /mnt/user-data -> /home/user follows transparently), then translate
-        # each hit back to the /mnt/user-data prefix before calling
-        # ``E2BSandbox.download_file``: that method enforces a security check
-        # that the path is under ``VIRTUAL_PATH_PREFIX`` (/mnt/user-data) and
-        # internally re-resolves it to /home/user via ``_resolve_path``.
-        find_targets = " ".join(shlex.quote(f"{home_dir}/{sub}") for sub in self._SYNC_BACK_SUBDIRS)
-        list_cmd = f'for d in {find_targets}; do   [ -d "$d" ] && find "$d" -type f -printf \'%s\\t%T@\\t%p\\0\' 2>/dev/null; done'
+        # /mnt/user-data -> /home/user follows transparently); the shared core
+        # translates each hit back to the /mnt/user-data prefix before calling
+        # ``E2BSandbox.download_file``, which enforces that the path is under
+        # ``VIRTUAL_PATH_PREFIX`` and re-resolves it to /home/user internally.
+        limits = OutputSyncLimits(
+            max_file_bytes=_MAX_DOWNLOAD_SIZE,
+            max_total_bytes=self._MAX_SYNC_TOTAL_BYTES,
+            max_files=self._MAX_SYNC_FILES,
+            deadline_seconds=self._SYNC_DEADLINE_SECONDS,
+        )
+        deadline = time.monotonic() + limits.deadline_seconds
+        find_targets = tuple(f"{home_dir}/{sub}" for sub in self._SYNC_BACK_SUBDIRS)
+        list_cmd = build_bounded_listing_command(
+            find_targets,
+            limits,
+            busybox_stat_fallback=False,
+        )
 
         try:
-            result = client.commands.run(list_cmd)
+            remaining = max(0.001, deadline - time.monotonic())
+            result = client.commands.run(
+                list_cmd,
+                timeout=remaining,
+                request_timeout=remaining,
+            )
         except Exception as e:
             logger.warning("e2b sync: list command failed: %s", e)
             if _is_sandbox_gone_error(e):
@@ -1995,170 +1949,21 @@ class E2BSandboxProvider(SandboxProvider):
                     sandbox._dead = True
             return
 
-        stdout = getattr(result, "stdout", "") or ""
-        if not stdout:
-            if manifest or manifest_dirty:
-                self._write_sync_manifest(manifest_path, remote_sandbox_id, {})
-            return
-
-        synced = 0
-        skipped = 0
-        seen_manifest_keys: set[str] = set()
-        from .e2b_sandbox import _MAX_DOWNLOAD_SIZE
-
-        # Aggregate budget for this pass (see the _MAX_SYNC_* class constants).
-        downloaded_bytes = 0
-        downloaded_files = 0
-        truncated_reason: str | None = None
-        deadline = time.monotonic() + self._SYNC_DEADLINE_SECONDS
-
-        for entry in stdout.split("\0"):
-            if time.monotonic() >= deadline:
-                truncated_reason = f"time budget {self._SYNC_DEADLINE_SECONDS}s"
-                break
-            # NUL already delimits records, so do NOT strip: a filename that
-            # legitimately ends in whitespace (e.g. "report ") would have its
-            # trailing space trimmed here, pointing host_path at the wrong
-            # file and recording a manifest key that never matches again.
-            if not entry:
-                continue
-            try:
-                size_str, remote_mtime_str, remote_path = entry.split("\t", 2)
-                remote_size = int(size_str)
-                remote_mtime_ns = int(Decimal(remote_mtime_str) * 1_000_000_000)
-            except (InvalidOperation, ValueError):
-                logger.debug("e2b sync: unparseable entry %r", entry)
-                continue
-
-            # Determine which subdir this file belongs to so we can compute
-            # the relative path on the host side.  remote_path is absolute,
-            # e.g. /home/user/outputs/foo/bar.pdf
-            sub_match: tuple[str, Path, str] | None = None
-            for sub, host_root in host_targets.items():
-                prefix = f"{home_dir}/{sub}/"
-                if remote_path == f"{home_dir}/{sub}":
-                    continue
-                if remote_path.startswith(prefix):
-                    rel = remote_path[len(prefix) :]
-                    virtual_path = f"/mnt/user-data/{sub}/{rel}"
-                    sub_match = (sub, host_root / rel, virtual_path)
-                    break
-            if sub_match is None:
-                continue
-            _sub, host_path, virtual_path = sub_match
-            manifest_key = host_path.relative_to(thread_root).as_posix()
-            seen_manifest_keys.add(manifest_key)
-
-            if remote_size > _MAX_DOWNLOAD_SIZE:
-                logger.warning(
-                    "e2b sync: skipping oversize artefact %s (%d bytes > %d cap)",
-                    remote_path,
-                    remote_size,
-                    _MAX_DOWNLOAD_SIZE,
-                )
-                skipped += 1
-                continue
-
-            try:
-                host_stat = host_path.stat()
-                entry = manifest.get(manifest_key)
-                if entry == {
-                    "remote_size": remote_size,
-                    "remote_mtime_ns": remote_mtime_ns,
-                    "host_size": host_stat.st_size,
-                    "host_mtime_ns": host_stat.st_mtime_ns,
-                }:
-                    skipped += 1
-                    continue
-            except OSError:
-                pass
-
-            if downloaded_files >= self._MAX_SYNC_FILES:
-                truncated_reason = f"file count cap {self._MAX_SYNC_FILES}"
-                break
-            if downloaded_bytes + remote_size > self._MAX_SYNC_TOTAL_BYTES:
-                truncated_reason = f"total byte budget {self._MAX_SYNC_TOTAL_BYTES}"
-                break
-
-            try:
-                data = sandbox.download_file(virtual_path)
-            except Exception as e:
-                logger.warning(
-                    "e2b sync: failed to download %s from sandbox %s: %s",
-                    virtual_path,
-                    sandbox.id,
-                    e,
-                )
-                continue
-            # Count the download against the budget regardless of the host-side
-            # write below: the remote round-trip is the resource being bounded.
-            downloaded_files += 1
-            downloaded_bytes += remote_size
-
-            try:
-                host_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = host_path.with_name(host_path.name + ".e2bsync.tmp")
-                tmp_path.write_bytes(data)
-                # os.utime rejects ns values outside roughly +/-2^63; a remote
-                # mtime far in the future (e.g. `touch -d "99999 years" file`)
-                # raises OverflowError, which is not an OSError and would
-                # escape the outer except below, skipping the manifest write
-                # and forcing a full re-download next release. Drop only the
-                # timestamp restoration in that case — the file is still
-                # written correctly.
-                try:
-                    os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
-                except (OSError, OverflowError):
-                    logger.debug(
-                        "e2b sync: skipped mtime restoration for %s (ns=%d)",
-                        host_path,
-                        remote_mtime_ns,
-                    )
-                tmp_path.replace(host_path)
-                host_stat = host_path.stat()
-                manifest[manifest_key] = {
-                    "remote_size": remote_size,
-                    "remote_mtime_ns": remote_mtime_ns,
-                    "host_size": host_stat.st_size,
-                    "host_mtime_ns": host_stat.st_mtime_ns,
-                }
-                manifest_dirty = True
-                synced += 1
-            except OSError as e:
-                logger.warning("e2b sync: failed to write %s on host: %s", host_path, e)
-
-        # A truncated pass did not observe every remote file, so
-        # ``seen_manifest_keys`` is incomplete; pruning "stale" entries here
-        # would forget files we simply never reached. Skip pruning and let the
-        # next release reconcile them (freshly downloaded entries are still
-        # written below).
-        stale_keys = set(manifest) - seen_manifest_keys
-        if stale_keys and truncated_reason is None:
-            for key in stale_keys:
-                manifest.pop(key)
-            manifest_dirty = True
-
-        if manifest_dirty:
-            self._write_sync_manifest(manifest_path, remote_sandbox_id, manifest)
-
-        if truncated_reason is not None:
-            logger.warning(
-                "e2b sync: sandbox=%s thread=%s truncated (%s); downloaded=%d files/%d bytes this pass, remaining artefacts deferred to next release",
-                sandbox.id,
-                thread_id,
-                truncated_reason,
-                downloaded_files,
-                downloaded_bytes,
-            )
-
-        if synced or skipped:
-            logger.info(
-                "e2b sync: sandbox=%s thread=%s synced=%d skipped=%d",
-                sandbox.id,
-                thread_id,
-                synced,
-                skipped,
-            )
+        listing, listing_complete = parse_bounded_listing_output(getattr(result, "stdout", "") or "")
+        sync_listing_to_host(
+            listing,
+            remote_root=home_dir,
+            thread_id=thread_id,
+            user_id=user_id,
+            sandbox_id=sandbox.sandbox_id,
+            manifest_name=self._SYNC_MANIFEST_NAME,
+            download=sandbox.download_file,
+            limits=limits,
+            subdirs=self._SYNC_BACK_SUBDIRS,
+            log_prefix="e2b sync",
+            deadline=deadline,
+            listing_complete=listing_complete,
+        )
 
     @staticmethod
     def _upload_tree(

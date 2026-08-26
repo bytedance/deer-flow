@@ -5,10 +5,12 @@ import logging
 import re
 import shlex
 import threading
+import time
 
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.output_sync import build_secure_bounded_read_command, parse_secure_bounded_read_output
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -226,7 +228,12 @@ class E2BSandbox(Sandbox):
             logger.error("Failed to read file %s in e2b sandbox: %s", resolved, e)
             return f"Error: {e}"
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(
+        self,
+        path: str,
+        max_bytes: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> bytes:
         normalised = path.replace("\\", "/")
         for segment in normalised.split("/"):
             if segment == "..":
@@ -243,9 +250,45 @@ class E2BSandbox(Sandbox):
             )
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise TimeoutError(f"download deadline expired for '{path}'")
+        byte_limit = _MAX_DOWNLOAD_SIZE if max_bytes is None else min(max_bytes, _MAX_DOWNLOAD_SIZE)
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
+
+        def remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"download deadline expired for '{path}'")
+            return remaining
+
         resolved = self._resolve_path(path)
-        # Prefer the streaming API so the 100 MB cap is enforced *before* the
-        # whole payload is buffered in the gateway process.  ``format="bytes"``
+        if max_bytes is not None:
+            relative_path = stripped_path[len(allowed_prefix) :].lstrip("/")
+            command = build_secure_bounded_read_command(self.home_dir, relative_path, byte_limit)
+            with self._lock:
+                client = self._client
+                if client is None:
+                    raise RuntimeError("sandbox client has been closed")
+                try:
+                    remaining = remaining_timeout()
+                    kwargs = {} if remaining is None else {"timeout": remaining, "request_timeout": remaining}
+                    result = client.commands.run(command, **kwargs)
+                except TimeoutError:
+                    raise
+                except Exception as e:
+                    logger.error("Failed to download file %s from e2b sandbox: %s", resolved, e)
+                    raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
+            if getattr(result, "exit_code", 0) not in (0, None):
+                detail = (getattr(result, "stderr", "") or "").strip() or "bounded read command failed"
+                raise OSError(f"Failed to download file '{path}' from sandbox: {detail}")
+            return parse_secure_bounded_read_output(getattr(result, "stdout", "") or "", path=path)
+
+        # Prefer the streaming API so the caller's exact remaining pass
+        # allowance is enforced before the whole payload is buffered.  ``format="bytes"``
         # is implemented by the e2b SDK as ``bytearray(r.content)`` — i.e. the
         # entire file is materialised in memory before returning — which would
         # let a multi-GB artifact OOM the shared gateway on hosted deployments.
@@ -257,13 +300,43 @@ class E2BSandbox(Sandbox):
             if client is None:
                 raise RuntimeError("sandbox client has been closed")
             try:
-                data = client.files.read(resolved, format="stream")
+                remaining = remaining_timeout()
+                if remaining is None:
+                    data = client.files.read(resolved, format="stream")
+                else:
+                    data = client.files.read(
+                        resolved,
+                        format="stream",
+                        request_timeout=remaining,
+                        # Keep each blocking iterator read short so the absolute
+                        # deadline below is re-checked throughout a long stream.
+                        stream_idle_timeout=min(remaining, 1.0),
+                    )
             except TypeError:
                 try:
-                    data = client.files.read(resolved, format="bytes")
+                    if deadline is None:
+                        data = client.files.read(resolved, format="bytes")
+                    else:
+                        data = client.files.read(
+                            resolved,
+                            format="bytes",
+                            request_timeout=remaining_timeout(),
+                        )
+                except TypeError as e:
+                    if deadline is None:
+                        raise
+                    raise OSError(
+                        errno.ENOTSUP,
+                        "installed e2b SDK cannot enforce bounded file-download requests",
+                        path,
+                    ) from e
+                except TimeoutError:
+                    raise
                 except Exception as e:
                     logger.error("Failed to download file %s from e2b sandbox: %s", resolved, e)
                     raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
+            except TimeoutError:
+                raise
             except Exception as e:
                 logger.error("Failed to download file %s from e2b sandbox: %s", resolved, e)
                 raise OSError(f"Failed to download file '{path}' from sandbox: {e}") from e
@@ -274,19 +347,21 @@ class E2BSandbox(Sandbox):
         # Buffered fallbacks (bytes/bytearray/str): apply the cap up front so
         # we still refuse oversize payloads even on this path.
         if isinstance(data, (bytes, bytearray)):
-            if len(data) > _MAX_DOWNLOAD_SIZE:
+            remaining_timeout()
+            if len(data) > byte_limit:
                 raise OSError(
                     errno.EFBIG,
-                    f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                    f"File exceeds maximum download size of {byte_limit} bytes",
                     path,
                 )
             return bytes(data)
         if isinstance(data, str):
+            remaining_timeout()
             encoded = data.encode("utf-8")
-            if len(encoded) > _MAX_DOWNLOAD_SIZE:
+            if len(encoded) > byte_limit:
                 raise OSError(
                     errno.EFBIG,
-                    f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                    f"File exceeds maximum download size of {byte_limit} bytes",
                     path,
                 )
             return encoded
@@ -296,18 +371,27 @@ class E2BSandbox(Sandbox):
         close = getattr(data, "close", None)
         try:
             try:
-                for chunk in data:
+                iterator = iter(data)
+                while True:
+                    remaining_timeout()
+                    try:
+                        chunk = next(iterator)
+                    except StopIteration:
+                        break
+                    remaining_timeout()
                     if not chunk:
                         continue
                     chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
                     total += len(chunk_bytes)
-                    if total > _MAX_DOWNLOAD_SIZE:
+                    if total > byte_limit:
                         raise OSError(
                             errno.EFBIG,
-                            f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes",
+                            f"File exceeds maximum download size of {byte_limit} bytes",
                             path,
                         )
                     chunks.append(chunk_bytes)
+            except TimeoutError:
+                raise
             except OSError:
                 raise
             except Exception as e:

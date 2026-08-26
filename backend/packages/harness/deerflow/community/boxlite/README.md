@@ -13,7 +13,7 @@ the default AIO Docker sandbox in
 ```yaml
 sandbox:
   use: deerflow.community.boxlite:BoxliteProvider
-  image: python:3.12-slim         # any OCI image (default: python:3.12-slim)
+  image: python:3.12-slim         # OCI image with sh/base64/find/grep/python3 (default shown)
   memory_mib: 1024                # per-box memory cap (optional)
   cpus: 2                         # per-box vCPUs (optional)
   replicas: 3                     # active + warm VM cap per gateway process (default: 3)
@@ -63,11 +63,26 @@ inside the box and reuse `deerflow.sandbox.search`, mirroring `e2b_sandbox`:
 
 - `execute_command` — `sh -lc`, with per-call env and timeout.
 - `read_file` / `write_file` / `update_file` — `cat` and chunked `base64` (binary-safe, no arg-size limit).
-- `download_file` — 100 MB cap, restricted to the `/mnt/user-data` prefix.
+- `download_file` — exact 100 MB cap, restricted to `/mnt/user-data`; uses
+  `python3` with `openat`/`O_NOFOLLOW` so concurrent symlink swaps cannot escape
+  the allowed tree.
 - `list_dir` / `glob` / `grep` — `find` / `grep` with busybox-portable flags; results filtered/capped in Python.
 
 The provider creates `/mnt/user-data/{workspace,uploads,outputs}` and
 `/mnt/skills` on box start so those virtual paths resolve natively.
+
+BoxLite has no host bind mount, so artifacts the agent writes under
+`/mnt/user-data/{outputs,workspace}` are copied back to the host thread directory
+when the sandbox is released at the end of each agent turn (before the run's
+delivery verification and the artifacts API look for them). The copy goes
+through the shared `deerflow.sandbox.output_sync` core: one hard-bounded `find`
+round-trip lists at most 20,000 records / 8 MiB of metadata (GNU `find -printf`,
+falling back to busybox `stat -c`), only files whose size/mtime changed since the
+last complete pass are downloaded, and the transfer is bounded to 100 MiB per
+file plus 2,000 files / 512 MiB / 120 seconds per release. A complete inventory
+also removes host files that were deleted in the same guest; truncated inventories
+never authorize deletion. Host writes and removals use no-follow directory
+descriptors and fail closed where that POSIX safety primitive is unavailable.
 
 Warm-pool capacity is governed by `sandbox.replicas` across active + warm VMs.
 `sandbox.idle_timeout` controls how long released warm VMs stay running; `0`

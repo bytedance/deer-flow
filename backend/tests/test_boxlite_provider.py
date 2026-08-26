@@ -7,8 +7,12 @@ which need a live box.
 from __future__ import annotations
 
 import asyncio
+import base64
+import errno
 import hashlib
+import importlib
 import logging
+import shlex
 import sys
 import threading
 import time
@@ -18,6 +22,9 @@ import pytest
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.config.paths import Paths
+from deerflow.sandbox import output_sync as output_sync_mod
+from deerflow.sandbox.output_sync import LISTING_COMPLETE_SENTINEL
 
 _LEGACY_COLLIDING_IDENTITIES = (
     ("user-9721", "thread-9721"),
@@ -1226,3 +1233,307 @@ def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
     )
     assert not replacement.is_closed
     provider.shutdown()
+
+
+# ── Release-time output sync ──────────────────────────────────────────
+
+
+def _fake_result(stdout="", stderr="", exit_code=0):
+    return types.SimpleNamespace(stdout=stdout, stderr=stderr, exit_code=exit_code)
+
+
+class _FakeFsBox(_FakeBox):
+    """A fake box with an in-memory file tree that answers the sync shell commands.
+
+    ``files`` maps absolute guest paths to bytes. The listing command, the
+    secure bounded-read command used by :meth:`BoxliteBox.download_file` are
+    emulated; everything else succeeds with empty output like
+    :class:`_FakeBox`.
+    """
+
+    files: dict[str, bytes] = {}
+    listing_override: str | None = None
+    listing_error: Exception | None = None
+
+    async def exec(self, *argv, env=None, timeout=None):
+        self._exec_history.append((argv, env, timeout))
+        script = argv[2] if len(argv) >= 3 and argv[0] == "sh" and argv[1] == "-lc" else None
+        if script is None:
+            return _fake_result()
+        if script == "echo ok":
+            return _fake_result("ok\n")
+        if "find " in script and "-type f" in script:
+            if self.listing_error is not None:
+                raise self.listing_error
+            if self.listing_override is not None:
+                return _fake_result(self.listing_override)
+            listing = "".join(f"{len(data)}\t1700000000.250000000\t{path}\0" for path, data in sorted(self.files.items()))
+            return _fake_result(f"{listing}{LISTING_COMPLETE_SENTINEL}\0")
+        if script.startswith("python3 -c "):
+            command_args = shlex.split(script)
+            root, relative_path, raw_limit = command_args[-3:]
+            path = f"{root.rstrip('/')}/{relative_path}"
+            limit = int(raw_limit)
+            if path not in self.files:
+                return _fake_result(f"{output_sync_mod._BOUNDED_READ_ERROR}\nNo such file or directory")
+            data = self.files[path]
+            if len(data) > limit:
+                return _fake_result(f"{output_sync_mod._BOUNDED_READ_EFBIG}\nartifact exceeds byte allowance")
+            payload = base64.b64encode(data).decode("ascii")
+            return _fake_result(f"{output_sync_mod._BOUNDED_READ_OK}\n{payload}\n{output_sync_mod._BOUNDED_READ_COMPLETE}")
+        return _fake_result()
+
+
+def _download_calls(box: _FakeFsBox) -> list[str]:
+    return [argv[2] for argv, _env, _timeout in box._exec_history if len(argv) >= 3 and argv[2].startswith("python3 -c ")]
+
+
+def _sync_provider(monkeypatch, tmp_path, box_cls=_FakeFsBox, sandbox_attrs=None):
+    monkeypatch.setattr("deerflow.community.boxlite.provider.get_app_config", lambda: _stub_config(sandbox_attrs))
+    monkeypatch.setattr("deerflow.community.boxlite.provider._import_simplebox", lambda: box_cls)
+    paths_mod = importlib.import_module("deerflow.config.paths")
+    monkeypatch.setattr(paths_mod, "get_paths", lambda: Paths(base_dir=tmp_path), raising=False)
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+    return provider
+
+
+def _host_outputs(tmp_path, thread_id, user_id):
+    return Paths(base_dir=tmp_path).thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
+
+
+def test_download_file_enforces_exact_dynamic_allowance():
+    path = "/mnt/user-data/outputs/growing.bin"
+    fake = _FakeFsBox(name="sb")
+    fake.files = {path: b"x" * 11}
+    box = BoxliteBox("sb", fake, _fake_run, default_env={})
+
+    with pytest.raises(OSError) as raised:
+        box.download_file(path, max_bytes=10)
+
+    assert raised.value.errno == errno.EFBIG
+    calls = _download_calls(box._box)
+    assert len(calls) == 1
+    assert shlex.split(calls[0])[-3:] == ["/mnt/user-data", "outputs/growing.bin", "10"]
+
+
+def test_release_mirrors_guest_outputs_to_host_thread_dir(monkeypatch, tmp_path):
+    """Artifacts written under /mnt/user-data/outputs land in the host thread outputs dir on release.
+
+    BoxLite has no host bind mount (``uses_thread_data_mounts=False``), so the
+    artifacts endpoint and the run's delivery scan can only see files that the
+    provider copies back before the agent turn completes.
+    """
+    pdf = b"%PDF-1.4\x00\xff\xfe binary \x80 payload"
+    blob = bytes(range(256)) * 3
+
+    class _Box(_FakeFsBox):
+        files = {
+            "/mnt/user-data/outputs/report.pdf": pdf,
+            "/mnt/user-data/outputs/nested/deep/data.bin": blob,
+            "/mnt/user-data/workspace/notes.txt": b"scratch",
+        }
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid = provider.acquire("thread-1", user_id="u1")
+    outputs = _host_outputs(tmp_path, "thread-1", "u1")
+    assert not outputs.exists()
+
+    provider.release(sid)
+
+    assert (outputs / "report.pdf").read_bytes() == pdf
+    assert (outputs / "nested" / "deep" / "data.bin").read_bytes() == blob
+    assert (outputs.parent / "workspace" / "notes.txt").read_bytes() == b"scratch"
+    box = provider._warm_pool[sid][0]._box
+    listing_calls = [(argv[2], timeout) for argv, _env, timeout in box._exec_history if len(argv) >= 3 and "find " in argv[2] and "-type f" in argv[2]]
+    assert len(listing_calls) == 1
+    assert "head -z -n" in listing_calls[0][0] and "head -c" in listing_calls[0][0]
+    assert 0 < listing_calls[0][1] <= provider._SYNC_DEADLINE_SECONDS
+    assert all(0 < timeout <= provider._SYNC_DEADLINE_SECONDS for _argv, _env, timeout in box._exec_history if timeout is not None)
+    # Lifecycle is unchanged: the VM is parked warm, not destroyed.
+    assert sid not in provider._boxes
+    assert sid in provider._warm_pool
+    assert not provider._warm_pool[sid][0]._box._stopped
+
+
+def test_release_serializes_with_reacquire_for_the_same_sandbox(monkeypatch, tmp_path):
+    provider = _sync_provider(monkeypatch, tmp_path)
+    sid = provider.acquire("thread-1", user_id="u1")
+    sync_started = threading.Event()
+    allow_sync = threading.Event()
+    reacquired = threading.Event()
+    reacquired_ids: list[str] = []
+
+    def blocking_sync(*args, **kwargs) -> None:
+        sync_started.set()
+        assert allow_sync.wait(timeout=2)
+
+    provider._sync_outputs_to_host = blocking_sync  # type: ignore[method-assign]
+    release_thread = threading.Thread(target=provider.release, args=(sid,))
+    release_thread.start()
+    assert sync_started.wait(timeout=2)
+
+    def acquire_again() -> None:
+        reacquired_ids.append(provider.acquire("thread-1", user_id="u1"))
+        reacquired.set()
+
+    acquire_thread = threading.Thread(target=acquire_again)
+    acquire_thread.start()
+    assert not reacquired.wait(timeout=0.1), "acquire must wait until release-time output sync and parking finish"
+
+    allow_sync.set()
+    release_thread.join(timeout=2)
+    acquire_thread.join(timeout=2)
+    assert not release_thread.is_alive()
+    assert not acquire_thread.is_alive()
+    assert reacquired_ids == [sid]
+    assert sid in provider._boxes
+    assert sid not in provider._warm_pool
+    provider.shutdown()
+
+
+def test_release_keeps_outputs_isolated_per_user_and_thread(monkeypatch, tmp_path):
+    """Two tenants sharing a thread id never write into each other's host bucket."""
+
+    class _Box(_FakeFsBox):
+        def __init__(self, *, name=None, **kwargs):
+            super().__init__(name=name, **kwargs)
+            self.files = {f"/mnt/user-data/outputs/{name}.txt": name.encode()}
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid_a = provider.acquire("thread-1", user_id="alice")
+    sid_b = provider.acquire("thread-1", user_id="bob")
+    assert sid_a != sid_b
+
+    provider.release(sid_a)
+    provider.release(sid_b)
+
+    alice = sorted(p.name for p in _host_outputs(tmp_path, "thread-1", "alice").iterdir())
+    bob = sorted(p.name for p in _host_outputs(tmp_path, "thread-1", "bob").iterdir())
+    assert alice == [f"{provider._box_name(sid_a)}.txt"]
+    assert bob == [f"{provider._box_name(sid_b)}.txt"]
+    # No legacy (user-less) thread layout is created as a side effect.
+    assert not (tmp_path / "threads").exists()
+
+
+def test_release_ignores_traversal_and_out_of_root_listing_entries(monkeypatch, tmp_path):
+    """Hostile or malformed listing entries are dropped before any download or host write."""
+
+    class _Box(_FakeFsBox):
+        files = {
+            "/mnt/user-data/outputs/ok.txt": b"fine",
+            "/mnt/user-data/outputs/../../../etc/passwd": b"root:x:0:0",
+            "/mnt/user-data/outputs/sub/../../uploads/secret.txt": b"nope",
+            "/mnt/user-data/uploads/user-upload.txt": b"upload",
+            "/etc/shadow": b"shadow",
+            "/mnt/user-data/outputs/back\\slash.txt": b"bs",
+        }
+        listing_override = "".join(f"{len(data)}\t1700000000.0\t{path}\0" for path, data in files.items()) + "garbage-without-tabs\0" + "x\ty\t/mnt/user-data/outputs/bad-size.txt\0"
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid = provider.acquire("thread-1", user_id="u1")
+
+    provider.release(sid)
+
+    thread_dir = Paths(base_dir=tmp_path).thread_dir("thread-1", user_id="u1")
+    written = sorted(str(p.relative_to(thread_dir)) for p in thread_dir.rglob("*") if p.is_file() and not p.name.startswith("."))
+    assert written == ["user-data/outputs/ok.txt"]
+    assert not (tmp_path / "etc").exists()
+    assert not (tmp_path / "users" / "u1" / "threads" / "thread-1" / "user-data" / "uploads").exists()
+    box = provider._warm_pool[sid][0]._box
+    assert len(_download_calls(box)) == 1
+    assert shlex.split(_download_calls(box)[0])[-3:-1] == ["/mnt/user-data", "outputs/ok.txt"]
+
+
+def test_release_output_sync_honours_file_count_cap(monkeypatch, tmp_path):
+    """The per-pass file cap bounds release like the E2B sync; remaining files defer to the next release."""
+
+    class _Box(_FakeFsBox):
+        files = {f"/mnt/user-data/outputs/{n}.txt": n.encode() for n in ("a", "b", "c")}
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    provider._MAX_SYNC_FILES = 2
+    sid = provider.acquire("thread-1", user_id="u1")
+
+    provider.release(sid)
+
+    assert sorted(p.name for p in _host_outputs(tmp_path, "thread-1", "u1").iterdir()) == ["a.txt", "b.txt"]
+    assert len(_download_calls(provider._warm_pool[sid][0]._box)) == 2
+    assert sid in provider._warm_pool
+
+
+def test_release_output_sync_skips_unchanged_files_on_next_release(monkeypatch, tmp_path):
+    """A manifest records synced versions so an unchanged tree costs no downloads next time."""
+
+    class _Box(_FakeFsBox):
+        files = {"/mnt/user-data/outputs/a.txt": b"hello"}
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    box = provider._warm_pool[sid][0]._box
+    assert len(_download_calls(box)) == 1
+
+    assert provider.acquire("thread-1", user_id="u1") == sid
+    provider.release(sid)
+
+    assert len(_download_calls(box)) == 1
+    assert (_host_outputs(tmp_path, "thread-1", "u1") / "a.txt").read_bytes() == b"hello"
+
+
+def test_release_does_not_prune_host_file_without_complete_inventory(monkeypatch, tmp_path):
+    class _Box(_FakeFsBox):
+        files = {"/mnt/user-data/outputs/a.txt": b"hello"}
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid = provider.acquire("thread-1", user_id="u1")
+    provider.release(sid)
+    host_file = _host_outputs(tmp_path, "thread-1", "u1") / "a.txt"
+    assert host_file.read_bytes() == b"hello"
+
+    assert provider.acquire("thread-1", user_id="u1") == sid
+    box = provider.get(sid)
+    assert box is not None
+    box._box.files = {}
+    box._box.listing_override = ""
+    provider.release(sid)
+    assert host_file.read_bytes() == b"hello"
+
+    assert provider.acquire("thread-1", user_id="u1") == sid
+    box = provider.get(sid)
+    assert box is not None
+    box._box.listing_override = f"{LISTING_COMPLETE_SENTINEL}\0"
+    provider.release(sid)
+    assert not host_file.exists()
+
+
+def test_release_parks_box_when_output_listing_fails(monkeypatch, tmp_path):
+    """A failed (non-terminal) sync is logged and never blocks the warm-pool release."""
+
+    class _Box(_FakeFsBox):
+        files = {"/mnt/user-data/outputs/a.txt": b"hello"}
+        listing_error = RuntimeError("find exploded")
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid = provider.acquire("thread-1", user_id="u1")
+
+    provider.release(sid)
+
+    assert sid in provider._warm_pool
+    assert not _host_outputs(tmp_path, "thread-1", "u1").exists()
+
+
+def test_release_without_thread_identity_skips_sync(monkeypatch, tmp_path):
+    """Thread-less sandboxes have no host bucket to mirror into."""
+
+    class _Box(_FakeFsBox):
+        files = {"/mnt/user-data/outputs/a.txt": b"hello"}
+
+    provider = _sync_provider(monkeypatch, tmp_path, _Box)
+    sid = provider.acquire()
+
+    provider.release(sid)
+
+    assert sid in provider._warm_pool
+    assert _download_calls(provider._warm_pool[sid][0]._box) == []
+    assert not (tmp_path / "users").exists() and not (tmp_path / "threads").exists()

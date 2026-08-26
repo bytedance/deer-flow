@@ -9,22 +9,24 @@ runs on the loop the box was started on, and stays safe no matter which
 
 Every operation is a shell command run inside the box (``cat`` / ``find`` /
 ``grep`` / chunked ``base64``), parsed with the shared ``deerflow.sandbox.search``
-helpers — the same exec-driven approach as ``community/e2b_sandbox``. Commands
-use only busybox-portable flags so any OCI image works.
+helpers — the same exec-driven approach as ``community/e2b_sandbox``. General
+commands use busybox-portable flags; race-safe bounded artifact reads additionally
+require ``python3``, which is present in the default image.
 """
 
 from __future__ import annotations
 
 import base64
-import errno
 import logging
 import posixpath
 import re
 import shlex
 import threading
+import time
 from typing import TYPE_CHECKING, TypeVar
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.sandbox.output_sync import build_secure_bounded_read_command, parse_secure_bounded_read_output
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
 
@@ -256,31 +258,42 @@ class BoxliteBox(Sandbox):
                 raise OSError(f"write '{resolved}' failed: {(r.stderr or '').strip()}")
             first = False
 
-    def download_file(self, path: str) -> bytes:
+    def download_file(
+        self,
+        path: str,
+        max_bytes: int | None = None,
+        timeout_seconds: float | None = None,
+    ) -> bytes:
         normalized = self._guard_traversal(path)
         stripped = normalized.lstrip("/")
         allowed = VIRTUAL_PATH_PREFIX.lstrip("/")
         if stripped != allowed and not stripped.startswith(f"{allowed}/"):
             raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
 
-        # Enforce the size cap before buffering the whole payload.
-        size_r = self._sh(f"wc -c < {shlex.quote(normalized)}")
-        if size_r.exit_code not in (0, None):
-            raise OSError(f"cannot read '{path}' from box: {(size_r.stderr or '').strip() or 'not found'}")
-        try:
-            size = int((size_r.stdout or "0").strip() or "0")
-        except ValueError:
-            size = 0
-        if size > _MAX_DOWNLOAD_SIZE:
-            raise OSError(errno.EFBIG, f"File exceeds maximum download size of {_MAX_DOWNLOAD_SIZE} bytes", path)
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise TimeoutError(f"download deadline expired for '{path}'")
+        byte_limit = _MAX_DOWNLOAD_SIZE if max_bytes is None else min(max_bytes, _MAX_DOWNLOAD_SIZE)
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
 
-        r = self._sh(f"base64 {shlex.quote(normalized)}")
+        def remaining_timeout() -> float | None:
+            if deadline is None:
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"download deadline expired for '{path}'")
+            return remaining
+
+        relative_path = stripped[len(allowed) :].lstrip("/")
+        command = build_secure_bounded_read_command(VIRTUAL_PATH_PREFIX, relative_path, byte_limit)
+        r = self._sh(
+            command,
+            timeout=remaining_timeout(),
+        )
         if r.exit_code not in (0, None):
             raise OSError(f"cannot read '{path}' from box: {(r.stderr or '').strip()}")
-        try:
-            return base64.b64decode("".join((r.stdout or "").split()))
-        except Exception as e:
-            raise OSError(f"failed to decode '{path}' from box: {e}") from e
+        return parse_secure_bounded_read_output(r.stdout or "", path=path)
 
     def list_dir(self, path: str, max_depth: int = 2) -> list[str]:
         resolved = self._resolve_path(path)

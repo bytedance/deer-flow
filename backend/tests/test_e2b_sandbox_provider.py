@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import importlib
 import json
 import os
+import shlex
 import threading
 import time
 from collections import OrderedDict
@@ -24,7 +26,9 @@ from deerflow.community.e2b_sandbox.capacity import (
 )
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox import output_sync as output_sync_mod
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.output_sync import LISTING_COMPLETE_SENTINEL
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Fakes for the e2b SDK
@@ -39,7 +43,9 @@ class FakeCommandsAPI:
 
     def __init__(self, responses: list[Any] | None = None) -> None:
         self.calls: list[str] = []
+        self.call_kwargs: list[dict[str, Any]] = []
         self._responses = list(responses or [])
+        self._files_api = None
 
     def _next(self) -> Any:
         if not self._responses:
@@ -49,14 +55,49 @@ class FakeCommandsAPI:
 
     def run(self, cmd: str, envs: dict[str, str] | None = None, **kwargs) -> SimpleNamespace:
         self.calls.append(cmd)
+        self.call_kwargs.append(dict(kwargs))
         self.envs = getattr(self, "envs", [])
         self.envs.append(envs)
+        if cmd.startswith("python3 -c ") and self._files_api is not None:
+            command_args = shlex.split(cmd)
+            root, relative_path, raw_limit = command_args[-3:]
+            path = f"{root.rstrip('/')}/{relative_path}"
+            self._files_api.read_calls.append((path, "bounded-command"))
+            self._files_api.read_options.append(
+                {
+                    "request_timeout": kwargs.get("request_timeout"),
+                    "stream_idle_timeout": None,
+                }
+            )
+            if path not in self._files_api.store:
+                return SimpleNamespace(
+                    stdout=f"{output_sync_mod._BOUNDED_READ_ERROR}\nNo such file or directory",
+                    stderr="",
+                    exit_code=0,
+                )
+            data = self._files_api.store[path]
+            if len(data) > int(raw_limit):
+                return SimpleNamespace(
+                    stdout=f"{output_sync_mod._BOUNDED_READ_EFBIG}\nartifact exceeds byte allowance",
+                    stderr="",
+                    exit_code=0,
+                )
+            payload = base64.b64encode(data).decode("ascii")
+            return SimpleNamespace(
+                stdout=(f"{output_sync_mod._BOUNDED_READ_OK}\n{payload}\n{output_sync_mod._BOUNDED_READ_COMPLETE}"),
+                stderr="",
+                exit_code=0,
+            )
         head = self._next()
         if head == self.GONE:
             raise RuntimeError(self.NOT_FOUND_MSG)
         if callable(head):
             return head(cmd)
         if isinstance(head, SimpleNamespace):
+            if LISTING_COMPLETE_SENTINEL in cmd and getattr(head, "exit_code", 0) == 0:
+                values = vars(head).copy()
+                values["stdout"] = f"{getattr(head, 'stdout', '') or ''}{LISTING_COMPLETE_SENTINEL}\0"
+                return SimpleNamespace(**values)
             return head
         return SimpleNamespace(stdout=str(head), stderr="", exit_code=0)
 
@@ -104,13 +145,27 @@ class FakeFilesAPI:
     ) -> None:
         self.store = dict(store or {})
         self.read_calls: list[tuple[str, str | None]] = []
+        self.read_options: list[dict[str, float | None]] = []
         self.write_calls: list[tuple[str, bytes]] = []
         self.write_streamed: list[bool] = []
         self.streams: list[_FakeFileStream] = []
         self._stream_chunk_size = stream_chunk_size
 
-    def read(self, path: str, *, format: str | None = None):
+    def read(
+        self,
+        path: str,
+        *,
+        format: str | None = None,
+        request_timeout: float | None = None,
+        stream_idle_timeout: float | None = None,
+    ):
         self.read_calls.append((path, format))
+        self.read_options.append(
+            {
+                "request_timeout": request_timeout,
+                "stream_idle_timeout": stream_idle_timeout,
+            }
+        )
         if path not in self.store:
             raise FileNotFoundError(path)
         data = self.store[path]
@@ -144,8 +199,9 @@ class FakeClient:
         files: FakeFilesAPI | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
-        self.commands = commands or FakeCommandsAPI()
         self.files = files or FakeFilesAPI()
+        self.commands = commands or FakeCommandsAPI()
+        self.commands._files_api = self.files
         self.timeouts_set: list[int] = []
         self.killed = False
         self.closed = False
@@ -2031,6 +2087,13 @@ def test_sync_outputs_to_host_writes_new_files(monkeypatch, tmp_path):
     expected = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "random.pdf"
     assert expected.exists()
     assert expected.read_bytes() == b"%PDF-1.4hello"
+    assert "head -z -n" in cmds.calls[0] and "head -c" in cmds.calls[0]
+    assert 0 < cmds.call_kwargs[0]["timeout"] <= p._SYNC_DEADLINE_SECONDS
+    assert 0 < cmds.call_kwargs[0]["request_timeout"] <= p._SYNC_DEADLINE_SECONDS
+    assert 0 < files.read_options[0]["request_timeout"] <= p._SYNC_DEADLINE_SECONDS
+    assert files.read_options[0]["stream_idle_timeout"] is None
+    assert 0 < cmds.call_kwargs[1]["timeout"] <= p._SYNC_DEADLINE_SECONDS
+    assert 0 < cmds.call_kwargs[1]["request_timeout"] <= p._SYNC_DEADLINE_SECONDS
 
 
 def test_sync_outputs_to_host_updates_changed_same_size_file(monkeypatch, tmp_path):
@@ -2144,6 +2207,9 @@ def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeyp
     paths = Paths(base_dir=tmp_path)
     thread_dir = paths.thread_dir("t1", user_id="u1")
     thread_dir.mkdir(parents=True, exist_ok=True)
+    deleted_host = thread_dir / "user-data" / "outputs" / "deleted.txt"
+    deleted_host.parent.mkdir(parents=True, exist_ok=True)
+    deleted_host.write_bytes(b"old")
     (thread_dir / ".e2b-output-sync.json").write_text(
         json.dumps(
             {
@@ -2164,13 +2230,14 @@ def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeyp
     listing = "5\t1720000000.1234567890\t/home/user/outputs/live.txt\x00"
     files = FakeFilesAPI(store={"/home/user/outputs/live.txt": b"alive"})
     cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
-    client = FakeClient(commands=cmds, files=files)
+    client = FakeClient(sandbox_id="sb-sync-cleanup", commands=cmds, files=files)
     sb = _make_sandbox(client, sandbox_id="sb-sync-cleanup")
 
     p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
 
     manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"outputs/live.txt"}
+    assert not deleted_host.exists()
 
 
 def test_sync_outputs_to_host_preserves_trailing_space_in_filename(monkeypatch, tmp_path):
@@ -2206,7 +2273,7 @@ def test_sync_outputs_to_host_skips_mtime_restoration_on_overflow(monkeypatch, t
 
     e2b_provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
 
-    def _raise_overflow(path, times=None, ns=None):
+    def _raise_overflow(path, times=None, ns=None, **kwargs):
         raise OverflowError("timestamp out of range")
 
     monkeypatch.setattr(e2b_provider_mod.os, "utime", _raise_overflow)
@@ -2538,6 +2605,22 @@ def test_download_file_uses_streaming_read_and_returns_full_bytes():
     assert "stream" in formats_used, f"expected download_file to invoke read(format='stream'), got {formats_used!r}"
     assert files.streams, "download_file must actually consume a stream"
     assert files.streams[-1].closed, "stream must be closed after successful read"
+
+
+def test_download_file_enforces_dynamic_remaining_allowance():
+    import errno as _errno
+
+    files = FakeFilesAPI(store={"/home/user/outputs/raced.bin": b"x" * 11})
+    client = FakeClient(files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-stream-dynamic-cap")
+
+    with pytest.raises(OSError) as raised:
+        sb.download_file("/mnt/user-data/outputs/raced.bin", max_bytes=10)
+
+    assert raised.value.errno == _errno.EFBIG
+    assert not files.streams, "an exact-cap download must not use a stream that can yield beyond the allowance"
+    assert files.read_calls == [("/home/user/outputs/raced.bin", "bounded-command")]
+    assert shlex.split(client.commands.calls[-1])[-3:] == ["/home/user", "outputs/raced.bin", "10"]
 
 
 def test_download_file_streaming_raises_efbig_before_full_buffering():
