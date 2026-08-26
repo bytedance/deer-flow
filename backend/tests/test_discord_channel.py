@@ -263,3 +263,61 @@ async def test_send_file_closes_handle_when_send_fails(tmp_path) -> None:
         assert handles[0].closed is True
     finally:
         _stop_bg_loop(bg_loop, bg_thread)
+
+
+@pytest.mark.asyncio
+async def test_ack_reaction_task_retained_under_gc() -> None:
+    """The ack-reaction task survives GC and still runs to completion.
+
+    A bare ``asyncio.create_task`` holds only a weak loop reference, so the
+    ✅ acknowledgment could be garbage-collected mid-flight. The module-level
+    retention set keeps the task strongly referenced until completion (same
+    pattern as #4928 / #4931).
+    """
+    import gc
+    import weakref
+
+    from app.channels import discord as discord_module
+
+    bus = MessageBus()
+    channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
+
+    reacted = asyncio.Event()
+
+    async def _add_reaction(_emoji: str) -> None:
+        reacted.set()
+
+    message = SimpleNamespace(id=111, add_reaction=_add_reaction)
+
+    task = channel._schedule_ack_reaction(message)
+    weak_task = weakref.ref(task)
+    del task
+    gc.collect()
+
+    retained = weak_task()
+    assert retained is not None, "ack reaction task was garbage-collected mid-flight"
+    assert retained in discord_module._ack_reaction_tasks
+
+    await asyncio.wait_for(retained, timeout=1.0)
+    assert reacted.is_set()
+    # Completed tasks are discarded so the retention set cannot grow unboundedly.
+    assert retained not in discord_module._ack_reaction_tasks
+
+
+@pytest.mark.asyncio
+async def test_ack_reaction_task_survives_reaction_failure() -> None:
+    """A failing add_reaction completes quietly and is discarded from the set."""
+
+    from app.channels import discord as discord_module
+
+    bus = MessageBus()
+    channel = DiscordChannel(bus=bus, config={"bot_token": "token"})
+
+    async def _boom(_emoji: str) -> None:
+        raise RuntimeError("discord api down")
+
+    message = SimpleNamespace(id=222, add_reaction=_boom)
+
+    task = channel._schedule_ack_reaction(message)
+    await asyncio.wait_for(task, timeout=1.0)
+    assert task not in discord_module._ack_reaction_tasks

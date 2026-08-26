@@ -19,6 +19,21 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
+# Strong references for in-flight ack-reaction tasks. The event loop keeps
+# only weak references to scheduled tasks, so a bare ``asyncio.create_task``
+# could be garbage-collected mid-flight and silently drop the acknowledgment
+# reaction (same retention pattern as the deferred subagent cleanup in #4928).
+_ack_reaction_tasks: set[asyncio.Task[None]] = set()
+
+
+def _on_ack_reaction_task_done(task: asyncio.Task[None]) -> None:
+    _ack_reaction_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error("[Discord] ack reaction task failed: %s", exc)
+
 
 class DiscordChannel(Channel):
     """Discord bot channel.
@@ -330,6 +345,17 @@ class DiscordChannel(Channel):
         except Exception:
             logger.debug("[Discord] failed to add reaction to message %s", message.id, exc_info=True)
 
+    def _schedule_ack_reaction(self, message) -> asyncio.Task[None]:
+        """Schedule the ack reaction with a strong task reference.
+
+        The delayed HTTP call must survive until completion; see
+        ``_ack_reaction_tasks`` for why a bare ``create_task`` is unsafe here.
+        """
+        task = asyncio.create_task(self._add_reaction(message))
+        _ack_reaction_tasks.add(task)
+        task.add_done_callback(_on_ack_reaction_task_done)
+        return task
+
     async def _on_message(self, message) -> None:
         if not self._running or not self._client:
             return
@@ -450,7 +476,7 @@ class DiscordChannel(Channel):
                     # Start typing indicator in the thread
                     if typing_target:
                         await self._start_typing(typing_target, chat_id, thread_id)
-                    asyncio.create_task(self._add_reaction(message))
+                    self._schedule_ack_reaction(message)
                     return
 
                 # Thread not tracked (orphaned) — create new thread and handle below
@@ -561,7 +587,7 @@ class DiscordChannel(Channel):
             # Start typing/reaction only after bounded admission succeeds.
             if typing_target:
                 await self._start_typing(typing_target, chat_id, thread_id)
-            asyncio.create_task(self._add_reaction(message))
+            self._schedule_ack_reaction(message)
         finally:
             if not reservation_transferred:
                 reservation.release()
