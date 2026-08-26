@@ -1,10 +1,10 @@
 """Route-level authorization tests for the Gateway permission decorators."""
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -16,6 +16,7 @@ from app.gateway.authz import (
     require_permission,
     resolve_route_permissions,
 )
+from app.gateway.routers import runs
 from deerflow.authz.provider import AuthzDecision, AuthzReason
 from deerflow.authz.rbac import RbacAuthorizationProvider
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
@@ -266,6 +267,54 @@ def test_auth_middleware_marks_internal_route_principal(monkeypatch):
     assert response.status_code == 200
     permission_resolver.assert_awaited_once()
     assert permission_resolver.await_args.kwargs == {"is_internal": True}
+
+
+_STATELESS_RUN_PATHS = ("/api/runs/stream", "/api/runs/wait")
+
+
+def _make_stateless_runs_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.include_router(runs.router)
+    app.state.stream_bridge = MagicMock()
+    app.state.run_manager = MagicMock()
+    return app
+
+
+@pytest.mark.parametrize("path", _STATELESS_RUN_PATHS)
+def test_stateless_run_creation_requires_runs_create(monkeypatch, path):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setattr(
+        "app.gateway.auth_middleware.resolve_route_permissions",
+        AsyncMock(return_value=[Permissions.RUNS_READ]),
+    )
+    start_run = AsyncMock(side_effect=HTTPException(status_code=418, detail="run creation reached"))
+    monkeypatch.setattr(runs, "start_run", start_run)
+
+    with TestClient(_make_stateless_runs_app()) as client:
+        response = client.post(path, json={})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Permission denied: runs:create"}
+    start_run.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", _STATELESS_RUN_PATHS)
+def test_stateless_run_creation_allows_runs_create(monkeypatch, path):
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setattr(
+        "app.gateway.auth_middleware.resolve_route_permissions",
+        AsyncMock(return_value=[Permissions.RUNS_CREATE]),
+    )
+    start_run = AsyncMock(side_effect=HTTPException(status_code=418, detail="run creation reached"))
+    monkeypatch.setattr(runs, "start_run", start_run)
+
+    with TestClient(_make_stateless_runs_app()) as client:
+        response = client.post(path, json={})
+
+    assert response.status_code == 418
+    assert response.json() == {"detail": "run creation reached"}
+    start_run.assert_awaited_once()
 
 
 # ── Provider cache tests ────────────────────────────────────────────────
