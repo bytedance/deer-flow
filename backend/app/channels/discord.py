@@ -194,7 +194,8 @@ class DiscordChannel(Channel):
         if discord_loop is None or discord_loop is current_loop:
             await self._cancel_ephemeral_tasks()
         elif discord_loop.is_running():
-            # Serialize cleanup with _start_typing() on the owning loop.  The
+            # Serialize cleanup with _start_typing()/_schedule_ack_reaction()
+            # on the owning loop.  The
             # loop may exit between is_running() and scheduling, so neither
             # scheduling nor waiting is allowed to block the rest of stop().
             cleanup_coro = self._cancel_ephemeral_tasks()
@@ -202,15 +203,15 @@ class DiscordChannel(Channel):
                 cleanup_future = asyncio.run_coroutine_threadsafe(cleanup_coro, discord_loop)
             except RuntimeError:
                 cleanup_coro.close()
-                logger.warning("[Discord] event loop stopped before typing-task cleanup could be scheduled")
+                logger.warning("[Discord] event loop stopped before ephemeral-task cleanup could be scheduled")
             else:
                 try:
                     await asyncio.wait_for(asyncio.wrap_future(cleanup_future), timeout=10)
                 except TimeoutError:
                     cleanup_future.cancel()
-                    logger.warning("[Discord] typing-task cleanup timed out after 10s")
+                    logger.warning("[Discord] ephemeral-task cleanup timed out after 10s")
                 except Exception:
-                    logger.exception("[Discord] error while cleaning up typing tasks")
+                    logger.exception("[Discord] error while cleaning up ephemeral tasks")
 
         if self._client and discord_loop and discord_loop.is_running():
             close_coro = self._client.close()
@@ -345,7 +346,7 @@ class DiscordChannel(Channel):
 
     def _discard_ack_reaction_tasks(self) -> None:
         """Forget stale ack-reaction tasks after the owning loop stopped."""
-        for task in _ack_reaction_tasks:
+        for task in list(_ack_reaction_tasks):
             if not task.done():
                 logger.warning("[Discord] discarding pending ack-reaction task for stopped loop")
         _ack_reaction_tasks.clear()
@@ -700,7 +701,7 @@ class DiscordChannel(Channel):
             try:
                 self._discord_loop.run_until_complete(self._cancel_ephemeral_tasks())
             except Exception:
-                logger.exception("Error while cleaning up Discord typing tasks")
+                logger.exception("Error while cleaning up Discord ephemeral tasks")
             try:
                 if self._client and not self._client.is_closed():
                     self._discord_loop.run_until_complete(self._client.close())

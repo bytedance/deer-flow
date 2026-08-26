@@ -341,12 +341,15 @@ async def test_stop_drains_in_flight_ack_reaction_tasks() -> None:
 
     task = channel._schedule_ack_reaction(message)
     assert task in discord_module._ack_reaction_tasks
+    # Yield once so the task actually starts and suspends inside _hang —
+    # cancelling a never-started task would not exercise the mid-flight path.
+    await asyncio.sleep(0)
+    assert not task.done()
 
     await channel._cancel_ephemeral_tasks()
 
-    assert task.cancelled() or task.done()
+    assert task.cancelled()
     assert task not in discord_module._ack_reaction_tasks
-    release.set()
 
 
 @pytest.mark.asyncio
@@ -365,3 +368,37 @@ async def test_ack_reaction_task_failure_is_logged_and_discarded(caplog) -> None
 
     assert task not in discord_module._ack_reaction_tasks
     assert any("ack reaction task failed" in record.message for record in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_stop_wiring_drains_ack_tasks_across_loops() -> None:
+    """The real stop() path (cross-loop branch) drains in-flight ack reactions.
+
+    Guards the wiring itself: reverting stop() to typing-only cleanup must
+    fail here, not just at the helper level.
+    """
+    bg_loop, bg_thread = _start_bg_loop()
+    try:
+        channel = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+        channel._discord_loop = bg_loop
+
+        release = asyncio.Event()
+
+        async def _hang(_emoji: str) -> None:
+            await release.wait()
+
+        async def _schedule_on_bg_loop() -> asyncio.Task:
+            task = channel._schedule_ack_reaction(SimpleNamespace(id=555, add_reaction=_hang))
+            await asyncio.sleep(0.05)  # let the task start and suspend on the event
+            return task
+
+        schedule_future = asyncio.run_coroutine_threadsafe(_schedule_on_bg_loop(), bg_loop)
+        task = await asyncio.wrap_future(schedule_future)
+        assert task in discord_module._ack_reaction_tasks
+
+        await channel.stop()
+
+        assert task.cancelled()
+        assert not discord_module._ack_reaction_tasks
+    finally:
+        _stop_bg_loop(bg_loop, bg_thread)
