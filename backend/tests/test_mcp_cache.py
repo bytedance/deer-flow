@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,8 @@ _TRACKED_GLOBALS = (
     "_config_path",
     "_config_signature",
     "_config_mtime",
-    "_initialization_lock",
+    "_init_lock",
+    "_async_init_lock",
 )
 
 
@@ -64,9 +66,10 @@ def cache_globals():
     for name in ("_config_path", "_config_signature", "_config_mtime"):
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
-    # asyncio.Lock binds to the first event loop it is awaited on, so each test
-    # (which drives initialize_mcp_tools via a fresh asyncio.run) needs its own.
-    cache_module._initialization_lock = asyncio.Lock()
+    # threading.Lock is safe across threads and does not bind to event loops,
+    # so each test gets a fresh one for isolation without the cross-loop issue.
+    cache_module._init_lock = threading.RLock()
+    cache_module._async_init_lock = asyncio.Lock()
 
     try:
         yield
@@ -286,3 +289,98 @@ def test_config_deleted_after_init_via_real_env_resolution_does_not_raise(cache_
     # last-known-good MCP tools), matching the deliberate contract in
     # test_config_deleted_after_init_is_not_stale above.
     assert cache_module._is_cache_stale() is False
+
+
+class TestCrossLoopReinitialization:
+    """Regression for #5060: ``asyncio.Lock`` bound to a closed event loop breaks re-initialization.
+
+    ``get_cached_mcp_tools()`` spawns ``asyncio.run(initialize_mcp_tools())`` in a
+    ``ThreadPoolExecutor`` when the caller's loop is already running. Each ``asyncio.run()``
+    creates a fresh event loop, binds the module-level ``_initialization_lock`` to it, then
+    closes that loop on return. On the next re-initialization attempt, a different
+    ``asyncio.run()`` creates yet another loop, and the still-bound Lock refuses to acquire,
+    raising ``RuntimeError: Lock is bound to a different event loop``.
+
+    The fix must ensure that ``initialize_mcp_tools()`` can be called from any number of
+    independent event loops without a cross-loop Lock binding failure.
+    """
+
+    def test_cross_loop_reinit_does_not_raise(self, monkeypatch, tmp_path):
+        """Two successive ``asyncio.run()`` calls (each with its own loop) must not crash.
+
+        Does NOT use ``cache_globals`` — the Lock must survive across loops, exactly
+        as it does in production after a config change invalidates the cache.
+        """
+        saved = {name: getattr(cache_module, name, _MISSING) for name in _TRACKED_GLOBALS}
+        try:
+            cache_module._mcp_tools_cache = None
+            cache_module._cache_initialized = False
+            for name in ("_config_path", "_config_signature", "_config_mtime"):
+                if hasattr(cache_module, name):
+                    setattr(cache_module, name, None)
+
+            cfg = tmp_path / "extensions_config.json"
+            _write_extensions_config(cfg, {"srv1": _server()})
+            monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+            async def _fake_tools():
+                return []
+
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+            # First init — binds _initialization_lock to Loop A.
+            asyncio.run(cache_module.initialize_mcp_tools())
+            assert cache_module._cache_initialized is True
+
+            # Invalidate (simulates reset_mcp_tools_cache on config change).
+            cache_module.reset_mcp_tools_cache()
+            assert cache_module._cache_initialized is False
+
+            # Second init — creates Loop B. On unfixed code this raises:
+            # RuntimeError: Lock is bound to a different event loop
+            asyncio.run(cache_module.initialize_mcp_tools())
+            assert cache_module._cache_initialized is True
+        finally:
+            for name, value in saved.items():
+                if value is _MISSING:
+                    if hasattr(cache_module, name):
+                        delattr(cache_module, name)
+                else:
+                    setattr(cache_module, name, value)
+
+    def test_get_cached_mcp_tools_reinit_after_invalidation(self, monkeypatch, tmp_path):
+        """Gateway path without ``cache_globals`` resetting the Lock — production scenario."""
+        saved = {name: getattr(cache_module, name, _MISSING) for name in _TRACKED_GLOBALS}
+        try:
+            cache_module._mcp_tools_cache = None
+            cache_module._cache_initialized = False
+            for name in ("_config_path", "_config_signature", "_config_mtime"):
+                if hasattr(cache_module, name):
+                    setattr(cache_module, name, None)
+
+            cfg = tmp_path / "extensions_config.json"
+            _write_extensions_config(cfg, {"srv1": _server()})
+            monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(cfg))
+
+            async def _fake_tools():
+                return []
+
+            monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_tools)
+
+            result1 = cache_module.get_cached_mcp_tools()
+            assert result1 == []
+            assert cache_module._cache_initialized is True
+
+            _write_extensions_config(cfg, {"srv1": _server(), "srv2": _server("uvx")})
+            cache_module.reset_mcp_tools_cache()
+
+            result2 = cache_module.get_cached_mcp_tools()
+            assert result2 == []
+            assert cache_module._cache_initialized is True
+        finally:
+            for name, value in saved.items():
+                if value is _MISSING:
+                    if hasattr(cache_module, name):
+                        delattr(cache_module, name)
+                else:
+                    setattr(cache_module, name, value)
