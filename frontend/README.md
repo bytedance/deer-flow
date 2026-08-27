@@ -144,7 +144,7 @@ src/
 ## Development Notes
 
 - Uses pnpm workspaces (see `packageManager` in package.json)
-- Turbopack is used by default in development except on Windows, where Webpack avoids known Turbopack runtime instability
+- Turbopack is used by default in development except on Windows, where Webpack avoids known Turbopack runtime instability. Set `DEER_FLOW_DEV_BUNDLER=turbo` or `DEER_FLOW_DEV_BUNDLER=webpack` to override the platform default for local diagnosis.
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 

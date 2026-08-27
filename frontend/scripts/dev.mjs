@@ -4,13 +4,35 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export function getDevBundler(platform = process.platform) {
+/**
+ * @param {string} platform
+ * @param {Record<string, string | undefined>} env
+ */
+export function getDevBundler(platform = process.platform, env = process.env) {
+  const override = env.DEER_FLOW_DEV_BUNDLER?.trim();
+  if (override) {
+    if (override !== "turbo" && override !== "webpack") {
+      throw new Error(
+        'DEER_FLOW_DEV_BUNDLER must be either "turbo" or "webpack"',
+      );
+    }
+    return override;
+  }
   return platform === "win32" ? "webpack" : "turbo";
 }
 
-export function getNextDevArgs(platform = process.platform, extraArgs = []) {
+/**
+ * @param {string} platform
+ * @param {string[]} extraArgs
+ * @param {Record<string, string | undefined>} env
+ */
+export function getNextDevArgs(
+  platform = process.platform,
+  extraArgs = [],
+  env = process.env,
+) {
   const nextArgs = extraArgs[0] === "--" ? extraArgs.slice(1) : extraArgs;
-  return ["dev", `--${getDevBundler(platform)}`, ...nextArgs];
+  return ["dev", `--${getDevBundler(platform, env)}`, ...nextArgs];
 }
 
 function startDevServer() {
