@@ -61,6 +61,9 @@ class _BoundedPipeCapture:
             kept_bytes = self._kept_bytes
 
         output = data.decode(self._encoding, errors="replace")
+        # Match ``subprocess.run(..., text=True)``: text streams use universal
+        # newlines, translating both CRLF and bare CR to LF.
+        output = output.replace("\r\n", "\n").replace("\r", "\n")
         if truncated:
             notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
             output += notice

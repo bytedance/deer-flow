@@ -22,6 +22,13 @@ def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding()
     assert capture.read() == "caf\u00e9"
 
 
+def test_bounded_pipe_capture_preserves_text_mode_newline_normalization():
+    capture = _BoundedPipeCapture()
+    capture.append(b"crlf\r\nbare-cr\rlf\n")
+
+    assert capture.read() == "crlf\nbare-cr\nlf\n"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows text-mode encoding semantics")
 @pytest.mark.parametrize(
     ("python_args", "python_utf8"),
