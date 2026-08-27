@@ -65,7 +65,14 @@ class ThreadMetaStore(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def update_display_name(self, thread_id: str, display_name: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
+    async def update_display_name(
+        self,
+        thread_id: str,
+        display_name: str,
+        *,
+        remove_metadata_keys: tuple[str, ...] = (),
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> None:
         pass
 
     @abc.abstractmethod

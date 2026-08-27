@@ -154,6 +154,68 @@ to get the exact key is to have the user attempt a call before being mapped:
 the fail-closed error message includes their resolved id verbatim, ready to
 copy into `user_auth.users`.
 
+## Per-request credentials
+
+`user_auth` binds a credential to a *configured* DeerFlow user. When the caller
+picks the credential at request time instead — a multi-tenant gateway, a per-run
+API key, one shared MCP server fronting several environments — declare a
+`headers_from_context` block. Each entry maps an HTTP header name to a key of
+the run request's `config.context.secrets` carrier:
+
+```json
+{
+  "mcpServers": {
+    "shared-api": {
+      "type": "http",
+      "url": "https://api.example.com/mcp",
+      "headers": { "Authorization": "$SERVICE_DISCOVERY_TOKEN" },
+      "headers_from_context": {
+        "headers": {
+          "X-Tenant-Id": "tenant_id",
+          "Authorization": "tenant_token"
+        },
+        "on_missing": "deny"
+      }
+    }
+  }
+}
+```
+
+The caller supplies the values with each run request, out of band from the
+conversation:
+
+```json
+{
+  "config": {
+    "context": {
+      "secrets": {
+        "tenant_id": "acme",
+        "tenant_token": "Bearer <request-scoped credential>"
+      }
+    }
+  }
+}
+```
+
+- The config file stores **names only**, never a credential, so the block is
+  returned unmasked by the config API. The values travel with each run and are
+  stripped from persisted run configuration, API responses, and traces.
+- The entry's static `headers` are used only for startup tool discovery; a
+  mapped header replaces the static one for the tool call. Header names are
+  matched case-insensitively, so a mapped `Authorization` replaces a static
+  `authorization` rather than travelling alongside it.
+- **Fail-closed by default**: if the run carries no value for a mapped key, the
+  call fails with an error naming the missing key rather than falling back to
+  the discovery credential — which would send one tenant's request under
+  another tenant's authority. Set `"on_missing": "passthrough"` to opt out.
+- For a server declaring several sources, precedence is static `headers` <
+  `oauth` < `user_auth` < `headers_from_context`: the value chosen for this one
+  request is the most specific, so it wins.
+- On a server that also declares `task_toolsets`, the durable submit is awaited
+  inside the run and carries these headers, but the later status and cancel
+  polls run after the run ends and fall back to the server's own credentials —
+  so the fail-closed guarantee covers the submit, not those polls.
+
 ## Managing MCP servers
 
 MCP servers can be managed in several ways:

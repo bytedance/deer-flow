@@ -34,6 +34,7 @@ from app.gateway.routers import (
     runs,
     scheduled_tasks,
     skills,
+    subagent_batches,
     subagents,
     suggestions,
     thread_runs,
@@ -202,6 +203,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
+        from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import configure_subagent_execution_capacity
+
+        subagent_runtime_config = getattr(startup_config, "subagent_runtime", None)
+        if not isinstance(subagent_runtime_config, SubagentRuntimeConfig):
+            subagent_runtime_config = SubagentRuntimeConfig()
+        subagent_batches_config = getattr(startup_config, "subagent_batches", None)
+        if not isinstance(subagent_batches_config, SubagentBatchesConfig):
+            subagent_batches_config = SubagentBatchesConfig()
+        configure_subagent_execution_capacity(subagent_runtime_config)
         configure_logging(startup_config)
         ensure_browser_runtime_available(startup_config)
         logger.info("Configuration loaded successfully")
@@ -395,6 +407,26 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 set_mcp_task_submitter(mcp_task_service)
                 app.state.mcp_tasks_available = True
 
+        from app.subagent_batches import SubagentBatchService
+        from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+        batch_repo = getattr(app.state, "subagent_batch_repo", None)
+        app.state.subagent_batches_available = False
+        set_subagent_batch_submitter(None)
+        if subagent_batches_config.enabled and batch_repo is None:
+            raise RuntimeError("subagent_batches.enabled requires database.backend sqlite or postgres")
+        if batch_repo is not None:
+            batch_service = SubagentBatchService(
+                repository=batch_repo,
+                config=subagent_batches_config,
+                runtime_config=subagent_runtime_config,
+            )
+            app.state.subagent_batch_service = batch_service
+            if subagent_batches_config.enabled:
+                await batch_service.start()
+                set_subagent_batch_submitter(batch_service)
+                app.state.subagent_batches_available = True
+
         yield
 
         try:
@@ -437,6 +469,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         from deerflow.mcp.tasks.runtime import set_mcp_task_config_snapshot
 
         set_mcp_task_config_snapshot(None)
+
+        if getattr(app.state, "subagent_batch_service", None) is not None:
+            app.state.subagent_batches_available = False
+            try:
+                await app.state.subagent_batch_service.stop()
+            except Exception:
+                logger.exception("Failed to stop subagent batch service")
+            finally:
+                from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
+
+                set_subagent_batch_submitter(None)
 
         try:
             from deerflow.community.browser_automation import get_browser_session_manager
@@ -748,6 +791,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Durable MCP tasks are scoped to their owning thread.
     app.include_router(mcp_tasks.router)
+    app.include_router(subagent_batches.router)
 
     # Memory API is mounted at /api/memory
     app.include_router(memory.router)

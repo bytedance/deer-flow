@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from contextvars import ContextVar
 from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, cast
 
@@ -18,6 +19,7 @@ from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -39,6 +41,15 @@ if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
 
 logger = logging.getLogger(__name__)
+
+_explicit_execution_capacity: ContextVar[SubagentExecutionCapacity | None] = ContextVar(
+    "deerflow_explicit_subagent_execution_capacity",
+    default=None,
+)
+_explicit_app_config: ContextVar[Any | None] = ContextVar(
+    "deerflow_explicit_subagent_app_config",
+    default=None,
+)
 
 
 def _is_subagent_terminal(result: Any) -> bool:
@@ -85,6 +96,35 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, exe
 
 
 _deferred_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+def bind_task_tool(
+    execution_capacity: SubagentExecutionCapacity,
+    *,
+    app_config: "AppConfig | None" = None,
+):
+    """Return a task tool bound to one explicit SDK runtime capacity.
+
+    The copied tool keeps the original name, description, and argument schema;
+    only its coroutine is wrapped. ``ContextVar`` keeps concurrent direct
+    factories isolated while the resolved capacity is passed into the executor
+    before work crosses to the persistent subagent event loop.
+    """
+
+    original_coroutine = task_tool.coroutine
+    if original_coroutine is None:  # pragma: no cover - task_tool is async by contract
+        raise RuntimeError("task tool has no async implementation")
+
+    async def bound_coroutine(**kwargs):
+        capacity_token = _explicit_execution_capacity.set(execution_capacity)
+        config_token = _explicit_app_config.set(app_config)
+        try:
+            return await original_coroutine(**kwargs)
+        finally:
+            _explicit_app_config.reset(config_token)
+            _explicit_execution_capacity.reset(capacity_token)
+
+    return task_tool.model_copy(update={"coroutine": bound_coroutine})
 
 
 def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> asyncio.Task[None]:
@@ -161,6 +201,9 @@ def _report_subagent_usage(runtime: Any, result: Any) -> None:
 
 
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
+    explicit = _explicit_app_config.get()
+    if explicit is not None:
+        return cast("AppConfig", explicit)
     context = getattr(runtime, "context", None)
     if isinstance(context, dict):
         app_config = context.get("app_config")
@@ -414,6 +457,9 @@ async def task_tool(
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
         executor_kwargs["extensions"] = run_extensions
+    explicit_capacity = _explicit_execution_capacity.get()
+    if explicit_capacity is not None:
+        executor_kwargs["execution_capacity"] = explicit_capacity
     executor = SubagentExecutor(**executor_kwargs)
 
     # Keep the provider tool-call ID for stream/message correlation, but use a
