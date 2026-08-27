@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.channels import discord as discord_module
 from app.channels.discord import DiscordChannel
 from app.channels.manager import CHANNEL_CAPABILITIES
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
@@ -278,7 +277,7 @@ async def test_ack_reaction_task_retained_under_gc() -> None:
     same limitation the #4928 precedent test has.
 
     A bare ``asyncio.create_task`` holds only a weak loop reference, so the
-    ✅ acknowledgment could be garbage-collected mid-flight. The module-level
+    ✅ acknowledgment could be garbage-collected mid-flight. The instance-level
     retention set keeps the task strongly referenced until completion (same
     pattern as #4928 / #4931).
     """
@@ -299,12 +298,42 @@ async def test_ack_reaction_task_retained_under_gc() -> None:
 
     retained = weak_task()
     assert retained is not None, "ack reaction task was garbage-collected mid-flight"
-    assert retained in discord_module._ack_reaction_tasks
+    assert retained in channel._ack_reaction_tasks
 
     await asyncio.wait_for(retained, timeout=1.0)
     assert reacted.is_set()
     # Completed tasks are discarded so the retention set cannot grow unboundedly.
-    assert retained not in discord_module._ack_reaction_tasks
+    assert retained not in channel._ack_reaction_tasks
+
+
+@pytest.mark.asyncio
+async def test_ack_reaction_retention_is_isolated_per_channel() -> None:
+    """One channel's shutdown must not cancel another instance's in-flight reactions.
+
+    The retention set is instance-level (matching ``_typing_tasks``): a
+    module-level set would let ``stop()`` on one channel drain every other
+    channel's pending ack tasks.
+    """
+    first = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+    second = DiscordChannel(bus=MessageBus(), config={"bot_token": "token"})
+
+    release = asyncio.Event()
+
+    async def _hang(_emoji: str) -> None:
+        await release.wait()
+
+    task = second._schedule_ack_reaction(SimpleNamespace(id=666, add_reaction=_hang))
+    await asyncio.sleep(0)  # let the task start and suspend
+    assert task in second._ack_reaction_tasks
+    assert task not in first._ack_reaction_tasks
+
+    await first._cancel_ack_reaction_tasks()
+
+    assert not task.done()
+    assert task in second._ack_reaction_tasks
+
+    release.set()
+    await asyncio.wait_for(task, timeout=1.0)
 
 
 @pytest.mark.asyncio
@@ -321,7 +350,7 @@ async def test_ack_reaction_task_survives_reaction_failure() -> None:
 
     task = channel._schedule_ack_reaction(message)
     await asyncio.wait_for(task, timeout=1.0)
-    assert task not in discord_module._ack_reaction_tasks
+    assert task not in channel._ack_reaction_tasks
 
 
 @pytest.mark.asyncio
@@ -340,7 +369,7 @@ async def test_stop_drains_in_flight_ack_reaction_tasks() -> None:
     message = SimpleNamespace(id=333, add_reaction=_hang)
 
     task = channel._schedule_ack_reaction(message)
-    assert task in discord_module._ack_reaction_tasks
+    assert task in channel._ack_reaction_tasks
     # Yield once so the task actually starts and suspends inside _hang —
     # cancelling a never-started task would not exercise the mid-flight path.
     await asyncio.sleep(0)
@@ -349,7 +378,7 @@ async def test_stop_drains_in_flight_ack_reaction_tasks() -> None:
     await channel._cancel_ephemeral_tasks()
 
     assert task.cancelled()
-    assert task not in discord_module._ack_reaction_tasks
+    assert task not in channel._ack_reaction_tasks
 
 
 @pytest.mark.asyncio
@@ -366,7 +395,7 @@ async def test_ack_reaction_task_failure_is_logged_and_discarded(caplog) -> None
         with pytest.raises(RuntimeError, match="unexpected boom"):
             await asyncio.wait_for(task, timeout=1.0)
 
-    assert task not in discord_module._ack_reaction_tasks
+    assert task not in channel._ack_reaction_tasks
     assert any("ack reaction task failed" in record.message for record in caplog.records)
 
 
@@ -394,11 +423,11 @@ async def test_stop_wiring_drains_ack_tasks_across_loops() -> None:
 
         schedule_future = asyncio.run_coroutine_threadsafe(_schedule_on_bg_loop(), bg_loop)
         task = await asyncio.wrap_future(schedule_future)
-        assert task in discord_module._ack_reaction_tasks
+        assert task in channel._ack_reaction_tasks
 
         await channel.stop()
 
         assert task.cancelled()
-        assert not discord_module._ack_reaction_tasks
+        assert not channel._ack_reaction_tasks
     finally:
         _stop_bg_loop(bg_loop, bg_thread)

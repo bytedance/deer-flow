@@ -19,21 +19,6 @@ logger = logging.getLogger(__name__)
 
 _DISCORD_MAX_MESSAGE_LEN = 2000
 
-# Strong references for in-flight ack-reaction tasks. The event loop keeps
-# only weak references to scheduled tasks, so a bare ``asyncio.create_task``
-# could be garbage-collected mid-flight and silently drop the acknowledgment
-# reaction (same retention pattern as the deferred subagent cleanup in #4928).
-_ack_reaction_tasks: set[asyncio.Task[None]] = set()
-
-
-def _on_ack_reaction_task_done(task: asyncio.Task[None]) -> None:
-    _ack_reaction_tasks.discard(task)
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logger.error("[Discord] ack reaction task failed: %s", exc)
-
 
 class DiscordChannel(Channel):
     """Discord bot channel.
@@ -81,6 +66,15 @@ class DiscordChannel(Channel):
 
         # Typing indicator management
         self._typing_tasks: dict[str, asyncio.Task] = {}
+
+        # Strong references for this channel's in-flight ack-reaction tasks.
+        # The event loop keeps only weak references to scheduled tasks, so a
+        # bare ``asyncio.create_task`` could be garbage-collected mid-flight
+        # and silently drop the acknowledgment reaction (same retention
+        # pattern as the deferred subagent cleanup in #4928). Instance-level
+        # on purpose, matching ``_typing_tasks``: one channel's shutdown must
+        # not cancel another instance's in-flight reactions.
+        self._ack_reaction_tasks: set[asyncio.Task[None]] = set()
 
         self._client = None
         self._thread: threading.Thread | None = None
@@ -334,11 +328,11 @@ class DiscordChannel(Channel):
     async def _cancel_ack_reaction_tasks(self) -> None:
         """Cancel in-flight ack reactions so stop() does not strand them.
 
-        A task interrupted mid-HTTP-call would otherwise stay in the module
+        A task interrupted mid-HTTP-call would otherwise stay in the
         retention set forever, pinning this channel instance and the discord
         Message object graph after shutdown.
         """
-        pending = [task for task in _ack_reaction_tasks if not task.done()]
+        pending = [task for task in self._ack_reaction_tasks if not task.done()]
         for task in pending:
             task.cancel()
         if pending:
@@ -346,10 +340,10 @@ class DiscordChannel(Channel):
 
     def _discard_ack_reaction_tasks(self) -> None:
         """Forget stale ack-reaction tasks after the owning loop stopped."""
-        for task in list(_ack_reaction_tasks):
+        for task in list(self._ack_reaction_tasks):
             if not task.done():
                 logger.warning("[Discord] discarding pending ack-reaction task for stopped loop")
-        _ack_reaction_tasks.clear()
+        self._ack_reaction_tasks.clear()
 
     async def _cancel_ephemeral_tasks(self) -> None:
         """Cancel typing indicators and in-flight ack reactions together."""
@@ -376,6 +370,14 @@ class DiscordChannel(Channel):
         except Exception:
             logger.debug("[Discord] failed to add reaction to message %s", message.id, exc_info=True)
 
+    def _on_ack_reaction_task_done(self, task: asyncio.Task[None]) -> None:
+        self._ack_reaction_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("[Discord] ack reaction task failed: %s", exc)
+
     def _schedule_ack_reaction(self, message) -> asyncio.Task[None]:
         """Schedule the ack reaction with a strong task reference.
 
@@ -383,8 +385,8 @@ class DiscordChannel(Channel):
         ``_ack_reaction_tasks`` for why a bare ``create_task`` is unsafe here.
         """
         task = asyncio.create_task(self._add_reaction(message))
-        _ack_reaction_tasks.add(task)
-        task.add_done_callback(_on_ack_reaction_task_done)
+        self._ack_reaction_tasks.add(task)
+        task.add_done_callback(self._on_ack_reaction_task_done)
         return task
 
     async def _on_message(self, message) -> None:
