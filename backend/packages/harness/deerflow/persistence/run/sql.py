@@ -11,7 +11,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import case, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,6 +29,21 @@ from deerflow.utils.time import coerce_iso
 def _lease_expired_or_null(lease_col, cutoff: datetime):
     """SQLAlchemy filter: True when the lease is NULL or has expired past *cutoff*."""
     return or_(lease_col.is_(None), lease_col < cutoff)
+
+
+def _database_wall_clock(dialect_name: str):
+    """Return a statement-time wall clock suitable for lease fencing.
+
+    PostgreSQL's ``now()``/``CURRENT_TIMESTAMP`` is frozen at transaction
+    start. An UPDATE waiting on a row lock could therefore acquire that lock
+    after the lease expired and still pass a stale cutoff. ``clock_timestamp``
+    is volatile and is re-evaluated against actual wall time during the
+    post-lock predicate check. Other supported dialects use their native
+    current-timestamp expression.
+    """
+    if dialect_name == "postgresql":
+        return func.clock_timestamp()
+    return func.current_timestamp()
 
 
 class RunRepository(RunStore):
@@ -244,13 +259,11 @@ class RunRepository(RunStore):
             values["error"] = error
         if stop_reason is not None:
             values["stop_reason"] = stop_reason
-        # Guard: only transition rows that are still active. ``interrupted`` is
-        # included because the rollback path goes ``running → interrupted``
-        # (cancel acknowledged) then ``interrupted → error`` (task finalize).
-        # ``error`` and ``success`` remain locked so a peer's takeover (or a
-        # completed run) cannot be overwritten by a late writer.
+        # Generic status writes may only terminalize active rows. In
+        # particular, ``interrupted`` is terminal: rollback advancement to
+        # ``error`` must use the owner/action-fenced completion primitive.
         async with self._sf() as session:
-            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running", "interrupted"))).values(**values))
+            result = await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status.in_(("pending", "running"))).values(**values))
             await session.commit()
             return result.rowcount != 0
 
@@ -325,6 +338,48 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    def _completion_values(
+        self,
+        *,
+        status: str,
+        total_input_tokens: int = 0,
+        total_output_tokens: int = 0,
+        total_tokens: int = 0,
+        llm_call_count: int = 0,
+        lead_agent_tokens: int = 0,
+        subagent_tokens: int = 0,
+        middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
+        message_count: int = 0,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Build one normalized, snapshot-shaped completion update."""
+        values: dict[str, Any] = {
+            "status": status,
+            "total_input_tokens": total_input_tokens,
+            "total_output_tokens": total_output_tokens,
+            "total_tokens": total_tokens,
+            "llm_call_count": llm_call_count,
+            "lead_agent_tokens": lead_agent_tokens,
+            "subagent_tokens": subagent_tokens,
+            "middleware_tokens": middleware_tokens,
+            "token_usage_by_model": self._safe_json(token_usage_by_model) or {},
+            "message_count": message_count,
+            "updated_at": datetime.now(UTC),
+        }
+        if last_ai_message is not None:
+            values["last_ai_message"] = last_ai_message[:2000]
+        if first_human_message is not None:
+            values["first_human_message"] = first_human_message[:2000]
+        if error is not None:
+            values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+        return values
+
     async def update_run_completion(
         self,
         run_id: str,
@@ -349,32 +404,25 @@ class RunRepository(RunStore):
         Returns ``False`` when the row is missing or already has a conflicting
         terminal outcome.
         """
-        values: dict[str, Any] = {
-            "status": status,
-            "total_input_tokens": total_input_tokens,
-            "total_output_tokens": total_output_tokens,
-            "total_tokens": total_tokens,
-            "llm_call_count": llm_call_count,
-            "lead_agent_tokens": lead_agent_tokens,
-            "subagent_tokens": subagent_tokens,
-            "middleware_tokens": middleware_tokens,
-            "token_usage_by_model": self._safe_json(token_usage_by_model) or {},
-            "message_count": message_count,
-            "updated_at": datetime.now(UTC),
-        }
-        if last_ai_message is not None:
-            values["last_ai_message"] = last_ai_message[:2000]
-        if first_human_message is not None:
-            values["first_human_message"] = first_human_message[:2000]
-        if error is not None:
-            values["error"] = error
-        if stop_reason is not None:
-            values["stop_reason"] = stop_reason
+        values = self._completion_values(
+            status=status,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
+            total_tokens=total_tokens,
+            llm_call_count=llm_call_count,
+            lead_agent_tokens=lead_agent_tokens,
+            subagent_tokens=subagent_tokens,
+            middleware_tokens=middleware_tokens,
+            token_usage_by_model=token_usage_by_model,
+            message_count=message_count,
+            last_ai_message=last_ai_message,
+            first_human_message=first_human_message,
+            error=error,
+            stop_reason=stop_reason,
+        )
         allowed_sources = ["pending", "running"]
         if status not in allowed_sources:
             allowed_sources.append(status)
-        if status == "error" and "interrupted" not in allowed_sources:
-            allowed_sources.append("interrupted")
         async with self._sf() as session:
             result = await session.execute(
                 update(RunRow)
@@ -386,6 +434,240 @@ class RunRepository(RunStore):
             )
             await session.commit()
             return result.rowcount != 0
+
+    async def finalize_completion_if_owned_and_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        status: str,
+        total_input_tokens: int = 0,
+        total_output_tokens: int = 0,
+        total_tokens: int = 0,
+        llm_call_count: int = 0,
+        lead_agent_tokens: int = 0,
+        subagent_tokens: int = 0,
+        middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
+        message_count: int = 0,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> StatusFinalization:
+        """Atomically finalize the complete snapshot for the active owner."""
+        values = self._completion_values(
+            status=status,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
+            total_tokens=total_tokens,
+            llm_call_count=llm_call_count,
+            lead_agent_tokens=lead_agent_tokens,
+            subagent_tokens=subagent_tokens,
+            middleware_tokens=middleware_tokens,
+            token_usage_by_model=token_usage_by_model,
+            message_count=message_count,
+            last_ai_message=last_ai_message,
+            first_human_message=first_human_message,
+            error=error,
+            stop_reason=stop_reason,
+        )
+        async with self._sf() as session:
+            active_fence = RunRow.status.in_(("pending", "running")) & RunRow.cancel_action.is_(None)
+            if require_unexpired_lease:
+                database_now = _database_wall_clock(
+                    session.get_bind().dialect.name,
+                )
+                live_lease = RunRow.lease_expires_at.is_not(None) & (RunRow.lease_expires_at > database_now)
+                active_fence &= live_lease
+            eligible_sources = [
+                RunRow.status == status,
+                active_fence,
+            ]
+            if status == "error":
+                eligible_sources.append(
+                    (RunRow.status == "interrupted") & RunRow.cancel_action.is_(None),
+                )
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == expected_owner_worker_id,
+                    or_(*eligible_sources),
+                )
+                .values(**values)
+                .returning(RunRow.run_id)
+            )
+            if result.first() is not None:
+                await session.commit()
+                return StatusFinalization(
+                    finalized=True,
+                    durable_write_confirmed=True,
+                )
+
+            active_cancellation_fence = RunRow.status.in_(("pending", "running"))
+            if require_unexpired_lease:
+                database_now = _database_wall_clock(
+                    session.get_bind().dialect.name,
+                )
+                active_cancellation_fence &= RunRow.lease_expires_at.is_not(
+                    None,
+                ) & (RunRow.lease_expires_at > database_now)
+            current = await session.execute(
+                select(RunRow.cancel_action).where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == expected_owner_worker_id,
+                    RunRow.cancel_action.is_not(None),
+                    or_(
+                        active_cancellation_fence,
+                        (RunRow.cancel_action == "interrupt") & (RunRow.status == "interrupted"),
+                        (RunRow.cancel_action == "rollback") & RunRow.status.in_(("interrupted", "error")),
+                    ),
+                )
+            )
+            cancel_action = current.scalar_one_or_none()
+            await session.commit()
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+
+    async def finalize_cancelled_completion_if_owned(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        expected_cancel_action: str,
+        status: str,
+        total_input_tokens: int = 0,
+        total_output_tokens: int = 0,
+        total_tokens: int = 0,
+        llm_call_count: int = 0,
+        lead_agent_tokens: int = 0,
+        subagent_tokens: int = 0,
+        middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
+        message_count: int = 0,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> StatusFinalization:
+        """Atomically persist a cancellation's complete terminal snapshot."""
+        allowed_targets = {
+            "interrupt": {"interrupted"},
+            "rollback": {"interrupted", "error"},
+        }.get(expected_cancel_action, set())
+        if status not in allowed_targets:
+            return StatusFinalization(finalized=False)
+        allowed_sources = ["pending", "running"]
+        if expected_cancel_action == "rollback" and status == "error":
+            allowed_sources.append("interrupted")
+        values = self._completion_values(
+            status=status,
+            total_input_tokens=total_input_tokens,
+            total_output_tokens=total_output_tokens,
+            total_tokens=total_tokens,
+            llm_call_count=llm_call_count,
+            lead_agent_tokens=lead_agent_tokens,
+            subagent_tokens=subagent_tokens,
+            middleware_tokens=middleware_tokens,
+            token_usage_by_model=token_usage_by_model,
+            message_count=message_count,
+            last_ai_message=last_ai_message,
+            first_human_message=first_human_message,
+            error=error,
+            stop_reason=stop_reason,
+        )
+        async with self._sf() as session:
+            active_source_fence = RunRow.status.in_(("pending", "running"))
+            if require_unexpired_lease:
+                database_now = _database_wall_clock(
+                    session.get_bind().dialect.name,
+                )
+                active_source_fence &= RunRow.lease_expires_at.is_not(None) & (RunRow.lease_expires_at > database_now)
+            source_fences = [active_source_fence]
+            if expected_cancel_action == "rollback" and status == "error":
+                source_fences.append(RunRow.status == "interrupted")
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == expected_owner_worker_id,
+                    or_(*source_fences),
+                    RunRow.cancel_action == expected_cancel_action,
+                )
+                .values(**values)
+                .returning(RunRow.run_id)
+            )
+            if result.first() is not None:
+                await session.commit()
+                return StatusFinalization(
+                    finalized=True,
+                    durable_write_confirmed=True,
+                )
+
+            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
+            cancel_action = current.scalar_one_or_none()
+            await session.commit()
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+
+    async def insert_terminal_completion_if_absent(
+        self,
+        run_id: str,
+        *,
+        run_payload: dict[str, Any],
+        completion_payload: dict[str, Any],
+    ) -> bool:
+        """Insert one complete terminal snapshot without touching conflicts."""
+        resolved_user_id = resolve_user_id(
+            run_payload.get("user_id", AUTO),
+            method_name="RunRepository.insert_terminal_completion_if_absent",
+        )
+        now = datetime.now(UTC)
+        created_at = run_payload.get("created_at")
+        created = datetime.fromisoformat(created_at) if created_at else now
+        lease_expires_at = run_payload.get("lease_expires_at")
+        lease_dt = datetime.fromisoformat(lease_expires_at) if lease_expires_at else None
+        values: dict[str, Any] = {
+            "thread_id": run_payload["thread_id"],
+            "assistant_id": run_payload.get("assistant_id"),
+            "user_id": resolved_user_id,
+            "model_name": self._normalize_model_name(run_payload.get("model_name")),
+            "status": completion_payload["status"],
+            "operation_kind": run_payload.get("operation_kind", "run"),
+            "multitask_strategy": run_payload.get("multitask_strategy", "reject"),
+            "metadata_json": self._safe_json(run_payload.get("metadata")) or {},
+            "kwargs_json": self._safe_json(run_payload.get("kwargs")) or {},
+            "error": run_payload.get("error"),
+            "stop_reason": run_payload.get("stop_reason"),
+            "owner_worker_id": run_payload.get("owner_worker_id"),
+            "lease_expires_at": lease_dt,
+            "idempotency_key": run_payload.get("idempotency_key"),
+            "created_at": created,
+            "updated_at": now,
+        }
+        values.update(self._completion_values(**completion_payload))
+
+        async with self._sf() as session:
+            session.add(RunRow(run_id=run_id, **values))
+            try:
+                await session.commit()
+            except IntegrityError:
+                await session.rollback()
+                # Only a run-id conflict is the expected insert-if-absent
+                # miss. Do not hide idempotency-key or schema violations as a
+                # harmless race, otherwise the supervisor would retry forever
+                # without surfacing the real persistence error.
+                if await session.get(RunRow, run_id) is not None:
+                    return False
+                raise
+        return True
 
     async def update_run_progress(
         self,
@@ -612,7 +894,10 @@ class RunRepository(RunStore):
             )
             if result.first() is not None:
                 await session.commit()
-                return StatusFinalization(finalized=True)
+                return StatusFinalization(
+                    finalized=True,
+                    durable_write_confirmed=True,
+                )
 
             current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
             cancel_action = current.scalar_one_or_none()
@@ -634,6 +919,8 @@ class RunRepository(RunStore):
         values: dict[str, Any] = {
             "status": "error",
             "error": error,
+            "owner_worker_id": None,
+            "lease_expires_at": None,
             "updated_at": datetime.now(UTC),
         }
         if stop_reason is not None:

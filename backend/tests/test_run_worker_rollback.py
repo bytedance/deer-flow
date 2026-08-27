@@ -158,6 +158,103 @@ async def test_remote_cancel_wins_when_graph_finishes_before_owner_heartbeat():
     assert record.status == RunStatus.error
 
 
+@pytest.mark.anyio
+async def test_no_event_store_keeps_admission_fenced_until_rollback_finishes(
+    monkeypatch,
+):
+    """Checkpoint rollback must finish before the durable row becomes terminal."""
+    store = MemoryRunStore()
+    ownership = RunOwnershipConfig(
+        heartbeat_enabled=True,
+        lease_seconds=30,
+        grace_seconds=10,
+    )
+    owner = RunManager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    peer = RunManager(
+        store=store,
+        worker_id="worker-b",
+        run_ownership_config=ownership,
+    )
+    record = await owner.create_or_reject("thread-rollback-admission-fence")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    stream_started = asyncio.Event()
+    finish_stream = asyncio.Event()
+    rollback_started = asyncio.Event()
+    finish_rollback = asyncio.Event()
+
+    class _FinishingAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            del graph_input, config, stream_mode, subgraphs
+            stream_started.set()
+            await finish_stream.wait()
+            yield {"messages": []}
+
+    async def blocked_rollback(**_kwargs):
+        rollback_started.set()
+        await finish_rollback.wait()
+        return True
+
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._rollback_to_pre_run_checkpoint",
+        blocked_rollback,
+    )
+    task = asyncio.create_task(
+        run_agent(
+            bridge,
+            owner,
+            record,
+            ctx=RunContext(checkpointer=None, event_store=None),
+            agent_factory=lambda **_kwargs: _FinishingAgent(),
+            graph_input={},
+            config={},
+        )
+    )
+    record.task = task
+
+    try:
+        await asyncio.wait_for(stream_started.wait(), timeout=1)
+        assert await owner.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+        await asyncio.wait_for(rollback_started.wait(), timeout=1)
+
+        stored_during_rollback = await store.get(record.run_id)
+        assert stored_during_rollback is not None
+        assert stored_during_rollback["status"] == RunStatus.running.value
+        assert stored_during_rollback["cancel_action"] == "rollback"
+        with pytest.raises(ConflictError):
+            await peer.create_or_reject("thread-rollback-admission-fence")
+
+        finish_rollback.set()
+        await asyncio.wait_for(task, timeout=1)
+
+        stored_after_rollback = await store.get(record.run_id)
+        assert stored_after_rollback is not None
+        assert stored_after_rollback["status"] == RunStatus.error.value
+        admitted = await peer.create_or_reject(
+            "thread-rollback-admission-fence",
+        )
+        assert admitted.status == RunStatus.pending
+    finally:
+        finish_stream.set()
+        finish_rollback.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):
     materialized_messages = tuple(messages)
     return RollbackPoint(
@@ -1175,6 +1272,25 @@ async def test_rollback_forks_pre_run_checkpoint_without_deleting_thread(monkeyp
             task_id="task-b",
         ),
     ]
+
+
+@pytest.mark.anyio
+async def test_rollback_skips_checkpoint_mutation_after_authority_loss():
+    """A stale owner must never rewind a peer's checkpoint lineage."""
+    checkpointer = FakeCheckpointer()
+
+    restored = await _rollback_to_pre_run_checkpoint(
+        accessor=None,
+        checkpointer=checkpointer,
+        thread_id="thread-lease-lost",
+        run_id="run-lease-lost",
+        rollback_point=None,
+        snapshot_capture_failed=False,
+        authority_check=lambda: False,
+    )
+
+    assert restored is False
+    checkpointer.adelete_thread.assert_not_awaited()
 
 
 @pytest.mark.anyio

@@ -59,20 +59,95 @@ publishing the stream END marker fails. Memory-only managers retain terminal
 records so history is not lost. Store-backed managers keep one strongly
 referenced task per run; after the grace period it reads the stored row first,
 skips redundant writes when the matching terminal completion snapshot is already
-durable, and repairs only the stale status and/or completion snapshot before
-verification. The completion snapshot includes `stop_reason`, so a successful
-completion write cannot hide a failed terminal-status write and allow eviction
-of the only copy of a cap/loop reason. Only a verified terminal row permits
-removal from `_runs` and `_runs_by_thread`. A missing, active, incomplete, or unreadable stored row retains
-the local record, emits a retry-attempt debug record, and retries later. The
-`finalizing` barrier applies to every terminal status, including `timeout` and
-`interrupted`. Shutdown fences new eviction schedules and boundedly cancels
-existing timers before draining workers.
+durable, and repairs through a single owner-fenced completion CAS. For active
+rows, built-in stores also require no cancellation action to have won. If a
+cancellation action is already durable but its terminal status write failed, a
+separate CAS requires the same owner, exact action, and matching outcome
+(`interrupt` -> `interrupted`; `rollback` -> `error`) before writing the full
+snapshot. The rollback CAS may advance the durable, owner-matched
+`interrupted` intermediate to `error` if that second status write was lost. If
+the durable cancellation request itself failed, the same transition is allowed
+only through the owner-fenced, cancellation-empty path plus the local rollback
+proof. Generic status/completion APIs treat `interrupted` as terminal and can
+never advance it; only these fenced rollback paths may perform
+`interrupted` -> `error`. Cancellation responses are treated as potentially ambiguous commits:
+the manager re-reads and adopts the first durable action, and if neither the
+write nor that authority read can be confirmed it defers local cancellation
+instead of guessing (especially never executing a destructive rollback). The
+heartbeat applies any action that did commit. If it arrives after a terminal
+result was staged, `run_agent` observes it inside the finalization path without
+injecting `CancelledError` into `finally`, then runs the cancellation/rollback
+before the terminal CAS. If the worker has already returned, the supervisor
+fences that stale local result and stops renewing so recovery cannot be pinned
+forever.
+Running rollback keeps the durable row active until checkpoint restoration is
+finished; no-event-store and edit-replay paths stage their terminal result in
+memory and terminalize only through the final convergence gate. This preserves
+the cross-worker admission fence so a peer cannot write a new checkpoint
+lineage that the old worker then rewinds. Losing ownership revokes checkpoint
+rollback authority as well as RunStore write authority. Shutdown establishes
+the durable first-writer cancel action before signalling a live worker, never
+injects a second cancellation into cleanup, and lets pending rollback pass the
+normal startup barrier without deleting pre-existing thread state.
 
-Idempotent admission rehydrates only active (`pending`/`running`/`finalizing`)
-records into `RunManager`'s local indexes. Reused terminal results remain
-store-only because the Gateway returns them without starting a worker or
-scheduling another eviction. Delayed stream-bridge cleanup tasks are strongly
+A completion CAS surfaces a
+durable cancellation only while the expected worker still owns a live active
+row or an owner/action-consistent terminal row; takeover rows may retain the
+historical action but must never make the stale worker execute it. A row
+already at the same terminal status may be completed only when its owner and
+durable error/stop identity still match; lease takeover clears the old owner so
+the stale worker cannot enter that path. Third-party stores without the optional
+capability retain general legacy repair only in single-worker mode. With
+heartbeat ownership, missing/active rows fail closed and release renewal for
+peer recovery; an already-terminal same-status row may use the legacy snapshot
+write only after its owner, cancel, error, and stop identity are verified,
+because terminal rows are ineligible for takeover. Operators sharing a store
+across workers should still implement the fenced capabilities. The completion snapshot includes
+`stop_reason`, so a successful
+completion write cannot hide a failed terminal-status write and allow eviction
+of the only copy of a cap/loop reason. Worker completion and eviction share the
+same convergence gate, so neither path can fall back to an ownerless write for
+an existing terminal row. A missing row is rebuilt with an atomic
+insert-if-absent full snapshot; a concurrent row always wins and is never
+overwritten. Existing terminal rows with a peer/conflicting identity are
+read-only and authoritative, so the stale local record can be evicted instead
+of retrying forever. In heartbeat mode, recognizing such a winning terminal row
+also fences local post-run metadata/title/lifecycle side effects through
+`ownership_lost`; this authority check uses owner/recovery metadata even when
+every completion field happens to match. An incomplete locally-owned
+same-status snapshot can still be finished without changing the chosen terminal
+outcome. Before title synchronization, thread-status updates, or
+`on_run_completed`, the worker always performs a read-only terminal-authority
+check, even when no run event store/journal exists or preflight ended before
+completion accounting began; uncertain or peer-owned rows suppress those
+post-run side effects. A transient gate read may reuse a same-status,
+process-local proof from a successful terminal write because terminal rows are
+ineligible for takeover; the proof is cleared on every local status change or
+ownership fence. Without that proof, read failure remains fail-closed so a peer
+outcome cannot leak through to local callbacks.
+Only a verified terminal row permits removal from `_runs` and `_runs_by_thread`.
+An active, incomplete, unreadable, or unsuccessfully repaired row retains the
+local record, emits a retry-attempt debug record, and retries with capped
+exponential backoff plus clipped jitter. The
+`finalizing` barrier applies to every terminal status, including `timeout` and
+`interrupted`, and the final prune rechecks the captured local status after all
+store I/O. Shutdown fences new eviction schedules and boundedly cancels existing
+timers with a small dedicated budget before draining workers, then reissues
+cancellation for any task still unwinding while retaining its strong reference.
+While a terminal result lacks confirmed durable authority, that supervised
+eviction task continues to own lease renewal after the worker task returns; the
+five-minute retention delay therefore cannot let an active durable row expire
+and be rewritten as an orphan before its convergence retry. Renewal stops when
+the record is confirmed or evicted, the supervisor ends, ownership is fenced,
+or shutdown cancels it.
+
+Idempotent conflict hydration is always a one-shot, store-only response. It is
+never inserted into `RunManager`'s execution indexes, including when the
+durable row is active: this process has no worker, heartbeat, or eviction task
+for that peer-owned snapshot, and indexing it would both stale the local view
+and let cancellation present the peer's owner id to fenced store methods.
+Subsequent reads, cancellation, and orphan reconciliation therefore consult the
+durable store. Delayed stream-bridge cleanup tasks are strongly
 referenced by the worker module until completion, and their exceptions are
 explicitly observed and logged; never replace that supervisor with a bare
 `asyncio.create_task()`.

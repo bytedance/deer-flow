@@ -136,9 +136,10 @@ class MemoryRunStore(RunStore):
         run = self._runs.get(run_id)
         if run is None:
             return False
-        # Guard: only transition rows that are still active. ``interrupted``
-        # is included for the rollback path (``interrupted → error`` finalize).
-        if run["status"] not in ("pending", "running", "interrupted"):
+        # Generic status writes may only terminalize active rows. In
+        # particular, ``interrupted`` is terminal: rollback advancement to
+        # ``error`` must use the owner/action-fenced completion primitive.
+        if run["status"] not in ("pending", "running"):
             return False
         run["status"] = status
         if error is not None:
@@ -166,16 +167,15 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
-    async def update_run_completion(self, run_id, *, status, stop_reason=None, **kwargs):
-        run = self._runs.get(run_id)
-        if run is None:
-            return False
-        current_status = run.get("status")
-        allowed_sources = {"pending", "running", status}
-        if status == "error":
-            allowed_sources.add("interrupted")
-        if current_status not in allowed_sources:
-            return False
+    @staticmethod
+    def _apply_completion_snapshot(
+        run,
+        *,
+        status,
+        stop_reason=None,
+        **kwargs,
+    ) -> None:
+        """Apply a pre-fenced completion snapshot without another status gate."""
         run["status"] = status
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
@@ -183,6 +183,162 @@ class MemoryRunStore(RunStore):
             if value is not None:
                 run[key] = value
         run["updated_at"] = datetime.now(UTC).isoformat()
+
+    async def update_run_completion(self, run_id, *, status, stop_reason=None, **kwargs):
+        run = self._runs.get(run_id)
+        if run is None:
+            return False
+        current_status = run.get("status")
+        allowed_sources = {"pending", "running", status}
+        if current_status not in allowed_sources:
+            return False
+        self._apply_completion_snapshot(
+            run,
+            status=status,
+            stop_reason=stop_reason,
+            **kwargs,
+        )
+        return True
+
+    async def finalize_completion_if_owned_and_not_cancelled(
+        self,
+        run_id,
+        *,
+        expected_owner_worker_id,
+        status,
+        stop_reason=None,
+        require_unexpired_lease=False,
+        **kwargs,
+    ) -> StatusFinalization:
+        run = self._runs.get(run_id)
+        if run is None:
+            return StatusFinalization(finalized=False)
+        cancel_action = run.get("cancel_action")
+        if run.get("owner_worker_id") != expected_owner_worker_id:
+            return StatusFinalization(finalized=False)
+        current_status = run.get("status")
+        if require_unexpired_lease and current_status in {"pending", "running"}:
+            try:
+                lease_deadline = datetime.fromisoformat(run.get("lease_expires_at"))
+                if lease_deadline.tzinfo is None:
+                    lease_deadline = lease_deadline.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                return StatusFinalization(finalized=False)
+            if lease_deadline <= datetime.now(UTC):
+                return StatusFinalization(finalized=False)
+        if cancel_action is not None and current_status != status:
+            # Surface a cancellation only while this caller still owns the
+            # active row (and, when requested, its lease is live). A peer
+            # takeover may preserve cancel_action on its terminal row; the
+            # stale worker must not interpret that as permission to roll back.
+            terminal_cancel_matches = (cancel_action == "interrupt" and current_status == "interrupted") or (cancel_action == "rollback" and current_status in {"interrupted", "error"})
+            if current_status in {"pending", "running"} or terminal_cancel_matches:
+                return StatusFinalization(
+                    finalized=False,
+                    cancel_action=cancel_action,
+                )
+            return StatusFinalization(finalized=False)
+        allowed_sources = {"pending", "running", status}
+        if status == "error" and cancel_action is None:
+            allowed_sources.add("interrupted")
+        if current_status not in allowed_sources:
+            return StatusFinalization(finalized=False)
+        # Apply directly so a subclass override cannot insert a suspension
+        # point or re-run the generic terminal-status guard after these
+        # stronger owner/cancel/lease fences have succeeded.
+        self._apply_completion_snapshot(
+            run,
+            status=status,
+            stop_reason=stop_reason,
+            **kwargs,
+        )
+        return StatusFinalization(
+            finalized=True,
+            durable_write_confirmed=True,
+        )
+
+    async def finalize_cancelled_completion_if_owned(
+        self,
+        run_id,
+        *,
+        expected_owner_worker_id,
+        expected_cancel_action,
+        status,
+        stop_reason=None,
+        require_unexpired_lease=False,
+        **kwargs,
+    ) -> StatusFinalization:
+        run = self._runs.get(run_id)
+        if run is None:
+            return StatusFinalization(finalized=False)
+        cancel_action = run.get("cancel_action")
+        allowed_targets = {
+            "interrupt": {"interrupted"},
+            "rollback": {"interrupted", "error"},
+        }.get(expected_cancel_action, set())
+        if status not in allowed_targets:
+            return StatusFinalization(finalized=False)
+        if cancel_action != expected_cancel_action:
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+        if run.get("owner_worker_id") != expected_owner_worker_id:
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+        allowed_sources = {"pending", "running"}
+        if expected_cancel_action == "rollback" and status == "error":
+            allowed_sources.add("interrupted")
+        if run.get("status") not in allowed_sources:
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+        if require_unexpired_lease and run.get("status") in {"pending", "running"}:
+            try:
+                lease_deadline = datetime.fromisoformat(run.get("lease_expires_at"))
+                if lease_deadline.tzinfo is None:
+                    lease_deadline = lease_deadline.replace(tzinfo=UTC)
+            except (TypeError, ValueError):
+                return StatusFinalization(
+                    finalized=False,
+                    cancel_action=cancel_action,
+                )
+            if lease_deadline <= datetime.now(UTC):
+                return StatusFinalization(
+                    finalized=False,
+                    cancel_action=cancel_action,
+                )
+        # As above, keep the complete snapshot mutation inside the already
+        # validated owner/action critical section.
+        self._apply_completion_snapshot(
+            run,
+            status=status,
+            stop_reason=stop_reason,
+            **kwargs,
+        )
+        return StatusFinalization(
+            finalized=True,
+            durable_write_confirmed=True,
+        )
+
+    async def insert_terminal_completion_if_absent(
+        self,
+        run_id,
+        *,
+        run_payload,
+        completion_payload,
+    ) -> bool:
+        if run_id in self._runs:
+            return False
+        # Call the concrete implementations directly: both contain no
+        # suspension points, and subclass overrides cannot weaken the atomic
+        # existence-check + complete-snapshot critical section.
+        await MemoryRunStore.put(self, run_id, **run_payload)
+        run = self._runs[run_id]
+        self._apply_completion_snapshot(run, **completion_payload)
         return True
 
     async def update_run_progress(self, run_id, **kwargs):
@@ -321,7 +477,10 @@ class MemoryRunStore(RunStore):
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
-        return StatusFinalization(finalized=True)
+        return StatusFinalization(
+            finalized=True,
+            durable_write_confirmed=True,
+        )
 
     async def claim_for_takeover(
         self,
@@ -343,6 +502,8 @@ class MemoryRunStore(RunStore):
             return False
         run["status"] = "error"
         run["error"] = error
+        run["owner_worker_id"] = None
+        run["lease_expires_at"] = None
         if stop_reason is not None:
             run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()

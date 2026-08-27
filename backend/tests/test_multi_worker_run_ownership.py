@@ -761,6 +761,9 @@ async def test_shutdown_cancels_recovery_that_exceeds_drain_budget():
     await manager.shutdown(timeout=0.01)
 
     assert callback_cancelled.is_set()
+    # The recovery task remains strongly referenced until its done callback
+    # runs on the next loop turn; shutdown must not unboundedly gather it.
+    await asyncio.sleep(0)
     assert manager._orphan_recovery_task is None
 
 
@@ -788,6 +791,142 @@ async def test_shutdown_applies_shared_deadline_to_heartbeat_stop():
     elapsed = asyncio.get_running_loop().time() - started
     assert heartbeat_cancelled.is_set()
     assert elapsed < 0.5
+
+
+@pytest.mark.anyio
+async def test_shutdown_adopts_unobserved_durable_rollback_winner():
+    """Shutdown's synthetic interrupt must respect an earlier durable rollback."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+        ),
+    )
+    record = await manager.create_or_reject("thread-shutdown-rollback")
+    await manager.set_status(record.run_id, RunStatus.running)
+    assert await store.request_cancel(record.run_id, action="rollback") == "rollback"
+    store.request_cancel = AsyncMock(wraps=store.request_cancel)
+    assert record.abort_event.is_set() is False
+    observed_action: list[str] = []
+
+    async def worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed_action.append(record.abort_action)
+
+    record.task = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+
+    await manager.shutdown(timeout=1.0)
+
+    assert observed_action == ["rollback"]
+    assert record.abort_action == "rollback"
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["cancel_action"] == "rollback"
+    store.request_cancel.assert_awaited_once_with(
+        record.run_id,
+        action="interrupt",
+    )
+
+
+@pytest.mark.anyio
+async def test_shutdown_signals_pending_rollback_without_injecting_cancellation():
+    """A pending rollback must use startup cleanup, never delete thread state."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+        ),
+    )
+    record = await manager.create_or_reject("thread-shutdown-pending-rollback")
+    assert record.status == RunStatus.pending
+    assert await store.request_cancel(record.run_id, action="rollback") == "rollback"
+    cancellation_injected = asyncio.Event()
+    observed_action: list[str] = []
+
+    async def pending_worker() -> None:
+        try:
+            await record.abort_event.wait()
+        except asyncio.CancelledError:
+            cancellation_injected.set()
+            raise
+        observed_action.append(record.abort_action)
+        await manager.set_status(
+            record.run_id,
+            RunStatus.error,
+            error="Rolled back by user",
+        )
+
+    record.task = asyncio.create_task(pending_worker())
+    await asyncio.sleep(0)
+
+    await manager.shutdown(timeout=1.0)
+
+    assert cancellation_injected.is_set() is False
+    assert observed_action == ["rollback"]
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["status"] == RunStatus.error.value
+    assert stored["cancel_action"] == "rollback"
+
+
+@pytest.mark.anyio
+async def test_shutdown_does_not_cancel_inflight_rollback_cleanup_twice():
+    """An already-signalled worker must receive exactly one CancelledError."""
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=_lease_config(
+            heartbeat_enabled=True,
+            lease_seconds=30,
+        ),
+    )
+    record = await manager.create_or_reject("thread-shutdown-cancel-once")
+    await manager.set_status(record.run_id, RunStatus.running)
+    assert await store.request_cancel(record.run_id, action="rollback") == "rollback"
+    store.request_cancel = AsyncMock(wraps=store.request_cancel)
+    first_cancel_seen = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    second_cancel_seen = asyncio.Event()
+
+    async def worker() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancel_seen.set()
+            try:
+                await release_cleanup.wait()
+            except asyncio.CancelledError:
+                second_cancel_seen.set()
+                raise
+
+    record.task = asyncio.create_task(worker())
+    await asyncio.sleep(0)
+    assert await manager._signal_local_cancel(
+        record.run_id,
+        action="rollback",
+    )
+    await asyncio.wait_for(first_cancel_seen.wait(), timeout=1.0)
+
+    shutdown_task = asyncio.create_task(manager.shutdown(timeout=1.0))
+    await asyncio.sleep(0)
+
+    assert record.task.cancelling() == 1
+    assert second_cancel_seen.is_set() is False
+    store.request_cancel.assert_not_awaited()
+
+    release_cleanup.set()
+    await asyncio.wait_for(shutdown_task, timeout=1.0)
+    assert second_cancel_seen.is_set() is False
 
 
 # ---------------------------------------------------------------------------
@@ -818,6 +957,153 @@ async def test_heartbeat_renews_active_run_leases():
     assert record.lease_expires_at is not None
     # Lease should have been extended
     assert record.lease_expires_at >= original_lease
+
+
+@pytest.mark.anyio
+async def test_heartbeat_fences_invalid_durable_cancel_action():
+    """Malformed durable actions must not pin a locally renewed active row."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject("thread-invalid-cancel")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.Event().wait())
+    store._runs[record.run_id]["cancel_action"] = "bogus"
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    try:
+        await manager._renew_leases()
+        await asyncio.sleep(0)
+
+        assert record.ownership_lost is True
+        assert record.abort_event.is_set() is True
+        assert record.task.cancelled() is True
+
+        await manager._renew_leases()
+        store.update_lease.assert_awaited_once()
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_heartbeat_renews_durable_active_row_during_terminal_finalizing():
+    """A staged local terminal result must not stop the still-active row's lease."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject("thread-finalizing-lease")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.Event().wait())
+
+    try:
+        original_lease = record.lease_expires_at
+        assert original_lease is not None
+        # Normal journal-backed completion stages a terminal status locally
+        # without setting ``finalizing`` before its receipt/progress writes.
+        await manager.set_status(record.run_id, RunStatus.success, persist=False)
+        # Windows clocks can expose coarser wall-time resolution under load.
+        await asyncio.sleep(0.05)
+        store.update_lease = AsyncMock(wraps=store.update_lease)
+
+        await manager._renew_leases()
+
+        store.update_lease.assert_awaited_once()
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == RunStatus.running.value
+        assert record.lease_expires_at is not None
+        assert record.lease_expires_at > original_lease
+    finally:
+        record.task.cancel()
+        await asyncio.gather(record.task, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_eviction_supervisor_keeps_unconfirmed_terminal_lease_alive():
+    """The durability retry task owns the lease after the worker has returned."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject("thread-terminal-retry-lease")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(0))
+    await record.task
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    assert record.durable_terminal_authority_status is None
+
+    eviction = manager.schedule_terminal_eviction(record.run_id)
+    assert eviction is not None
+    assert eviction.done() is False
+    original_lease = record.lease_expires_at
+    assert original_lease is not None
+    await asyncio.sleep(0.05)
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    try:
+        await manager._renew_leases()
+
+        store.update_lease.assert_awaited_once()
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == RunStatus.running.value
+        assert record.lease_expires_at is not None
+        assert record.lease_expires_at > original_lease
+    finally:
+        eviction.cancel()
+        await asyncio.gather(eviction, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_terminal_supervisor_stops_renewing_when_durable_cancel_wins():
+    """A finished worker cannot let an unhandled cancel pin its active row."""
+    config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
+    store = MemoryRunStore()
+    manager = _make_manager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=config,
+    )
+    record = await manager.create_or_reject("thread-terminal-cancel-after-worker")
+    await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(0))
+    await record.task
+    await manager.set_status(record.run_id, RunStatus.success, persist=False)
+    assert await store.request_cancel(record.run_id, action="rollback") == "rollback"
+    eviction = manager.schedule_terminal_eviction(record.run_id)
+    assert eviction is not None
+    store.update_lease = AsyncMock(wraps=store.update_lease)
+
+    try:
+        await manager._renew_leases()
+
+        store.update_lease.assert_awaited_once()
+        assert record.ownership_lost is True
+        assert record.abort_event.is_set() is True
+        assert record.abort_action == "interrupt"
+
+        await manager._renew_leases()
+        store.update_lease.assert_awaited_once()
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == RunStatus.running.value
+        assert stored["cancel_action"] == "rollback"
+    finally:
+        eviction.cancel()
+        await asyncio.gather(eviction, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -1564,6 +1850,7 @@ async def test_claim_for_takeover_succeeds_with_expired_lease():
     grace = 10
     expired_lease = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
     await store.put("run-1", thread_id="t1", status="running", created_at=datetime.now(UTC).isoformat(), owner_worker_id="w-a", lease_expires_at=expired_lease)
+    assert await store.request_cancel("run-1", action="rollback") == "rollback"
 
     ok = await store.claim_for_takeover(
         "run-1",
@@ -1578,6 +1865,21 @@ async def test_claim_for_takeover_succeeds_with_expired_lease():
     assert row["status"] == "error"
     assert row["error"] == "claimed"
     assert row["stop_reason"] == ORPHAN_RECOVERY_STOP_REASON
+    assert row["owner_worker_id"] is None
+    assert row["lease_expires_at"] is None
+    assert row["cancel_action"] == "rollback"
+
+    stale_owner = await store.finalize_completion_if_owned_and_not_cancelled(
+        "run-1",
+        expected_owner_worker_id="w-a",
+        status="error",
+        total_tokens=99,
+    )
+    assert stale_owner.finalized is False
+    assert stale_owner.cancel_action is None
+    row = await store.get("run-1")
+    assert row["error"] == "claimed"
+    assert row.get("total_tokens") in (None, 0)
 
 
 @pytest.mark.anyio
@@ -1745,8 +2047,8 @@ async def test_first_cancel_action_wins_when_retry_lands_on_owner():
 
 
 @pytest.mark.anyio
-async def test_local_owner_cancel_falls_back_when_durable_request_fails():
-    """A local owner can still abort its own task when durable cancel persistence fails."""
+async def test_local_owner_cancel_fails_closed_when_durable_request_is_unknown():
+    """An owner must not guess a destructive action after an ambiguous write."""
 
     class FailingCancelStore(MemoryRunStore):
         async def request_cancel(self, run_id: str, *, action: str) -> str | None:
@@ -1764,16 +2066,14 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
     record.task = asyncio.create_task(asyncio.sleep(3600))
 
     try:
-        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
-        assert record.abort_event.is_set()
-        assert record.abort_action == "rollback"
-
-        with pytest.raises(asyncio.CancelledError):
-            await record.task
+        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.unknown
+        assert record.abort_event.is_set() is False
+        assert record.abort_action == "interrupt"
+        assert record.task.done() is False
 
         stored = await store.get(record.run_id)
         assert stored is not None
-        assert stored["status"] == "interrupted"
+        assert stored["status"] == "running"
         assert stored["cancel_action"] is None
     finally:
         if not record.task.done():
@@ -1784,7 +2084,7 @@ async def test_local_owner_cancel_falls_back_when_durable_request_fails():
 
 @pytest.mark.anyio
 async def test_owner_cancel_retry_on_peer_is_accepted():
-    """A peer must treat the owner's interrupted status as an accepted cancel."""
+    """A peer must adopt the owner's durable first-writer cancel action."""
     store = MemoryRunStore()
     config = _lease_config(heartbeat_enabled=True, lease_seconds=30)
     owner = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
@@ -1798,7 +2098,9 @@ async def test_owner_cancel_retry_on_peer_is_accepted():
 
     stored = await store.get(record.run_id)
     assert stored is not None
-    assert stored["status"] == "interrupted"
+    # Rollback keeps the admission fence active until checkpoint restoration
+    # advances the row to its final error status.
+    assert stored["status"] == "running"
     assert stored["cancel_action"] == "rollback"
 
 
@@ -1812,15 +2114,25 @@ async def test_owner_cancel_uses_store_while_terminal_status_is_staged_locally()
     )
     record = await manager.create_or_reject("thread-1")
     await manager.set_status(record.run_id, RunStatus.running)
+    record.task = asyncio.create_task(asyncio.sleep(3600))
 
     # Event-store finalization stages success in memory before persisting it.
     record.status = RunStatus.success
 
-    assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
-    stored = await store.get(record.run_id)
-    assert stored is not None
-    assert stored["status"] == "running"
-    assert stored["cancel_action"] == "rollback"
+    try:
+        assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+        assert record.abort_event.is_set()
+        assert record.abort_action == "rollback"
+        assert record.task.done() is False
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == "running"
+        assert stored["cancel_action"] == "rollback"
+    finally:
+        if not record.task.done():
+            record.task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await record.task
 
 
 @pytest.mark.anyio
@@ -2116,10 +2428,7 @@ def test_http_stream_action_interrupt_takeover_returns_202_not_hang():
 
 @pytest.mark.anyio
 async def test_update_status_rejects_terminal_row():
-    """update_status must return False when the store row is already terminal
-    (error/success), so a late writer cannot overwrite a peer's takeover or
-    a completed run. interrupted is NOT terminal — the rollback path needs
-    ``interrupted → error`` to finalize."""
+    """Generic status/completion writes must not replace any terminal row."""
     store = MemoryRunStore()
     # error (takeover) must stay locked
     await store.put("run-err", thread_id="t1", status="error", created_at=datetime.now(UTC).isoformat())
@@ -2131,12 +2440,16 @@ async def test_update_status_rejects_terminal_row():
     assert await store.update_status("run-ok", "error") is False
     assert (await store.get("run-ok"))["status"] == "success"
 
-    # interrupted → error MUST pass (rollback finalize path)
+    # interrupted is terminal too. Rollback advancement uses the dedicated
+    # owner/action-fenced completion primitive, never these generic APIs.
     await store.put("run-rb", thread_id="t1", status="interrupted", created_at=datetime.now(UTC).isoformat())
-    assert await store.update_status("run-rb", "error", error="Rolled back by user") is True
+    assert await store.update_status("run-rb", "success") is False
+    assert await store.update_status("run-rb", "error", error="late error") is False
+    assert await store.update_run_completion("run-rb", status="error", total_tokens=99) is False
     row = await store.get("run-rb")
-    assert row["status"] == "error"
-    assert row["error"] == "Rolled back by user"
+    assert row["status"] == "interrupted"
+    assert row.get("error") is None
+    assert row.get("total_tokens") in (None, 0)
 
 
 @pytest.mark.anyio
@@ -2198,7 +2511,7 @@ async def test_heartbeat_cancels_task_on_lease_loss():
 @pytest.mark.anyio
 async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
     """When a peer's claim_for_takeover flips the row to error between this
-    worker's in-memory cancel and the guarded update_status, cancel() must
+    worker's in-memory cancel and the owner-fenced terminal CAS, cancel() must
     surface taken_over (not cancelled) so the client sees a status consistent
     with the store."""
     store = MemoryRunStore()
@@ -2207,22 +2520,22 @@ async def test_cancel_returns_taken_over_when_peer_claims_during_local_cancel():
     record = await mgr.create("thread-1")
     await mgr.set_status(record.run_id, RunStatus.running)
 
-    # Wrap update_status so that the first call (from cancel's _persist_status)
-    # is rejected as if a peer already marked the row error. This simulates
-    # the race: in-memory cancel succeeds, but store write is blocked.
-    original = store.update_status
+    # Wrap the cancellation CAS so a peer takeover commits immediately before
+    # the local owner/action-fenced write.
+    original = store.finalize_cancelled_completion_if_owned
 
-    async def race_update(run_id, status, *, error=None, stop_reason=None):
+    async def race_finalize(run_id, **kwargs):
         # Simulate peer takeover: flip to error before our write lands
         run = store._runs.get(run_id)
-        if run and run["status"] == "running" and status == "interrupted":
+        if run and run["status"] == "running" and kwargs["status"] == "interrupted":
             run["status"] = "error"
             run["error"] = "peer takeover"
+            run["owner_worker_id"] = None
+            run["lease_expires_at"] = None
             run["updated_at"] = datetime.now(UTC).isoformat()
-            return False  # our write was blocked
-        return await original(run_id, status, error=error, stop_reason=stop_reason)
+        return await original(run_id, **kwargs)
 
-    store.update_status = race_update
+    store.finalize_cancelled_completion_if_owned = race_finalize
 
     outcome = await mgr.cancel(record.run_id)
     assert outcome == CancelOutcome.taken_over
@@ -2237,10 +2550,9 @@ async def test_cancel_action_rollback_finalizes_to_error_in_store():
     """action=rollback must end up as error in the store with the
     "Rolled back by user" message preserved.
 
-    Regression guard: the update_status guard was originally
-    ``status IN ('pending','running')`` which blocked the rollback path's
-    ``interrupted → error`` transition — the store stayed interrupted and
-    the rollback message was lost.
+    Regression guard: rollback cancellation must keep the durable row active
+    until checkpoint restoration is complete, then owner/action-fenced
+    finalization advances it directly to error with the rollback message.
     """
     store = MemoryRunStore()
     mgr = RunManager(store=store, run_ownership_config=_lease_config(heartbeat_enabled=True))
@@ -2248,11 +2560,13 @@ async def test_cancel_action_rollback_finalizes_to_error_in_store():
     record = await mgr.create("thread-1")
     await mgr.set_status(record.run_id, RunStatus.running)
 
-    # Step 1: cancel(action=rollback) flips running → interrupted
+    # Step 1: cancellation records the first-writer action but deliberately
+    # leaves the durable row active while checkpoint restoration is pending.
     outcome = await mgr.cancel(record.run_id, action="rollback")
     assert outcome == CancelOutcome.cancelled
     row = await store.get(record.run_id)
-    assert row["status"] == "interrupted"
+    assert row["status"] == "running"
+    assert row["cancel_action"] == "rollback"
 
     # Step 2: worker.py finalize path — task raises CancelledError, then
     # set_status(error, "Rolled back by user"). The widened guard
@@ -2286,7 +2600,10 @@ async def test_peer_reconciliation_fences_late_success_and_completion():
 
     row = await store.get(record.run_id)
     assert record.ownership_lost is True
-    assert record.status == RunStatus.error
+    # Keep the losing local snapshot available for diagnostics until eviction;
+    # ownership_lost fences every external side effect and the store is
+    # authoritative for reads after eviction.
+    assert record.status == RunStatus.success
     assert row["status"] == "error"
     assert row["error"] == "peer takeover"
 
@@ -2306,7 +2623,7 @@ async def test_unconfirmed_success_is_fenced_when_heartbeat_is_enabled():
     async def fail_status_write(*_args, **_kwargs):
         raise OSError("database unreachable")
 
-    store.update_status = fail_status_write
+    store.finalize_completion_if_owned_and_not_cancelled = fail_status_write
 
     await manager.set_status(record.run_id, RunStatus.success)
 
@@ -2333,7 +2650,7 @@ async def test_unconfirmed_staged_success_is_fenced_on_deferred_persistence():
     async def fail_status_write(*_args, **_kwargs):
         raise OSError("database unreachable")
 
-    store.update_status = fail_status_write
+    store.finalize_completion_if_owned_and_not_cancelled = fail_status_write
 
     persisted = await manager.persist_current_status(record.run_id)
 
