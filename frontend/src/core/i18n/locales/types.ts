@@ -102,6 +102,8 @@ export interface Translations {
     loadFullFile: string;
     loadingFullFile: string;
     previewFailed: string;
+    viewSource: string;
+    missingTarget: string;
   };
 
   // Citations
