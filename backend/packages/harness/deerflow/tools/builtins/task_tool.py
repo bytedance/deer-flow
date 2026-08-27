@@ -70,6 +70,32 @@ async def _await_subagent_terminal(execution_id: str, max_polls: int) -> Any | N
     return None
 
 
+async def _finalize_interrupted_subagent(runtime: Runtime, execution_id: str, trace_id: str, max_polls: int) -> None:
+    """Shared unwind for interrupted polling (cancellation or unexpected error).
+
+    Wait (shielded, bounded by ``max_polls``) for the subagent to reach a
+    terminal state so the final token usage snapshot is reported to the parent
+    RunJournal, then remove the registry entry — deferring removal only if it
+    never reached terminal. Doing this before re-raising (rather than via a
+    detached task) keeps the cleanup alive under synchronous tool invocation,
+    where ``asyncio.run()`` would cancel spawned tasks at teardown.
+    """
+    terminal_result = None
+    try:
+        terminal_result = await asyncio.shield(_await_subagent_terminal(execution_id, max_polls))
+    except asyncio.CancelledError:
+        pass
+
+    # Report whatever the subagent collected (even if we timed out).
+    final_result = terminal_result or get_background_task_result(execution_id)
+    if final_result is not None:
+        _report_subagent_usage(runtime, final_result)
+    if final_result is not None and _is_subagent_terminal(final_result):
+        cleanup_background_task(execution_id)
+    else:
+        _schedule_deferred_subagent_cleanup(execution_id, trace_id, max_polls)
+
+
 async def _deferred_cleanup_subagent_task(execution_id: str, trace_id: str, max_polls: int) -> None:
     """Keep polling a cancelled subagent until it can be safely removed."""
     cleanup_poll_count = 0
@@ -513,18 +539,21 @@ async def task_tool(
     logger.info(f"[trace={trace_id}] Started background task {tool_call_id} (execution_id={execution_id}, subagent={subagent_type}, timeout={config.timeout_seconds}s, polling_limit={max_poll_count} polls)")
 
     writer = get_stream_writer()
-    # Send Task Started message'
-    await aemit_custom_event(
-        {
-            "type": "task_started",
-            "task_id": tool_call_id,
-            "description": description,
-            "model_name": effective_model,
-        },
-        writer=writer,
-    )
-
     try:
+        # Send Task Started message. This is a real await point (registered
+        # handlers run here), so it belongs inside the guarded region: an emit
+        # failure must take the same cooperative-cancel + deferred-cleanup
+        # path as any other unexpected exit, not leak the background entry.
+        await aemit_custom_event(
+            {
+                "type": "task_started",
+                "task_id": tool_call_id,
+                "description": description,
+                "model_name": effective_model,
+            },
+            writer=writer,
+        )
+
         while True:
             result = get_background_task_result(execution_id)
 
@@ -718,24 +747,20 @@ async def task_tool(
                     tool_receipts=getattr(result, "tool_receipts", None),
                 )
     except asyncio.CancelledError:
-        # Signal the background subagent thread to stop cooperatively.
+        # Signal the background subagent thread to stop cooperatively, then
+        # wait for the terminal result so the final token usage snapshot is
+        # reported to the parent RunJournal before the parent worker persists
+        # get_completion_data().
         request_cancel_background_task(execution_id)
-
-        # Wait (shielded) for the subagent to reach a terminal state so the
-        # final token usage snapshot is reported to the parent RunJournal
-        # before the parent worker persists get_completion_data().
-        terminal_result = None
-        try:
-            terminal_result = await asyncio.shield(_await_subagent_terminal(execution_id, max_poll_count))
-        except asyncio.CancelledError:
-            pass
-
-        # Report whatever the subagent collected (even if we timed out).
-        final_result = terminal_result or get_background_task_result(execution_id)
-        if final_result is not None:
-            _report_subagent_usage(runtime, final_result)
-        if final_result is not None and _is_subagent_terminal(final_result):
-            cleanup_background_task(execution_id)
-        else:
-            _schedule_deferred_subagent_cleanup(execution_id, trace_id, max_poll_count)
+        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
+        raise
+    except Exception:
+        # Unexpected poller failure (emit error, status-lookup bug, writer
+        # failure, ...). Mirror the cancellation unwind: stop the subagent
+        # cooperatively, report its final usage, and remove the registry entry
+        # (or defer removal if it never reaches terminal) before re-raising —
+        # a detached cleanup task would not survive synchronous tool
+        # invocation, where asyncio.run() cancels spawned tasks at teardown.
+        request_cancel_background_task(execution_id)
+        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
         raise

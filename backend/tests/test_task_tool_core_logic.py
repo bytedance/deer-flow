@@ -1475,6 +1475,100 @@ def test_cleanup_scheduled_on_cancellation(monkeypatch):
     assert cleanup_calls == ["tc-cancelled-cleanup"]
 
 
+def test_task_started_emit_failure_stops_subagent_reports_usage_and_cleans_up(monkeypatch):
+    """An exception from the task_started emit — a real await point before the
+    polling loop — must mirror the cancellation unwind: cooperative cancel,
+    final usage reported to the parent RunJournal, and synchronous registry
+    cleanup. A detached cleanup task would not survive asyncio.run() teardown
+    on the synchronous tool path, so the terminal case must clean up directly."""
+    config = _make_subagent_config()
+    cancel_calls: list[str] = []
+    cleanup_calls: list[str] = []
+    reported: list = []
+    terminal_result = _make_result(FakeSubagentStatus.COMPLETED, result="done")
+
+    async def failing_emit(event, *, writer=None):
+        raise RuntimeError("emit boom")
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: terminal_result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", failing_emit)
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id: cancel_calls.append(execution_id))
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda execution_id: cleanup_calls.append(execution_id))
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda runtime, result: reported.append(result))
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    with pytest.raises(RuntimeError, match="emit boom"):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-emit-fail",
+        )
+
+    assert cancel_calls == ["tc-emit-fail"], "emit failure must cooperatively cancel the subagent"
+    assert reported == [terminal_result], "emit failure must still report the subagent's final usage"
+    assert cleanup_calls == ["tc-emit-fail"], "terminal subagent must be cleaned up synchronously"
+
+
+def test_unexpected_poller_error_reports_usage_and_defers_cleanup(monkeypatch):
+    """A generic exception inside the polling loop must mirror the
+    cancellation unwind: cooperative cancel, final usage reported, and —
+    because this subagent never reaches terminal — deferred cleanup
+    scheduled."""
+    config = _make_subagent_config()
+    cancel_calls: list[str] = []
+    schedule_calls: list[str] = []
+    reported: list = []
+    running_result = _make_result(FakeSubagentStatus.RUNNING, ai_messages=["partial"])
+    emit_calls = 0
+
+    async def fail_on_status_emit(event, *, writer=None):
+        nonlocal emit_calls
+        emit_calls += 1
+        if emit_calls >= 2:
+            raise RuntimeError("status emit boom")
+        return None
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: running_result)
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id: cancel_calls.append(execution_id))
+    monkeypatch.setattr(task_tool_module, "_schedule_deferred_subagent_cleanup", lambda execution_id, trace_id, max_polls: schedule_calls.append(execution_id))
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda runtime, result: reported.append(result))
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    with pytest.raises(RuntimeError, match="status emit boom"):
+        _run_task_tool(
+            runtime=_make_runtime(),
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-poll-fail",
+        )
+
+    assert cancel_calls == ["tc-poll-fail"], "unexpected poller exit must cooperatively cancel the subagent"
+    assert reported == [running_result], "unexpected poller exit must still report the subagent's usage"
+    assert schedule_calls == ["tc-poll-fail"], "non-terminal subagent must get deferred cleanup"
+
+
 def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
     """Verify cancellation handler survives a shielded-wait timeout gracefully.
 
