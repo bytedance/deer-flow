@@ -1478,7 +1478,14 @@ async def launch_scheduled_thread_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    record = await start_run(body, thread_id, request)
+    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
+    record = await start_run(
+        body,
+        thread_id,
+        request,
+        idempotency_key=idempotency_key,
+    )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 

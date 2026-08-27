@@ -642,6 +642,30 @@ def test_build_middlewares_uses_resolved_model_name_for_vision(monkeypatch):
     assert isinstance(middlewares[-1], ClarificationMiddleware)
 
 
+def test_build_middlewares_prefers_startup_execution_capacity_after_reload(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    app_config.subagent_runtime.max_running = 12
+    monkeypatch.setattr(lead_agent_module, "_create_summarization_middleware", lambda **kwargs: None)
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+
+    middlewares = lead_agent_module.build_middlewares(
+        {
+            "configurable": {
+                "model_name": "safe-model",
+                "is_plan_mode": False,
+                "subagent_enabled": True,
+                "max_concurrent_subagents": 10,
+            }
+        },
+        model_name="safe-model",
+        app_config=app_config,
+        subagent_execution_capacity=3,
+    )
+
+    limiter = next(middleware for middleware in middlewares if isinstance(middleware, lead_agent_module.SubagentLimitMiddleware))
+    assert limiter.max_concurrent == 3
+
+
 def test_build_middlewares_passes_explicit_app_config_to_shared_factory(monkeypatch):
     app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
     captured: dict[str, object] = {}

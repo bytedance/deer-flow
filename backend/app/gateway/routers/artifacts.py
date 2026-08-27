@@ -16,10 +16,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.authz.sandbox_authz import safe_app_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
@@ -498,7 +499,14 @@ async def update_artifact(
     body: ArtifactUpdateRequest,
     request: Request,
 ) -> ArtifactUpdateResponse:
-    """Update an existing text artifact while the thread has no active run."""
+    """Update an existing text artifact while the thread has no active run.
+
+    The host-side artifact file is updated first; when the sandbox provider is
+    not thread-mounted, the new content is also synced into the thread's
+    sandbox. Under ``authorization.enabled``, a caller denied
+    ``sandbox:execute`` skips that sandbox sync (the host-side update still
+    completes).
+    """
     virtual_path = _normalize_editable_artifact_path(path)
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()
@@ -524,9 +532,18 @@ async def update_artifact(
 
             sandbox_provider = get_sandbox_provider()
             if not bool(getattr(sandbox_provider, "uses_thread_data_mounts", False)):
-                sandbox_id = await sandbox_provider.acquire_async(thread_id, user_id=effective_user_id)
-                sandbox = sandbox_provider.get(sandbox_id)
-                if sandbox is None:
+                # Phase 3: enforce sandbox:execute before acquiring — a denied
+                # role skips the sandbox sync; the host-side artifact update
+                # still completes (the agent cannot consume the sandbox copy
+                # anyway when sandbox execution is denied).
+                sandbox, sandbox_id, sandbox_denied = await try_acquire_sandbox_for_request(
+                    request,
+                    sandbox_provider,
+                    thread_id,
+                    user_id=effective_user_id,
+                    app_config=safe_app_config(),
+                )
+                if not sandbox_denied and sandbox is None:
                     raise RuntimeError("Failed to acquire sandbox for artifact update")
 
             try:

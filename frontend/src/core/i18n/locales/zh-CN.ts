@@ -327,6 +327,37 @@ export const zhCN: Translations = {
     },
   },
 
+  subagentBatches: {
+    label: "批处理",
+    title: "子智能体批处理",
+    description: "面向大量独立条目的持久化、可恢复执行。",
+    workerUnavailable:
+      "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
+    empty: "暂无子智能体批处理",
+    emptyHint: "当前对话通过 batch_task 提交的批处理会显示在这里。",
+    loadFailed: "无法加载子智能体批处理",
+    active: "进行中",
+    recent: "最近任务",
+    pause: "暂停",
+    resume: "继续",
+    cancel: "取消",
+    retryItem: "重试",
+    exportResults: "导出 JSONL",
+    viewItems: "查看条目",
+    hideItems: "收起条目",
+    itemsFailed: "无法加载批处理条目",
+    progress: (completed, total) => `${completed}/${total} 已结束`,
+    limits: (live, running) => `存活 ${live} · 运行 ${running}`,
+    status: {
+      queued: "排队中",
+      running: "运行中",
+      paused: "已暂停",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+  },
+
   // 定时任务
   scheduledTasks: {
     scheduleType: {
@@ -373,6 +404,9 @@ export const zhCN: Translations = {
       fresh: "新线程",
       reuse: "复用线程",
       threadIdPlaceholder: "线程 ID",
+      reuseNoticeTitle: "使用该线程的历史对话",
+      reuseNoticeDescription:
+        "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
     },
     filters: {
       allStatuses: "全部状态",
@@ -433,6 +467,7 @@ export const zhCN: Translations = {
     runTrigger: { scheduled: "定时", manual: "手动" },
     runStatus: {
       queued: "排队中",
+      launching: "启动中",
       running: "运行中",
       success: "成功",
       failed: "失败",
@@ -560,6 +595,7 @@ export const zhCN: Translations = {
   // Chats
   chats: {
     searchChats: "搜索对话",
+    branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",

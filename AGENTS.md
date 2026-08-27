@@ -104,6 +104,7 @@ Skill quality review note:
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
 - Scheduled background runs are intentionally non-interactive: they execute through the normal run lifecycle, but the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. The key is honored only for internally-authenticated callers (the scheduler launch path); client-supplied `context.non_interactive` is dropped.
+- Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
 - Scheduled launches use `scheduler.recursion_limit` (default 1000, matching the web UI's `recursion_limit: 1000`, clamped by `max_recursion_limit`). The value is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
 
 ## Commands: Root vs. Module
@@ -150,7 +151,7 @@ cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
 # Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server with Turbopack (port 3000)
+cd frontend && pnpm dev       # Dev server: Webpack on Windows, Turbopack elsewhere (override with DEER_FLOW_DEV_BUNDLER)
 cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
@@ -187,7 +188,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
-- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
   errors surface in the browser console at `localhost:3000`; backend tracebacks appear
   in the Gateway terminal.
 
