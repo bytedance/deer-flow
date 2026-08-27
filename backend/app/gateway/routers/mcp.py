@@ -511,6 +511,45 @@ def _mask_sensitive_extra_value(value: Any) -> Any:
     return value
 
 
+def _contains_masked_sensitive_extra_value(key: str, value: Any) -> bool:
+    if value == _MASKED_VALUE and _is_sensitive_extra_key(key):
+        return True
+    if isinstance(value, dict):
+        return any(_contains_masked_sensitive_extra_value(str(nested_key), nested_value) for nested_key, nested_value in value.items())
+    if isinstance(value, list):
+        return any(_contains_masked_sensitive_extra_value(key, item) for item in value)
+    return False
+
+
+def _ensure_no_masked_secrets(server: McpServerConfigResponse) -> None:
+    """Reject request-only masked placeholders before config persistence."""
+
+    def reject(location: str) -> None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot persist masked secret placeholder for {location}; provide a real value.",
+        )
+
+    for key, value in server.env.items():
+        if value == _MASKED_VALUE:
+            reject(f"env key '{key}'")
+    for key, value in server.headers.items():
+        if value == _MASKED_VALUE:
+            reject(f"header '{key}'")
+    for key, value in (server.model_extra or {}).items():
+        if _contains_masked_sensitive_extra_value(str(key), value):
+            reject(f"extra config key '{key}'")
+
+    if server.user_auth is None:
+        return
+    for key, value in server.user_auth.users.items():
+        if value == _MASKED_VALUE:
+            reject(f"user_auth credential '{key}'")
+    for key, value in (server.user_auth.model_extra or {}).items():
+        if _contains_masked_sensitive_extra_value(str(key), value):
+            reject(f"user_auth extra config key '{key}'")
+
+
 def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing_value: Any, *, existing_present: bool) -> Any:
     if incoming_value == _MASKED_VALUE and _is_sensitive_extra_key(key):
         if existing_present:
@@ -532,8 +571,15 @@ def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing
             )
         return merged
 
-    if isinstance(incoming_value, list) and isinstance(existing_value, list) and len(incoming_value) == len(existing_value):
-        return [_merge_extra_value_preserving_masked(key, nested_value, existing_value[index], existing_present=True) for index, nested_value in enumerate(incoming_value)]
+    if isinstance(incoming_value, list) and isinstance(existing_value, list):
+        if _contains_masked_sensitive_extra_value(key, incoming_value):
+            if incoming_value != _mask_sensitive_extra_value(existing_value):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Cannot edit extra config array '{key}' while masked secrets remain; provide real values for every masked secret.",
+                )
+            return existing_value
+        return incoming_value
 
     return incoming_value
 
@@ -846,7 +892,9 @@ def _merge_preserving_secrets(
     for key, value in (existing.model_extra or {}).items():
         if key not in (incoming.model_extra or {}):
             update[key] = value
-    return incoming.model_copy(update=update)
+    merged = incoming.model_copy(update=update)
+    _ensure_no_masked_secrets(merged)
+    return merged
 
 
 @router.get(
@@ -923,12 +971,14 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         for name, incoming in body.mcp_servers.items():
             raw_server = raw_servers.get(name)
             if raw_server is not None:
-                merged_servers[name] = _merge_preserving_secrets(
+                merged = _merge_preserving_secrets(
                     incoming,
                     McpServerConfigResponse(**raw_server),
                 )
             else:
-                merged_servers[name] = incoming
+                merged = incoming
+            _ensure_no_masked_secrets(merged)
+            merged_servers[name] = merged
 
         # Build config data preserving all top-level keys from the original file
         config_data = dict(raw_other_keys)
@@ -1050,6 +1100,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
             )
 
         for name, incoming in body.mcp_servers.items():
+            _ensure_no_masked_secrets(incoming)
             raw_servers[name] = incoming.model_dump()
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)
@@ -1076,6 +1127,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
             body.server,
             McpServerConfigResponse(**raw_server),
         )
+        _ensure_no_masked_secrets(merged)
         raw_servers[body.server_name] = merged.model_dump()
         raw_data["mcpServers"] = raw_servers
         atomic_write_extensions_config(config_path, raw_data)

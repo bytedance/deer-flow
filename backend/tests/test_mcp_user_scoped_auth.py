@@ -304,6 +304,42 @@ def test_user_auth_extra_keys_survive_parse_mask_and_merge():
     assert (merged.user_auth.model_extra or {}).get("custom_note") == "keep-me"
 
 
+def test_user_auth_extra_array_rejects_structural_edit_while_secrets_are_masked():
+    from fastapi import HTTPException
+
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _mask_server_config,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            providers=[
+                {"name": "alpha", "apiKey": "secret-alpha"},
+                {"name": "beta", "apiKey": "secret-beta"},
+            ]
+        ),
+    )
+    masked = _mask_server_config(existing)
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            providers=list(reversed(masked.user_auth.model_extra["providers"])),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        _merge_preserving_secrets(incoming, existing)
+
+    assert exc_info.value.status_code == 400
+    assert "providers" in exc_info.value.detail
+
+
 def test_stdio_server_user_auth_is_skipped_with_warning(caplog):
     import logging
 

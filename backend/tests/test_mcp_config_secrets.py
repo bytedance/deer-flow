@@ -255,6 +255,60 @@ def test_merge_preserves_masked_sensitive_extra_values():
     assert merged.model_extra["endpoints"] == [{"access_key": "real-access", "name": "prod"}]
 
 
+@pytest.mark.parametrize("operation", ["add", "remove", "reorder"])
+def test_merge_rejects_structural_edits_to_masked_sensitive_extra_arrays(operation):
+    """Array entries cannot be identified safely while nested secrets are masked."""
+    existing = McpServerConfigResponse(
+        providers=[
+            {"name": "alpha", "apiKey": "secret-alpha"},
+            {"name": "beta", "apiKey": "secret-beta"},
+        ]
+    )
+    masked = _mask_server_config(existing)
+    providers = masked.model_extra["providers"]
+    if operation == "add":
+        providers = [*providers, {"name": "gamma", "apiKey": "secret-gamma"}]
+    elif operation == "remove":
+        providers = providers[:1]
+    else:
+        providers = list(reversed(providers))
+
+    with pytest.raises(HTTPException) as exc_info:
+        _merge_preserving_secrets(McpServerConfigResponse(providers=providers), existing)
+
+    assert exc_info.value.status_code == 400
+    assert "providers" in exc_info.value.detail
+    assert "real values" in exc_info.value.detail
+
+
+def test_merge_allows_structural_extra_array_edits_with_real_replacement_secrets():
+    """Supplying every replacement secret makes an array edit unambiguous."""
+    existing = McpServerConfigResponse(
+        providers=[
+            {"name": "alpha", "apiKey": "secret-alpha"},
+            {"name": "beta", "apiKey": "secret-beta"},
+        ]
+    )
+    incoming_providers = [
+        {"name": "beta", "apiKey": "replacement-beta"},
+        {"name": "gamma", "apiKey": "secret-gamma"},
+    ]
+
+    merged = _merge_preserving_secrets(McpServerConfigResponse(providers=incoming_providers), existing)
+
+    assert merged.model_extra["providers"] == incoming_providers
+
+
+def test_merge_allows_structural_edits_to_non_sensitive_extra_arrays():
+    """Secret-free advanced arrays remain fully editable."""
+    existing = McpServerConfigResponse(routes=[{"name": "alpha"}])
+    incoming_routes = [{"name": "beta"}, {"name": "gamma"}]
+
+    merged = _merge_preserving_secrets(McpServerConfigResponse(routes=incoming_routes), existing)
+
+    assert merged.model_extra["routes"] == incoming_routes
+
+
 def test_merge_rejects_masked_sensitive_extra_value_for_new_key():
     """A new unknown secret field must provide a real value, not a mask."""
     incoming = McpServerConfigResponse(api_key="***")
@@ -707,6 +761,116 @@ async def test_update_mcp_server_preserves_latest_sibling_and_masked_secret(monk
     assert persisted["mcpServers"]["target"]["url"] == "https://new.example/mcp"
     assert persisted["mcpServers"]["target"]["headers"]["Authorization"] == "Bearer real-secret"
     assert response.mcp_servers["target"].headers["Authorization"] == "***"
+
+
+@pytest.mark.asyncio
+async def test_update_mcp_server_rejects_masked_array_structural_edit_without_writing(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "target": {
+                "enabled": True,
+                "type": "http",
+                "url": "https://old.example/mcp",
+                "providers": [
+                    {"name": "alpha", "apiKey": "secret-alpha"},
+                    {"name": "beta", "apiKey": "secret-beta"},
+                ],
+            }
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_server(
+            _request_with_role("admin"),
+            McpServerConfigUpdateRequest(
+                server_name="target",
+                server=McpServerConfigResponse(
+                    enabled=True,
+                    type="http",
+                    url="https://new.example/mcp",
+                    providers=[
+                        {"name": "alpha", "apiKey": "***"},
+                        {"name": "beta", "apiKey": "***"},
+                        {"name": "gamma", "apiKey": "secret-gamma"},
+                    ],
+                ),
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+async def test_create_mcp_servers_rejects_masked_secret_sentinel_without_writing(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {"mcpServers": {}, "skills": {}}
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await create_mcp_servers(
+            _request_with_role("admin"),
+            McpConfigUpdateRequest(
+                mcp_servers={
+                    "added": McpServerConfigResponse(
+                        type="http",
+                        url="https://new.example/mcp",
+                        providers=[{"name": "alpha", "apiKey": "***"}],
+                    )
+                }
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+async def test_bulk_update_rejects_masked_secret_for_new_server_without_writing(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {"mcpServers": {}, "skills": {}}
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_configuration(
+            _request_with_role("admin"),
+            McpConfigUpdateRequest(
+                mcp_servers={
+                    "added": McpServerConfigResponse(
+                        type="http",
+                        url="https://new.example/mcp",
+                        providers=[{"name": "alpha", "apiKey": "***"}],
+                    )
+                }
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
 
 
 @pytest.mark.asyncio
