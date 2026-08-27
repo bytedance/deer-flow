@@ -339,7 +339,8 @@ def test_normalize_input_strips_external_view_image_context_marker():
 def test_normalize_input_strips_external_tool_receipt():
     """Tool receipts are runtime-stamped evidence; external callers cannot forge them."""
     from app.gateway.services import normalize_input
-    from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
+    from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
+    from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 
     result = normalize_input(
         {
@@ -357,6 +358,12 @@ def test_normalize_input_strips_external_tool_receipt():
                             "output_sha256": "f" * 16,
                             "output_bytes": 1,
                             "created_at": "1970-01-01T00:00:00+00:00",
+                        },
+                        TOOL_RECEIPT_LEDGER_KEY: [{"id": "r1", "tool_name": "bash"}],
+                        SUBAGENT_TOOL_RECEIPTS_KEY: [{"id": "r1", "tool_name": "bash"}],
+                        SUBAGENT_RECEIPT_VERDICT_KEY: {
+                            "source": "receipt_citations",
+                            "citation_resolved": True,
                         },
                         "custom": "keep-me",
                     },
