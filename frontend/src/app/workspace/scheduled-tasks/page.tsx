@@ -26,7 +26,6 @@ import {
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
-import { buildScheduledTaskDuplicateDraft } from "@/core/scheduled-tasks/duplicate";
 import {
   useCreateScheduledTask,
   useUpdateScheduledTask,
@@ -167,15 +166,15 @@ export default function ScheduledTasksPage() {
     setCreateNonce((n) => n + 1);
   };
   const duplicateTask = (task: ScheduledTask) => {
-    const draft = buildScheduledTaskDuplicateDraft(
-      task,
-      st.actions.duplicateTitleSuffix,
-    );
-    setTitle(draft.title);
-    setPrompt(draft.prompt);
-    setContextMode(draft.contextMode);
-    setTargetThreadId(draft.targetThreadId);
-    setCreateSchedule(draft.schedule);
+    setTitle(`${task.title}${st.actions.duplicateTitleSuffix}`);
+    setPrompt(task.prompt);
+    setContextMode(task.context_mode);
+    setTargetThreadId(task.thread_id ?? "");
+    setCreateSchedule({
+      schedule_type: task.schedule_type,
+      schedule_spec: { ...task.schedule_spec },
+      timezone: task.timezone,
+    });
     setFormError(null);
     setCreateNonce((nonce) => nonce + 1);
     createFormRef.current?.scrollIntoView({
