@@ -171,8 +171,13 @@ async def batch_task(
     metadata = runtime.config.get("metadata", {}) if runtime is not None else {}
     app_config = _batch_app_config(runtime)
     allowed_subagents = metadata.get("allowed_subagents")
-    available = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents)
-    config = get_subagent_config(subagent_type, app_config=app_config)
+    user_id = resolve_runtime_user_id(runtime)
+    available = get_available_subagent_names(
+        app_config=app_config,
+        allowed_subagents=allowed_subagents,
+        user_id=user_id,
+    )
+    config = get_subagent_config(subagent_type, app_config=app_config, user_id=user_id)
     if config is None or subagent_type not in available:
         names = ", ".join(available) if available else "none"
         return _result(
@@ -188,7 +193,6 @@ async def batch_task(
     thread_id = context.get("thread_id") or runtime.config.get("configurable", {}).get("thread_id")
     if not thread_id:
         return _result(tool_call_id, content="Durable batches require a thread_id.", error=True)
-    user_id = resolve_runtime_user_id(runtime)
     run_id = context.get("run_id")
     submission_key = f"{run_id or thread_id}:{tool_call_id}"
     execution_spec = {

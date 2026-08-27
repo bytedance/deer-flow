@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentOverrideConfig, SubagentsAppConfig
+from deerflow.config.tool_config import ToolConfig
 from deerflow.persistence.managed_subagents import ManagedSubagentDefinition
 from deerflow.subagents import registry
 
@@ -63,6 +66,84 @@ def test_builtin_and_config_definitions_win_name_conflicts(monkeypatch):
     assert names.count("general-purpose") == 1
     assert names.count("reviewer") == 1
     assert registry.get_subagent_config("reviewer", app_config=config).system_prompt == "Config wins."
+
+
+def test_user_store_agents_join_runtime_catalog_with_user_scoping(monkeypatch):
+    agent = AgentConfig(
+        name="writer",
+        description="User writer",
+        model=None,
+        tool_groups=["web"],
+        skills=["style-guide"],
+    )
+    app_config = SimpleNamespace(
+        subagents=SubagentsAppConfig(timeout_seconds=1200, max_turns=80),
+        tools=[
+            ToolConfig(name="web_search", group="web", use="deerflow.community.search:search"),
+            ToolConfig(name="bash", group="bash", use="deerflow.sandbox.tools:bash_tool"),
+        ],
+    )
+    captured = {}
+
+    def list_user_agents(*, user_id=None):
+        captured["list_user_id"] = user_id
+        return [agent]
+
+    def load_user_agent_record(name, *, user_id=None):
+        captured["load"] = (name, user_id)
+        return agent, "  You are the writer.  "
+
+    monkeypatch.setattr(registry, "_managed_definitions", lambda **_: [])
+    monkeypatch.setattr(registry, "_list_user_agents", list_user_agents)
+    monkeypatch.setattr(registry, "_load_user_agent_record", load_user_agent_record)
+
+    assert "writer" in registry.get_subagent_names(app_config=app_config, user_id="user-1")
+
+    resolved = registry.get_subagent_config("writer", app_config=app_config, user_id="user-1")
+
+    assert captured == {
+        "list_user_id": "user-1",
+        "load": ("writer", "user-1"),
+    }
+    assert resolved is not None
+    assert resolved.description == "User writer"
+    assert resolved.system_prompt == "You are the writer."
+    assert resolved.tools == ["web_search"]
+    assert resolved.skills == ["style-guide"]
+    assert resolved.model == "inherit"
+    assert resolved.timeout_seconds == 1200
+    assert resolved.max_turns == 80
+
+
+def test_user_store_agents_do_not_shadow_operator_definitions(monkeypatch):
+    config = SubagentsAppConfig(
+        custom_agents={
+            "reviewer": CustomSubagentConfig(description="Config reviewer", system_prompt="Config wins."),
+        }
+    )
+    monkeypatch.setattr(registry, "_managed_definitions", lambda **_: [_managed("planner")])
+    monkeypatch.setattr(
+        registry,
+        "_list_user_agents",
+        lambda **_: [
+            AgentConfig(name="general-purpose", description="User builtin conflict"),
+            AgentConfig(name="reviewer", description="User config conflict"),
+            AgentConfig(name="planner", description="User managed conflict"),
+            AgentConfig(name="writer", description="User writer"),
+        ],
+    )
+    monkeypatch.setattr(
+        registry,
+        "_load_user_agent_record",
+        lambda name, **_: (AgentConfig(name=name, description="User writer"), "User soul"),
+    )
+
+    names = registry.get_subagent_names(app_config=config, user_id="user-1")
+
+    assert names == ["general-purpose", "bash", "reviewer", "planner", "writer"]
+    assert registry.get_subagent_config("reviewer", app_config=config, user_id="user-1").system_prompt == "Config wins."
+    assert registry.get_subagent_config("planner", app_config=config, user_id="user-1").system_prompt == "You are planner."
+    assert registry.get_subagent_config("writer", app_config=config, user_id="user-1").system_prompt == "User soul"
 
 
 def test_allowed_subagents_is_a_hard_runtime_filter(monkeypatch):

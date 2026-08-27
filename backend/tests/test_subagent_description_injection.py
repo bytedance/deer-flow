@@ -32,7 +32,7 @@ def test_available_subagents_description_escapes_breakout(monkeypatch) -> None:
     monkeypatch.setattr(
         registry_module,
         "get_subagent_config",
-        lambda name, app_config=None: SimpleNamespace(description=_BREAKOUT),
+        lambda name, **_kwargs: SimpleNamespace(description=_BREAKOUT),
     )
 
     result = prompt_module._build_available_subagents_description(["evil-agent"], bash_available=True)
