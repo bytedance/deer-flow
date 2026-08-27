@@ -825,18 +825,26 @@ class LocalContainerBackend(SandboxBackend):
             # and su from the already-root entrypoint does not need to gain
             # anything. Everything else (NET_RAW, SYS_PTRACE, ...) stays
             # dropped, which is the bulk of the attack-surface reduction.
-            # A fully pre-initialized non-root image could drop all of these
-            # again; see the smoke test for the shipped image.
-            cmd.extend(
-                [
-                    "--cap-drop=ALL",
-                    "--cap-add=CHOWN",
-                    "--cap-add=SETUID",
-                    "--cap-add=SETGID",
-                    "--security-opt",
-                    "no-new-privileges",
-                ]
-            )
+            # For a pre-initialized non-root image nothing ever runs as
+            # root, so the handoff capabilities are not needed — and leaving
+            # them available for the container's lifetime would let
+            # sandboxed code chown bind-mounted paths or impersonate
+            # mounted-file UIDs/GIDs. Such images opt out with
+            # DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 (see CONFIGURATION.md),
+            # which drops every capability including these three.
+            if _env_flag_disabled("DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"):
+                cmd.extend(["--cap-drop=ALL", "--security-opt", "no-new-privileges"])
+            else:
+                cmd.extend(
+                    [
+                        "--cap-drop=ALL",
+                        "--cap-add=CHOWN",
+                        "--cap-add=SETUID",
+                        "--cap-add=SETGID",
+                        "--security-opt",
+                        "no-new-privileges",
+                    ]
+                )
 
             # The shipped AIO image runs a Chromium-based browser that does
             # not start under Docker's default seccomp profile — its upstream

@@ -932,3 +932,26 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
         assert backend.is_alive(info)
     finally:
         backend.destroy(info)
+
+
+def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch):
+    """A custom, pre-initialized non-root image never runs the root handoff,
+    so CHOWN/SETUID/SETGID must not stay available for the container's
+    lifetime (chown on bind mounts, UID/GID impersonation). Opting out with
+    DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 drops every capability."""
+    backend = LocalContainerBackend(
+        image="my-preinitialized-sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS", "0")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--cap-drop=ALL" in captured_cmd
+    assert not [arg for arg in captured_cmd if arg.startswith("--cap-add=")]
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "no-new-privileges" in security_opts
