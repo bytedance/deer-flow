@@ -69,6 +69,14 @@ the local record, emits a retry-attempt debug record, and retries later. The
 `interrupted`. Shutdown fences new eviction schedules and boundedly cancels
 existing timers before draining workers.
 
+Idempotent admission rehydrates only active (`pending`/`running`/`finalizing`)
+records into `RunManager`'s local indexes. Reused terminal results remain
+store-only because the Gateway returns them without starting a worker or
+scheduling another eviction. Delayed stream-bridge cleanup tasks are strongly
+referenced by the worker module until completion, and their exceptions are
+explicitly observed and logged; never replace that supervisor with a bare
+`asyncio.create_task()`.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`

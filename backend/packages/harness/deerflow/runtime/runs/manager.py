@@ -1590,8 +1590,15 @@ class RunManager:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
                 if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
+                    # A reused terminal result returns directly to the caller:
+                    # no worker starts and therefore no later eviction is
+                    # scheduled. Keep terminal history store-only or this
+                    # hydration would pin it in both local registries forever.
+                    # In-flight records still need local tracking for conflict,
+                    # cancellation, and finalizing-barrier checks.
+                    if existing.status in (RunStatus.pending, RunStatus.running) or existing.finalizing:
+                        self._runs[existing.run_id] = existing
+                        self._index_run_locked(existing)
                     current = existing
                 current.idempotency_reused = True
                 return current

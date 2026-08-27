@@ -11,7 +11,12 @@ import pytest
 from deerflow.runtime.runs.manager import PersistenceRetryPolicy, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.runtime.runs.worker import RunContext, run_agent
+from deerflow.runtime.runs.worker import (
+    _BACKGROUND_TERMINAL_TASKS,
+    RunContext,
+    _spawn_background_terminal_task,
+    run_agent,
+)
 
 
 class RecoveringRunStore(MemoryRunStore):
@@ -58,6 +63,13 @@ async def _terminal_run(manager: RunManager, thread_id: str = "thread-eviction")
     return record.run_id
 
 
+async def _forget_local_record(manager: RunManager, run_id: str, thread_id: str) -> None:
+    """Drop a local entry so the next idempotent admission hydrates it."""
+    async with manager._lock:
+        manager._runs.pop(run_id, None)
+        manager._unindex_run_locked(run_id, thread_id)
+
+
 @pytest.mark.asyncio
 async def test_memory_only_manager_preserves_terminal_history():
     manager = RunManager()
@@ -83,6 +95,67 @@ async def test_terminal_eviction_prunes_both_indexes_and_hydrates_from_store():
     assert hydrated is not None
     assert hydrated.status == RunStatus.success
     assert hydrated.store_only is True
+
+
+@pytest.mark.asyncio
+async def test_terminal_idempotent_reuse_stays_store_only():
+    store = MemoryRunStore()
+    manager = RunManager(store=store)
+    record = await manager.create_or_reject(
+        "thread-idempotent-terminal",
+        user_id="user-a",
+        idempotency_key="idempotency-terminal-1",
+    )
+    await manager.set_status(record.run_id, RunStatus.success)
+    await _forget_local_record(manager, record.run_id, record.thread_id)
+
+    reused = await manager.create_or_reject(
+        record.thread_id,
+        user_id="user-a",
+        idempotency_key="idempotency-terminal-1",
+    )
+
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.success
+    assert reused.store_only is True
+    assert record.run_id not in manager._runs
+    assert record.thread_id not in manager._runs_by_thread
+
+    hydrated = await manager.get(record.run_id)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    assert hydrated.store_only is True
+
+
+@pytest.mark.asyncio
+async def test_inflight_idempotent_reuse_is_still_locally_indexed():
+    store = MemoryRunStore()
+    await store.put(
+        "run-peer-inflight",
+        thread_id="thread-idempotent-inflight",
+        user_id="user-a",
+        status=RunStatus.running.value,
+        operation_kind="run",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        owner_worker_id="worker-peer",
+        lease_expires_at="2099-01-01T00:00:00+00:00",
+        idempotency_key="idempotency-inflight-1",
+    )
+    manager = RunManager(store=store)
+
+    reused = await manager.create_or_reject(
+        "thread-idempotent-inflight",
+        user_id="user-a",
+        idempotency_key="idempotency-inflight-1",
+    )
+
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.running
+    assert manager._runs[reused.run_id] is reused
+    assert list(manager._runs_by_thread[reused.thread_id]) == [reused.run_id]
 
 
 @pytest.mark.asyncio
@@ -237,6 +310,42 @@ async def test_shutdown_cancels_pending_evictions_and_rejects_new_ones():
 
 
 @pytest.mark.asyncio
+async def test_background_terminal_task_is_strongly_referenced_until_done():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_cleanup() -> None:
+        started.set()
+        await release.wait()
+
+    task = _spawn_background_terminal_task(delayed_cleanup())
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    assert task in _BACKGROUND_TERMINAL_TASKS
+
+    release.set()
+    await asyncio.wait_for(task, timeout=1)
+    await asyncio.sleep(0)
+    assert task not in _BACKGROUND_TERMINAL_TASKS
+
+
+@pytest.mark.asyncio
+async def test_background_terminal_task_failure_is_observed(caplog):
+    caplog.set_level("WARNING", logger="deerflow.runtime.runs.worker")
+
+    async def failed_cleanup() -> None:
+        raise RuntimeError("cleanup failed")
+
+    task = _spawn_background_terminal_task(failed_cleanup())
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)
+
+    assert task not in _BACKGROUND_TERMINAL_TASKS
+    assert "Background terminal task" in caplog.text
+    assert "cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_worker_schedules_eviction_even_when_publish_end_fails():
     class EmptyAgent:
         metadata: dict = {}
@@ -271,3 +380,5 @@ async def test_worker_schedules_eviction_even_when_publish_end_fails():
 
     assert record.status == RunStatus.success
     manager.schedule_terminal_eviction.assert_called_once_with(record.run_id)
+    await asyncio.sleep(0)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)

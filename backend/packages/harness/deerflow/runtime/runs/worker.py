@@ -23,7 +23,7 @@ import os
 import sys
 import threading
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -113,6 +113,30 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
+# The event loop keeps only weak references to tasks. Retain delayed
+# post-terminal work until completion so a GC pass cannot destroy a sleeping
+# stream-cleanup task before it releases bridge state (#4930 / #5011).
+_BACKGROUND_TERMINAL_TASKS: set[asyncio.Task[Any]] = set()
+
+
+def _background_terminal_task_done(task: asyncio.Task[Any]) -> None:
+    """Release a supervised terminal task and observe any failure."""
+    _BACKGROUND_TERMINAL_TASKS.discard(task)
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception as exc:
+        logger.warning("Background terminal task %s failed: %s", task.get_name(), exc, exc_info=True)
+
+
+def _spawn_background_terminal_task(coro: Coroutine[Any, Any, Any], *, name: str | None = None) -> asyncio.Task[Any]:
+    """Schedule post-terminal work with a strong reference until it settles."""
+    task = asyncio.create_task(coro, name=name)
+    _BACKGROUND_TERMINAL_TASKS.add(task)
+    task.add_done_callback(_background_terminal_task_done)
+    return task
 
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1360,7 +1384,10 @@ async def run_agent(
             # particular, a Redis failure while publishing END must not leave a
             # terminal record strongly referenced for the process lifetime.
             run_manager.schedule_terminal_eviction(run_id)
-            asyncio.create_task(bridge.cleanup(run_id, delay=60))
+            _spawn_background_terminal_task(
+                bridge.cleanup(run_id, delay=60),
+                name=f"run-stream-cleanup-{run_id}",
+            )
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
