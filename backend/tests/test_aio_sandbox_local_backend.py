@@ -903,7 +903,10 @@ def _docker_daemon_available() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _docker_daemon_available(), reason="requires a running Docker daemon and pulls the default AIO image")
+# `live`: pulls and runs a mutable external image, so the default offline
+# suite (`make test` = `-m "not live"`) never touches the network. The
+# daemon probe happens inside the test body — never at collection time.
+@pytest.mark.live
 def test_default_image_starts_under_hardened_capabilities(monkeypatch):
     """Real smoke test against the shipped default image — no subprocess mock.
 
@@ -917,8 +920,13 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
     """
     from deerflow.community.aio_sandbox.local_backend import wait_for_sandbox_ready
 
+    if not _docker_daemon_available():
+        pytest.skip("requires a running Docker daemon")
+
     backend = LocalContainerBackend(
-        image=_DEFAULT_AIO_IMAGE,
+        # Pin via this override when wiring a dedicated integration job, so
+        # the run does not depend on a mutable :latest tag.
+        image=os.environ.get("DEER_FLOW_SANDBOX_SMOKE_IMAGE", _DEFAULT_AIO_IMAGE),
         base_port=18210,
         container_prefix="sandbox-smoke",
         config_mounts=[],
