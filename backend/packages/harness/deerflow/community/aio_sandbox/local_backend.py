@@ -818,8 +818,13 @@ class LocalContainerBackend(SandboxBackend):
             # The default image (/opt/gem/run.sh) starts as root, creates the
             # gem account at runtime, chown -R's /opt/jupyter, and drops to
             # that user via su before starting the services. That needs
-            # exactly CHOWN/SETUID/SETGID; dropping ALL of them makes the
-            # entrypoint fail (set -e) before the readiness endpoint exists.
+            # CHOWN/SETUID/SETGID; additionally the root nginx master writes
+            # logs under /var/log/nginx that belong to the gem user, which
+            # requires DAC_OVERRIDE — without it nginx dies with
+            # "open() .../access.log failed (13: Permission denied)" on every
+            # start (a runtime need, not just startup: access.log is written
+            # per request). Dropping ALL of them makes the image fail before
+            # the readiness endpoint exists.
             # no-new-privileges stays: it only blocks *gaining* privileges
             # through exec, it does not revoke the capabilities added here,
             # and su from the already-root entrypoint does not need to gain
@@ -841,6 +846,7 @@ class LocalContainerBackend(SandboxBackend):
                         "--cap-add=CHOWN",
                         "--cap-add=SETUID",
                         "--cap-add=SETGID",
+                        "--cap-add=DAC_OVERRIDE",
                         "--security-opt",
                         "no-new-privileges",
                     ]

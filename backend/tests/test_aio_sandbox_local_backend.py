@@ -388,9 +388,11 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
     assert "--cap-drop=ALL" in captured_cmd
     # The shipped image's entrypoint starts as root, creates the gem user,
     # chowns /opt/jupyter, and drops to that user via su — CHOWN/SETUID/SETGID
-    # must survive the drop or the container exits before readiness.
+    # must survive the drop or the container exits before readiness. The root
+    # nginx master also writes gem-owned logs under /var/log/nginx for the
+    # container's lifetime, which needs DAC_OVERRIDE.
     cap_adds = [arg.split("=", 1)[1] for arg in captured_cmd if arg.startswith("--cap-add=")]
-    assert cap_adds == ["CHOWN", "SETUID", "SETGID"]
+    assert cap_adds == ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
     # The shipped AIO image needs seccomp=unconfined for its Chromium
