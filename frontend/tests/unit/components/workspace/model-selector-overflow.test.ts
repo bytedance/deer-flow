@@ -4,15 +4,17 @@ import path from "node:path";
 import { describe, expect, it } from "@rstest/core";
 
 const FRONTEND_ROOT = path.resolve(__dirname, "../../../..");
-const SELECTED_MODEL_TRIGGER_PATTERN =
-  /<ModelSelectorTrigger asChild>[\s\S]*?<\/ModelSelectorTrigger>/;
+const SELECTED_MODEL_WRAPPER_PATTERN =
+  /<ModelSelectorTrigger asChild>[\s\S]*?<div className="([^"]*)">\s*<ModelSelectorName/;
 
 function source(relativePath: string) {
   return readFileSync(path.join(FRONTEND_ROOT, relativePath), "utf8");
 }
 
-function selectedModelTrigger(relativePath: string) {
-  return SELECTED_MODEL_TRIGGER_PATTERN.exec(source(relativePath))?.[0];
+function selectedModelWrapperClasses(relativePath: string) {
+  return SELECTED_MODEL_WRAPPER_PATTERN.exec(source(relativePath))?.[1]?.split(
+    /\s+/,
+  );
 }
 
 describe("selected model name truncation", () => {
@@ -20,9 +22,11 @@ describe("selected model name truncation", () => {
     "src/components/workspace/input-box.tsx",
     "src/components/workspace/sidecar/sidecar-panel.tsx",
   ])("lets ModelSelectorName stretch in %s", (relativePath) => {
-    const trigger = selectedModelTrigger(relativePath);
+    const classes = selectedModelWrapperClasses(relativePath);
 
-    expect(trigger).toContain("<ModelSelectorName");
-    expect(trigger).not.toContain("items-start");
+    expect(classes).toEqual(
+      expect.arrayContaining(["flex", "min-w-0", "flex-col"]),
+    );
+    expect(classes).not.toContain("items-start");
   });
 });
