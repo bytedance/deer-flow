@@ -37,7 +37,8 @@ class StreamGap:
     ``requested_event_id`` is the reconnect cursor, or the most recently
     delivered event for a live subscriber that fell behind.  The retained
     bounds let callers reload durable state and resume at the current tail
-    without mistaking a partial replay for a complete one.
+    without mistaking a partial replay for a complete one.  When nothing is
+    retained in the buffer, the bounds are ``None``.
     """
 
     requested_event_id: str | None

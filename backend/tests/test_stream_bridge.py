@@ -8,6 +8,7 @@ from collections import defaultdict
 
 import anyio
 import pytest
+from pydantic import ValidationError
 
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, set_stream_bridge_config
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
@@ -1083,6 +1084,48 @@ async def test_memory_make_gap_handles_empty_events_buffer():
     gap = bridge._make_gap(stream, "100-0")
     assert gap == StreamGap(
         requested_event_id="100-0",
+        earliest_available_event_id=None,
+        latest_available_event_id=None,
+    )
+
+
+def test_memory_stream_bridge_clamps_queue_maxsize():
+    """queue_maxsize <= 0 is clamped to at least 1."""
+    bridge = MemoryStreamBridge(queue_maxsize=0)
+    assert bridge._maxsize == 1
+    bridge_neg = MemoryStreamBridge(queue_maxsize=-5)
+    assert bridge_neg._maxsize == 1
+
+
+def test_stream_bridge_config_validates_queue_maxsize():
+    """StreamBridgeConfig rejects queue_maxsize < 1."""
+    with pytest.raises(ValidationError):
+        StreamBridgeConfig(queue_maxsize=0)
+    with pytest.raises(ValidationError):
+        StreamBridgeConfig(queue_maxsize=-1)
+
+
+@pytest.mark.anyio
+async def test_memory_subscribe_replays_gap_when_buffer_empty_and_cursor_behind_watermark():
+    """Subscribing with a cursor behind start_offset when buffer is empty yields StreamGap with None bounds."""
+    bridge = MemoryStreamBridge(queue_maxsize=2)
+    run_id = "run-empty-retained-gap"
+    stream = bridge._get_or_create_stream(run_id)
+    # Simulate a stream whose retained buffer was cleared / advanced
+    stream.start_offset = 10
+    stream.events.clear()
+
+    received = [
+        entry
+        async for entry in bridge.subscribe(
+            run_id,
+            last_event_id="5-0",
+            heartbeat_interval=0.1,
+        )
+    ]
+    assert len(received) == 1
+    assert received[0] == StreamGap(
+        requested_event_id="5-0",
         earliest_available_event_id=None,
         latest_available_event_id=None,
     )
