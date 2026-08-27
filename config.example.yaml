@@ -184,6 +184,40 @@ models:
   #     extra_body:
   #       thinking:
   #         type: disabled
+
+  # Example: Z.AI GLM-5.3-Flash (required-thinking workaround)
+  #
+  # GLM-5.3-Flash cannot disable thinking and only accepts low/high/max effort.
+  # DeerFlow's current generic UI may request disabled thinking or emit
+  # minimal/medium, so this profile keeps thinking enabled unconditionally and
+  # suppresses generic effort forwarding. Keep the thinking block in the base
+  # extra_body: moving it to when_thinking_enabled would let background calls
+  # synthesize the invalid thinking.type=disabled + reasoning_effort=minimal pair.
+  # clear_thinking=true is intentional for this compatibility workaround: it
+  # avoids requiring exact historical reasoning replay after summarization.
+  #
+  # - name: glm-5.3-flash
+  #   display_name: GLM-5.3-Flash
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: glm-5.3-flash
+  #   api_base: https://api.z.ai/api/paas/v4
+  #   api_key: $ZAI_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   temperature: 1.0
+  #   top_p: 0.95
+  #   max_tokens: 131072
+  #   context_window: 1000000
+  #   supports_thinking: true
+  #   supports_reasoning_effort: false
+  #   supports_vision: true
+  #   stream_usage: false
+  #   extra_body:
+  #     thinking:
+  #       type: enabled
+  #       clear_thinking: true
+  #     tool_stream: true
+
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4

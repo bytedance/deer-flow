@@ -176,6 +176,47 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="zai",
+        display_name="Z.AI GLM-5.3-Flash",
+        description="GLM-5.3-Flash with required thinking and native vision",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=["glm-5.3-flash"],
+        default_model="glm-5.3-flash",
+        env_var="ZAI_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://api.z.ai/api/paas/v4",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 131072,
+            "context_window": 1000000,
+            "supports_thinking": True,
+            # GLM-5.3-Flash only accepts low/high/max, while DeerFlow's current
+            # generic UI can emit minimal/medium. Keep provider effort control
+            # disabled until model-specific reasoning capabilities are exposed.
+            "supports_reasoning_effort": False,
+            "supports_vision": True,
+            # The model cannot disable thinking. This unconditional base payload
+            # deliberately avoids when_thinking_enabled/disabled so background
+            # callers that request thinking_enabled=False cannot synthesize an
+            # invalid disabled/minimal combination in the model factory.
+            "extra_body": {
+                "thinking": {
+                    "type": "enabled",
+                    # Avoid preserved-thinking history requirements until the
+                    # reasoning-history abstraction handles summarization.
+                    "clear_thinking": True,
+                },
+                "tool_stream": True,
+            },
+            # Z.AI streams terminal usage without requiring OpenAI's undocumented
+            # stream_options.include_usage request field.
+            "stream_usage": False,
+        },
+    ),
+    LLMProvider(
         name="openai",
         display_name="OpenAI",
         description="GPT-5, GPT-4.1, GPT-4o",
