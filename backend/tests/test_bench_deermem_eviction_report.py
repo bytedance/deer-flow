@@ -150,6 +150,17 @@ def test_collect_and_integrity_checks_reject_incomplete_or_tampered_rows(tmp_pat
         grade_answer_rows(cases, results, rows, expected_fingerprints=stale)
 
 
+def test_grading_rejects_a_row_reassigned_to_another_valid_case(tmp_path: Path) -> None:
+    cases, results, fingerprints = _setup(tmp_path)
+    path = response_path(tmp_path, "case-off__hybrid-v1")
+    original = json.loads(path.read_text(encoding="utf-8"))
+    for field, value in (("case_id", "case-syn"), ("source", "synthetic"), ("scenario", "correction_reserve"), ("row_id", "case-syn__hybrid-v1")):
+        path.write_text(json.dumps(dict(original, **{field: value})) + "\n", encoding="utf-8")
+        rows = collect_answer_rows(tmp_path, cases)
+        with pytest.raises(AnswerRowIntegrityError, match="case-off__hybrid-v1.*case identity"):
+            grade_answer_rows(cases, results, rows, expected_fingerprints=fingerprints)
+
+
 def test_summary_and_statistics_keep_suites_separate(tmp_path: Path) -> None:
     cases, results, fingerprints = _setup(tmp_path)
     config = _load_config()

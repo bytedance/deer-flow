@@ -151,7 +151,14 @@ def ensure_run_config_identity(
 
 def _row_matches_task(row: dict[str, Any], task: AnswerTask, expected_fingerprint: str) -> bool:
     return (
-        row.get("row_id") == task.row_id and row.get("policy") == task.policy and row.get("capacity") == task.capacity and tuple(row.get("kept_fact_ids", ())) == task.kept_fact_ids and row.get("request_fingerprint") == expected_fingerprint
+        row.get("row_id") == task.row_id
+        and row.get("case_id") == task.case_id
+        and row.get("source") == task.source
+        and row.get("scenario") == task.scenario
+        and row.get("policy") == task.policy
+        and row.get("capacity") == task.capacity
+        and tuple(row.get("kept_fact_ids", ())) == task.kept_fact_ids
+        and row.get("request_fingerprint") == expected_fingerprint
     )
 
 

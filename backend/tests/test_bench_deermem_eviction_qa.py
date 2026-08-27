@@ -221,6 +221,27 @@ def test_run_answer_calls_persists_rows_and_resumes_without_new_calls(tmp_path: 
         assert len(calls) == 3
 
 
+def test_run_answer_calls_refuses_to_reuse_a_row_bound_to_another_case(tmp_path: Path) -> None:
+    config = _load_config()
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json=_success_body())
+
+    tasks = _tasks()
+    with _mock_client(handler, config.qa) as client:
+        run_answer_calls(tasks, config=config, client=client, output_dir=tmp_path, backoff_seconds=0)
+        assert len(calls) == 2
+        path = response_path(tmp_path, tasks[0].row_id)
+        original = json.loads(path.read_text(encoding="utf-8"))
+        for field, value in (("case_id", tasks[1].case_id), ("source", f"not-{tasks[0].source}"), ("scenario", f"not-{tasks[0].scenario}")):
+            path.write_text(json.dumps(dict(original, **{field: value})), encoding="utf-8")
+            report = run_answer_calls(tasks, config=config, client=client, output_dir=tmp_path, backoff_seconds=0)
+            assert (report.reused, report.called, report.failed) == (1, 1, ())
+        assert len(calls) == 5
+
+
 def test_run_answer_calls_reports_failures_without_writing_rows(tmp_path: Path) -> None:
     config = _load_config()
 

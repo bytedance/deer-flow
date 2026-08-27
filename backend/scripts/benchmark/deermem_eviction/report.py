@@ -54,8 +54,12 @@ def grade_answer_rows(cases: list[PreparedCase], results_by_row: dict[str, Polic
     graded: list[dict[str, Any]] = []
     for row_id in sorted(rows):
         row = rows[row_id]
-        case = cases_by_id[str(row["case_id"])]
         result = results_by_row[row_id]
+        # The recomputed task is authoritative: the reference case is derived from it,
+        # never from the stored row, and every persisted identity field must match it.
+        case = cases_by_id[result.case_id]
+        if row.get("row_id") != row_id or row.get("case_id") != result.case_id or row.get("source") != result.source or row.get("scenario") != result.scenario:
+            raise AnswerRowIntegrityError(f"row {row_id} case identity does not match the expected task")
         if tuple(row.get("kept_fact_ids", ())) != result.kept_fact_ids:
             raise AnswerRowIntegrityError(f"row {row_id} kept facts do not match the deterministic selector output")
         if row.get("capacity") != result.capacity or row.get("policy") != result.policy:
