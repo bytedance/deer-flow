@@ -280,8 +280,8 @@ async function* recoverStreamReplayGaps({
 
     // The SDK would otherwise ignore an unknown `gap` event and report a
     // normal finish. Surface a custom control event to DeerFlow's hook, reload
-    // durable values, then explicitly follow only events newer than the
-    // retained tail captured by the server.
+    // durable values, then resume after the retained tail when it exists
+    // (or rejoin without a cursor if the buffer is empty).
     clearReconnectRun(threadId, runId);
     yield {
       event: "custom",
