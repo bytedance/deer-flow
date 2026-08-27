@@ -6,6 +6,7 @@ Handles container lifecycle, port allocation, and cross-process container discov
 
 from __future__ import annotations
 
+import csv
 import ipaddress
 import json
 import logging
@@ -374,21 +375,34 @@ def _resolve_sandbox_host_address(host: str) -> str | None:
 
 
 def _effective_docker_network_target(raw: str) -> str:
-    """Return the network Docker will actually attach to for ``--network raw``.
+    r"""Return the network Docker will actually attach to for ``--network raw``.
 
-    Docker accepts the extended form ``name=<network>`` (its documented long
-    syntax, e.g. ``--network name=egress-net``) in addition to plain names
-    and network IDs; the effective target is the part after ``name=``.
-    Everything else (a network name or a 64-hex / short network ID) is the
-    target itself. Validation must run on this effective value — the raw
-    string ``name=host`` does not read as the literal word ``host``, but
-    Docker attaches the container to the host network namespace all the
-    same, silently voiding the port publish.
+    Mirrors Docker CLI's parser (opts/network.go): a value without ``=`` is
+    the short syntax — the whole value is a network name or ID. A value with
+    ``=`` is the long syntax — a CSV of ``key=value`` fields in any order
+    (``name=``, ``alias=``, ``ip=``, ``ip6=``, ``mac-address=``,
+    ``link-local-ip=``, ``driver-opt=``, ``gw-priority=``) — and the network
+    is the value of the ``name=`` field, with the last occurrence winning
+    and fields lowercased, exactly as Docker does it.
+
+    Validation must run on this effective value: neither ``name=host`` nor
+    ``gw-priority=0,name=host`` reads as the bare word ``host``, but both
+    attach the host network namespace all the same, silently voiding the
+    port publish. A long-syntax value with no ``name=`` field cannot name a
+    network at all (Docker rejects it as well), so the raw value is returned
+    and falls through the checks harmlessly.
     """
-    lowered = raw.strip().lower()
-    if lowered.startswith("name="):
-        lowered = lowered[len("name=") :].strip()
-    return lowered
+    value = raw.strip()
+    if "=" not in value:
+        return value.lower()
+    target = ""
+    for field in next(csv.reader([value])):
+        key, _, val = field.partition("=")
+        key = key.strip().lower()
+        val = val.strip().lower()  # Docker lowercases the whole field as well
+        if key == "name":
+            target = val  # last name= wins, mirroring the loop in network.go
+    return target or value.lower()
 
 
 def _docker_resource_limit(env_name: str, default: str) -> str | None:

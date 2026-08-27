@@ -821,3 +821,65 @@ def test_resolve_sandbox_host_address_accepts_bracketed_ipv6(monkeypatch):
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.socket.getaddrinfo", fake_getaddrinfo)
 
     assert _resolve_sandbox_host_address("[fd00::1]") == "[fd00::1]"
+
+
+# ── Long-syntax fields in any position (Docker opts/network.go semantics) ────
+
+
+@pytest.mark.parametrize(
+    "network",
+    [
+        "name=host,gw-priority=0",
+        "gw-priority=0,name=host",
+        "name=host,alias=sbx",
+    ],
+)
+def test_start_container_rejects_host_with_additional_long_syntax_fields(monkeypatch, network):
+    """Docker accepts comma-separated fields in any order; both orderings
+    select the host network and must not dodge the rejection."""
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", network)
+
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_NETWORK"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_rejects_none_with_additional_long_syntax_fields(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "gw-priority=0,name=none")
+
+    with pytest.raises(RuntimeError, match="loopback-only"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_rejects_container_mode_with_additional_long_syntax_fields(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "name=container:gateway,gw-priority=0")
+
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_NETWORK"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_passes_long_syntax_custom_network_with_fields(monkeypatch):
+    """A legit long-syntax value with extra fields keeps passing through verbatim."""
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "name=egressnet,gw-priority=1")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--network") + 1] == "name=egressnet,gw-priority=1"
+
+
+def test_effective_network_target_last_name_field_wins():
+    """Docker's parser lets a later name= field overwrite an earlier one."""
+    from deerflow.community.aio_sandbox.local_backend import _effective_docker_network_target as target
+
+    assert target("name=host,name=egressnet") == "egressnet"
+    assert target("name=egressnet,name=host") == "host"
+    assert target("gw-priority=0") == "gw-priority=0"  # no name= field: Docker errors itself
+    assert target("bridge") == "bridge"
+    assert target("1f2a" * 16) == "1f2a" * 16  # network ID passes through
