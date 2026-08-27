@@ -762,6 +762,184 @@ def test_async_sandbox_tool_authorizes_once_via_async_provider(monkeypatch):
     provider.authorize.assert_not_called()
 
 
+def _composed_file_request(name, args, runtime, messages=()):
+    from langgraph.prebuilt.tool_node import ToolCallRequest
+
+    return ToolCallRequest(
+        tool_call={"name": name, "args": args, "id": f"call-{name}"},
+        tool=None,
+        state={"messages": list(messages)},
+        runtime=runtime,
+    )
+
+
+def _install_composed_file_authz(monkeypatch, *, allow=True):
+    from deerflow.sandbox import tools as sandbox_tools
+
+    provider = MagicMock()
+    provider.authorize.return_value = AuthzDecision(allow=allow)
+    provider.aauthorize = AsyncMock(return_value=AuthzDecision(allow=allow))
+    app_config = _make_app_config()
+    _enable_authz(app_config)
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.resolve_authorization_provider",
+        lambda config: provider,
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: app_config)
+
+    sandbox = MagicMock()
+    sandbox.id = "sbx-existing"
+    sandbox_provider = MagicMock()
+    sandbox_provider.get.return_value = sandbox
+    monkeypatch.setattr(sandbox_tools, "get_sandbox_provider", lambda: sandbox_provider)
+    monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda runtime: False)
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "sbx-existing"}},
+        context={"thread_id": "t1", "user_id": "u1", "user_role": "user"},
+        config=None,
+    )
+    return provider, sandbox, runtime
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "write_file", "str_replace"])
+def test_composed_sync_file_tool_authorizes_once(monkeypatch, tool_name):
+    """Read-before-write re-entry shares one synchronous provider decision."""
+    from langchain_core.messages import ToolMessage
+
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.sandbox import tools as sandbox_tools
+
+    provider, sandbox, runtime = _install_composed_file_authz(monkeypatch)
+    path = "/mnt/user-data/outputs/report.md"
+    middleware = ReadBeforeWriteMiddleware()
+    messages = ()
+
+    if tool_name == "read_file":
+        sandbox.read_file.return_value = "v1"
+        args = {"description": "read report", "path": path}
+
+        def handler(_request):
+            content = sandbox_tools.read_file_tool.func(runtime, args["description"], path)
+            return ToolMessage(content=content, tool_call_id="call-read_file", name="read_file")
+
+    elif tool_name == "write_file":
+        sandbox.read_file.side_effect = FileNotFoundError(path)
+        args = {"description": "write report", "path": path, "content": "v1"}
+
+        def handler(_request):
+            content = sandbox_tools.write_file_tool.func(runtime, args["description"], path, args["content"])
+            return ToolMessage(content=content, tool_call_id="call-write_file", name="write_file")
+
+    else:
+        import hashlib
+
+        sandbox.read_file.return_value = "v1"
+        args = {"description": "edit report", "path": path, "old_str": "v1", "new_str": "v2"}
+        read_mark = ToolMessage(content="v1", tool_call_id="prior-read", name="read_file")
+        read_mark.additional_kwargs["deerflow_read_mark"] = {
+            "path": path,
+            "hash": hashlib.sha256(b"v1").hexdigest(),
+        }
+        messages = (read_mark,)
+
+        def handler(_request):
+            content = sandbox_tools.str_replace_tool.func(runtime, args["description"], path, args["old_str"], args["new_str"])
+            return ToolMessage(content=content, tool_call_id="call-str_replace", name="str_replace")
+
+    result = middleware.wrap_tool_call(_composed_file_request(tool_name, args, runtime, messages), handler)
+
+    assert result.status != "error"
+    provider.authorize.assert_called_once()
+    provider.aauthorize.assert_not_called()
+
+
+@pytest.mark.parametrize("tool_name", ["read_file", "write_file", "str_replace"])
+def test_composed_async_file_tool_authorizes_once(monkeypatch, tool_name):
+    """Async gate, tool body, and read-mark worker share one async decision."""
+    import asyncio
+
+    from langchain_core.messages import ToolMessage
+
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.sandbox import tools as sandbox_tools
+
+    provider, sandbox, runtime = _install_composed_file_authz(monkeypatch)
+    path = "/mnt/user-data/outputs/report.md"
+    middleware = ReadBeforeWriteMiddleware()
+    messages = ()
+
+    if tool_name == "read_file":
+        sandbox.read_file.return_value = "v1"
+        args = {"description": "read report", "path": path}
+
+        async def handler(_request):
+            content = await sandbox_tools.read_file_tool.coroutine(runtime, args["description"], path)
+            return ToolMessage(content=content, tool_call_id="call-read_file", name="read_file")
+
+    elif tool_name == "write_file":
+        sandbox.read_file.side_effect = FileNotFoundError(path)
+        args = {"description": "write report", "path": path, "content": "v1"}
+
+        async def handler(_request):
+            content = await sandbox_tools.write_file_tool.coroutine(runtime, args["description"], path, args["content"])
+            return ToolMessage(content=content, tool_call_id="call-write_file", name="write_file")
+
+    else:
+        import hashlib
+
+        sandbox.read_file.return_value = "v1"
+        args = {"description": "edit report", "path": path, "old_str": "v1", "new_str": "v2"}
+        read_mark = ToolMessage(content="v1", tool_call_id="prior-read", name="read_file")
+        read_mark.additional_kwargs["deerflow_read_mark"] = {
+            "path": path,
+            "hash": hashlib.sha256(b"v1").hexdigest(),
+        }
+        messages = (read_mark,)
+
+        async def handler(_request):
+            content = await sandbox_tools.str_replace_tool.coroutine(runtime, args["description"], path, args["old_str"], args["new_str"])
+            return ToolMessage(content=content, tool_call_id="call-str_replace", name="str_replace")
+
+    result = asyncio.run(middleware.awrap_tool_call(_composed_file_request(tool_name, args, runtime, messages), handler))
+
+    assert result.status != "error"
+    provider.aauthorize.assert_awaited_once()
+    provider.authorize.assert_not_called()
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_composed_write_authorization_deny_is_not_swallowed(monkeypatch, is_async):
+    """The gate's generic fail-open path must never turn an authz deny into allow."""
+    import asyncio
+
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+
+    provider, sandbox, runtime = _install_composed_file_authz(monkeypatch, allow=False)
+    path = "/mnt/user-data/outputs/report.md"
+    args = {"description": "write report", "path": path, "content": "v1"}
+    request = _composed_file_request("write_file", args, runtime)
+    middleware = ReadBeforeWriteMiddleware()
+    handler = MagicMock(side_effect=AssertionError("denied handler must not run"))
+
+    if is_async:
+
+        async def async_handler(_request):
+            handler(_request)
+
+        result = asyncio.run(middleware.awrap_tool_call(request, async_handler))
+        provider.aauthorize.assert_awaited_once()
+        provider.authorize.assert_not_called()
+    else:
+        result = middleware.wrap_tool_call(request, handler)
+        provider.authorize.assert_called_once()
+        provider.aauthorize.assert_not_called()
+
+    assert result.status == "error"
+    assert "not permitted" in str(result.content).lower()
+    handler.assert_not_called()
+    sandbox.read_file.assert_not_called()
+
+
 def test_abefore_agent_deny_skips_acquisition(monkeypatch):
     """Async eager path deny: acquisition skipped, no run-level error.
 

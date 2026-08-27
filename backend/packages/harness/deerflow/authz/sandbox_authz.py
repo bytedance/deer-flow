@@ -14,6 +14,7 @@ so the sandbox path shares one identity source with the tool and model paths.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Mapping
 from typing import Any
@@ -43,6 +44,11 @@ def safe_app_config() -> AppConfig | None:
     except Exception:
         logger.debug("App config unavailable; sandbox:execute gate is a no-op", exc_info=True)
         return None
+
+
+async def safe_app_config_async() -> AppConfig | None:
+    """Load AppConfig without running config file I/O on the event loop."""
+    return await asyncio.to_thread(safe_app_config)
 
 
 # Sandbox is a single shared resource (the execution environment), not a named
@@ -122,8 +128,18 @@ def authorize_sandbox_execution(*, context: Mapping[str, Any], app_config: AppCo
 
 
 async def authorize_sandbox_execution_async(*, context: Mapping[str, Any], app_config: AppConfig | None) -> None:
-    """Asynchronously check ``authorize("sandbox", "execute")`` before use."""
-    inputs = _resolve_authorization_inputs(context=context, app_config=app_config)
+    """Asynchronously check ``authorize("sandbox", "execute")`` before use.
+
+    Provider resolution may import and construct a custom provider, so keep the
+    shared synchronous resolution path off the event loop as well as the config
+    file load performed by :func:`safe_app_config_async`.
+    """
+    context_snapshot = dict(context)
+    inputs = await asyncio.to_thread(
+        _resolve_authorization_inputs,
+        context=context_snapshot,
+        app_config=app_config,
+    )
     if inputs is None:
         return
     provider, authz_config, principal = inputs

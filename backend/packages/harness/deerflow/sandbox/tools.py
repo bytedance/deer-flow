@@ -5,7 +5,8 @@ import os
 import posixpath
 import re
 import shlex
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,7 @@ from deerflow.authz.sandbox_authz import (
     authorize_sandbox_execution,
     authorize_sandbox_execution_async,
     safe_app_config,
+    safe_app_config_async,
 )
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
@@ -39,11 +41,12 @@ from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
 
-# Async tool wrappers authorize before dispatching their synchronous body via
-# ``asyncio.to_thread``. Context variables are copied into that worker, making
-# this a task-local, one-invocation handoff rather than shared runtime state.
-_ASYNC_SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
-    "deerflow_async_sandbox_authorization_checked",
+# The read-before-write middleware can enter the sandbox before or after the
+# tool body. Scope this marker to the complete composed invocation so all of
+# those entries share one live provider decision. Context variables are copied
+# into ``asyncio.to_thread`` workers, keeping the handoff task-local.
+_SANDBOX_AUTHORIZATION_CHECKED: ContextVar[bool] = ContextVar(
+    "deerflow_sandbox_authorization_checked",
     default=False,
 )
 
@@ -1384,6 +1387,42 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     return sandbox
 
 
+@contextmanager
+def sandbox_authorization_scope(runtime: Runtime) -> Iterator[None]:
+    """Authorize once for one complete synchronous sandbox tool invocation."""
+    if _SANDBOX_AUTHORIZATION_CHECKED.get():
+        yield
+        return
+
+    authorize_sandbox_execution(
+        context=runtime.context or {},
+        app_config=safe_app_config(),
+    )
+    token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
+    try:
+        yield
+    finally:
+        _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
+
+
+@asynccontextmanager
+async def sandbox_authorization_scope_async(runtime: Runtime) -> AsyncIterator[None]:
+    """Authorize once for one complete asynchronous sandbox tool invocation."""
+    if _SANDBOX_AUTHORIZATION_CHECKED.get():
+        yield
+        return
+
+    await authorize_sandbox_execution_async(
+        context=runtime.context or {},
+        app_config=await safe_app_config_async(),
+    )
+    token = _SANDBOX_AUTHORIZATION_CHECKED.set(True)
+    try:
+        yield
+    finally:
+        _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1411,7 +1450,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Authorization is a live execution policy, not a lifetime property of a
     # sandbox id. Re-check before both reuse and acquisition so a role or policy
     # change takes effect on the next sandbox-backed tool call.
-    if not _ASYNC_SANDBOX_AUTHORIZATION_CHECKED.get():
+    if not _SANDBOX_AUTHORIZATION_CHECKED.get():
         authorize_sandbox_execution(
             context=runtime.context or {},
             app_config=safe_app_config(),
@@ -1470,10 +1509,11 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     # Keep the async path aligned with the sync path: persisted sandbox state
     # must not bypass a newly-revoked sandbox:execute grant.
-    await authorize_sandbox_execution_async(
-        context=runtime.context or {},
-        app_config=safe_app_config(),
-    )
+    if not _SANDBOX_AUTHORIZATION_CHECKED.get():
+        await authorize_sandbox_execution_async(
+            context=runtime.context or {},
+            app_config=await safe_app_config_async(),
+        )
 
     # Same discard as the sync path above: the reuse path never releases,
     # because after_agent short-circuits on the still-wrapped state first.
@@ -1514,20 +1554,17 @@ async def _run_sync_tool_after_async_sandbox_init(
 ) -> str:
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
-        await ensure_sandbox_initialized_async(runtime)
+        async with sandbox_authorization_scope_async(runtime):
+            await ensure_sandbox_initialized_async(runtime)
+
+            if func is None:
+                return "Error: Tool implementation not available"
+
+            return await asyncio.to_thread(func, runtime, *args)
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
-
-    if func is None:
-        return "Error: Tool implementation not available"
-
-    token = _ASYNC_SANDBOX_AUTHORIZATION_CHECKED.set(True)
-    try:
-        return await asyncio.to_thread(func, runtime, *args)
-    finally:
-        _ASYNC_SANDBOX_AUTHORIZATION_CHECKED.reset(token)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
