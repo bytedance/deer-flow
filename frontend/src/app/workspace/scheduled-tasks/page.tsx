@@ -1,8 +1,8 @@
 "use client";
 
-import { TriangleAlertIcon } from "lucide-react";
+import { CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ import {
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
+import { buildScheduledTaskDuplicateDraft } from "@/core/scheduled-tasks/duplicate";
 import {
   useCreateScheduledTask,
   useUpdateScheduledTask,
@@ -118,6 +119,8 @@ export default function ScheduledTasksPage() {
     timezone: "UTC",
   });
   const [createNonce, setCreateNonce] = useState(0);
+  const createFormRef = useRef<HTMLDivElement>(null);
+  const createTitleRef = useRef<HTMLInputElement>(null);
   const filteredData = (data ?? []).filter((task) => {
     const statusPass = statusFilter === "all" || task.status === statusFilter;
     const typePass = typeFilter === "all" || task.schedule_type === typeFilter;
@@ -162,6 +165,24 @@ export default function ScheduledTasksPage() {
     setCreateSchedule(recipe.schedule);
     setContextMode("fresh_thread_per_run");
     setCreateNonce((n) => n + 1);
+  };
+  const duplicateTask = (task: ScheduledTask) => {
+    const draft = buildScheduledTaskDuplicateDraft(
+      task,
+      st.actions.duplicateTitleSuffix,
+    );
+    setTitle(draft.title);
+    setPrompt(draft.prompt);
+    setContextMode(draft.contextMode);
+    setTargetThreadId(draft.targetThreadId);
+    setCreateSchedule(draft.schedule);
+    setFormError(null);
+    setCreateNonce((nonce) => nonce + 1);
+    createFormRef.current?.scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+    createTitleRef.current?.focus();
   };
 
   useEffect(() => {
@@ -212,6 +233,7 @@ export default function ScheduledTasksPage() {
         <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6">
           <h1 className="text-2xl font-semibold">{t.sidebar.scheduledTasks}</h1>
           <div
+            ref={createFormRef}
             className="grid gap-2 rounded-lg border p-4"
             data-testid="scheduled-task-create-form"
           >
@@ -267,6 +289,7 @@ export default function ScheduledTasksPage() {
               </>
             )}
             <Input
+              ref={createTitleRef}
               value={title}
               onChange={(event) => setTitle(event.target.value)}
               placeholder={st.create.taskTitle}
@@ -545,6 +568,14 @@ export default function ScheduledTasksPage() {
                       onClick={() => triggerTask.mutate(selectedTask.id)}
                     >
                       {st.actions.trigger}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => duplicateTask(selectedTask)}
+                    >
+                      <CopyIcon />
+                      {st.actions.duplicate}
                     </Button>
                     <Button
                       variant="destructive"
