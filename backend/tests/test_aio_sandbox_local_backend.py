@@ -954,7 +954,23 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
                 text=True,
                 timeout=30,
             )
-            tail = "\n".join((logs.stdout + logs.stderr).splitlines()[-40:])
+            # supervisord only reports exit codes in the container log; the
+            # failing program's own stderr goes to files inside the container.
+            # Pull the usual suspects so the failure is actionable in CI.
+            prog_logs = subprocess.run(
+                [
+                    "docker",
+                    "exec",
+                    info.container_name,
+                    "sh",
+                    "-c",
+                    "cat /var/log/supervisor/* 2>/dev/null | tail -n 40; echo '--- nginx -t ---'; nginx -t 2>&1; echo '--- nginx error.log ---'; tail -n 20 /var/log/nginx/error.log 2>/dev/null",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            tail = "\n".join((logs.stdout + logs.stderr).splitlines()[-40:]) + "\n" + (prog_logs.stdout or "")
             pytest.fail(f"default image never became ready under the hardened capabilities: {info.sandbox_url}\n--- last 40 container log lines ---\n{tail}")
         assert backend.is_alive(info)
     finally:
