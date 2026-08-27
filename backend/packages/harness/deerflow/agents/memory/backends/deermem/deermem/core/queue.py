@@ -433,6 +433,13 @@ class MemoryUpdateQueue:
         this call), an agent-level tombstone is recorded so the in-flight write
         is skipped before it reaches save().
 
+        The tombstone is only recorded while a worker holds a pre-discard
+        snapshot (``_processing``): it is cleared at the end of that run. When
+        the queue is idle there is no snapshot, so the filtered ``_items``
+        alone are sufficient — recording a tombstone there would leave a stale
+        entry that could silently skip a re-created agent's first legitimate
+        update (review feedback on #3364).
+
         Returns the number of pending contexts removed from the queue.
         """
         with self._lock:
@@ -444,7 +451,8 @@ class MemoryUpdateQueue:
                 c for c in self._items
                 if not (c.user_id == user_id and c.agent_name == agent_name)
             ]
-            self._deleted_agents.add((user_id, agent_name))
+            if self._processing:
+                self._deleted_agents.add((user_id, agent_name))
         return len(matching)
 
     def clear(self) -> None:

@@ -469,19 +469,38 @@ def test_discard_skips_in_flight_update_for_deleted_agent() -> None:
     assert queue._deleted_agents == set()
 
 
-def test_discard_tombstone_cleared_after_processing() -> None:
-    """A tombstone is cleared once a processing run finishes, so it never leaks
-    into a later run and blocks a recreated same-named agent."""
+def test_discard_does_not_leave_stale_tombstone_when_idle() -> None:
+    """An idle queue has no pre-discard snapshot, so discard() must not record
+    a tombstone: a stale one would silently skip a recreated same-named
+    agent's first legitimate update (review feedback on #3364)."""
     queue = _queue()
     with patch.object(queue, "_schedule_timer"):
         queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+
+    removed = queue.discard(user_id="alice", agent_name="agent-a")
+
+    assert removed == 1
+    assert queue._deleted_agents == set()  # idle queue: no tombstone recorded
+
+
+def test_discard_tombstone_cleared_after_processing() -> None:
+    """A tombstone recorded while a worker holds a pre-discard snapshot is
+    cleared once that processing run finishes, so it never leaks into a later
+    run and blocks a recreated same-named agent."""
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["m"], agent_name="agent-a", user_id="alice")
+    # Simulate in-flight: the worker already pulled the queue out.
+    queue._processing = True
+    contexts = queue._items
+    queue._items = []
     queue.discard(user_id="alice", agent_name="agent-a")
     assert queue._deleted_agents == {("alice", "agent-a")}
 
-    # A fresh update forces an actual processing run whose finally block clears
-    # the tombstone set.
-    with patch.object(queue, "_schedule_timer"):
-        queue.add(thread_id="t2", messages=["m"], agent_name="agent-b", user_id="alice")
+    # Re-arm the snapshot and run it: the in-flight context is skipped via the
+    # tombstone, and the finally block clears the set.
+    queue._items = contexts
+    queue._processing = False
     queue.flush()
 
     assert queue._deleted_agents == set()

@@ -776,6 +776,30 @@ class TestAgentsAPI:
             user_id="test-user-autouse",
             agent_name="discard-er",
         )
+        # After the store delete succeeds, the agent must be marked deleted in
+        # the memory storage so late writes cannot resurrect the directory.
+        manager.mark_agent_deleted.assert_called_once_with(
+            user_id="test-user-autouse",
+            agent_name="discard-er",
+        )
+
+    def test_delete_agent_skips_memory_cleanup_when_memory_disabled(self, agent_client):
+        """issue #3364 review: when memory is disabled, the delete path must
+        not build the memory manager (which would bootstrap storage, signal
+        patterns and the extraction LLM on every agent deletion)."""
+        from unittest.mock import MagicMock
+
+        agent_client.post("/api/agents", json={"name": "no-mem-er", "soul": "bye"})
+
+        with (
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()) as get_manager,
+            patch("app.gateway.routers.agents.get_memory_config") as get_config,
+        ):
+            get_config.return_value.enabled = False
+            response = agent_client.delete("/api/agents/no-mem-er")
+            assert response.status_code == 204
+
+        get_manager.assert_not_called()
 
     def test_delete_rejects_memory_only_directory_without_removing_facts(self, agent_client, tmp_path):
         agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "lead-agent"

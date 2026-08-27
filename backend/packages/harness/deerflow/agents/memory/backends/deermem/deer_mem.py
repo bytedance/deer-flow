@@ -288,6 +288,25 @@ class DeerMem(MemoryManager):
             return 0
         return queue.discard(user_id=user_id, agent_name=agent_name)
 
+    def mark_agent_deleted(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> None:
+        """Record an agent deletion so late memory writes are skipped (issue #3364).
+
+        Forwards to the storage backend's tombstone marker, which survives the
+        agent-directory rmtree and guards every commit path (save / apply_changes
+        / fact CRUD) against resurrecting a deleted agent's directory.
+        """
+        storage = self._storage
+        if storage is None:
+            return
+        mark = getattr(storage, "mark_agent_deleted", None)
+        if mark is not None:
+            mark(user_id=user_id, agent_name=agent_name)
+
     def _prepare_update(
         self,
         messages: list[Any],
