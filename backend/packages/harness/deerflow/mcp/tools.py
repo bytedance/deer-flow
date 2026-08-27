@@ -22,6 +22,7 @@ from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig,
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
+from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
 from deerflow.mcp.session_pool import MCPSessionPool, get_session_pool
@@ -820,9 +821,12 @@ async def get_mcp_tools() -> list[BaseTool]:
             if server_name not in servers_config:
                 continue
             if servers_config[server_name].get("transport") in ("sse", "http"):
-                existing_headers = dict(servers_config[server_name].get("headers", {}))
-                existing_headers["Authorization"] = auth_header
-                servers_config[server_name]["headers"] = existing_headers
+                # Case-insensitive write: a static header spelled 'authorization'
+                # must be replaced, not joined on the wire by a second field.
+                servers_config[server_name]["headers"] = apply_header_overrides(
+                    servers_config[server_name].get("headers", {}),
+                    {"Authorization": auth_header},
+                )
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
