@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import socket
 import sqlite3
@@ -48,6 +49,55 @@ TERMINAL_RUN_STATUSES_FOR_EVICTION = frozenset({status.value for status in RunSt
 # more grace period, so a store outage delays removal instead of reintroducing
 # unbounded retention through an endless retry loop.
 EVICTION_VERIFY_MAX_ATTEMPTS = 3
+
+# Completion fields the eviction gate verifies before dropping a record,
+# mirroring the ``RunStore.update_run_completion`` contract. Terminal status and
+# completion data travel independent persistence paths (``set_status`` vs
+# ``update_run_completion``, each best-effort), so a row can be terminal yet
+# thinner than the local record; verifying columns alongside status keeps
+# eviction from discarding token usage and completion metadata forever.
+_COMPLETION_INT_FIELDS = (
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_tokens",
+    "llm_call_count",
+    "lead_agent_tokens",
+    "subagent_tokens",
+    "middleware_tokens",
+    "message_count",
+)
+_COMPLETION_STR_FIELDS = ("last_ai_message", "first_human_message")
+
+
+def _completion_divergence_from_row(record: RunRecord, row: dict[str, Any]) -> dict[str, Any]:
+    """Return completion fields carried by *record* but absent from *row*.
+
+    Only locally non-default values are compared, so legacy zero-valued rows
+    never block eviction; dict payloads go through canonical JSON so SQL/JSONL
+    round-trips cannot create false divergence.
+    """
+    divergent: dict[str, Any] = {}
+    for field_name in _COMPLETION_INT_FIELDS:
+        local = int(getattr(record, field_name, 0) or 0)
+        if local > 0 and int(row.get(field_name) or 0) != local:
+            divergent[field_name] = local
+    for field_name in _COMPLETION_STR_FIELDS:
+        local = getattr(record, field_name, None)
+        if local and row.get(field_name) != local:
+            divergent[field_name] = local
+    if record.error and row.get("error") != record.error:
+        divergent["error"] = record.error
+    usage_by_model = record.token_usage_by_model or {}
+    if usage_by_model:
+        row_usage = row.get("token_usage_by_model") or {}
+
+        def _canonical(value: Any) -> str:
+            return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+        if _canonical(row_usage) != _canonical(usage_by_model):
+            divergent["token_usage_by_model"] = usage_by_model
+    return divergent
+
 
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
@@ -1907,7 +1957,12 @@ class RunManager:
         (``_persist_status`` / ``update_run_completion`` swallow store
         failures), so blindly dropping the local record could leave a stale
         ``pending``/``running`` row as the only authority and let recovery
-        rewrite the completed run as an orphan error. Verification failures
+        rewrite the completed run as an orphan error. Because terminal status
+        and completion data travel independent best-effort write paths, the
+        gate also compares the row's completion columns against the local
+        record (repairing a thinner row once through an idempotent same-status
+        ``update_run_completion``) so eviction cannot drop the richer snapshot.
+        Verification failures
         retry with the same grace-period spacing up to ``verify_attempts``
         times; a missing durable row is repaired once from the authoritative
         local snapshot, while a present-but-active row is never overwritten
@@ -1973,7 +2028,11 @@ class RunManager:
         (upsert) so an unobserved terminal write recovers here instead of
         needing a dedicated reconciler. An existing active row is left alone:
         rewriting it from a possibly stale snapshot could clobber a peer's
-        legitimate claim.
+        legitimate claim. On a same-status terminal row the completion columns
+        are also verified (see :func:`_completion_divergence_from_row`) and
+        repaired through an idempotent ``update_run_completion`` when they are
+        thinner than the local record; a row at a *different* terminal status is
+        a peer's legitimate outcome and is accepted as-is.
         """
         row_status: str | None = None
         try:
@@ -1998,7 +2057,27 @@ class RunManager:
                 return False
 
         row_status = row.get("status")
-        return row_status in TERMINAL_RUN_STATUSES_FOR_EVICTION
+        if row_status not in TERMINAL_RUN_STATUSES_FOR_EVICTION:
+            return False
+        # A differing terminal status means a peer legitimately finished the run
+        # its own way (lease takeover): the durable outcome is authoritative and
+        # our completion fields must never be forced onto it. An ownership-lost
+        # record likewise defers to the store's terminal fact alone.
+        if record.ownership_lost or row_status != record.status.value:
+            return True
+
+        divergent_fields = _completion_divergence_from_row(record, row)
+        if not divergent_fields:
+            return True
+        try:
+            updated = await self._store.update_run_completion(record.run_id, status=record.status.value, **divergent_fields)
+        except Exception:
+            logger.warning("Eviction gate could not repair completion snapshot for run %s", record.run_id, exc_info=True)
+            return False
+        if updated is False:
+            logger.warning("Run %s completion snapshot repair was refused by the store", record.run_id)
+            return False
+        return True
 
     def schedule_terminal_eviction(self, run_id: str, *, delay: float = TERMINAL_RUN_EVICTION_DELAY_SECONDS) -> asyncio.Task[None] | None:
         """Schedule removal of a terminal run from the in-memory registries.

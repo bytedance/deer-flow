@@ -323,6 +323,75 @@ class TestEvictionGatedOnVerifiedDurableTerminalState:
         assert record.run_id not in store._runs
         assert record.run_id in manager._runs
 
+    @pytest.mark.asyncio
+    async def test_thin_terminal_row_is_repaired_from_local_snapshot_before_eviction(self):
+        """A terminal row missing the completion payload must not lose it (#5011 follow-up).
+
+        ``set_status`` and ``update_run_completion`` are independent persistence
+        paths: when only the status write lands, the row is terminal yet thinner
+        than the local record — and eviction would drop token usage, message
+        counts, and the convenience fields forever.
+        """
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-thin")
+        await manager.set_status(record.run_id, RunStatus.success)
+        # Enrich only the local record, as the worker would have via
+        # update_run_completion had that store write failed silently.
+        record.total_tokens = 1234
+        record.total_output_tokens = 500
+        record.message_count = 7
+        record.last_ai_message = "final answer"
+
+        await manager.cleanup(record.run_id, delay=0)
+
+        assert record.run_id not in manager._runs
+        repaired = store._runs[record.run_id]
+        assert repaired["total_tokens"] == 1234
+        assert repaired["total_output_tokens"] == 500
+        assert repaired["message_count"] == 7
+        assert repaired["last_ai_message"] == "final answer"
+
+    @pytest.mark.asyncio
+    async def test_unrepairable_completion_gap_retains_record(self):
+        """When the completion columns cannot be fixed, eviction is withheld."""
+
+        class NoCompletionStore(MemoryRunStore):
+            async def update_run_completion(self, run_id, *, status, **kwargs):
+                raise RuntimeError("completion write down")
+
+        broken = NoCompletionStore()
+        manager = RunManager(store=broken)
+        record = await manager.create("thread-eviction-unrepairable")
+        await manager.set_status(record.run_id, RunStatus.success)
+        record.total_tokens = 99
+
+        await manager.cleanup(record.run_id, delay=0, verify_attempts=1)
+
+        assert record.run_id in manager._runs
+        assert "total_tokens" not in broken._runs[record.run_id]
+
+    @pytest.mark.asyncio
+    async def test_agreeing_completion_snapshot_evicts_normally(self):
+        """Rows already carrying the full snapshot need no extra retention."""
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-full")
+        await manager.set_status(record.run_id, RunStatus.success)
+        record.total_tokens = 10
+        await manager.update_run_completion(
+            record.run_id,
+            status=RunStatus.success.value,
+            total_input_tokens=4,
+            total_output_tokens=6,
+            total_tokens=10,
+        )
+
+        await manager.cleanup(record.run_id, delay=0)
+
+        assert record.run_id not in manager._runs
+        assert store._runs[record.run_id]["total_tokens"] == 10
+
 
 class TestWorkerSchedulesEvictionWhenPublishEndFails:
     """A failing END marker must still schedule post-terminal cleanup."""

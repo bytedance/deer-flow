@@ -79,7 +79,13 @@ best-effort, so a read failure retries with one more grace period up to
 authoritative local snapshot, an active row (or any row once lease ownership
 was lost) is never overwritten by the evictor, and when every attempt fails
 the record is retained with a warning — retention under a broken store beats
-exposing a stale pending row that orphan recovery would rewrite as an error;
+exposing a stale pending row that orphan recovery would rewrite as an error.
+Because terminal status and completion data travel independent best-effort
+write paths (`set_status` vs `update_run_completion`), the gate additionally
+compares the row's completion columns (token totals, message counts, convenience
+fields) against the local record on same-status rows and repairs a thinner row
+once through an idempotent same-status `update_run_completion`; a row at a
+*different* terminal status is a peer's legitimate outcome and is accepted as-is;
 (3) the worker wraps `bridge.publish_end` so a failing END marker still
 schedules bridge cleanup and eviction through `_spawn_background_terminal_task`
 (strong module-level reference, mirroring `_eviction_tasks`), while the

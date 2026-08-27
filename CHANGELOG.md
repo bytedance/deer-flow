@@ -401,7 +401,12 @@ This section accumulates work toward the **2.1.0** milestone
   period up to `EVICTION_VERIFY_MAX_ATTEMPTS`, a missing row is repaired once
   from the authoritative local snapshot, an active or lease-lost row is never
   overwritten, and exhausted attempts deliberately retain the record with a
-  warning so orphan recovery cannot rewrite a completed run as an error; and
+  warning so orphan recovery cannot rewrite a completed run as an error. Because
+  terminal status and completion data travel independent best-effort write paths,
+  the gate also verifies the row's completion columns (token totals, message
+  counts, convenience fields) on same-status rows and repairs a thinner row once
+  through an idempotent same-status `update_run_completion`, so eviction can no
+  longer drop the richer local snapshot; and
   `run_agent` schedules bridge cleanup plus eviction in a `finally` around
   `publish_end`, so a failing stream END marker no longer pins terminal state
   in memory (pinned via tests). ([#5011])
