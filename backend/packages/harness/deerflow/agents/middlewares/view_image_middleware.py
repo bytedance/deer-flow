@@ -1,16 +1,17 @@
-"""Middleware for injecting image details into conversation before LLM call."""
+"""Middleware for injecting image details into the model request."""
 
 import asyncio
 import base64
 import logging
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import override
 from uuid import uuid4
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import AIMessage, HumanMessage, RemoveMessage, ToolMessage
-from langgraph.runtime import Runtime
+from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 
 from deerflow.agents.thread_state import ThreadState
 
@@ -29,18 +30,24 @@ class ViewImageMiddlewareState(ThreadState):
 
 
 class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
-    """Injects image details as a human message before LLM calls when view_image tools have completed.
+    """Injects image details into the model request when view_image tool calls have completed.
 
     This middleware:
-    1. Runs before each LLM call
+    1. Wraps each LLM call
     2. Checks if the last assistant message contains view_image tool calls
     3. Verifies all tool calls in that message have been completed (have corresponding ToolMessages)
-    4. If conditions are met, creates a human message with all viewed image details (including base64 data)
-    5. Adds the message to state so the LLM can see and analyze the images
-    6. Removes the transient message after the LLM call so later checkpoints do not retain its base64 data
+    4. If conditions are met, appends a human message with all viewed image details (including base64 data)
+    5. Hands the augmented request to the model so it can see and analyze the images
 
     This enables the LLM to automatically receive and analyze images that were loaded via view_image tool,
     without requiring explicit user prompts to describe the images.
+
+    Injection happens in ``wrap_model_call`` on purpose: the message exists only
+    in ``ModelRequest.messages`` and is never returned as a state update, so no
+    checkpoint carries the base64 payload and an interrupted run cannot strand it
+    in history. Do not move this back to a ``before_model``/``after_model`` pair
+    -- that writes the payload into state and can only take it out again
+    afterwards (see #4267).
     """
 
     state_schema = ViewImageMiddlewareState
@@ -183,16 +190,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
         return content_blocks
 
-    def _should_inject_image_message(self, state: ViewImageMiddlewareState) -> bool:
-        """Determine if we should inject an image details message.
+    def _should_inject_image_message(self, messages: list[AnyMessage]) -> bool:
+        """Determine if we should append an image details message.
 
         Args:
-            state: Current state
+            messages: Messages about to be sent to the model
 
         Returns:
-            True if we should inject the message
+            True if we should append the message
         """
-        messages = state.get("messages", [])
         if not messages:
             return False
 
@@ -209,13 +215,14 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         if not self._all_tools_completed(messages, last_assistant_msg):
             return False
 
-        # Check if we've already added an image details message
-        # Look for a human message after the last assistant message that contains image details
+        # Skip when image details are already present. ``_inject`` has stripped
+        # this middleware's own messages by now, so what remains are unmarked
+        # ones from checkpoints written before the marker existed -- those cannot
+        # be told apart from user-authored text with certainty, so they are left
+        # in place and simply not duplicated.
         assistant_idx = messages.index(last_assistant_msg)
         for msg in messages[assistant_idx + 1 :]:
             if isinstance(msg, HumanMessage):
-                if self._is_image_context_message(msg):
-                    return False
                 content_str = str(msg.content)
                 if "Here are the images you've viewed" in content_str or "Here are the details of the images you've viewed" in content_str:
                     # Already added, don't add again
@@ -236,86 +243,55 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             },
         )
 
-    @staticmethod
-    def _remove_image_context_messages(state: ViewImageMiddlewareState) -> dict | None:
-        """Remove transient image context messages after the model consumed them."""
-        removals = [RemoveMessage(id=msg.id) for msg in state.get("messages", []) if ViewImageMiddleware._is_image_context_message(msg)]
-        if not removals:
-            return None
-        return {"messages": removals}
-
-    def _inject_image_message(self, state: ViewImageMiddlewareState) -> dict | None:
-        """Internal helper to inject image details message.
+    def _inject(self, request: ModelRequest) -> ModelRequest:
+        """Rebuild the request's image context from ``viewed_images``.
 
         Args:
-            state: Current state
+            request: The pending model request
 
         Returns:
-            State update with additional human message, or None if no update needed
+            A request whose messages carry exactly the image context this call
+            warrants -- one freshly built message, or none -- leaving the
+            original request untouched when there is nothing to change
         """
-        if not self._should_inject_image_message(state):
-            return None
+        # This middleware owns the image context and rebuilds it from
+        # ``viewed_images`` on every call, so drop any copy already in the list.
+        # A thread checkpointed by the earlier before_model/after_model pair can
+        # carry one that reached state but was never removed (the run died during
+        # the model call); left in place it would ride along in every later
+        # request for the life of the thread. Matching requires both the reserved
+        # ID prefix and the server-owned marker, and Gateway strips that marker
+        # from client input, so this can never drop a user-authored message.
+        messages = [message for message in request.messages if not self._is_image_context_message(message)]
+        dropped_stranded = len(messages) != len(request.messages)
+        if dropped_stranded:
+            logger.debug("Dropping %d stranded image context message(s) from the model request", len(request.messages) - len(messages))
 
-        # Create the image details message with text and image content
-        image_content = self._create_image_details_message(state)
+        if not self._should_inject_image_message(messages):
+            return request.override(messages=messages) if dropped_stranded else request
 
-        # Create a new human message with mixed content (text + images). This is
-        # internal context for the model only, so hide it from the chat UI and IM
-        # channels (matches the other middleware-injected context messages).
-        human_msg = self._create_image_context_message(image_content)
+        # Mixed content (text + images) for the model only, so hide it from the
+        # chat UI and IM channels (matches the other middleware-injected context
+        # messages) even though it never leaves this request.
+        image_content = self._create_image_details_message(request.state or {})
+        logger.debug("Injecting image details message with images into the model request")
 
-        logger.debug("Injecting image details message with images before LLM call")
-
-        # Return state update with the new message
-        return {"messages": [human_msg]}
-
-    @override
-    def before_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject image details message before LLM call if view_image tools have completed (sync version).
-
-        This runs before each LLM call, checking if the previous turn included view_image
-        tool calls that have all completed. If so, it injects a human message with the image
-        details so the LLM can see and analyze the images.
-
-        Args:
-            state: Current state
-            runtime: Runtime context (unused but required by interface)
-
-        Returns:
-            State update with additional human message, or None if no update needed
-        """
-        return self._inject_image_message(state)
+        return request.override(messages=[*messages, self._create_image_context_message(image_content)])
 
     @override
-    async def abefore_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
-        """Inject image details message before LLM call if view_image tools have completed (async version).
-
-        This runs before each LLM call, checking if the previous turn included view_image
-        tool calls that have all completed. If so, it injects a human message with the image
-        details so the LLM can see and analyze the images.
-
-        Args:
-            state: Current state
-            runtime: Runtime context (unused but required by interface)
-
-        Returns:
-            State update with additional human message, or None if no update needed
-        """
-        if not self._should_inject_image_message(state):
-            return None
-        # Image reads + base64 encoding can be slow (up to 20MB), so offload
-        # the blocking work to a thread rather than stalling the event loop.
-        image_content = await asyncio.to_thread(self._create_image_details_message, state)
-        human_msg = self._create_image_context_message(image_content)
-        logger.debug("Injecting image details message with images before LLM call")
-        return {"messages": [human_msg]}
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        return handler(self._inject(request))
 
     @override
-    def after_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
-        """Remove model-only image data before subsequent checkpoints (sync version)."""
-        return self._remove_image_context_messages(state)
-
-    @override
-    async def aafter_model(self, state: ViewImageMiddlewareState, runtime: Runtime) -> dict | None:
-        """Remove model-only image data before subsequent checkpoints (async version)."""
-        return self._remove_image_context_messages(state)
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        # Image reads + base64 encoding can be slow (up to 20MB), so offload the
+        # blocking work to a thread rather than stalling the event loop.
+        return await handler(await asyncio.to_thread(self._inject, request))

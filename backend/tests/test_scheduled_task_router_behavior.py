@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from _router_auth_helpers import call_unwrapped
 from fastapi import HTTPException
 
 from app.gateway.routers import scheduled_tasks
@@ -188,7 +189,8 @@ async def test_create_scheduled_task_uses_repo():
         scheduled_tasks.get_config = lambda: config
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        created = await scheduled_tasks.create_scheduled_task.__wrapped__(
+        created = await call_unwrapped(
+            scheduled_tasks.create_scheduled_task,
             request=request,
             body=body,
         )
@@ -231,7 +233,8 @@ async def test_create_fresh_thread_task_does_not_require_thread_id():
         scheduled_tasks.get_config = lambda: config
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        created = await scheduled_tasks.create_scheduled_task.__wrapped__(
+        created = await call_unwrapped(
+            scheduled_tasks.create_scheduled_task,
             request=request,
             body=body,
         )
@@ -273,7 +276,8 @@ async def test_trigger_scheduled_task_dispatches_manual_run():
         scheduled_tasks.get_scheduled_task_service = lambda _request: service
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        result = await scheduled_tasks.trigger_scheduled_task.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.trigger_scheduled_task,
             task_id=task["id"],
             request=request,
         )
@@ -317,7 +321,8 @@ async def test_trigger_scheduled_task_returns_conflict_when_dispatch_conflicts()
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
         with pytest.raises(Exception) as exc_info:
-            await scheduled_tasks.trigger_scheduled_task.__wrapped__(
+            await call_unwrapped(
+                scheduled_tasks.trigger_scheduled_task,
                 task_id=task["id"],
                 request=request,
             )
@@ -360,7 +365,8 @@ async def test_update_scheduled_task_writes_repo():
         scheduled_tasks.get_config = lambda: config
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        result = await scheduled_tasks.update_scheduled_task.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.update_scheduled_task,
             task_id=task["id"],
             request=request,
             body=scheduled_tasks.ScheduledTaskUpdateRequest(title="Updated title"),
@@ -419,7 +425,8 @@ async def test_update_rechecks_atomic_mutability_after_router_precheck(tmp_path)
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=SimpleNamespace(id="user-1"))
 
         patch_call = asyncio.create_task(
-            scheduled_tasks.update_scheduled_task.__wrapped__(
+            call_unwrapped(
+                scheduled_tasks.update_scheduled_task,
                 task_id=task["id"],
                 request=SimpleNamespace(),
                 body=scheduled_tasks.ScheduledTaskUpdateRequest(prompt="changed after admission"),
@@ -476,7 +483,8 @@ async def test_delete_scheduled_task_deletes_repo_row():
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        result = await scheduled_tasks.delete_scheduled_task.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.delete_scheduled_task,
             task_id=task["id"],
             request=request,
         )
@@ -513,12 +521,14 @@ async def test_pause_and_resume_scheduled_task_update_status():
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        paused = await scheduled_tasks.pause_scheduled_task.__wrapped__(
+        paused = await call_unwrapped(
+            scheduled_tasks.pause_scheduled_task,
             task_id=task["id"],
             request=request,
         )
         paused_status = paused["status"]
-        resumed = await scheduled_tasks.resume_scheduled_task.__wrapped__(
+        resumed = await call_unwrapped(
+            scheduled_tasks.resume_scheduled_task,
             task_id=task["id"],
             request=request,
         )
@@ -555,7 +565,8 @@ async def test_pause_cancels_waiting_occurrence_before_pausing_task():
     try:
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
-        result = await scheduled_tasks.pause_scheduled_task.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.pause_scheduled_task,
             task_id=task["id"],
             request=request,
         )
@@ -593,7 +604,8 @@ async def test_delete_rejects_occurrence_that_has_started_launching():
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
         with pytest.raises(Exception) as exc_info:
-            await scheduled_tasks.delete_scheduled_task.__wrapped__(
+            await call_unwrapped(
+                scheduled_tasks.delete_scheduled_task,
                 task_id=task["id"],
                 request=request,
             )
@@ -632,7 +644,8 @@ async def test_pause_rejects_running_task():
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
         with pytest.raises(Exception) as exc_info:
-            await scheduled_tasks.pause_scheduled_task.__wrapped__(
+            await call_unwrapped(
+                scheduled_tasks.pause_scheduled_task,
                 task_id=task["id"],
                 request=request,
             )
@@ -676,7 +689,8 @@ async def test_update_rejects_running_task():
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
         with pytest.raises(Exception) as exc_info:
-            await scheduled_tasks.update_scheduled_task.__wrapped__(
+            await call_unwrapped(
+                scheduled_tasks.update_scheduled_task,
                 task_id=task["id"],
                 request=request,
                 body=scheduled_tasks.ScheduledTaskUpdateRequest(title="Updated title"),
@@ -720,7 +734,8 @@ async def test_update_rejects_queued_task_definition_until_occurrence_finishes()
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
         with pytest.raises(Exception) as exc_info:
-            await scheduled_tasks.update_scheduled_task.__wrapped__(
+            await call_unwrapped(
+                scheduled_tasks.update_scheduled_task,
                 task_id=task["id"],
                 request=request,
                 body=scheduled_tasks.ScheduledTaskUpdateRequest(prompt="Changed while queued"),
@@ -773,7 +788,8 @@ async def test_list_thread_scheduled_tasks_filters_by_thread_id():
         scheduled_tasks.get_scheduled_task_repo = lambda _request: repo
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        result = await scheduled_tasks.list_thread_scheduled_tasks.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.list_thread_scheduled_tasks,
             thread_id="thread-1",
             request=request,
         )
@@ -825,7 +841,8 @@ async def test_list_scheduled_task_runs_returns_persisted_rows_without_side_effe
         scheduled_tasks.get_scheduled_task_run_repo = lambda _request: run_repo
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        result = await scheduled_tasks.list_scheduled_task_runs.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.list_scheduled_task_runs,
             task_id=task["id"],
             request=request,
         )
@@ -864,7 +881,8 @@ async def test_create_once_task_enforces_minimum_delay():
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
         with pytest.raises(Exception) as exc_info:
-            await scheduled_tasks.create_scheduled_task.__wrapped__(
+            await call_unwrapped(
+                scheduled_tasks.create_scheduled_task,
                 request=request,
                 body=body,
             )
@@ -909,7 +927,8 @@ async def test_update_terminal_once_task_with_future_run_at_rearms_it():
         scheduled_tasks.get_config = lambda: _Config()
         scheduled_tasks.get_optional_user_from_request = AsyncMock(return_value=user)
 
-        result = await scheduled_tasks.update_scheduled_task.__wrapped__(
+        result = await call_unwrapped(
+            scheduled_tasks.update_scheduled_task,
             task_id=task["id"],
             request=request,
             body=scheduled_tasks.ScheduledTaskUpdateRequest(schedule_spec={"run_at": future_run_at}),
