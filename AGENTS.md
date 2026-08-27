@@ -151,7 +151,7 @@ cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
 # Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server with Turbopack (port 3000)
+cd frontend && pnpm dev       # Dev server: Webpack on Windows, Turbopack elsewhere (override with DEER_FLOW_DEV_BUNDLER)
 cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
@@ -188,7 +188,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ### Logs
 
 - Docker stack: `make docker-logs` (or `docker compose -f docker/... logs -f <svc>`).
-- Local `make dev`: each service logs to its own terminal pane. Frontend Turbopack
+- Local `make dev`: each service logs to its own terminal pane. Frontend dev-server
   errors surface in the browser console at `localhost:3000`; backend tracebacks appear
   in the Gateway terminal.
 
