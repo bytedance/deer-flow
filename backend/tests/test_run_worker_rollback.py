@@ -679,6 +679,43 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
 
 
 @pytest.mark.anyio
+async def test_run_agent_schedules_terminal_run_record_cleanup():
+    class CleanupTrackingRunManager(RunManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_calls: list[tuple[str, float]] = []
+
+        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+            self.cleanup_calls.append((run_id, delay))
+
+    run_manager = CleanupTrackingRunManager()
+    record = await run_manager.create("thread-terminal-cleanup")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+    await asyncio.sleep(0)
+
+    assert run_manager.cleanup_calls == [(record.run_id, 300)]
+
+
+@pytest.mark.anyio
 async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context():
     run_manager = RunManager()
     record = await run_manager.create("thread-1")

@@ -1355,6 +1355,10 @@ async def run_agent(
 
         await bridge.publish_end(run_id)
         asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        # Keep the terminal record briefly for local join/cancellation paths, then
+        # release its completed task and request payload from the process-local
+        # registry. Durable run history remains available through RunStore.
+        asyncio.create_task(run_manager.cleanup(run_id))
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
