@@ -806,14 +806,37 @@ class LocalContainerBackend(SandboxBackend):
 
         # Docker-only security hardening. The sandbox container executes
         # untrusted, model-authored code, so it must not run with the
-        # daemon's permissive defaults: all Linux capabilities are dropped,
-        # privilege escalation (setuid/sudo) is blocked, and CPU/memory/PID
-        # footprints are bounded so one runaway sandbox cannot exhaust the
-        # host or fork-bomb it. Each knob has an env escape hatch documented
-        # in backend/docs/CONFIGURATION.md. Apple Container's CLI does not
-        # support these flags, so they are Docker-only.
+        # daemon's permissive defaults: all Linux capabilities are dropped
+        # except the minimum the shipped image's entrypoint needs to
+        # initialize itself, privilege escalation (setuid/sudo) is blocked,
+        # and CPU/memory/PID footprints are bounded so one runaway sandbox
+        # cannot exhaust the host or fork-bomb it. Each knob has an env
+        # escape hatch documented in backend/docs/CONFIGURATION.md. Apple
+        # Container's CLI does not support these flags, so they are
+        # Docker-only.
         if self._runtime == "docker":
-            cmd.extend(["--cap-drop=ALL", "--security-opt", "no-new-privileges"])
+            # The default image (/opt/gem/run.sh) starts as root, creates the
+            # gem account at runtime, chown -R's /opt/jupyter, and drops to
+            # that user via su before starting the services. That needs
+            # exactly CHOWN/SETUID/SETGID; dropping ALL of them makes the
+            # entrypoint fail (set -e) before the readiness endpoint exists.
+            # no-new-privileges stays: it only blocks *gaining* privileges
+            # through exec, it does not revoke the capabilities added here,
+            # and su from the already-root entrypoint does not need to gain
+            # anything. Everything else (NET_RAW, SYS_PTRACE, ...) stays
+            # dropped, which is the bulk of the attack-surface reduction.
+            # A fully pre-initialized non-root image could drop all of these
+            # again; see the smoke test for the shipped image.
+            cmd.extend(
+                [
+                    "--cap-drop=ALL",
+                    "--cap-add=CHOWN",
+                    "--cap-add=SETUID",
+                    "--cap-add=SETGID",
+                    "--security-opt",
+                    "no-new-privileges",
+                ]
+            )
 
             # The shipped AIO image runs a Chromium-based browser that does
             # not start under Docker's default seccomp profile — its upstream

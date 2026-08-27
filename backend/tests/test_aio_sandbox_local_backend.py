@@ -385,6 +385,11 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert "--cap-drop=ALL" in captured_cmd
+    # The shipped image's entrypoint starts as root, creates the gem user,
+    # chowns /opt/jupyter, and drops to that user via su — CHOWN/SETUID/SETGID
+    # must survive the drop or the container exits before readiness.
+    cap_adds = [arg.split("=", 1)[1] for arg in captured_cmd if arg.startswith("--cap-add=")]
+    assert cap_adds == ["CHOWN", "SETUID", "SETGID"]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
     # The shipped AIO image needs seccomp=unconfined for its Chromium
@@ -883,3 +888,47 @@ def test_effective_network_target_last_name_field_wins():
     assert target("gw-priority=0") == "gw-priority=0"  # no name= field: Docker errors itself
     assert target("bridge") == "bridge"
     assert target("1f2a" * 16) == "1f2a" * 16  # network ID passes through
+
+
+# ── Real-image startup smoke test (docker-gated) ─────────────────────────────
+# Keep in sync with aio_sandbox_provider.DEFAULT_IMAGE.
+_DEFAULT_AIO_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+
+
+def _docker_daemon_available() -> bool:
+    try:
+        subprocess.run(["docker", "info"], capture_output=True, timeout=30, check=True)
+        return True
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _docker_daemon_available(), reason="requires a running Docker daemon and pulls the default AIO image")
+def test_default_image_starts_under_hardened_capabilities(monkeypatch):
+    """Real smoke test against the shipped default image — no subprocess mock.
+
+    The image's entrypoint (/opt/gem/run.sh) starts as root, creates the gem
+    account at runtime, chown -R's /opt/jupyter, and drops to that user via
+    su before starting the services. Under the default hardened argv
+    (--cap-drop=ALL + no-new-privileges) that initialization needs
+    CHOWN/SETUID/SETGID to be re-added, or the container exits (set -e)
+    before the readiness endpoint exists. Reaching readiness through the
+    real docker run proves the whole startup chain survives the hardening.
+    """
+    from deerflow.community.aio_sandbox.local_backend import wait_for_sandbox_ready
+
+    backend = LocalContainerBackend(
+        image=_DEFAULT_AIO_IMAGE,
+        base_port=18210,
+        container_prefix="sandbox-smoke",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+
+    info = backend.create(thread_id="smoke", sandbox_id="caps-smoke")
+    try:
+        assert wait_for_sandbox_ready(info.sandbox_url, timeout=120), f"default image never became ready under the hardened capabilities: {info.sandbox_url}"
+        assert backend.is_alive(info)
+    finally:
+        backend.destroy(info)
