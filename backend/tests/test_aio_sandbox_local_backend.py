@@ -284,6 +284,7 @@ def _clear_hardening_env(monkeypatch):
         "DEER_FLOW_SANDBOX_PIDS_LIMIT",
         "DEER_FLOW_SANDBOX_CONTAINER_USER",
         "DEER_FLOW_SANDBOX_NETWORK",
+        "DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS",
     ):
         monkeypatch.delenv(var, raising=False)
 
