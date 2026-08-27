@@ -254,13 +254,16 @@ class TestEvictionGatedOnVerifiedDurableTerminalState:
     """cleanup must not remove the local record without durable proof."""
 
     @pytest.mark.asyncio
-    async def test_nonterminal_store_row_blocks_eviction_until_verified(self):
+    async def test_peer_owned_active_row_blocks_eviction_until_healed_elsewhere(self):
+        """Retention applies when the durable claim belongs to another worker."""
         store = MemoryRunStore()
         manager = RunManager(store=store)
         record = await manager.create("thread-eviction-gate")
         await manager.set_status(record.run_id, RunStatus.success)
-        # Simulate a failed terminal persistence: only memory knows the truth.
+        # Simulate both a failed terminal persistence and a peer claiming the
+        # lease: the evictor may neither rewrite nor drop the record.
         store._runs[record.run_id]["status"] = "pending"
+        store._runs[record.run_id]["owner_worker_id"] = "worker-peer"
 
         task = manager.schedule_terminal_eviction(record.run_id, delay=0.01)
         assert task is not None
@@ -391,6 +394,168 @@ class TestEvictionGatedOnVerifiedDurableTerminalState:
 
         assert record.run_id not in manager._runs
         assert store._runs[record.run_id]["total_tokens"] == 10
+
+    @pytest.mark.asyncio
+    async def test_stop_reason_is_backfilled_before_eviction(self):
+        """A terminal row must not lose its cap reason when evicted (#5011 follow-up).
+
+        ``update_run_completion`` historically had no ``stop_reason`` column
+        write, so a row terminalized through it while the status-side
+        persistence carried the reason could end up missing it entirely.
+        """
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-stop-reason")
+        await manager.set_status(record.run_id, RunStatus.success)
+        # Simulate the reviewer's repro: durable status landed without the cap
+        # reason while the local record holds it.
+        store._runs[record.run_id].pop("stop_reason", None)
+        record.stop_reason = "token_capped"
+
+        await manager.cleanup(record.run_id, delay=0)
+
+        assert record.run_id not in manager._runs
+        assert store._runs[record.run_id]["stop_reason"] == "token_capped"
+
+    @pytest.mark.asyncio
+    async def test_differing_status_keeps_peer_outcome_untouched(self):
+        """A peer-terminalized row is accepted as-is, never force-patched."""
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-peer-stop-reason")
+        await manager.set_status(record.run_id, RunStatus.success)
+        store._runs[record.run_id]["status"] = "interrupted"
+        store._runs[record.run_id].pop("stop_reason", None)
+        record.stop_reason = "token_capped"
+
+        await manager.cleanup(record.run_id, delay=0)
+
+        # The durable outcome is authoritative; our fields are not forced onto it.
+        assert record.run_id not in manager._runs
+        assert "stop_reason" not in store._runs[record.run_id]
+
+
+class _NoStatusWriteStore(MemoryRunStore):
+    """Simulates both best-effort terminal writes failing."""
+
+    async def update_status(self, run_id, status, **kwargs):
+        raise RuntimeError("status write down")
+
+
+class TestRepairLocallyOwnedActiveRow:
+    """An active row owned by this worker is repaired, not abandoned (review P1)."""
+
+    @pytest.mark.asyncio
+    async def test_locally_owned_active_row_is_repaired_then_evicted(self):
+        store = _NoStatusWriteStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-both-fail")
+        await manager.set_status(record.run_id, RunStatus.success)
+        assert store._runs[record.run_id]["status"] == "pending"  # status write failed
+        store._runs[record.run_id].pop("stop_reason", None)
+        record.stop_reason = "loop_capped"
+
+        await manager.cleanup(record.run_id, delay=0)
+
+        repaired = store._runs[record.run_id]
+        assert repaired["status"] == "success"
+        assert repaired["stop_reason"] == "loop_capped"
+        assert record.run_id not in manager._runs
+
+    @pytest.mark.asyncio
+    async def test_peer_owned_active_row_is_never_repaired(self):
+        store = _NoStatusWriteStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-peer-active")
+        await manager.set_status(record.run_id, RunStatus.success)
+        store._runs[record.run_id]["owner_worker_id"] = "worker-peer"
+
+        await manager.cleanup(record.run_id, delay=0, verify_attempts=1)
+
+        # Deferred: the peer owns the lease; retention instead of clobbering.
+        assert store._runs[record.run_id]["status"] == "pending"
+        assert record.run_id in manager._runs
+
+
+class TestShutdownFencesAndDrainsEvictionTasks:
+    """The five-minute timer must not survive RunManager.shutdown (review P2)."""
+
+    @pytest.mark.asyncio
+    async def test_shutdown_drains_pending_eviction_task(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        run_id = await _terminal_run(manager, thread_id="thread-shutdown-drain")
+
+        task = manager.schedule_terminal_eviction(run_id, delay=3600)
+        assert task is not None
+        assert manager._eviction_tasks == {task}
+
+        await manager.shutdown()
+
+        assert not manager._eviction_tasks
+
+    @pytest.mark.asyncio
+    async def test_new_schedules_rejected_after_fence(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        run_id = await _terminal_run(manager, thread_id="thread-shutdown-fence")
+
+        await manager.shutdown()
+
+        assert manager.schedule_terminal_eviction(run_id) is None
+        assert run_id in manager._runs
+
+
+class TestSupervisedEvictionRetriesUntilDurable:
+    """Unresolved runs keep retrying under supervision until healed (review P1)."""
+
+    @pytest.mark.asyncio
+    async def test_supervised_retry_removes_record_after_store_heals(self, monkeypatch):
+        import deerflow.runtime.runs.manager as manager_module
+
+        monkeypatch.setattr(manager_module, "EVICTION_RETRY_SUPERVISION_INTERVAL_SECONDS", 0.01)
+
+        class HealableStatusStore(_NoStatusWriteStore):
+            heal = False
+            snapshot_blocked = False
+
+            async def update_status(self, run_id, status, **kwargs):
+                if not self.heal:
+                    raise RuntimeError("status write down")
+                return await super().update_status(run_id, status, **kwargs)
+
+            async def put(self, run_id, **payload):
+                # Block the eviction-gate snapshot repair too — but only after
+                # the initial admission write, which must succeed so the run
+                # becomes visible at all.
+                if self.snapshot_blocked and not self.heal:
+                    raise RuntimeError("snapshot repair down")
+                return await super().put(run_id, **payload)
+
+        store = HealableStatusStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-supervised-heal")
+        await manager.set_status(record.run_id, RunStatus.success)
+        store.snapshot_blocked = True
+        assert store._runs[record.run_id]["status"] == "pending"
+
+        task = manager.schedule_terminal_eviction(record.run_id, delay=0.01)
+        assert task is not None
+        await asyncio.sleep(0.05)  # bounded attempts fail → supervisor takes over
+        assert record.run_id in manager._runs
+
+        store.heal = True
+        deadline = asyncio.get_running_loop().time() + 2.0
+        while record.run_id in manager._runs and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+
+        assert record.run_id not in manager._runs
+        assert store._runs[record.run_id]["status"] == "success"
+        # The supervisor exits once the record is gone.
+        deadline = asyncio.get_running_loop().time() + 1.0
+        while manager._eviction_tasks and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.02)
+        assert not manager._eviction_tasks
 
 
 class TestWorkerSchedulesEvictionWhenPublishEndFails:

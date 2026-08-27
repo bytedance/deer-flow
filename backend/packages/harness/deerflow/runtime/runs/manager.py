@@ -50,6 +50,12 @@ TERMINAL_RUN_STATUSES_FOR_EVICTION = frozenset({status.value for status in RunSt
 # unbounded retention through an endless retry loop.
 EVICTION_VERIFY_MAX_ATTEMPTS = 3
 
+# Unresolved evictions (durable terminal state never confirmed) hand off to a
+# supervised retry loop instead of being abandoned after the bounded budget:
+# the loop re-verifies every interval until durability succeeds or shutdown
+# cancels it. Read at call time so tests can shrink it.
+EVICTION_RETRY_SUPERVISION_INTERVAL_SECONDS = TERMINAL_RUN_EVICTION_DELAY_SECONDS
+
 # Completion fields the eviction gate verifies before dropping a record,
 # mirroring the ``RunStore.update_run_completion`` contract. Terminal status and
 # completion data travel independent persistence paths (``set_status`` vs
@@ -87,6 +93,11 @@ def _completion_divergence_from_row(record: RunRecord, row: dict[str, Any]) -> d
             divergent[field_name] = local
     if record.error and row.get("error") != record.error:
         divergent["error"] = record.error
+    # stop_reason travels with the status write, not update_run_completion: a
+    # row that reached terminality without it would otherwise lose cap reasons
+    # such as ``token_capped`` when the record is evicted.
+    if record.stop_reason and row.get("stop_reason") != record.stop_reason:
+        divergent["stop_reason"] = record.stop_reason
     usage_by_model = record.token_usage_by_model or {}
     if usage_by_model:
         row_usage = row.get("token_usage_by_model") or {}
@@ -319,6 +330,10 @@ class RunManager:
         # event loop cannot garbage-collect a task sleeping through its grace
         # period ("Task was destroyed but it is pending!").
         self._eviction_tasks: set[asyncio.Task[None]] = set()
+        # Shutdown fence: set before draining workers so no worker finalizing
+        # during shutdown can schedule another eviction task, and draining the
+        # strong-referenced tasks happens once at the end of shutdown.
+        self._shutdown_fenced = False
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -1949,7 +1964,7 @@ class RunManager:
         async with self._lock:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
-    async def cleanup(self, run_id: str, *, delay: float = 300, verify_attempts: int = EVICTION_VERIFY_MAX_ATTEMPTS) -> None:
+    async def cleanup(self, run_id: str, *, delay: float = 300, verify_attempts: int = EVICTION_VERIFY_MAX_ATTEMPTS, supervise: bool = False) -> None:
         """Remove a run record after an optional delay, gated on durable proof.
 
         With a durable ``RunStore`` the removal is gated on a *verified*
@@ -1964,13 +1979,16 @@ class RunManager:
         ``update_run_completion``) so eviction cannot drop the richer snapshot.
         Verification failures
         retry with the same grace-period spacing up to ``verify_attempts``
-        times; a missing durable row is repaired once from the authoritative
-        local snapshot, while a present-but-active row is never overwritten
-        here — its owning worker (or orphan recovery) owns that transition,
-        and a later verification attempt succeeds once it terminalizes. When
-        every attempt fails the record is deliberately retained in memory
-        with a warning: retention under a broken store is the honest trade
-        against losing the only correct completion snapshot.
+        times; a missing or locally-owned active row is repaired once from the
+        authoritative local snapshot, while a peer-owned active row is never
+        overwritten here — its owning worker (or orphan recovery) owns that
+        transition, and a later verification attempt succeeds once it
+        terminalizes. When every attempt fails the record is deliberately
+        retained in memory with a warning: retention under a broken store is
+        the honest trade against losing the only correct completion snapshot.
+        Scheduled passes (``supervise=True``) additionally hand unresolved
+        runs to :meth:`_supervise_unresolved_eviction`, which keeps retrying
+        under supervision until durability succeeds or shutdown cancels it.
         """
         attempt = 1
         attempts_allowed = max(1, verify_attempts)
@@ -2012,6 +2030,8 @@ class RunManager:
                     attempt,
                     " (lease ownership lost)" if record.ownership_lost else "",
                 )
+                if supervise:
+                    self._spawn_supervised_eviction_retry(run_id)
                 return
             logger.warning(
                 "Deferring eviction of run %s: durable row was not confirmed terminal (attempt %d/%d)",
@@ -2021,27 +2041,49 @@ class RunManager:
             )
             attempt += 1
 
+    def _spawn_supervised_eviction_retry(self, run_id: str) -> None:
+        """Keep re-verifying *run_id* periodically until durable proof or shutdown."""
+        if self._shutdown_fenced:
+            logger.debug("Shutdown fenced: not scheduling supervised eviction retry for run %s", run_id)
+            return
+        task = asyncio.create_task(self._supervise_unresolved_eviction(run_id))
+        self._eviction_tasks.add(task)
+        task.add_done_callback(self._eviction_tasks.discard)
+
+    async def _supervise_unresolved_eviction(self, run_id: str) -> None:
+        """Re-run gated removal for an unresolved run until success or cancellation."""
+        while True:
+            await asyncio.sleep(EVICTION_RETRY_SUPERVISION_INTERVAL_SECONDS)
+            async with self._lock:
+                still_present = run_id in self._runs
+            if not still_present:
+                return
+            await self.cleanup(run_id, delay=0, supervise=False)
+
     async def _confirm_durable_terminal_for_cleanup(self, record: RunRecord) -> bool:
         """Return True when the durable row provably mirrors the local terminal outcome.
 
         A missing row is repaired once by re-persisting the local snapshot
         (upsert) so an unobserved terminal write recovers here instead of
-        needing a dedicated reconciler. An existing active row is left alone:
-        rewriting it from a possibly stale snapshot could clobber a peer's
-        legitimate claim. On a same-status terminal row the completion columns
-        are also verified (see :func:`_completion_divergence_from_row`) and
-        repaired through an idempotent ``update_run_completion`` when they are
-        thinner than the local record; a row at a *different* terminal status is
-        a peer's legitimate outcome and is accepted as-is.
+        needing a dedicated reconciler. An *active* row owned by this worker is
+        repaired the same way — both best-effort terminal writes may have
+        failed while this worker still owns the lease, and only the local
+        record carries the true outcome. A row owned by another worker is left
+        alone: rewriting it from a possibly stale snapshot could clobber a
+        peer's legitimate claim. On a same-status terminal row the completion
+        columns (including ``stop_reason``) are also verified (see
+        :func:`_completion_divergence_from_row`) and repaired through an
+        idempotent ``update_run_completion`` when they are thinner than the
+        local record; a row at a *different* terminal status is a peer's
+        legitimate outcome and is accepted as-is.
         """
-        row_status: str | None = None
         try:
             row = await self._store.get(record.run_id)
         except Exception:
             logger.warning("Eviction gate could not read durable row for run %s", record.run_id, exc_info=True)
             return False
 
-        if row is None:
+        if row is None or (row.get("status") not in TERMINAL_RUN_STATUSES_FOR_EVICTION and self._cleanup_may_repair_row(record, row)):
             if record.ownership_lost:
                 # A peer owns this run's durable fate; recreating the row here
                 # could resurrect state they are finishing differently.
@@ -2079,6 +2121,15 @@ class RunManager:
             return False
         return True
 
+    def _cleanup_may_repair_row(self, record: RunRecord, row: dict[str, Any]) -> bool:
+        """Whether an active durable row may be rewritten from the local snapshot.
+
+        Only rows still owned by this worker qualify: their terminal write is
+        known to be fallible and this process holds the authoritative outcome.
+        Rows of other workers belong to a peer's claim/lease flow.
+        """
+        return row.get("owner_worker_id") == self._worker_id
+
     def schedule_terminal_eviction(self, run_id: str, *, delay: float = TERMINAL_RUN_EVICTION_DELAY_SECONDS) -> asyncio.Task[None] | None:
         """Schedule removal of a terminal run from the in-memory registries.
 
@@ -2101,10 +2152,38 @@ class RunManager:
         """
         if self._store is None:
             return None
-        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
+        if self._shutdown_fenced:
+            # Worker finalization during shutdown must not create new delayed
+            # tasks that outlive the drain: the record stays in memory until
+            # the process exits, and its durable row keeps whatever state the
+            # best-effort persistence left there.
+            logger.debug("Shutdown fenced: not scheduling terminal eviction for run %s", run_id)
+            return None
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay, supervise=True))
         self._eviction_tasks.add(task)
         task.add_done_callback(self._eviction_tasks.discard)
         return task
+
+    async def _drain_eviction_tasks(self, *, timeout: float) -> None:
+        """Boundedly cancel and await every pending eviction/supervision task.
+
+        Called once at the end of :meth:`shutdown`: the fence has already
+        stopped new schedules, so nothing re-populates ``_eviction_tasks``
+        while this drains. Tasks sleeping through a grace period are cancelled
+        immediately; any task mid-store-call gets up to *timeout* to observe
+        cancellation before shutdown moves on.
+        """
+        tasks = list(self._eviction_tasks)
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout=timeout)
+        except TimeoutError:
+            logger.warning("Eviction-task drain exceeded %.1fs on shutdown; %d task(s) may still be finishing", timeout, len(tasks))
+        else:
+            logger.debug("Drained %d pending eviction task(s) on shutdown", len(tasks))
 
     # ------------------------------------------------------------------
     # Lease heartbeat
@@ -2475,6 +2554,11 @@ class RunManager:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
+        # Fence first: a worker finalizing during the drain must not schedule
+        # another delayed eviction task that would outlive this drain and later
+        # touch the RunStore after application resources are disposed.
+        self._shutdown_fenced = True
+
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
             for record in inflight:
@@ -2488,6 +2572,7 @@ class RunManager:
 
         if not inflight:
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+            await self._drain_eviction_tasks(timeout=max(0.05, min(1.0, deadline - loop.time())))
             return
 
         tasks = [record.task for record in inflight]
@@ -2540,6 +2625,7 @@ class RunManager:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+        await self._drain_eviction_tasks(timeout=max(0.05, min(1.0, deadline - loop.time())))
 
 
 class CancelOutcome(StrEnum):

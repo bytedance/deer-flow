@@ -342,6 +342,7 @@ class RunRepository(RunStore):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
     ) -> bool:
         """Update status + token usage + convenience fields on run completion.
 
@@ -367,6 +368,8 @@ class RunRepository(RunStore):
             values["first_human_message"] = first_human_message[:2000]
         if error is not None:
             values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
         allowed_sources = ["pending", "running"]
         if status not in allowed_sources:
             allowed_sources.append(status)

@@ -76,20 +76,35 @@ returns `idempotency_reused` immediately and never schedules eviction for it;
 terminal row (`TERMINAL_RUN_STATUSES_FOR_EVICTION`): terminal persistence is
 best-effort, so a read failure retries with one more grace period up to
 `EVICTION_VERIFY_MAX_ATTEMPTS`, a missing row is repaired once from the
-authoritative local snapshot, an active row (or any row once lease ownership
-was lost) is never overwritten by the evictor, and when every attempt fails
+authoritative local snapshot, a peer-owned active row (or any row once lease
+ownership was lost) is never overwritten by the evictor, and when every attempt fails
 the record is retained with a warning — retention under a broken store beats
 exposing a stale pending row that orphan recovery would rewrite as an error.
 Because terminal status and completion data travel independent best-effort
 write paths (`set_status` vs `update_run_completion`), the gate additionally
 compares the row's completion columns (token totals, message counts, convenience
-fields) against the local record on same-status rows and repairs a thinner row
-once through an idempotent same-status `update_run_completion`; a row at a
-*different* terminal status is a peer's legitimate outcome and is accepted as-is;
+fields, and `stop_reason` — accepted by `RunStore.update_run_completion` so
+repairs can backfill cap reasons) against the local record on same-status rows
+and repairs a thinner row once through an idempotent same-status
+`update_run_completion`; a row at a *different* terminal status is a peer's
+legitimate outcome and is accepted as-is. An **active** row (status write never
+landed) owned by *this* worker (`owner_worker_id == worker_id`) is repaired from
+the authoritative local snapshot via the upsert path; peer-owned active rows are
+never rewritten.
 (3) the worker wraps `bridge.publish_end` so a failing END marker still
 schedules bridge cleanup and eviction through `_spawn_background_terminal_task`
 (strong module-level reference, mirroring `_eviction_tasks`), while the
-exception keeps propagating.
+exception keeps propagating;
+(4) unresolved runs are not abandoned after the bounded budget: scheduled passes
+hand them to `_supervise_unresolved_eviction`, which re-runs the gated removal
+every `EVICTION_RETRY_SUPERVISION_INTERVAL_SECONDS` until durability succeeds or
+shutdown cancels it;
+(5) `RunManager.shutdown` sets a shutdown fence **before** draining workers —
+`schedule_terminal_eviction` rejects new schedules while fenced, so a worker
+finalizing during shutdown cannot create tasks that outlive the drain — and
+after the orphan-recovery drain `_drain_eviction_tasks` boundedly cancels/awaits
+everything in `_eviction_tasks`, so no five-minute timer survives shutdown to
+touch the RunStore after application resources are disposed.
 
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types

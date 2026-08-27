@@ -409,7 +409,17 @@ This section accumulates work toward the **2.1.0** milestone
   longer drop the richer local snapshot; and
   `run_agent` schedules bridge cleanup plus eviction in a `finally` around
   `publish_end`, so a failing stream END marker no longer pins terminal state
-  in memory (pinned via tests). ([#5011])
+  in memory (pinned via tests). Follow-up review hardening: `stop_reason`
+  joined the verified completion columns (and `RunStore.update_run_completion`
+  now accepts it) so cap reasons such as `token_capped` survive eviction; an
+  active row still owned by this worker is repaired from the authoritative local
+  snapshot instead of abandoning the durable row after both best-effort terminal
+  writes fail (peer-owned rows are still never rewritten); unresolved runs hand
+  off to `_supervise_unresolved_eviction`, which keeps retrying under supervision
+  until durability succeeds or shutdown cancels it; and `RunManager.shutdown`
+  now sets a shutdown fence before draining workers — new eviction schedules are
+  rejected while fenced — then boundedly cancels/awaits `_eviction_tasks`, so no
+  grace-period timer outlives disposal. ([#5011])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead

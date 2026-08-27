@@ -166,7 +166,7 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
-    async def update_run_completion(self, run_id, *, status, **kwargs):
+    async def update_run_completion(self, run_id, *, status, stop_reason=None, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
             return False
@@ -180,6 +180,8 @@ class MemoryRunStore(RunStore):
         for key, value in kwargs.items():
             if value is not None:
                 run[key] = value
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 

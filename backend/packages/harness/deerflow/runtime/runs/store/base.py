@@ -188,12 +188,14 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
     ) -> bool | None:
         """Persist final completion fields.
 
         Implementations must not replace a different terminal status. Returns
         ``False`` when the row is missing or already has a conflicting terminal
-        outcome.
+        outcome. ``stop_reason`` is accepted so an eviction-gate repair can
+        backfill the cap reason onto a row that terminalized without it.
         """
         pass
 
