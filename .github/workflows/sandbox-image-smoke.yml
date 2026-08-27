@@ -33,18 +33,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
-      DEER_FLOW_SANDBOX_SMOKE_IMAGE: ${{ vars.SANDBOX_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest' }}
+      SANDBOX_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest' }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Resolve and record the tested image digest
+      - name: Resolve an immutable image reference for this run
+        # Pull once on the runner's platform and export the immutable
+        # repo@sha256 reference through GITHUB_ENV: the test then runs the
+        # exact image recorded here, and a tag moving between steps cannot
+        # make the summary name a different image than the one executed.
+        # (docker manifest inspect + jq is not used because picking a
+        # manifest from the index by hand can miss the runner's platform.)
         run: |
           set -euo pipefail
-          digest="$(docker manifest inspect "$DEER_FLOW_SANDBOX_SMOKE_IMAGE" | jq -r '.manifests[0].digest // .config.digest')"
-          echo "Smoke-testing $DEER_FLOW_SANDBOX_SMOKE_IMAGE (digest $digest)" >> "$GITHUB_STEP_SUMMARY"
-          echo "Sandbox smoke image: $DEER_FLOW_SANDBOX_SMOKE_IMAGE ($digest)"
+          docker pull "$SANDBOX_SMOKE_IMAGE_REF" >/dev/null
+          repo_digest="$(docker image inspect "$SANDBOX_SMOKE_IMAGE_REF" --format '{{index .RepoDigests 0}}')"
+          echo "DEER_FLOW_SANDBOX_SMOKE_IMAGE=$repo_digest" >> "$GITHUB_ENV"
+          echo "Smoke-testing immutable reference: $repo_digest" | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Set up Python
         uses: actions/setup-python@v6
