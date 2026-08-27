@@ -937,7 +937,22 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
 
     info = backend.create(thread_id="smoke", sandbox_id="caps-smoke")
     try:
-        assert wait_for_sandbox_ready(info.sandbox_url, timeout=120), f"default image never became ready under the hardened capabilities: {info.sandbox_url}"
+        # 300s: a cold CI runner must first pull the multi-GB image and then
+        # cold-start the service stack, which can exceed a 120s budget on its
+        # own — the timeout must not conflate slow-start with broken-caps.
+        ready = wait_for_sandbox_ready(info.sandbox_url, timeout=300)
+        if not ready:
+            # Fail diagnosably: the entrypoint's own log tells us whether the
+            # capability set is still incomplete (chown/useradd/su errors) or
+            # the services are merely slow.
+            logs = subprocess.run(
+                ["docker", "logs", info.container_name],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            tail = "\n".join((logs.stdout + logs.stderr).splitlines()[-40:])
+            pytest.fail(f"default image never became ready under the hardened capabilities: {info.sandbox_url}\n--- last 40 container log lines ---\n{tail}")
         assert backend.is_alive(info)
     finally:
         backend.destroy(info)
