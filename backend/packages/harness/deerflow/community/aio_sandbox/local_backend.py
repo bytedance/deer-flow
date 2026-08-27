@@ -314,6 +314,32 @@ def _env_flag_disabled(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"0", "false", "no", "off"}
 
 
+def _strip_ipv6_brackets(value: str) -> str:
+    """Return ``value`` without IPv6 URL-style brackets, if any."""
+    inner = value.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        return inner[1:-1]
+    return inner
+
+
+def _normalize_sandbox_host_for_url(host: str) -> str:
+    """Bracket IPv6 literals exactly once for a URL authority (``host:port``).
+
+    ``http://fd00::1:8080`` is malformed — the URL authority form requires
+    brackets around IPv6 (``http://[fd00::1]:8080``), while operators (and
+    DEER_FLOW_SANDBOX_HOST) may carry the address in either bare or
+    bracketed form. Strip first, re-bracket once, so both inputs produce the
+    same URL; IPv4 addresses and hostnames pass through unchanged.
+    """
+    inner = _strip_ipv6_brackets(host)
+    try:
+        if ipaddress.ip_address(inner).version == 6:
+            return f"[{inner}]"
+    except ValueError:
+        pass
+    return inner
+
+
 def _resolve_sandbox_host_address(host: str) -> str | None:
     """Resolve ``host`` to the bind spec Docker should publish sandboxes on.
 
@@ -325,8 +351,12 @@ def _resolve_sandbox_host_address(host: str) -> str | None:
     IPv4. IPv6 results are bracketed for Docker's ``-p`` syntax. Returns
     None when the name cannot be resolved.
     """
+    # getaddrinfo takes the bare form; a bracketed IPv6 literal (legal in
+    # DEER_FLOW_SANDBOX_HOST) would fail to resolve and silently fall back
+    # to the IPv4 bridge gateway, splitting the bind from the URL address.
+    lookup = _strip_ipv6_brackets(host)
     try:
-        infos = socket.getaddrinfo(host, None)
+        infos = socket.getaddrinfo(lookup, None)
     except OSError as e:
         logger.debug(f"Could not resolve sandbox host {host!r}: {e}")
         return None
@@ -341,6 +371,24 @@ def _resolve_sandbox_host_address(host: str) -> str | None:
         if family == socket.AF_INET and ip not in ("0.0.0.0",):
             return ip
     return None
+
+
+def _effective_docker_network_target(raw: str) -> str:
+    """Return the network Docker will actually attach to for ``--network raw``.
+
+    Docker accepts the extended form ``name=<network>`` (its documented long
+    syntax, e.g. ``--network name=egress-net``) in addition to plain names
+    and network IDs; the effective target is the part after ``name=``.
+    Everything else (a network name or a 64-hex / short network ID) is the
+    target itself. Validation must run on this effective value — the raw
+    string ``name=host`` does not read as the literal word ``host``, but
+    Docker attaches the container to the host network namespace all the
+    same, silently voiding the port publish.
+    """
+    lowered = raw.strip().lower()
+    if lowered.startswith("name="):
+        lowered = lowered[len("name=") :].strip()
+    return lowered
 
 
 def _docker_resource_limit(env_name: str, default: str) -> str | None:
@@ -522,7 +570,7 @@ class LocalContainerBackend(SandboxBackend):
 
         # When running inside Docker (DooD), sandbox containers are reachable via
         # host.docker.internal rather than localhost (they run on the host daemon).
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         return SandboxInfo(
             sandbox_id=sandbox_id,
             sandbox_url=f"http://{sandbox_host}:{port}",
@@ -585,7 +633,7 @@ class LocalContainerBackend(SandboxBackend):
         if port is None:
             return None
 
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         sandbox_url = f"http://{sandbox_host}:{port}"
         if not wait_for_sandbox_ready(sandbox_url, timeout=5):
             return None
@@ -651,7 +699,7 @@ class LocalContainerBackend(SandboxBackend):
         inspections = self._batch_inspect(container_names)
 
         infos: list[SandboxInfo] = []
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         for container_name in container_names:
             data = inspections.get(container_name)
             if data is None:
@@ -801,8 +849,12 @@ class LocalContainerBackend(SandboxBackend):
             # metadata endpoints directly, bypassing the gateway's SSRF
             # protections.
             if network := os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip():
-                lowered = network.lower()
-                if lowered == "host" or lowered.startswith("container:"):
+                # Validate the *effective* target: Docker accepts the extended
+                # "name=<network>" long syntax in addition to plain names and
+                # network IDs, and "name=host" / "name=none" attach exactly
+                # like the bare words while dodging a raw-string check.
+                target = _effective_docker_network_target(network)
+                if target == "host" or target.startswith("container:"):
                     # Docker discards -p/--publish in host mode and
                     # container:<name> shares another container's network
                     # namespace, so either one voids the hardened bind below
@@ -811,11 +863,12 @@ class LocalContainerBackend(SandboxBackend):
                     # losing the bind.
                     # https://docs.docker.com/engine/network/drivers/host/
                     raise RuntimeError(
-                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} would void the sandbox port bind "
-                        "(Docker drops -p/--publish in host mode and shares the network namespace "
-                        "for container:<name>). Use a dedicated egress-controlled bridge network instead."
+                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} resolves to the {target.split(':', 1)[0]!r} network, "
+                        "which would void the sandbox port bind (Docker drops -p/--publish in host mode and shares "
+                        "the network namespace for container:<name>). Use a dedicated egress-controlled bridge "
+                        "network instead."
                     )
-                if lowered == "none":
+                if target == "none":
                     # The none driver gives the container only a loopback
                     # interface, so the published sandbox HTTP API cannot
                     # receive traffic: readiness would time out (60s), the
@@ -824,11 +877,13 @@ class LocalContainerBackend(SandboxBackend):
                     # instead of failing opaquely on first use.
                     # https://docs.docker.com/engine/network/drivers/none/
                     raise RuntimeError(
-                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} leaves the container loopback-only, "
-                        "so the published sandbox API port cannot receive traffic (readiness would "
-                        "time out and every acquisition would fail). Use a dedicated egress-controlled "
-                        "bridge network instead."
+                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} resolves to the 'none' network, which leaves the "
+                        "container loopback-only, so the published sandbox API port cannot receive traffic (readiness "
+                        "would time out and every acquisition would fail). Use a dedicated egress-controlled bridge "
+                        "network instead."
                     )
+                # Pass the raw value through: custom names, network IDs, and
+                # the legit name=<custom-net> long form all keep working.
                 cmd.extend(["--network", network])
 
         if self._runtime == "docker":

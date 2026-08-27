@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import subprocess
 from types import SimpleNamespace
 
@@ -726,3 +727,97 @@ def test_stop_container_propagates_a_timeout_instead_of_reporting_success(monkey
 
     with pytest.raises(subprocess.TimeoutExpired):
         backend._stop_container("sandbox-wedged")
+
+
+# ── Extended network syntax and IPv6 host normalization ──────────────────────
+
+
+def test_start_container_rejects_extended_network_syntax_host(monkeypatch):
+    """name=host attaches the host network namespace exactly like `host`;
+    the raw string must not dodge the rejection."""
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "name=host")
+
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_NETWORK"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_rejects_extended_network_syntax_none(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "name=none")
+
+    with pytest.raises(RuntimeError, match="loopback-only"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_rejects_extended_network_syntax_container(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "name=container:gateway")
+
+    with pytest.raises(RuntimeError, match="DEER_FLOW_SANDBOX_NETWORK"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
+def test_start_container_passes_extended_network_syntax_for_custom_networks(monkeypatch):
+    """The legit name=<custom-net> long form (and network IDs) keep working."""
+    backend = _backend_for_inspect_tests()
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "name=deer-flow-sandbox-egress")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--network") + 1] == "name=deer-flow-sandbox-egress"
+
+
+@pytest.mark.parametrize("sandbox_host", ["fd00::1", "[fd00::1]"])
+def test_discover_brackets_ipv6_sandbox_host_for_url(monkeypatch, sandbox_host):
+    """Both IPv6 input forms must yield the same bracketed URL authority:
+    the bare form used to produce the malformed http://fd00::1:<port>."""
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", sandbox_host)
+    monkeypatch.setattr(backend, "_is_container_running", lambda name: True)
+    monkeypatch.setattr(backend, "_get_container_port", lambda name: 18081)
+
+    seen_urls = []
+
+    def fake_ready(url, timeout):
+        seen_urls.append(url)
+        return True
+
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.wait_for_sandbox_ready", fake_ready)
+
+    info = backend.discover("sbx-ipv6")
+
+    assert info.sandbox_url == "http://[fd00::1]:18081"
+    assert seen_urls == ["http://[fd00::1]:18081"]
+
+
+@pytest.mark.parametrize("sandbox_host", ["fd00::1", "[fd00::1]"])
+def test_create_brackets_ipv6_sandbox_host_for_url(monkeypatch, sandbox_host):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", sandbox_host)
+    monkeypatch.setattr(backend, "_start_container", lambda name, port, mounts=None: "container-id")
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18082)
+
+    info = backend.create(thread_id="t", sandbox_id="sbx-ipv6")
+
+    assert info.sandbox_url == "http://[fd00::1]:18082"
+
+
+def test_resolve_sandbox_host_address_accepts_bracketed_ipv6(monkeypatch):
+    """The bracketed form must resolve (unbracketed for getaddrinfo) instead
+    of failing through to the IPv4 bridge fallback."""
+    from deerflow.community.aio_sandbox.local_backend import _resolve_sandbox_host_address
+
+    infos = [(socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("fd00::1", 0, 0, 0))]
+
+    def fake_getaddrinfo(host, port, *args, **kwargs):
+        assert host == "fd00::1", f"getaddrinfo must receive the unbracketed form, got {host!r}"
+        return infos
+
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.socket.getaddrinfo", fake_getaddrinfo)
+
+    assert _resolve_sandbox_host_address("[fd00::1]") == "[fd00::1]"
