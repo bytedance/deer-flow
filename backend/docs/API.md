@@ -16,6 +16,91 @@ For agent conversations, clients can either pre-create a thread
 endpoint (`POST /api/langgraph/runs/stream`). The latter auto-creates a thread
 and returns `thread_id` and `run_id` in the response `Content-Location` header.
 
+## Authentication
+
+Browser sessions authenticate with the `access_token` session cookie issued at
+login. Programmatic clients can instead use a **personal access token (PAT)**
+sent as a Bearer credential:
+
+```http
+GET /api/models
+Authorization: Bearer dfp_...
+```
+
+PATs require a configured database backend (SQLite/PostgreSQL) — on the
+memory-only backend, Bearer credentials are rejected and PAT management routes
+return `503`.
+
+### Personal Access Tokens
+
+Base URL: `/api/v1/auth`
+
+PAT management requires an **interactive session** (a PAT cannot manage PATs
+or change passwords, so a leaked automation token cannot mint fresh
+credentials). The raw token is returned **exactly once** at creation; only its
+SHA-256 digest is stored server-side.
+
+#### Create Token
+
+```http
+POST /api/v1/auth/pats
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "name": "ci-runner",
+  "scopes": ["threads:read", "runs:create", "runs:read"],
+  "expires_in_days": 90
+}
+```
+
+- `scopes` — subset of the route permissions: `threads:read`, `threads:write`,
+  `threads:delete`, `runs:create`, `runs:read`, `runs:cancel`. A PAT can only
+  *narrow* its owning user's permissions, never widen them.
+- `expires_in_days` — optional (`1`–`365`); omitted means the token never expires.
+
+**Response (`201`):**
+```json
+{
+  "id": "0f0c6e6a-...",
+  "name": "ci-runner",
+  "scopes": ["runs:create", "runs:read", "threads:read"],
+  "expires_at": "2026-11-25T10:30:00Z",
+  "created_at": "2026-08-27T10:30:00Z",
+  "token": "dfp_..."
+}
+```
+
+Save `token` immediately — it cannot be retrieved again.
+
+#### List Tokens
+
+```http
+GET /api/v1/auth/pats
+```
+
+Returns the caller's tokens with `last_used_at` / `revoked_at` audit fields;
+never returns digests or raw tokens.
+
+#### Revoke Token
+
+```http
+DELETE /api/v1/auth/pats/{pat_id}
+```
+
+Revocation is immediate.
+
+### PAT Constraints
+
+- A request carrying an `Authorization` header that fails validation gets a
+  hard `401` — it never falls back to the session cookie.
+- PAT credentials never carry admin capability, even when the owning user is
+  an admin.
+- Revoking or deleting the owning user invalidates their PATs on the next
+  request.
+
 ## LangGraph-compatible API
 
 Base URL: `/api/langgraph`
