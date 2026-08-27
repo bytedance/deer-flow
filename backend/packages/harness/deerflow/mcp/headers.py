@@ -14,11 +14,44 @@ The credential interceptors therefore write header names through
 :func:`apply_header_overrides`, which drops any key differing only in case and
 emits the spelling the connection already uses, so the adapter's merge replaces
 the static entry instead of duplicating it.
+
+They also refuse to inject a credential that cannot travel as a header value
+(:func:`illegal_header_value_reason`): httpx encodes values as Latin-1 and h11
+rejects line breaks and surrounding whitespace, and both render the *full
+value* into the exception message — which ``ToolErrorHandlingMiddleware`` then
+copies into a model-visible ToolMessage, putting the secret in the prompt,
+the checkpoint, and traces. Rejecting up front keeps the error message to the
+credential's name.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
+
+# What h11 refuses inside a field value (its field_vchar is ``[^\x00\s]``):
+# NUL and the vertical-whitespace characters. SP/HTAB are legal separators
+# *between* visible characters but not at either end.
+_FORBIDDEN_HEADER_VALUE_CHARS = re.compile(r"[\x00\n\x0b\x0c\r]")
+
+
+def illegal_header_value_reason(value: str) -> str | None:
+    """Explain why *value* cannot be sent as an HTTP header value, or ``None``.
+
+    Mirrors what the transport enforces — httpx encodes header values as
+    Latin-1, h11 rejects NUL/vertical whitespace and leading or trailing
+    SP/HTAB — without repeating the value, so callers can fail closed with a
+    message that names the credential instead of leaking it.
+    """
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError:
+        return "contains characters outside Latin-1"
+    if _FORBIDDEN_HEADER_VALUE_CHARS.search(value):
+        return "contains a line break or another forbidden control character"
+    if value != value.strip(" \t"):
+        return "has leading or trailing whitespace"
+    return None
 
 
 def header_spellings(names: Iterable[str] | None) -> dict[str, str]:

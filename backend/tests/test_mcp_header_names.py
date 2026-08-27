@@ -15,7 +15,11 @@ from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from pydantic import ValidationError
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpUserScopedAuthConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import (
+    apply_header_overrides,
+    header_spellings,
+    illegal_header_value_reason,
+)
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
 from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
 
@@ -62,6 +66,54 @@ def test_override_does_not_mutate_the_base():
     base = {"Authorization": DISCOVERY}
     apply_header_overrides(base, {"authorization": "Bearer new"})
     assert base == {"Authorization": DISCOVERY}
+
+
+# ---------------------------------------------------------------------------
+# illegal_header_value_reason
+#
+# The boundary mirrors what the transport enforces: httpx encodes values as
+# Latin-1; h11's field_vchar is ``[^\x00\s]`` with SP/HTAB allowed only
+# between visible characters. Values h11 accepts must not be rejected here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Bearer sk-token\n",
+        "Bearer sk-token\r",
+        "a\r\nX-Injected: b",
+        "a\x00b",
+        "a\x0bb",
+        "a\x0cb",
+        " leading-space",
+        "trailing-space ",
+        "trailing-tab\t",
+        "\u043f\u0430\u0440\u043e\u043b\u044c",
+    ],
+)
+def test_transport_rejected_values_are_flagged(value):
+    assert illegal_header_value_reason(value) is not None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Bearer sk-token",
+        "Bearer abc\tdef",
+        "two words",
+        "caf\xe9",  # Latin-1 high byte: httpx encodes it, h11 sends it
+        "a\x7fb",  # DEL: h11's field_vchar accepts it
+    ],
+)
+def test_transport_accepted_values_are_not_flagged(value):
+    assert illegal_header_value_reason(value) is None
+
+
+def test_reason_never_repeats_the_value():
+    reason = illegal_header_value_reason("sk-secret-value\n")
+    assert reason is not None
+    assert "sk-secret-value" not in reason
 
 
 # ---------------------------------------------------------------------------
