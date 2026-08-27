@@ -3523,6 +3523,22 @@ class RunManager:
             deadline = deadline.replace(tzinfo=UTC)
         return deadline
 
+    @staticmethod
+    def _checkpoint_fence_superseded_lease_attempt(
+        record: RunRecord,
+        confirmed_lease_expires_at: str | None,
+    ) -> bool:
+        """Return whether a checkpoint fence now owns lease confirmation.
+
+        A heartbeat selected immediately before ``fence_checkpoint_mutation``
+        can block behind the durable row lock until its old timeout expires.
+        The timeout/rejection belongs to that stale renewal attempt, not to the
+        checkpoint mutation that still holds the ownership fence.  While the
+        fence is active, defer to it; after release, its returned deadline
+        changes ``record.lease_expires_at`` and proves the old attempt stale.
+        """
+        return record.checkpoint_mutation_fence_active or record.lease_expires_at != confirmed_lease_expires_at
+
     async def _mark_ownership_lost(
         self,
         record: RunRecord,
@@ -3741,8 +3757,16 @@ class RunManager:
             ]
 
         for run_id, record in active_runs:
-            confirmed_deadline = self._parse_lease_deadline(record.lease_expires_at)
+            confirmed_lease_expires_at = record.lease_expires_at
+            confirmed_deadline = self._parse_lease_deadline(
+                confirmed_lease_expires_at,
+            )
             if confirmed_deadline is None or confirmed_deadline <= datetime.now(UTC):
+                if self._checkpoint_fence_superseded_lease_attempt(
+                    record,
+                    confirmed_lease_expires_at,
+                ):
+                    continue
                 if record.status in _TERMINAL_RUN_STATUSES:
                     await self._fence_terminal_authority_loss(
                         record,
@@ -3768,6 +3792,11 @@ class RunManager:
                             lease_expires_at=new_expiry,
                         ),
                     )
+                if self._checkpoint_fence_superseded_lease_attempt(
+                    record,
+                    confirmed_lease_expires_at,
+                ):
+                    continue
                 if renewal.renewed:
                     if confirmed_deadline <= datetime.now(UTC):
                         if record.status in _TERMINAL_RUN_STATUSES:
@@ -3836,6 +3865,11 @@ class RunManager:
                                 user_id=record.user_id,
                             ),
                         )
+                        if self._checkpoint_fence_superseded_lease_attempt(
+                            record,
+                            confirmed_lease_expires_at,
+                        ):
+                            continue
                         stored_status = stored_after_rejection.get("status") if stored_after_rejection is not None else None
                         if (
                             record.status in _TERMINAL_RUN_STATUSES
@@ -3877,6 +3911,11 @@ class RunManager:
                                 reason="The durable store rejected lease renewal for this worker.",
                             )
             except Exception:
+                if self._checkpoint_fence_superseded_lease_attempt(
+                    record,
+                    confirmed_lease_expires_at,
+                ):
+                    continue
                 if confirmed_deadline <= datetime.now(UTC):
                     if record.status in _TERMINAL_RUN_STATUSES:
                         await self._fence_terminal_authority_loss(

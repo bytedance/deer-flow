@@ -42,6 +42,25 @@ from deerflow.runtime.runs.worker import (
 )
 
 
+class _RenewalQueuedBehindCheckpointFenceStore(MemoryRunStore):
+    """Pause a selected renewal before it contends for the fence lock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.renewal_selected = asyncio.Event()
+        self.allow_renewal_to_contend = asyncio.Event()
+
+    async def renew_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+        self.renewal_selected.set()
+        await self.allow_renewal_to_contend.wait()
+        async with self._checkpoint_mutation_lock:
+            return await super().renew_lease(
+                run_id,
+                owner_worker_id=owner_worker_id,
+                lease_expires_at=lease_expires_at,
+            )
+
+
 class FakeCheckpointer:
     def __init__(self):
         self.adelete_thread = AsyncMock()
@@ -272,6 +291,55 @@ async def test_no_event_store_keeps_admission_fenced_until_rollback_finishes(
         if takeover_task is not None:
             pending.append(takeover_task)
         await asyncio.gather(*pending, return_exceptions=True)
+
+
+@pytest.mark.anyio
+async def test_selected_heartbeat_cannot_revoke_active_checkpoint_fence():
+    store = _RenewalQueuedBehindCheckpointFenceStore()
+    ownership = RunOwnershipConfig(
+        heartbeat_enabled=True,
+        lease_seconds=5,
+        grace_seconds=0,
+    )
+    manager = RunManager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    record = await manager.create_or_reject("thread-heartbeat-fence-race")
+    await manager.try_start(record.run_id)
+
+    old_expiry = (datetime.now(UTC) + timedelta(milliseconds=500)).isoformat()
+    record.lease_expires_at = old_expiry
+    store._runs[record.run_id]["lease_expires_at"] = old_expiry
+
+    renewal_task = asyncio.create_task(manager._renew_leases())
+    await asyncio.wait_for(store.renewal_selected.wait(), timeout=1)
+
+    fence_acquired = asyncio.Event()
+    release_fence = asyncio.Event()
+
+    async def hold_fence() -> None:
+        async with manager.fence_checkpoint_mutation(record.run_id) as acquired:
+            assert acquired is True
+            fence_acquired.set()
+            await release_fence.wait()
+
+    fence_task = asyncio.create_task(hold_fence())
+    await asyncio.wait_for(fence_acquired.wait(), timeout=1)
+    store.allow_renewal_to_contend.set()
+
+    await asyncio.wait_for(renewal_task, timeout=2)
+    assert record.checkpoint_mutation_fence_active is True
+    assert record.ownership_lost is False
+
+    release_fence.set()
+    await asyncio.wait_for(fence_task, timeout=1)
+
+    assert record.checkpoint_mutation_fence_active is False
+    assert record.ownership_lost is False
+    assert record.lease_expires_at != old_expiry
+    assert datetime.fromisoformat(record.lease_expires_at) > datetime.now(UTC)
 
 
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):

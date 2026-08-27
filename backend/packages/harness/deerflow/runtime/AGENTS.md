@@ -92,6 +92,9 @@ owner's lease before releasing it. The SQL store holds a `FOR UPDATE` lock on
 the active run row across the checkpoint await, so a contender cannot
 terminalize the row until the rollback has committed or unwound; after the
 lock releases, its lease predicate is re-evaluated against the renewed
+deadline. A heartbeat renewal selected before fence entry may block behind
+that row lock past its old deadline; its timeout or rejection is ignored while
+the fence is active or after fence release advances the locally confirmed
 deadline. A process-local authority check is only defense in depth and must
 never replace this durable fence. Third-party stores without the optional
 capability fail closed and skip rollback when heartbeat ownership is enabled.
