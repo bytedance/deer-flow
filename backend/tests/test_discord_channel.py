@@ -327,7 +327,9 @@ async def test_ack_reaction_retention_is_isolated_per_channel() -> None:
     assert task in second._ack_reaction_tasks
     assert task not in first._ack_reaction_tasks
 
-    await first._cancel_ack_reaction_tasks()
+    # Full shutdown of the first channel must leave the second instance's
+    # in-flight reaction alone (the review asked for independent shutdown).
+    await first.stop()
 
     assert not task.done()
     assert task in second._ack_reaction_tasks
