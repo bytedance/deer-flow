@@ -27,9 +27,12 @@ def test_serve_script_parses_skip_frontend_build_flag() -> None:
 def test_prod_default_still_builds_via_preview() -> None:
     serve = SERVE_SH.read_text(encoding="utf-8")
 
-    assert '"\\$DEERFLOW_PNPM_RUNNER\\" run preview"' in serve
-    assert '"\\$DEERFLOW_PNPM_RUNNER\\" run start"' in serve
-
+    # Verify the control-flow: skip flag -> `run start`, otherwise -> `run preview`.
+    assert re.search(
+        r"elif\s+\$SKIP_FRONTEND_BUILD;\s+then.*?FRONTEND_CMD=.*?run start.*?\nelse\n\s*FRONTEND_CMD=.*?run preview",
+        serve,
+        re.S,
+    ), "expected prod default to use `run preview` and --skip-frontend-build to use `run start`"
 
 def test_skip_build_reuses_existing_build_and_requires_build_id() -> None:
     serve = SERVE_SH.read_text(encoding="utf-8")
