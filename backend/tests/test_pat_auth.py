@@ -70,7 +70,7 @@ def _make_pat_app(with_pat_repo: bool = True):
     app.add_middleware(CSRFMiddleware)
     app.include_router(auth_router)
 
-    @app.get("/api/whoami")
+    @app.get("/api/threads/whoami")
     async def whoami(request: Request):
         return {"user_id": str(request.state.user.id), "auth_source": request.state.auth_source}
 
@@ -83,6 +83,14 @@ def _make_pat_app(with_pat_repo: bool = True):
     @app.post("/api/threads/{thread_id}/runs/stream")
     async def run_stream(request: Request):
         return {"ok": True, "permissions": list(request.state.auth.permissions)}
+
+    @app.delete("/api/memory")
+    async def memory_delete(request: Request):
+        return {"deleted": True}
+
+    @app.delete("/api/threads/{thread_id}")
+    async def thread_delete(request: Request):
+        return {"deleted": True}
 
     return app
 
@@ -151,34 +159,34 @@ def _create_pat(client: TestClient, *, scopes: list[str] | None = None, user_id:
 def test_valid_pat_authenticates_without_cookie(client):
     created = _create_pat(client)
     client.cookies.clear()
-    response = client.get("/api/whoami", headers={"Authorization": f"Bearer {created['token']}"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 200
     assert response.json() == {"user_id": "user-1", "auth_source": AUTH_SOURCE_PAT}
 
 
 def test_invalid_bearer_never_falls_back_to_session_cookie(client):
     _session_cookie(client)  # victim session is present and valid
-    response = client.get("/api/whoami", headers={"Authorization": "Bearer dfp_not-a-real-token"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_not-a-real-token"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid token"
 
 
 def test_non_bearer_authorization_scheme_is_rejected(client):
     _session_cookie(client)
-    response = client.get("/api/whoami", headers={"Authorization": "Basic dXNlcjpwYXNz"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": "Basic dXNlcjpwYXNz"})
     assert response.status_code == 401
 
 
 def test_valid_pat_takes_precedence_over_session_cookie(client):
     created = _create_pat(client)  # sets a session cookie too
-    response = client.get("/api/whoami", headers={"Authorization": f"Bearer {created['token']}"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == AUTH_SOURCE_PAT
 
 
 def test_no_bearer_header_keeps_session_behavior(client):
     _session_cookie(client)
-    response = client.get("/api/whoami")
+    response = client.get("/api/threads/whoami")
     assert response.status_code == 200
     assert response.json()["auth_source"] == AUTH_SOURCE_SESSION
 
@@ -189,7 +197,7 @@ def test_revoked_pat_is_rejected_immediately(client):
     assert delete.status_code == 200, delete.text
 
     client.cookies.clear()
-    response = client.get("/api/whoami", headers={"Authorization": f"Bearer {created['token']}"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 401
 
 
@@ -201,7 +209,7 @@ def test_pat_with_unresolvable_user_is_rejected(client, pat_env):
     token = generate_pat_token()
     asyncio.run(repo.create(user_id="user-deleted", name="orphan", scopes=["runs:read"], token_digest=pat_token_digest(token)))
     client.cookies.clear()
-    response = client.get("/api/whoami", headers={"Authorization": f"Bearer {token}"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
 
@@ -211,12 +219,12 @@ def test_pat_without_durable_store_is_rejected():
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
 
-    @app.get("/api/whoami")
+    @app.get("/api/threads/whoami")
     async def whoami(request):  # pragma: no cover - never reached
         return {}
 
     with TestClient(app) as bare_client:
-        response = bare_client.get("/api/whoami", headers={"Authorization": "Bearer dfp_whatever"})
+        response = bare_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_whatever"})
     assert response.status_code == 401
 
 
@@ -313,14 +321,17 @@ def test_pat_cannot_change_password(client):
         headers={"Authorization": f"Bearer {created['token']}"},
     )
     assert response.status_code == 403
-    assert "session" in response.json()["detail"].lower()
+    # The default-deny route policy blocks the request at the middleware,
+    # before the route-level session-only guard gets a chance; the 403 is the
+    # security property either way.
+    assert "pat" in response.json()["detail"].lower()
 
 
 def test_successful_pat_auth_stamps_last_used(client, pat_env):
     _app, repo, _engine = pat_env
     created = _create_pat(client)
     client.cookies.clear()
-    assert client.get("/api/whoami", headers={"Authorization": f"Bearer {created['token']}"}).status_code == 200
+    assert client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {created['token']}"}).status_code == 200
 
     records = asyncio.run(repo.list_for_user("user-1"))
     assert records[0]["last_used_at"] is not None
@@ -341,7 +352,7 @@ def test_expired_pat_rejected_at_middleware(client, pat_env):
         )
     )
     client.cookies.clear()
-    response = client.get("/api/whoami", headers={"Authorization": f"Bearer {token}"})
+    response = client.get("/api/threads/whoami", headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 401
 
 
@@ -353,15 +364,51 @@ def test_create_with_expiry_returns_expires_at(client):
 def test_pat_never_carries_admin_capability_even_for_admin_owner(client):
     created = _create_pat(client, user_id="admin-1", scopes=["runs:read"])
     client.cookies.clear()
+    # The route-level default-deny policy blocks the PAT before the route
+    # runs; the is_admin_user guard inside it remains as defense in depth
+    # for compositions without the middleware.
     response = client.get("/api/admin-check", headers={"Authorization": f"Bearer {created['token']}"})
-    assert response.status_code == 200
-    assert response.json() == {"is_admin": False}
+    assert response.status_code == 403
 
     # Control: the same admin over a session cookie keeps admin capability.
     _session_cookie(client, user_id="admin-1")
     control = client.get("/api/admin-check")
     assert control.status_code == 200
     assert control.json() == {"is_admin": True}
+
+
+def test_pat_default_denied_on_route_outside_pat_policy(client):
+    """P1 regression (#5041 review): a PAT holding every scope must not reach
+    destructive routes that have no PAT policy — scope intersection only
+    constrains @require_permission routes, so undecorated mutation routes
+    would otherwise accept a runs:read-only token."""
+    created = _create_pat(client, scopes=["threads:read", "threads:write", "threads:delete", "runs:create", "runs:read", "runs:cancel"])
+    client.cookies.clear()
+    response = client.delete("/api/memory", headers={"Authorization": f"Bearer {created['token']}"})
+    assert response.status_code == 403
+    assert "PAT" in response.json()["detail"]
+
+
+def test_session_cookie_reaches_route_that_denies_pat(client):
+    """The default-deny is PAT-specific: the same route stays open to the
+    owning user's session cookie (PATs narrow, never widen, and never
+    restrict the interactive path)."""
+    from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+
+    _session_cookie(client, user_id="user-1")
+    csrf = generate_csrf_token()
+    client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    response = client.delete("/api/memory", headers={CSRF_HEADER_NAME: csrf})
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+
+
+def test_pat_policy_allows_thread_lifecycle_routes(client):
+    created = _create_pat(client, scopes=["threads:delete"])
+    client.cookies.clear()
+    response = client.delete("/api/threads/t1", headers={"Authorization": f"Bearer {created['token']}"})
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
 
 
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
@@ -373,6 +420,6 @@ def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
     monkeypatch.setattr("app.gateway.auth_middleware.is_auth_disabled", lambda: True)
     app = _make_pat_app()
     with TestClient(app) as disabled_client:
-        response = disabled_client.get("/api/whoami", headers={"Authorization": "Bearer dfp_garbage"})
+        response = disabled_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_garbage"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == "auth_disabled"

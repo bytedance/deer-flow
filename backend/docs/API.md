@@ -96,8 +96,19 @@ Revocation is immediate.
 
 - A request carrying an `Authorization` header that fails validation gets a
   hard `401` — it never falls back to the session cookie.
+- **Route-level default-deny:** PAT requests are admitted only to the
+  thread/run lifecycle routes the v1 scopes govern — `GET/POST /api/threads`,
+  `POST /api/threads/search`, `GET/PATCH/DELETE /api/threads/{thread_id}`,
+  the thread `goal`/`state`/`compact`/`history`/`branches` subroutes, and
+  `/api/threads/{thread_id}/runs/*` plus `/api/runs/stream|wait|messages|feedback`.
+  Every other authenticated route — memory, agents, MCP/skills config,
+  integrations, channels, uploads — answers `403` to PAT callers regardless
+  of scopes. Scope enforcement alone only constrains permission-decorated
+  routes, so the allowlist is the outer boundary; session-cookie callers are
+  unaffected.
 - PAT credentials never carry admin capability, even when the owning user is
-  an admin.
+  an admin. This includes extension-contributed admin routes: the extension
+  principal projection suppresses every admin signal for PAT callers.
 - Revoking or deleting the owning user invalidates their PATs on the next
   request.
 

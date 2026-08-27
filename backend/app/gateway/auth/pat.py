@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import re
 import secrets
 from typing import Any
 
@@ -36,7 +37,37 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
 
 PAT_MAX_NAME_LENGTH = 128
 
+# Default-deny route boundary for PAT callers (#5041 review P1-1): scope
+# intersection in AuthMiddleware only constrains routes that consult
+# ``request.state.auth.permissions`` (``@require_permission``). Authenticated
+# mutation routes without that decorator — memory deletion, agent creation,
+# credential switching, channel configuration — would otherwise accept a
+# PAT holding a single read scope. A route is reachable by PAT only when it
+# is explicitly listed here, and only together with the thread/run lifecycle
+# the v1 scopes govern; everything else answers 403 regardless of scopes.
+_PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads$")),
+    (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
+    (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/threads/[^/]+$")),
+    (frozenset({"GET", "PUT", "DELETE"}), re.compile(r"^/api/threads/[^/]+/goal$")),
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
+    (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs(/.*)?$")),
+    (frozenset({"POST"}), re.compile(r"^/api/runs/(stream|wait)$")),
+    (frozenset({"GET"}), re.compile(r"^/api/runs/[^/]+/(messages|feedback)$")),
+)
+
 _BASE62_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+
+
+def is_pat_allowed_route(method: str, path: str) -> bool:
+    """Return whether the PAT route policy admits *method* + *path*.
+
+    Trailing slashes are normalized away so the mounted route and its
+    redirect-style twin resolve identically.
+    """
+    normalized = path.rstrip("/") or "/"
+    return any(method in methods and pattern.match(normalized) for methods, pattern in _PAT_ROUTE_RULES)
 
 
 def _base62(data: bytes) -> str:

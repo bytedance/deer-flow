@@ -124,12 +124,21 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # Auth-disabled mode is an operator override of all authentication,
             # so it stays ahead of the Bearer check (a stray Authorization
             # header from a proxy must not 401 an E2E sandbox).
-            from app.gateway.auth.pat import authenticate_pat
+            from app.gateway.auth.pat import authenticate_pat, is_pat_allowed_route
 
             try:
                 user, pat_scopes = await authenticate_pat(request.app, authorization)
             except HTTPException as exc:
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            # Default-deny route boundary (#5041 review P1-1): scopes only
+            # constrain @require_permission routes, so any route outside the
+            # explicit PAT policy is closed to PAT callers outright — an
+            # all-scopes token must not reach undecorated mutation routes.
+            if not is_pat_allowed_route(request.method, get_request_route_path(request)):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "PAT credentials are not permitted on this route"},
+                )
             auth_source = AUTH_SOURCE_PAT
         elif access_token:
             # Strict JWT validation: reject junk/expired tokens with 401
