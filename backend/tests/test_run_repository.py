@@ -126,6 +126,18 @@ async def test_terminal_insert_defaults_to_unsupported_for_custom_store():
 
 
 @pytest.mark.anyio
+async def test_checkpoint_mutation_fence_defaults_to_unsupported_for_custom_store():
+    store = _CustomRunStoreWithoutProgress()
+
+    async with store.checkpoint_mutation_fence(
+        "r1",
+        expected_owner_worker_id="worker-1",
+        lease_seconds=30,
+    ) as fence:
+        assert fence.acquired is False
+
+
+@pytest.mark.anyio
 async def test_legacy_create_run_atomic_store_remains_compatible():
     store = _CustomRunStoreWithoutProgress()
 
@@ -157,6 +169,39 @@ class TestRunRepository:
         assert row["run_id"] == "r1"
         assert row["thread_id"] == "t1"
         assert row["status"] == "pending"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_checkpoint_mutation_fence_requires_live_owner_and_renews_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        original_expiry = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "r-fence",
+            thread_id="t-fence",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=original_expiry,
+        )
+
+        async with repo.checkpoint_mutation_fence(
+            "r-fence",
+            expected_owner_worker_id="worker-a",
+            lease_seconds=120,
+        ) as fence:
+            assert fence.acquired is True
+
+        stored = await repo.get("r-fence")
+        assert stored is not None
+        assert fence.lease_expires_at is not None
+        assert stored["lease_expires_at"] == fence.lease_expires_at
+        assert datetime.fromisoformat(stored["lease_expires_at"]) > datetime.now(UTC) + timedelta(seconds=110)
+
+        async with repo.checkpoint_mutation_fence(
+            "r-fence",
+            expected_owner_worker_id="worker-b",
+            lease_seconds=120,
+        ) as fence:
+            assert fence.acquired is False
         await _cleanup()
 
     @pytest.mark.anyio

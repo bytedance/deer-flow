@@ -234,6 +234,9 @@ class RunRecord:
     # further durable run/thread finalization because its lease ownership is
     # either known to be lost or could not be confirmed before expiry.
     ownership_lost: bool = False
+    # True while the RunStore holds a durable row lock that serializes a
+    # checkpoint mutation with takeover and replacement-run admission.
+    checkpoint_mutation_fence_active: bool = False
     # Process-local proof that this worker successfully wrote the named
     # terminal status. Once a row is terminal, takeover cannot rewrite it, so
     # this proof safely bridges a transient read failure in the post-run
@@ -2452,6 +2455,83 @@ class RunManager:
                     if removed is not None:
                         self._unindex_run_locked(record.run_id, removed.thread_id)
 
+    @asynccontextmanager
+    async def fence_checkpoint_mutation(
+        self,
+        run_id: str,
+    ) -> AsyncIterator[bool]:
+        """Hold durable execution ownership across one checkpoint mutation.
+
+        In heartbeat mode the store scope locks the active run row, which is
+        the same row takeover and interrupt/rollback admission must retire
+        before a replacement lineage can be admitted.  The process-local flag
+        only tells heartbeat not to contend with that lock; it is not the
+        authority fence itself.
+        """
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.store_only or not self._has_local_execution_authority(record):
+                record = None
+            elif record.checkpoint_mutation_fence_active:
+                raise RuntimeError(f"Run {run_id} already holds a checkpoint mutation fence")
+            else:
+                record.checkpoint_mutation_fence_active = True
+
+        if record is None:
+            yield False
+            return
+
+        if not self.heartbeat_enabled:
+            try:
+                yield True
+            finally:
+                record.checkpoint_mutation_fence_active = False
+            return
+
+        if self._store is None or self._run_ownership_config is None:
+            record.checkpoint_mutation_fence_active = False
+            yield False
+            return
+
+        acquired = False
+        fence_result = None
+        try:
+            async with self._store.checkpoint_mutation_fence(
+                run_id,
+                expected_owner_worker_id=self._worker_id,
+                lease_seconds=self._run_ownership_config.lease_seconds,
+            ) as fence_result:
+                acquired = fence_result.acquired
+                if not acquired:
+                    await self._mark_ownership_lost(
+                        record,
+                        reason="Durable checkpoint mutation authority could not be acquired.",
+                        require_active=False,
+                    )
+                    yield False
+                    return
+                yield True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Run %s failed to hold its durable checkpoint mutation fence",
+                run_id,
+                exc_info=True,
+            )
+            await self._mark_ownership_lost(
+                record,
+                reason="Durable checkpoint mutation authority failed while held.",
+                require_active=False,
+            )
+            raise
+        finally:
+            async with self._lock:
+                if self._runs.get(run_id) is record:
+                    if acquired and not record.ownership_lost and fence_result is not None and fence_result.lease_expires_at is not None:
+                        record.lease_expires_at = fence_result.lease_expires_at
+                    record.checkpoint_mutation_fence_active = False
+
     async def reconcile_orphaned_inflight_runs(
         self,
         *,
@@ -3657,6 +3737,7 @@ class RunManager:
                     )
                 )
                 and self._has_local_execution_authority(record)
+                and not record.checkpoint_mutation_fence_active
             ]
 
         for run_id, record in active_runs:

@@ -686,47 +686,51 @@ async def run_agent(
             return
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
-            if record.ownership_lost:
-                # Losing the durable lease revokes checkpoint-mutation
-                # authority as well as RunStore authority. A stale worker may
-                # still receive CancelledError while abort_action is rollback;
-                # it must not rewind a peer's newer checkpoint lineage.
-                logger.warning(
-                    "Run %s skipped rollback after losing execution authority",
-                    run_id,
-                )
-                finalized_cancel_action = action
-                return
-            await run_manager.set_status(
-                run_id,
-                RunStatus.error,
-                error="Rolled back by user",
-                persist=False,
-            )
             if not restore_checkpoint:
+                if not record.ownership_lost:
+                    await run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error="Rolled back by user",
+                        persist=False,
+                    )
                 finalized_cancel_action = action
                 return
-            try:
-                checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                    accessor=accessor,
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    rollback_point=rollback_point,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                    authority_check=lambda: not record.ownership_lost,
-                )
-                logger.info(
-                    "Run %s rolled back to pre-run checkpoint %s",
+            async with run_manager.fence_checkpoint_mutation(run_id) as rollback_authorized:
+                if not rollback_authorized:
+                    logger.warning(
+                        "Run %s skipped rollback without durable checkpoint mutation authority",
+                        run_id,
+                    )
+                    finalized_cancel_action = action
+                    return
+                await run_manager.set_status(
                     run_id,
-                    pre_run_checkpoint_id,
+                    RunStatus.error,
+                    error="Rolled back by user",
+                    persist=False,
                 )
-            except Exception:
-                logger.warning(
-                    "Run %s cancellation rollback failed",
-                    run_id,
-                    exc_info=True,
-                )
+                try:
+                    checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                        accessor=accessor,
+                        checkpointer=checkpointer,
+                        thread_id=thread_id,
+                        run_id=run_id,
+                        rollback_point=rollback_point,
+                        snapshot_capture_failed=snapshot_capture_failed,
+                        authority_check=lambda: not record.ownership_lost,
+                    )
+                    logger.info(
+                        "Run %s rolled back to pre-run checkpoint %s",
+                        run_id,
+                        pre_run_checkpoint_id,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Run %s cancellation rollback failed",
+                        run_id,
+                        exc_info=True,
+                    )
         else:
             await run_manager.set_status(
                 run_id,
@@ -1201,15 +1205,22 @@ async def run_agent(
                 await run_manager.set_finalizing(run_id, True)
             try:
                 if not checkpoint_rollback_completed:
-                    checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                        accessor=accessor,
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        rollback_point=rollback_point,
-                        snapshot_capture_failed=snapshot_capture_failed,
-                        authority_check=lambda: not record.ownership_lost,
-                    )
+                    async with run_manager.fence_checkpoint_mutation(run_id) as rollback_authorized:
+                        if rollback_authorized:
+                            checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                                accessor=accessor,
+                                checkpointer=checkpointer,
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                rollback_point=rollback_point,
+                                snapshot_capture_failed=snapshot_capture_failed,
+                                authority_check=lambda: not record.ownership_lost,
+                            )
+                        else:
+                            logger.warning(
+                                "Run %s skipped edit replay rollback without durable checkpoint mutation authority",
+                                run_id,
+                            )
                 if checkpoint_rollback_completed:
                     await _publish_restored_checkpoint_values(
                         bridge=bridge,

@@ -7,7 +7,10 @@ minutes -- we don't hold connections across long execution.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -17,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.runs.store.base import (
+    CheckpointMutationFence,
     LeaseRenewal,
     RunIdempotencyConflict,
     RunStore,
@@ -49,6 +53,63 @@ def _database_wall_clock(dialect_name: str):
 class RunRepository(RunStore):
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
+
+    @asynccontextmanager
+    async def checkpoint_mutation_fence(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        lease_seconds: int,
+    ) -> AsyncIterator[CheckpointMutationFence]:
+        """Lock the active run row across a checkpoint mutation.
+
+        PostgreSQL takeover and interrupt/rollback admission update or lock the
+        same row, so they cannot retire it while this transaction is open.
+        Releasing the row lock and extending the lease happen in one commit;
+        blocked contenders then re-evaluate against the renewed deadline.
+        """
+        async with self._sf() as session:
+            database_now = _database_wall_clock(session.get_bind().dialect.name)
+            result = await session.execute(
+                select(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                    RunRow.owner_worker_id == expected_owner_worker_id,
+                    RunRow.lease_expires_at.is_not(None),
+                    RunRow.lease_expires_at > database_now,
+                )
+                .with_for_update()
+            )
+            row = result.scalar_one_or_none()
+            if row is None:
+                await session.rollback()
+                yield CheckpointMutationFence(acquired=False)
+                return
+
+            fence = CheckpointMutationFence(acquired=True)
+            try:
+                yield fence
+            finally:
+
+                async def _renew_and_release() -> None:
+                    new_expiry = datetime.now(UTC) + timedelta(seconds=lease_seconds)
+                    row.lease_expires_at = new_expiry
+                    row.updated_at = datetime.now(UTC)
+                    await session.commit()
+                    fence.lease_expires_at = new_expiry.isoformat()
+
+                # The caller task can be cancelled while its checkpoint write
+                # is unwinding.  Drain this tiny commit before releasing the
+                # session so the row lock and renewed lease stay contiguous.
+                release_task = asyncio.create_task(_renew_and_release())
+                while not release_task.done():
+                    try:
+                        await asyncio.shield(release_task)
+                    except asyncio.CancelledError:
+                        pass
+                release_task.result()
 
     @staticmethod
     def _normalize_model_name(model_name: str | None) -> str | None:

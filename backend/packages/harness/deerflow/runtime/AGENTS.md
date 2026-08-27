@@ -84,8 +84,19 @@ Running rollback keeps the durable row active until checkpoint restoration is
 finished; no-event-store and edit-replay paths stage their terminal result in
 memory and terminalize only through the final convergence gate. This preserves
 the cross-worker admission fence so a peer cannot write a new checkpoint
-lineage that the old worker then rewinds. Losing ownership revokes checkpoint
-rollback authority as well as RunStore write authority. Shutdown establishes
+lineage that the old worker then rewinds. In heartbeat mode every rollback
+checkpoint mutation additionally runs inside
+`RunStore.checkpoint_mutation_fence()`: built-in stores serialize that scope
+with lease takeover and interrupt/rollback admission, and renew the active
+owner's lease before releasing it. The SQL store holds a `FOR UPDATE` lock on
+the active run row across the checkpoint await, so a contender cannot
+terminalize the row until the rollback has committed or unwound; after the
+lock releases, its lease predicate is re-evaluated against the renewed
+deadline. A process-local authority check is only defense in depth and must
+never replace this durable fence. Third-party stores without the optional
+capability fail closed and skip rollback when heartbeat ownership is enabled.
+Losing ownership revokes checkpoint rollback authority as well as RunStore
+write authority. Shutdown establishes
 the durable first-writer cancel action before signalling a live worker, never
 injects a second cancellation into cleanup, and lets pending rollback pass the
 normal startup barrier without deleting pre-existing thread state.

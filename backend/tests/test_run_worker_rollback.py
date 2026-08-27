@@ -1,6 +1,7 @@
 import asyncio
 import copy
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Annotated, Any, NotRequired, TypedDict
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -166,7 +167,7 @@ async def test_no_event_store_keeps_admission_fenced_until_rollback_finishes(
     store = MemoryRunStore()
     ownership = RunOwnershipConfig(
         heartbeat_enabled=True,
-        lease_seconds=30,
+        lease_seconds=300,
         grace_seconds=10,
     )
     owner = RunManager(
@@ -224,6 +225,7 @@ async def test_no_event_store_keeps_admission_fenced_until_rollback_finishes(
         )
     )
     record.task = task
+    takeover_task = None
 
     try:
         await asyncio.wait_for(stream_started.wait(), timeout=1)
@@ -237,8 +239,22 @@ async def test_no_event_store_keeps_admission_fenced_until_rollback_finishes(
         with pytest.raises(ConflictError):
             await peer.create_or_reject("thread-rollback-admission-fence")
 
+        # Expire the visible lease while the rollback write is blocked.  A
+        # peer can discover the row, but its durable takeover must wait on the
+        # checkpoint mutation fence.  Once the write unwinds, fence release
+        # renews the lease before the peer's predicate is re-evaluated.
+        store._runs[record.run_id]["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
+        takeover_task = asyncio.create_task(
+            peer.reconcile_orphaned_inflight_runs(
+                error="peer takeover",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not takeover_task.done()
+
         finish_rollback.set()
         await asyncio.wait_for(task, timeout=1)
+        assert await asyncio.wait_for(takeover_task, timeout=1) == []
 
         stored_after_rollback = await store.get(record.run_id)
         assert stored_after_rollback is not None
@@ -252,7 +268,10 @@ async def test_no_event_store_keeps_admission_fenced_until_rollback_finishes(
         finish_rollback.set()
         if not task.done():
             task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+        pending = [task]
+        if takeover_task is not None:
+            pending.append(takeover_task)
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):

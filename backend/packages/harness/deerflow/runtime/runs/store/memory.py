@@ -5,15 +5,21 @@ Equivalent to the original RunManager._runs dict behavior.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.runtime.runs.store.base import LeaseRenewal, RunIdempotencyConflict, RunStore, StatusFinalization
+from deerflow.runtime.runs.store.base import CheckpointMutationFence, LeaseRenewal, RunIdempotencyConflict, RunStore, StatusFinalization
 
 
 class MemoryRunStore(RunStore):
     def __init__(self) -> None:
         self._runs: dict[str, dict[str, Any]] = {}
+        # Serializes durable checkpoint mutation fences with the two paths
+        # that can retire an active row and admit a replacement lineage.
+        self._checkpoint_mutation_lock = asyncio.Lock()
         # Secondary index: thread_id -> insertion-ordered run_id set (a dict is
         # used as an ordered set), maintained in lockstep with ``_runs`` so
         # per-thread queries avoid O(total in-memory runs) full scans. Mirrors
@@ -400,6 +406,42 @@ class MemoryRunStore(RunStore):
     # Multi-worker run ownership methods
     # ------------------------------------------------------------------
 
+    @asynccontextmanager
+    async def checkpoint_mutation_fence(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        lease_seconds: int,
+    ) -> AsyncIterator[CheckpointMutationFence]:
+        """Keep the active owner row immutable while checkpoints are changed."""
+        async with self._checkpoint_mutation_lock:
+            run = self._runs.get(run_id)
+            acquired = False
+            if run is not None and run.get("status") in ("pending", "running") and run.get("owner_worker_id") == expected_owner_worker_id:
+                try:
+                    lease_deadline = datetime.fromisoformat(run.get("lease_expires_at"))
+                    if lease_deadline.tzinfo is None:
+                        lease_deadline = lease_deadline.replace(tzinfo=UTC)
+                    acquired = lease_deadline > datetime.now(UTC)
+                except (TypeError, ValueError):
+                    acquired = False
+            if not acquired:
+                yield CheckpointMutationFence(acquired=False)
+                return
+            fence = CheckpointMutationFence(acquired=True)
+            try:
+                yield fence
+            finally:
+                # Takeover/admission are still excluded here, so this renewal
+                # is contiguous with the mutation even when the body raised.
+                current = self._runs.get(run_id)
+                if current is run and current.get("status") in ("pending", "running") and current.get("owner_worker_id") == expected_owner_worker_id:
+                    lease_expires_at = (datetime.now(UTC) + timedelta(seconds=lease_seconds)).isoformat()
+                    current["lease_expires_at"] = lease_expires_at
+                    current["updated_at"] = datetime.now(UTC).isoformat()
+                    fence.lease_expires_at = lease_expires_at
+
     async def update_lease(
         self,
         run_id: str,
@@ -492,22 +534,23 @@ class MemoryRunStore(RunStore):
     ) -> bool:
         from deerflow.utils.time import is_lease_expired
 
-        run = self._runs.get(run_id)
-        if run is None:
-            return False
-        if run["status"] not in ("pending", "running"):
-            return False
-        lease = run.get("lease_expires_at")
-        if not is_lease_expired(lease, grace_seconds=grace_seconds):
-            return False
-        run["status"] = "error"
-        run["error"] = error
-        run["owner_worker_id"] = None
-        run["lease_expires_at"] = None
-        if stop_reason is not None:
-            run["stop_reason"] = stop_reason
-        run["updated_at"] = datetime.now(UTC).isoformat()
-        return True
+        async with self._checkpoint_mutation_lock:
+            run = self._runs.get(run_id)
+            if run is None:
+                return False
+            if run["status"] not in ("pending", "running"):
+                return False
+            lease = run.get("lease_expires_at")
+            if not is_lease_expired(lease, grace_seconds=grace_seconds):
+                return False
+            run["status"] = "error"
+            run["error"] = error
+            run["owner_worker_id"] = None
+            run["lease_expires_at"] = None
+            if stop_reason is not None:
+                run["stop_reason"] = stop_reason
+            run["updated_at"] = datetime.now(UTC).isoformat()
+            return True
 
     async def list_inflight_with_expired_lease(
         self,
@@ -552,6 +595,59 @@ class MemoryRunStore(RunStore):
         return results
 
     async def create_thread_operation_atomic(
+        self,
+        run_id: str,
+        *,
+        thread_id: str,
+        owner_worker_id: str,
+        lease_expires_at: str | None,
+        operation_kind: str = "run",
+        multitask_strategy: str = "reject",
+        assistant_id: str | None = None,
+        user_id: str | None = None,
+        model_name: str | None = None,
+        metadata: dict[str, Any] | None = None,
+        kwargs: dict[str, Any] | None = None,
+        created_at: str | None = None,
+        grace_seconds: int = 10,
+        idempotency_key: str | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if multitask_strategy in ("interrupt", "rollback"):
+            async with self._checkpoint_mutation_lock:
+                return await self._create_thread_operation_atomic_unlocked(
+                    run_id,
+                    thread_id=thread_id,
+                    owner_worker_id=owner_worker_id,
+                    lease_expires_at=lease_expires_at,
+                    operation_kind=operation_kind,
+                    multitask_strategy=multitask_strategy,
+                    assistant_id=assistant_id,
+                    user_id=user_id,
+                    model_name=model_name,
+                    metadata=metadata,
+                    kwargs=kwargs,
+                    created_at=created_at,
+                    grace_seconds=grace_seconds,
+                    idempotency_key=idempotency_key,
+                )
+        return await self._create_thread_operation_atomic_unlocked(
+            run_id,
+            thread_id=thread_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+            operation_kind=operation_kind,
+            multitask_strategy=multitask_strategy,
+            assistant_id=assistant_id,
+            user_id=user_id,
+            model_name=model_name,
+            metadata=metadata,
+            kwargs=kwargs,
+            created_at=created_at,
+            grace_seconds=grace_seconds,
+            idempotency_key=idempotency_key,
+        )
+
+    async def _create_thread_operation_atomic_unlocked(
         self,
         run_id: str,
         *,

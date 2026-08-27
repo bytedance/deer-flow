@@ -11,6 +11,8 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,6 +35,14 @@ class LeaseRenewal:
     cancel_action: str | None = None
 
 
+@dataclass
+class CheckpointMutationFence:
+    """Result and release-time lease proof for a checkpoint mutation fence."""
+
+    acquired: bool
+    lease_expires_at: str | None = None
+
+
 @dataclass(frozen=True)
 class StatusFinalization:
     """Result of completing a run only if cancellation has not won."""
@@ -51,6 +61,30 @@ class RunIdempotencyConflict(RuntimeError):
 
 
 class RunStore(abc.ABC):
+    @asynccontextmanager
+    async def checkpoint_mutation_fence(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        lease_seconds: int,
+    ) -> AsyncIterator[CheckpointMutationFence]:
+        """Hold durable run ownership across one checkpoint mutation.
+
+        Implementations must serialize this scope with lease takeover and any
+        admission path that can terminalize the active row.  The row must stay
+        active while the scope is held, and a successful scope must extend its
+        lease by *lease_seconds* at release time before dropping the
+        serialization fence. The yielded result receives that exact durable
+        deadline after the scope exits.
+
+        ``acquired=False`` means this optional capability is unsupported or the
+        active, unexpired owner fence no longer matched. The compatibility
+        default is deliberately fail-closed for heartbeat-enabled callers.
+        """
+        del run_id, expected_owner_worker_id, lease_seconds
+        yield CheckpointMutationFence(acquired=False)
+
     @abc.abstractmethod
     async def put(
         self,
