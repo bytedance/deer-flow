@@ -501,6 +501,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+            from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
@@ -511,8 +512,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_repository=app.state.run_store,
             )
             app.state.mcp_task_repo = McpTaskRepository(sf)
+            app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
             app.state.mcp_task_repo = None
+            app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
 
@@ -676,6 +679,20 @@ def get_mcp_task_service(request: Request):
     val = getattr(request.app.state, "mcp_task_service", None)
     if val is None:
         raise HTTPException(status_code=503, detail="MCP task service not available")
+    return val
+
+
+def get_subagent_batch_repo(request: Request):
+    val = getattr(request.app.state, "subagent_batch_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch repository not available")
+    return val
+
+
+def get_subagent_batch_service(request: Request):
+    val = getattr(request.app.state, "subagent_batch_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch service not available")
     return val
 
 

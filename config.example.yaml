@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 35
+config_version: 36
 
 # ============================================================================
 # Logging
@@ -669,6 +669,7 @@ tool_groups:
   - name: file:write
   - name: bash
   - name: browser
+  - name: knowledge
 
 # ============================================================================
 # Tools Configuration
@@ -676,6 +677,30 @@ tool_groups:
 # Configure available tools for the agent to use
 
 tools:
+  # RAGFlow knowledge retrieval (read-only). Uncomment this single entry.
+  # `datasets` is optional. Omit it to list every tenant-visible dataset at
+  # search time; an explicit `datasets: []` is invalid. Empty datasets are
+  # skipped; searchable datasets are grouped by
+  # embedding model and retrieved with at most four groups in parallel. Group
+  # ranks are interleaved under the global `page_size` limit; scores are omitted
+  # when multiple groups are searched because they are not comparable.
+  # Configure stable IDs only to restrict scope. IDs and catalog listing never
+  # reach the model.
+  # - name: knowledge_search
+  #   group: knowledge
+  #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+  #   base_url: http://localhost:9380  # Docker: use a backend-reachable URL
+  #   api_key: $RAGFLOW_API_KEY
+  #   datasets:  # Optional operator-controlled allowlist
+  #     - 0123456789abcdef0123456789abcdef  # Replace with a RAGFlow dataset ID
+  #   timeout: 30
+  #   page_size: 8
+  #   similarity_threshold: 0.2
+  #   vector_similarity_weight: 0.3
+  #   top_k: 256
+  #   max_chars_per_chunk: 800
+  #   max_total_chars: 8000
+
   # Web search tool (uses DuckDuckGo, no API key required)
   - name: web_search
     group: web
@@ -728,6 +753,18 @@ tools:
   #   use: deerflow.community.infoquest.tools:web_search_tool
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
+
+  # Web search tool (uses Tencent Cloud Web Search API, requires a service API key)
+  # Create a service API key in the Tencent Cloud WSA console, then set
+  # TENCENTCLOUD_WSA_APIKEY in the Gateway environment. Do not use Tencent Cloud
+  # SecretId/SecretKey for this provider.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.tencent_wsa.tools:web_search_tool
+  #   max_results: 5                 # 1-50; values above 10 request Tencent's Cnt option
+  #                                    # (requires a Tencent plan that supports Cnt)
+  #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
+  #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
 
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search
@@ -1437,6 +1474,15 @@ sandbox:
 # Configure timeouts for subagent execution
 # Subagents are background workers delegated tasks by the lead agent
 
+# Process-wide execution capacity. These fields are restart-required and are
+# shared by ordinary `task` calls and durable batches. Waiting work is async;
+# queued subagents do not occupy a scheduler thread.
+subagent_runtime:
+  max_running: 3
+  max_queued: 64
+  admission_policy: queue       # queue or reject when all slots are occupied
+  queue_timeout_seconds: 300
+
 # subagents:
 #   # Default timeout (seconds) for built-in subagents (default: 1800 = 30 min).
 #   # Custom agents use their own timeout_seconds (default 900) unless overridden.
@@ -1507,6 +1553,25 @@ sandbox:
 #   # Model override: by default, subagents inherit the lead agent's model.
 #   # Set `model` to use a different model (e.g., a local Ollama model for cost savings).
 #   # The model name must match a name defined in the `models:` section above.
+
+# Durable native-subagent batches. Disabled by default because enabling it can
+# materially increase model usage and requires database.backend sqlite/postgres.
+# The three limits are intentionally separate:
+# - total: all persisted items in one batch
+# - live: pending work admitted as queued/running at one time
+# - running: items from one batch allowed to hold real execution slots
+subagent_batches:
+  enabled: false
+  poll_interval_seconds: 1
+  lease_seconds: 120
+  max_items_per_batch: 5000
+  default_max_live_items: 100
+  max_live_items_per_batch: 1000
+  default_max_running_items: 3
+  max_running_items_per_batch: 64
+  max_attempts: 3
+  max_result_chars: 100000
+  result_preview_max_chars: 2000
 
 # ============================================================================
 # Tool Result Verification

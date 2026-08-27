@@ -81,6 +81,7 @@ async def list_scheduled_tasks(request: Request):
 
 @router.post("/scheduled-tasks")
 @require_permission("threads", "write")
+@require_permission("runs", "create")
 async def create_scheduled_task(request: Request, body: ScheduledTaskCreateRequest):
     config = get_config()
     repo = get_scheduled_task_repo(request)
@@ -153,6 +154,7 @@ async def get_scheduled_task(task_id: str, request: Request):
 
 @router.patch("/scheduled-tasks/{task_id}")
 @require_permission("threads", "write")
+@require_permission("runs", "create")
 async def update_scheduled_task(task_id: str, request: Request, body: ScheduledTaskUpdateRequest):
     config = get_config()
     repo = get_scheduled_task_repo(request)
@@ -272,6 +274,7 @@ async def pause_scheduled_task(task_id: str, request: Request):
 
 @router.post("/scheduled-tasks/{task_id}/resume")
 @require_permission("threads", "write")
+@require_permission("runs", "create")
 async def resume_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     user = await get_optional_user_from_request(request)
@@ -300,6 +303,7 @@ async def resume_scheduled_task(task_id: str, request: Request):
 
 @router.post("/scheduled-tasks/{task_id}/trigger")
 @require_permission("threads", "write")
+@require_permission("runs", "create")
 async def trigger_scheduled_task(task_id: str, request: Request):
     repo = get_scheduled_task_repo(request)
     service = get_scheduled_task_service(request)

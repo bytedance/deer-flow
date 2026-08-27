@@ -39,6 +39,8 @@ from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skill_scan_config import SkillScanConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
@@ -298,6 +300,20 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "mcp_tasks",
             field_doc="Long-running MCP task persistence and background polling runtime.",
+        ),
+    )
+    subagent_runtime: SubagentRuntimeConfig = Field(
+        default_factory=SubagentRuntimeConfig,
+        description=format_field_description(
+            "subagent_runtime",
+            field_doc="Process-local admission and execution capacity shared by ordinary and batch subagents.",
+        ),
+    )
+    subagent_batches: SubagentBatchesConfig = Field(
+        default_factory=SubagentBatchesConfig,
+        description=format_field_description(
+            "subagent_batches",
+            field_doc="Durable native-subagent batch scheduling, lease, and recovery configuration.",
         ),
     )
     checkpointer: CheckpointerConfig | None = Field(

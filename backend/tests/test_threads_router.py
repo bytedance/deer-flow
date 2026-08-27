@@ -513,6 +513,42 @@ def test_delete_thread_route_rejects_active_thread_operation_without_deleting_me
     assert asyncio.run(store.aget(THREADS_NS, "thread-active-delete")) is not None
 
 
+def test_branch_thread_route_rejects_concurrent_source_operation_without_creating_child():
+    class RejectingRunManager(_ThreadTestRunManager):
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **_kwargs):
+            raise ConflictError("Thread already has active work")
+            yield  # pragma: no cover - required by asynccontextmanager
+
+    app, store, _checkpointer = _build_thread_app()
+    app.state.run_manager = RejectingRunManager()
+    asyncio.run(
+        store.aput(
+            THREADS_NS,
+            "thread-active-branch",
+            {
+                "thread_id": "thread-active-branch",
+                "user_id": None,
+                "status": "idle",
+                "created_at": "",
+                "updated_at": "",
+                "metadata": {},
+            },
+        )
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/threads/thread-active-branch/branches",
+            json={"message_id": "ai-1", "message_ids": ["ai-1"]},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Thread has work in flight. Branch it after the work finishes."
+    children = asyncio.run(app.state.thread_store.search(metadata={"branch_parent_thread_id": "thread-active-branch"}, user_id=None))
+    assert children == []
+
+
 def test_legacy_thread_metadata_mutation_is_rejected():
     app, store, _checkpointer = _build_thread_app()
     legacy_thread_id = "legacy.thread"
@@ -1355,6 +1391,7 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
 
 def test_get_thread_history_associates_tool_messages_from_checkpoint_turn() -> None:
     app, _store, checkpointer = _build_thread_app()
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=AsyncMock(return_value={}))
     thread_id = "history-tool-run"
     messages = [
         HumanMessage(id="human-1", content="Use a tool", additional_kwargs={"run_id": "run-1"}),
@@ -1414,11 +1451,14 @@ def test_get_thread_history_fast_path_skips_runs_already_in_checkpoint_metadata(
             "checkpoint-partial",
             messages,
             step=1,
-            metadata={"run_durations": {"run-migrated": 4}},
+            metadata={
+                "run_durations": {"run-migrated": 4},
+                "run_message_ids": {"ai-1": "run-migrated"},
+            },
         )
     )
 
-    async def list_by_thread(_: str) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="run-pending",
@@ -1427,14 +1467,19 @@ def test_get_thread_history_fast_path_skips_runs_already_in_checkpoint_metadata(
             ),
         ]
 
-    list_messages_calls: list[str] = []
+    lookup_calls: list[set[str]] = []
 
-    async def list_messages(thread: str, *, limit: int) -> list[dict]:
-        list_messages_calls.append(thread)
-        return []
+    async def find_latest_ai_message_run_ids(thread: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        assert thread == thread_id
+        assert message_ids == {"ai-2"}
+        lookup_calls.append(message_ids)
+        return {}
 
-    app.state.run_manager = SimpleNamespace(list_by_thread=list_by_thread)
-    app.state.run_event_store = SimpleNamespace(list_messages=list_messages)
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
 
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
@@ -1443,9 +1488,475 @@ def test_get_thread_history_fast_path_skips_runs_already_in_checkpoint_metadata(
     history_messages = response.json()[0]["values"]["messages"]
     assert history_messages[1]["additional_kwargs"]["turn_duration"] == 4
     assert history_messages[3]["additional_kwargs"]["turn_duration"] == 6
-    # The fallback still runs (run-pending was missing), but it is the only
-    # reason it ran — proven by it firing exactly once, not skipped entirely.
-    assert list_messages_calls == [thread_id]
+    # The missing ID is checked once for the response and once after write
+    # admission; the already migrated ID is absent from both lookups.
+    assert lookup_calls == [{"ai-2"}, {"ai-2"}]
+
+
+def test_get_thread_history_backfills_exact_mapping_when_durations_already_exist() -> None:
+    """Duration metadata alone does not prove exact message attribution.
+
+    A pre-#4949 checkpoint can already carry every run duration while lacking
+    ``run_message_ids``.  The history read must still consult the event index;
+    otherwise the synthesized human-boundary run becomes permanent.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-duration-without-attribution"
+    messages = [
+        HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000010",
+            messages,
+            step=1,
+            metadata={"run_durations": {"boundary-run": 3, "exact-run": 7}},
+        )
+    )
+
+    lookup_calls: list[set[str]] = []
+
+    async def find_latest_ai_message_run_ids(_: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        lookup_calls.append(message_ids)
+        return {"ai-1": "exact-run"}
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        return []
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    ai_message = response.json()[0]["values"]["messages"][1]
+    assert ai_message["run_id"] == "exact-run"
+    assert ai_message["additional_kwargs"]["turn_duration"] == 7
+    assert lookup_calls == [{"ai-1"}, {"ai-1"}]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "exact-run"}
+
+
+def test_get_thread_history_preserves_boundary_fallback_after_complete_partial_lookup() -> None:
+    """A complete lookup may legitimately find no event for old messages.
+
+    Pre-event-store checkpoints still rely on the human turn boundary.  A
+    partial result therefore corrects the IDs it can prove and preserves that
+    compatibility fallback for IDs that are definitively absent.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-partial-exact-attribution"
+    messages = [
+        HumanMessage(id="human-1", content="First", additional_kwargs={"run_id": "boundary-1"}),
+        AIMessage(id="ai-1", content="First answer"),
+        HumanMessage(id="human-2", content="Second", additional_kwargs={"run_id": "boundary-2"}),
+        AIMessage(id="ai-2", content="Second answer"),
+    ]
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000011", messages, step=1))
+
+    lookup_calls: list[set[str]] = []
+
+    async def find_latest_ai_message_run_ids(_: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        lookup_calls.append(message_ids)
+        if message_ids == {"ai-1", "ai-2"}:
+            return {"ai-1": "exact-1"}
+        assert message_ids == {"ai-2"}
+        return {}
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                run_id="exact-1",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:07+00:00",
+            ),
+            SimpleNamespace(
+                run_id="boundary-2",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:03+00:00",
+            ),
+        ]
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    first_ai, second_ai = [message for message in response.json()[0]["values"]["messages"] if message["type"] == "ai"]
+    assert first_ai["run_id"] == "exact-1"
+    assert first_ai["additional_kwargs"]["turn_duration"] == 7
+    assert second_ai["run_id"] == "boundary-2"
+    assert second_ai["additional_kwargs"]["turn_duration"] == 3
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "exact-1", "ai-2": "boundary-2"}
+    assert latest.metadata["run_durations"] == {"boundary-2": 3, "exact-1": 7}
+    assert lookup_calls == [{"ai-1", "ai-2"}, {"ai-1", "ai-2"}]
+
+
+def test_get_thread_history_removes_synthesized_boundary_when_exact_lookup_is_incomplete() -> None:
+    """Unsafe pagination removes only attribution it cannot prove."""
+    from deerflow.runtime.events.store.base import IncompleteMessageRunLookupError
+
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-incomplete-exact-attribution"
+    messages = [
+        HumanMessage(id="human-1", content="Proven question", additional_kwargs={"run_id": "proven-run"}),
+        AIMessage(id="ai-1", content="Proven answer"),
+        HumanMessage(id="human-2", content="Legacy question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-2", content="Legacy answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000012",
+            messages,
+            step=1,
+            metadata={
+                "run_durations": {"proven-run": 4},
+                "run_message_ids": {"ai-1": "proven-run"},
+            },
+        )
+    )
+
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=AsyncMock(side_effect=IncompleteMessageRunLookupError("Run event lookup could not form a safe backward cursor")))
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    first_ai, second_ai = [message for message in response.json()[0]["values"]["messages"] if message["type"] == "ai"]
+    assert first_ai["run_id"] == "proven-run"
+    assert first_ai["additional_kwargs"]["turn_duration"] == 4
+    assert "run_id" not in second_ai
+    assert "turn_duration" not in (second_ai.get("additional_kwargs") or {})
+    assert app.state.run_manager.reservations == []
+
+
+def test_get_thread_history_caches_complete_boundary_attribution() -> None:
+    """A complete audit, including a negative event result, is a one-time scan."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-sparse-exact-attribution"
+    messages = [
+        HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000013", messages, step=1))
+
+    lookup_calls: list[set[str]] = []
+
+    async def find_latest_ai_message_run_ids(_: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        lookup_calls.append(message_ids)
+        return {}
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                run_id="boundary-run",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:03+00:00",
+            )
+        ]
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+        second_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    ai_message = response.json()[0]["values"]["messages"][1]
+    assert ai_message["run_id"] == "boundary-run"
+    assert ai_message["additional_kwargs"]["turn_duration"] == 3
+    assert second_response.status_code == 200, second_response.text
+    assert lookup_calls == [{"ai-1"}, {"ai-1"}]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_durations"] == {"boundary-run": 3}
+    assert latest.metadata["run_message_ids"] == {"ai-1": "boundary-run"}
+
+
+def test_get_thread_history_revalidates_boundary_fallback_after_reservation() -> None:
+    """A run may flush its exact event before the metadata task is admitted.
+
+    The foreground lookup can exhaust the event log while the run's journal is
+    still buffered. If the background task acquires its checkpoint reservation
+    only after that run flushes and releases the thread, persisting the earlier
+    human-boundary fallback would make the temporary miss permanent.
+    """
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-fallback-reservation-race"
+    messages = [
+        HumanMessage(
+            id="human-1",
+            content="Question",
+            additional_kwargs={"run_id": "boundary-run"},
+        ),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000014",
+            messages,
+            step=1,
+        )
+    )
+
+    event_visible = False
+    lookup_visibility: list[bool] = []
+
+    async def find_latest_ai_message_run_ids(
+        _: str,
+        message_ids: set[str],
+        *,
+        user_id=None,
+    ) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        lookup_visibility.append(event_visible)
+        return {"ai-1": "exact-run"} if event_visible else {}
+
+    class RunManager(_ThreadTestRunManager):
+        async def list_by_thread(
+            self,
+            _thread_id: str,
+            *,
+            user_id=None,
+            limit: int = 100,
+        ) -> list[SimpleNamespace]:
+            runs = [
+                SimpleNamespace(
+                    run_id="boundary-run",
+                    created_at="2026-07-05T00:00:00+00:00",
+                    updated_at="2026-07-05T00:00:03+00:00",
+                )
+            ]
+            if event_visible:
+                runs.append(
+                    SimpleNamespace(
+                        run_id="exact-run",
+                        created_at="2026-07-05T00:00:00+00:00",
+                        updated_at="2026-07-05T00:00:07+00:00",
+                    )
+                )
+            return runs
+
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **kwargs):
+            nonlocal event_visible
+            self.reservations.append((_thread_id, kwargs))
+            event_visible = True
+            yield
+
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+
+    assert response.status_code == 200, response.text
+    response_ai = response.json()[0]["values"]["messages"][1]
+    assert response_ai["run_id"] == "boundary-run"
+    assert response_ai["additional_kwargs"]["turn_duration"] == 3
+    assert lookup_visibility == [False, True]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "exact-run"}
+    assert latest.metadata["run_durations"]["exact-run"] == 7
+
+
+def test_get_thread_history_revalidates_exact_attribution_after_reservation() -> None:
+    """A newer exact event must replace the foreground mapping before persistence."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-exact-reservation-race"
+    messages = [
+        HumanMessage(
+            id="human-1",
+            content="Question",
+            additional_kwargs={"run_id": "boundary-run"},
+        ),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000015",
+            messages,
+            step=1,
+        )
+    )
+
+    admitted = False
+    lookup_states: list[bool] = []
+
+    async def find_latest_ai_message_run_ids(
+        _: str,
+        message_ids: set[str],
+        *,
+        user_id=None,
+    ) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        lookup_states.append(admitted)
+        return {"ai-1": "new-run" if admitted else "old-run"}
+
+    class RunManager(_ThreadTestRunManager):
+        async def list_by_thread(
+            self,
+            _thread_id: str,
+            *,
+            user_id=None,
+            limit: int = 100,
+        ) -> list[SimpleNamespace]:
+            runs = [
+                SimpleNamespace(
+                    run_id="old-run",
+                    created_at="2026-07-05T00:00:00+00:00",
+                    updated_at="2026-07-05T00:00:04+00:00",
+                )
+            ]
+            if admitted:
+                runs.append(
+                    SimpleNamespace(
+                        run_id="new-run",
+                        created_at="2026-07-05T00:00:00+00:00",
+                        updated_at="2026-07-05T00:00:08+00:00",
+                    )
+                )
+            return runs
+
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **kwargs):
+            nonlocal admitted
+            self.reservations.append((_thread_id, kwargs))
+            admitted = True
+            yield
+
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+
+    assert response.status_code == 200, response.text
+    response_ai = response.json()[0]["values"]["messages"][1]
+    assert response_ai["run_id"] == "old-run"
+    assert response_ai["additional_kwargs"]["turn_duration"] == 4
+    assert lookup_states == [False, True]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "new-run"}
+    assert latest.metadata["run_durations"]["new-run"] == 8
+
+
+def test_get_thread_history_recomputes_duration_after_reservation() -> None:
+    """A final run row must replace a stale foreground duration before persistence."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "history-duration-reservation-race"
+    messages = [
+        HumanMessage(
+            id="human-1",
+            content="Question",
+            additional_kwargs={"run_id": "run-1"},
+        ),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(
+        _write_checkpoint(
+            checkpointer,
+            thread_id,
+            "00000000-0000-6000-8000-000000000016",
+            messages,
+            step=1,
+        )
+    )
+
+    admitted = False
+    lookup_states: list[bool] = []
+
+    async def find_latest_ai_message_run_ids(
+        _: str,
+        message_ids: set[str],
+        *,
+        user_id=None,
+    ) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        lookup_states.append(admitted)
+        return {"ai-1": "run-1"}
+
+    class RunManager(_ThreadTestRunManager):
+        async def list_by_thread(
+            self,
+            _thread_id: str,
+            *,
+            user_id=None,
+            limit: int = 100,
+        ) -> list[SimpleNamespace]:
+            return [
+                SimpleNamespace(
+                    run_id="run-1",
+                    created_at="2026-07-05T00:00:00+00:00",
+                    updated_at=("2026-07-05T00:00:09+00:00" if admitted else "2026-07-05T00:00:03+00:00"),
+                )
+            ]
+
+        @asynccontextmanager
+        async def reserve_thread_operation(self, _thread_id: str, **kwargs):
+            nonlocal admitted
+            self.reservations.append((_thread_id, kwargs))
+            admitted = True
+            yield
+
+    app.state.run_manager = RunManager()
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/threads/{thread_id}/history",
+            json={"limit": 10},
+        )
+
+    assert response.status_code == 200, response.text
+    response_ai = response.json()[0]["values"]["messages"][1]
+    assert response_ai["run_id"] == "run-1"
+    assert response_ai["additional_kwargs"]["turn_duration"] == 3
+    assert lookup_states == [False, True]
+
+    latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
+    assert latest is not None
+    assert latest.metadata["run_message_ids"] == {"ai-1": "run-1"}
+    assert latest.metadata["run_durations"]["run-1"] == 9
 
 
 def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id() -> None:
@@ -1458,7 +1969,7 @@ def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id()
     ]
     asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000001", messages, step=1))
 
-    async def list_by_thread(_: str) -> list[SimpleNamespace]:
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
         return [
             SimpleNamespace(
                 run_id="boundary-run",
@@ -1472,15 +1983,23 @@ def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id()
             ),
         ]
 
-    async def list_messages(_: str, *, limit: int) -> list[dict]:
-        assert limit == 1000
-        return [{"content": {"type": "ai", "id": "ai-1"}, "run_id": "exact-run"}]
+    list_messages_calls: list[str] = []
 
-    app.state.run_manager = SimpleNamespace(list_by_thread=list_by_thread)
-    app.state.run_event_store = SimpleNamespace(list_messages=list_messages)
+    async def find_latest_ai_message_run_ids(thread: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        list_messages_calls.append(thread)
+        return {"ai-1": "exact-run"}
+
+    reservation_owner = app.state.run_manager
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        reserve_thread_operation=reservation_owner.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
 
     with TestClient(app) as client:
         response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+        second_response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
 
     assert response.status_code == 200, response.text
     entry = response.json()[0]
@@ -1489,10 +2008,200 @@ def test_get_thread_history_backfills_legacy_durations_with_exact_event_run_id()
     assert history_messages[1]["additional_kwargs"]["turn_duration"] == 7
     assert history_messages[2]["run_id"] == "boundary-run"
     assert "run_durations" not in entry["metadata"]
+    assert list_messages_calls == [thread_id, thread_id]
+    assert len(reservation_owner.reservations) == 1
+    reserved_thread_id, reservation_kwargs = reservation_owner.reservations[0]
+    assert reserved_thread_id == thread_id
+    assert reservation_kwargs["kind"] is ThreadOperationKind.checkpoint_write
+    assert isinstance(reservation_kwargs["user_id"], str)
+
+    assert second_response.status_code == 200, second_response.text
+    second_history_messages = second_response.json()[0]["values"]["messages"]
+    assert second_history_messages[1]["run_id"] == "exact-run"
+    assert second_history_messages[1]["additional_kwargs"]["turn_duration"] == 7
 
     latest = asyncio.run(checkpointer.aget_tuple({"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}))
     assert latest is not None
-    assert latest.metadata["run_durations"] == {"boundary-run": 3, "exact-run": 7}
+    assert latest.metadata["run_durations"] == {"exact-run": 7}
+    assert latest.metadata["run_message_ids"] == {"ai-1": "exact-run"}
+
+
+def test_get_thread_history_finds_ai_event_beyond_ten_thousand_newer_events() -> None:
+    """#4949: no arbitrary page cap may turn an old exact run into a boundary run."""
+    from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history-run-id-paginated"
+    messages = [
+        HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000002", messages, step=1))
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        return [
+            SimpleNamespace(
+                run_id="boundary-run",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:03+00:00",
+            ),
+            SimpleNamespace(
+                run_id="exact-run",
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:07+00:00",
+            ),
+        ]
+
+    event_store = MemoryRunEventStore()
+    events = [
+        {
+            "thread_id": thread_id,
+            "run_id": "exact-run",
+            "event_type": "llm.ai.response",
+            "category": "message",
+            "content": {"type": "ai", "id": "ai-1"},
+        },
+        *[
+            {
+                "thread_id": thread_id,
+                "run_id": "noise-run",
+                "event_type": "llm.ai.response",
+                "category": "message",
+                "content": {"type": "ai", "id": f"noise-{index}"},
+            }
+            for index in range(10_000)
+        ],
+    ]
+    asyncio.run(event_store.put_batch(events))
+    event_store.find_latest_ai_message_run_ids = AsyncMock(wraps=event_store.find_latest_ai_message_run_ids)
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = event_store
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    history_messages = response.json()[0]["values"]["messages"]
+    assert history_messages[1]["run_id"] == "exact-run"
+    assert history_messages[1]["additional_kwargs"]["turn_duration"] == 7
+    assert event_store.find_latest_ai_message_run_ids.await_count == 2
+
+
+def test_get_thread_history_sizes_initial_run_page_to_required_attributions() -> None:
+    """A long thread should batch-hydrate its common migration path."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history-run-page-sizing"
+    run_count = 101
+    messages = []
+    runs = []
+    message_run_ids: dict[str, str] = {}
+    for index in range(run_count):
+        boundary_run_id = f"boundary-{index}"
+        exact_run_id = f"exact-{index}"
+        message_id = f"ai-{index}"
+        messages.extend(
+            [
+                HumanMessage(id=f"human-{index}", content=f"Question {index}", additional_kwargs={"run_id": boundary_run_id}),
+                AIMessage(id=message_id, content=f"Answer {index}"),
+            ]
+        )
+        message_run_ids[message_id] = exact_run_id
+        runs.append(
+            SimpleNamespace(
+                run_id=exact_run_id,
+                created_at="2026-07-05T00:00:00+00:00",
+                updated_at="2026-07-05T00:00:05+00:00",
+            )
+        )
+
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000020", messages, step=1))
+
+    list_limits: list[int] = []
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        list_limits.append(limit)
+        return runs[:limit]
+
+    async def get(run_id: str, *, user_id=None) -> SimpleNamespace | None:
+        return next((run for run in runs if run.run_id == run_id), None)
+
+    get_mock = AsyncMock(side_effect=get)
+
+    async def find_latest_ai_message_run_ids(_: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        assert message_ids == set(message_run_ids)
+        return message_run_ids
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        get=get_mock,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    ai_messages = [message for message in response.json()[0]["values"]["messages"] if message["type"] == "ai"]
+    assert len(ai_messages) == run_count
+    assert ai_messages[-1]["additional_kwargs"]["turn_duration"] == 5
+    assert list_limits == [run_count, run_count]
+    get_mock.assert_not_awaited()
+
+
+def test_get_thread_history_fetches_exact_run_older_than_default_run_page() -> None:
+    """The event index may resolve a run outside RunManager's newest-100 page."""
+    app, _store, checkpointer = _build_thread_app()
+    thread_id = "legacy-history-old-exact-run"
+    messages = [
+        HumanMessage(id="human-1", content="Question", additional_kwargs={"run_id": "boundary-run"}),
+        AIMessage(id="ai-1", content="Answer"),
+    ]
+    asyncio.run(_write_checkpoint(checkpointer, thread_id, "00000000-0000-6000-8000-000000000003", messages, step=1))
+
+    boundary_run = SimpleNamespace(
+        run_id="boundary-run",
+        created_at="2026-07-05T00:00:00+00:00",
+        updated_at="2026-07-05T00:00:03+00:00",
+    )
+    exact_run = SimpleNamespace(
+        run_id="old-exact-run",
+        created_at="2026-06-01T00:00:00+00:00",
+        updated_at="2026-06-01T00:00:09+00:00",
+    )
+    get_calls: list[str] = []
+
+    async def list_by_thread(_: str, *, user_id=None, limit: int = 100) -> list[SimpleNamespace]:
+        assert limit == 100
+        return [boundary_run]
+
+    async def get(run_id: str, *, user_id=None) -> SimpleNamespace | None:
+        get_calls.append(run_id)
+        return exact_run if run_id == exact_run.run_id else None
+
+    async def find_latest_ai_message_run_ids(_: str, message_ids: set[str], *, user_id=None) -> dict[str, str]:
+        assert message_ids == {"ai-1"}
+        return {"ai-1": exact_run.run_id}
+
+    app.state.run_manager = SimpleNamespace(
+        list_by_thread=list_by_thread,
+        get=get,
+        reserve_thread_operation=app.state.run_manager.reserve_thread_operation,
+    )
+    app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=find_latest_ai_message_run_ids)
+
+    with TestClient(app) as client:
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    history_messages = response.json()[0]["values"]["messages"]
+    assert history_messages[1]["run_id"] == exact_run.run_id
+    assert history_messages[1]["additional_kwargs"]["turn_duration"] == 9
+    assert get_calls == [exact_run.run_id, exact_run.run_id]
 
 
 def test_get_thread_history_injects_turn_duration_once_per_run() -> None:
@@ -1529,8 +2238,9 @@ def test_get_thread_history_injects_turn_duration_once_per_run() -> None:
 
     run_manager = AsyncMock()
     run_manager.list_by_thread = AsyncMock(return_value=[_run("run-1", 5), _run("run-2", 9)])
+    run_manager.reserve_thread_operation = _ThreadTestRunManager().reserve_thread_operation
     event_store = MagicMock()
-    event_store.list_messages = AsyncMock(return_value=[])
+    event_store.find_latest_ai_message_run_ids = AsyncMock(return_value={})
     app.state.run_manager = run_manager
     app.state.run_event_store = event_store
 
@@ -1708,7 +2418,54 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
         assert response.status_code == 200, response.text
         body = response.json()
         new_thread_id = body["thread_id"]
+        sibling_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert sibling_response.status_code == 200, sibling_response.text
+        sibling_thread_id = sibling_response.json()["thread_id"]
+        explicit_collision_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"], "title": "Original chat (4)"},
+        )
+        assert explicit_collision_response.status_code == 200, explicit_collision_response.text
+        explicit_collision_thread_id = explicit_collision_response.json()["thread_id"]
+        after_explicit_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert after_explicit_response.status_code == 200, after_explicit_response.text
+        after_explicit_thread_id = after_explicit_response.json()["thread_id"]
+        nested_response = client.post(
+            f"/api/threads/{new_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert nested_response.status_code == 200, nested_response.text
+        nested_thread_id = nested_response.json()["thread_id"]
+        rename_response = client.post(
+            f"/api/threads/{new_thread_id}/state",
+            json={"values": {"title": "Report Q4"}},
+        )
+        assert rename_response.status_code == 200, rename_response.text
+        renamed_branch_response = client.post(
+            f"/api/threads/{new_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"]},
+        )
+        assert renamed_branch_response.status_code == 200, renamed_branch_response.text
+        renamed_branch_thread_id = renamed_branch_response.json()["thread_id"]
+        explicit_response = client.post(
+            f"/api/threads/{source_thread_id}/branches",
+            json={"message_id": "ai-2", "message_ids": ["ai-2"], "title": "Deliberate branch title"},
+        )
+        assert explicit_response.status_code == 200, explicit_response.text
+        explicit_thread_id = explicit_response.json()["thread_id"]
         state_response = client.get(f"/api/threads/{new_thread_id}/state")
+        sibling_state_response = client.get(f"/api/threads/{sibling_thread_id}/state")
+        explicit_collision_state_response = client.get(f"/api/threads/{explicit_collision_thread_id}/state")
+        after_explicit_state_response = client.get(f"/api/threads/{after_explicit_thread_id}/state")
+        nested_state_response = client.get(f"/api/threads/{nested_thread_id}/state")
+        renamed_branch_state_response = client.get(f"/api/threads/{renamed_branch_thread_id}/state")
+        explicit_state_response = client.get(f"/api/threads/{explicit_thread_id}/state")
         search_response = client.post("/api/threads/search", json={"limit": 10})
 
     assert body["parent_thread_id"] == source_thread_id
@@ -1717,12 +2474,46 @@ def test_branch_thread_from_older_assistant_turn_creates_truncated_thread() -> N
     assert body["workspace_clone_mode"] == "skipped_historical_turn"
 
     assert state_response.status_code == 200, state_response.text
-    messages = state_response.json()["values"]["messages"]
+    state_values = state_response.json()["values"]
+    messages = state_values["messages"]
     assert [message["id"] for message in messages] == ["human-1", "ai-1", "human-2", "ai-2"]
     assert "Third answer" not in [message.get("content") for message in messages]
+    assert state_values["title"] == "Report Q4"
+    assert sibling_state_response.status_code == 200, sibling_state_response.text
+    assert sibling_state_response.json()["values"]["title"] == "Original chat (3)"
+    assert explicit_collision_state_response.status_code == 200, explicit_collision_state_response.text
+    assert explicit_collision_state_response.json()["values"]["title"] == "Original chat (4)"
+    assert after_explicit_state_response.status_code == 200, after_explicit_state_response.text
+    assert after_explicit_state_response.json()["values"]["title"] == "Original chat (5)"
+    assert nested_state_response.status_code == 200, nested_state_response.text
+    assert nested_state_response.json()["values"]["title"] == "Original chat (3)"
+    assert renamed_branch_state_response.status_code == 200, renamed_branch_state_response.text
+    assert renamed_branch_state_response.json()["values"]["title"] == "Report Q4 (2)"
+    assert explicit_state_response.status_code == 200, explicit_state_response.text
+    assert explicit_state_response.json()["values"]["title"] == "Deliberate branch title"
     assert search_response.status_code == 200, search_response.text
     branch_entry = next(item for item in search_response.json() if item["thread_id"] == new_thread_id)
-    assert branch_entry["values"]["title"] == "Original chat"
+    assert branch_entry["values"]["title"] == "Report Q4"
+    assert "branch_title_sequence" not in branch_entry["metadata"]
+    sibling_entry = next(item for item in search_response.json() if item["thread_id"] == sibling_thread_id)
+    assert sibling_entry["values"]["title"] == "Original chat (3)"
+    assert sibling_entry["metadata"]["branch_title_sequence"] == 3
+    explicit_collision_entry = next(item for item in search_response.json() if item["thread_id"] == explicit_collision_thread_id)
+    assert explicit_collision_entry["values"]["title"] == "Original chat (4)"
+    assert "branch_title_sequence" not in explicit_collision_entry["metadata"]
+    after_explicit_entry = next(item for item in search_response.json() if item["thread_id"] == after_explicit_thread_id)
+    assert after_explicit_entry["values"]["title"] == "Original chat (5)"
+    assert after_explicit_entry["metadata"]["branch_title_sequence"] == 5
+    nested_entry = next(item for item in search_response.json() if item["thread_id"] == nested_thread_id)
+    assert nested_entry["values"]["title"] == "Original chat (3)"
+    renamed_branch_entry = next(item for item in search_response.json() if item["thread_id"] == renamed_branch_thread_id)
+    assert renamed_branch_entry["values"]["title"] == "Report Q4 (2)"
+    assert renamed_branch_entry["metadata"]["branch_title_sequence"] == 2
+    explicit_entry = next(item for item in search_response.json() if item["thread_id"] == explicit_thread_id)
+    assert explicit_entry["values"]["title"] == "Deliberate branch title"
+    assert "branch_title_sequence" not in explicit_entry["metadata"]
+    branch_reservations = [reservation for reservation in app.state.run_manager.reservations if reservation[1]["kind"] == ThreadOperationKind.branch]
+    assert len(branch_reservations) == 7
 
 
 def test_branch_thread_uses_materialized_history_and_overwrites_fresh_seed(monkeypatch) -> None:
@@ -2525,10 +3316,51 @@ def test_update_thread_state_rejects_unknown_state_fields(monkeypatch) -> None:
     assert "not_a_state_field" in response.json()["detail"]
 
 
-def test_branch_display_name_strips_legacy_branch_prefix_only_for_branch_sources() -> None:
-    assert threads._default_branch_display_name("Original chat") == "Original chat"
-    assert threads._default_branch_display_name("Branch: Original chat") == "Branch: Original chat"
-    assert threads._default_branch_display_name("Branch: Branch: Original chat", source_is_branch=True) == "Original chat"
+def test_branch_title_adds_next_free_language_neutral_numeric_suffix() -> None:
+    assert threads._default_branch_title("Original chat") == ("Original chat (2)", 2)
+    assert threads._default_branch_title("Roadmap (2026)") == ("Roadmap (2026) (2)", 2)
+    assert threads._default_branch_title("Original chat", sibling_records=[{"display_name": "Original chat (2)", "metadata": {"branch_title_sequence": 2}}]) == (
+        "Original chat (3)",
+        3,
+    )
+    assert threads._default_branch_title("Original chat (2)", source_is_branch=True, source_sequence=2) == ("Original chat (3)", 3)
+    assert threads._default_branch_title("Roadmap (2026)", source_is_branch=True) == ("Roadmap (2026) (2)", 2)
+    assert threads._default_branch_title("Roadmap (2026)", source_is_branch=True, source_sequence=2) == ("Roadmap (2026) (3)", 3)
+    assert threads._default_branch_title("Branch: Branch: Original chat", source_is_branch=True) == ("Original chat (2)", 2)
+    assert threads._default_branch_title("Report Q4", source_is_branch=True, sibling_records=[{"display_name": "Original chat (3)", "metadata": {"branch_title_sequence": 3}}]) == (
+        "Report Q4 (2)",
+        2,
+    )
+    assert threads._default_branch_title(
+        "Original chat",
+        sibling_records=[
+            {"display_name": "Original chat (3)", "metadata": {"branch_title_sequence": 3}},
+            {"display_name": "Explicit title", "metadata": {}},
+            {"display_name": "Original chat (2)", "metadata": {"branch_title_sequence": "2"}},
+        ],
+    ) == ("Original chat (4)", 4)
+    assert threads._default_branch_title(
+        "Original chat",
+        sibling_records=[
+            {"display_name": "Original chat (2)", "metadata": {}},
+            {"display_name": "Unrelated (3)", "metadata": {"branch_title_sequence": 3}},
+        ],
+    ) == ("Original chat (3)", 3)
+    assert threads._default_branch_title("   ") == (None, None)
+    capped, sequence = threads._default_branch_title("x" * 256)
+    assert capped is not None
+    assert sequence == 2
+    assert len(capped) == 256
+    assert capped.endswith(" (2)")
+
+
+def test_next_branch_title_sequence_accepts_only_bounded_numeric_branch_metadata() -> None:
+    assert threads._next_branch_title_sequence(2, source_is_branch=True) == 3
+    assert threads._next_branch_title_sequence(8, source_is_branch=True) == 9
+    assert threads._next_branch_title_sequence(8, source_is_branch=False) == 2
+    assert threads._next_branch_title_sequence(True, source_is_branch=True) == 2
+    assert threads._next_branch_title_sequence("8", source_is_branch=True) == 2
+    assert threads._next_branch_title_sequence(threads._BRANCH_TITLE_SEQUENCE_MAX, source_is_branch=True) == 2
 
 
 def test_branch_thread_rejects_sidecar_threads() -> None:

@@ -345,6 +345,37 @@ export const enUS: Translations = {
     },
   },
 
+  subagentBatches: {
+    label: "Batches",
+    title: "Subagent batches",
+    description: "Durable, restart-safe work for many independent items.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
+    empty: "No subagent batches yet",
+    emptyHint: "Explicit batch_task submissions in this chat will appear here.",
+    loadFailed: "Couldn't load subagent batches",
+    active: "Active",
+    recent: "Recent",
+    pause: "Pause",
+    resume: "Resume",
+    cancel: "Cancel",
+    retryItem: "Retry",
+    exportResults: "Export JSONL",
+    viewItems: "View items",
+    hideItems: "Hide items",
+    itemsFailed: "Couldn't load batch items",
+    progress: (completed, total) => `${completed} of ${total} terminal`,
+    limits: (live, running) => `Live ${live} · running ${running}`,
+    status: {
+      queued: "Queued",
+      running: "Running",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
@@ -427,6 +458,8 @@ export const enUS: Translations = {
       pause: "Pause",
       resume: "Resume",
       trigger: "Trigger now",
+      duplicate: "Duplicate",
+      duplicateTitleSuffix: " (Copy)",
       delete: "Delete",
     },
     deleteConfirm:
@@ -592,6 +625,7 @@ export const enUS: Translations = {
   // Chats
   chats: {
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
