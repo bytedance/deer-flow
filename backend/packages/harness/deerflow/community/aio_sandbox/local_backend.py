@@ -815,6 +815,20 @@ class LocalContainerBackend(SandboxBackend):
                         "(Docker drops -p/--publish in host mode and shares the network namespace "
                         "for container:<name>). Use a dedicated egress-controlled bridge network instead."
                     )
+                if lowered == "none":
+                    # The none driver gives the container only a loopback
+                    # interface, so the published sandbox HTTP API cannot
+                    # receive traffic: readiness would time out (60s), the
+                    # container would be destroyed, and every acquisition
+                    # would fail. Refuse at start-up with a clear message
+                    # instead of failing opaquely on first use.
+                    # https://docs.docker.com/engine/network/drivers/none/
+                    raise RuntimeError(
+                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} leaves the container loopback-only, "
+                        "so the published sandbox API port cannot receive traffic (readiness would "
+                        "time out and every acquisition would fail). Use a dedicated egress-controlled "
+                        "bridge network instead."
+                    )
                 cmd.extend(["--network", network])
 
         if self._runtime == "docker":

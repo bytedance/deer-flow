@@ -552,6 +552,24 @@ def test_start_container_rejects_shared_container_network_namespace(monkeypatch)
         _capture_start_container_command(monkeypatch, backend)
 
 
+def test_start_container_rejects_none_network(monkeypatch):
+    """The none driver leaves the container loopback-only, so the published
+    sandbox API port cannot receive traffic: readiness would time out and
+    every acquisition would fail. Fail fast at start-up instead."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_NETWORK", "none")
+
+    with pytest.raises(RuntimeError, match="loopback-only"):
+        _capture_start_container_command(monkeypatch, backend)
+
+
 def test_start_container_does_not_add_docker_hardening_to_apple_container(monkeypatch):
     """Apple Container's CLI does not support the Docker hardening flags."""
     backend = LocalContainerBackend(
