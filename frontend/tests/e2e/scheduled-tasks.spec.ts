@@ -147,6 +147,9 @@ test("duplicate fills the create form without creating a task", async ({
   await expect(createForm.getByPlaceholder("Thread ID")).toHaveValue(
     "thread-copy-source",
   );
+  await expect(createForm.getByTestId("schedule-preview")).toHaveText(
+    "Every day at 18:00 (UTC)",
+  );
   await expect(createForm.getByPlaceholder("Task title")).toBeFocused();
   expect(createRequests).toBe(0);
 });
