@@ -30,6 +30,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Delay before a finished run's in-memory record is evicted from the registry.
+# The backing RunStore is the source of truth for run history; the in-memory
+# record only needs to outlive terminal status polling and short-window
+# list/get overrides, so it holds the run's full ``kwargs["input"]`` payload
+# for at most this long after the worker finishes.
+RUN_RECORD_CLEANUP_DELAY_SECONDS = 300.0
+
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
@@ -877,6 +884,9 @@ class RunManager:
             record.updated_at = _now_iso()
 
         await self._persist_status(record, RunStatus.error, error=error)
+        # No worker can attach after this point, so the terminal record has no
+        # other path off the registry — schedule its eviction here.
+        self.schedule_cleanup(run_id)
         return True
 
     async def get_many_by_thread(
@@ -1570,6 +1580,14 @@ class RunManager:
                     self._runs[existing.run_id] = existing
                     self._index_run_locked(existing)
                     current = existing
+                    if existing.status not in (RunStatus.pending, RunStatus.running):
+                        # Store-only terminal overlay: no local worker will
+                        # pass through run_agent's cleanup scheduling, so
+                        # evict this hydration from the registry itself.
+                        # Active rows are skipped — a locally-owned run is
+                        # cleaned by its own worker, and a row owned by
+                        # another worker must stay visible while it runs.
+                        self.schedule_cleanup(existing.run_id)
                 current.idempotency_reused = True
                 return current
 
@@ -1871,8 +1889,15 @@ class RunManager:
         async with self._lock:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
-    async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-        """Remove a run record after an optional delay."""
+    async def cleanup(self, run_id: str, *, delay: float = RUN_RECORD_CLEANUP_DELAY_SECONDS) -> None:
+        """Remove a run record after an optional delay.
+
+        Only the process-local registry entry is removed; the backing RunStore
+        keeps the durable run history, and later lookups fall back to store
+        hydration. Terminal paths schedule this via :meth:`schedule_cleanup`
+        so finished records (which retain the run's full ``kwargs`` payload)
+        cannot accumulate for the lifetime of the process.
+        """
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:
@@ -1880,6 +1905,19 @@ class RunManager:
             if record is not None:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
+
+    def schedule_cleanup(self, run_id: str, *, delay: float = RUN_RECORD_CLEANUP_DELAY_SECONDS) -> asyncio.Task[None]:
+        """Schedule :meth:`cleanup` as a named background task.
+
+        Callers must only schedule this once the run is terminal (or the
+        record is a store-only hydration that no local worker owns), because
+        ``cleanup`` removes the record unconditionally. The returned task is
+        referenced by the event loop's timers while it sleeps, mirroring the
+        StreamBridge cleanup scheduling in the worker.
+        """
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
+        task.set_name(f"deerflow-run-record-cleanup-{run_id}")
+        return task
 
     # ------------------------------------------------------------------
     # Lease heartbeat

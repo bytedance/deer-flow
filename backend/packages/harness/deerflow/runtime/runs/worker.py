@@ -1145,6 +1145,11 @@ async def run_agent(
             )
 
     finally:
+        # Evict the finished run's in-memory registry record after a delay.
+        # Scheduled first so an exception later in this finally block cannot
+        # skip it: the delay far outlasts finalization, and the backing
+        # RunStore remains the source of truth for run history either way.
+        run_manager.schedule_cleanup(run_id)
         if record.ownership_lost:
             logger.warning(
                 "Skipping durable finalization for run %s because this worker no longer owns its lease",
