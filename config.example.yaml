@@ -754,6 +754,18 @@ tools:
   #   # Used to limit the scope of search results, only returns content within the specified time range. Set to -1 to disable time filtering
   #   search_time_range: 10
 
+  # Web search tool (uses Tencent Cloud Web Search API, requires a service API key)
+  # Create a service API key in the Tencent Cloud WSA console, then set
+  # TENCENTCLOUD_WSA_APIKEY in the Gateway environment. Do not use Tencent Cloud
+  # SecretId/SecretKey for this provider.
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.tencent_wsa.tools:web_search_tool
+  #   max_results: 5                 # 1-50; values above 10 request Tencent's Cnt option
+  #                                    # (requires a Tencent plan that supports Cnt)
+  #   # mode: 0                      # Optional: 0=web, 1=VR, 2=mixed
+  #   # api_key: $TENCENTCLOUD_WSA_APIKEY  # Optional explicit env-var reference
+
   # Web search tool (uses Exa, requires EXA_API_KEY)
   # - name: web_search
   #   group: web

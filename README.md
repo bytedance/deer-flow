@@ -45,12 +45,25 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 ---
 
+## Tencent Cloud Web Search API
+
+DeerFlow supports Tencent Cloud Web Search API (WSA) through its service API key
+endpoint. Set `TENCENTCLOUD_WSA_APIKEY` in the Gateway environment and configure
+`deerflow.community.tencent_wsa.tools:web_search_tool`; this provider does not use
+Tencent Cloud `SecretId` / `SecretKey` credentials. See the commented example in
+[`config.example.yaml`](./config.example.yaml). `max_results` accepts 1–50; a
+value above 10 sends Tencent Cloud's `Cnt` parameter and therefore requires a
+Tencent Cloud plan that supports that parameter.
+
+---
+
 ## Table of Contents
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
   - [Coding Plan from ByteDance Volcengine](#coding-plan-from-bytedance-volcengine)
   - [InfoQuest](#infoquest)
+  - [Tencent Cloud Web Search API](#tencent-cloud-web-search-api)
   - [Table of Contents](#table-of-contents)
   - [One-Line Agent Setup](#one-line-agent-setup)
   - [Quick Start](#quick-start)
