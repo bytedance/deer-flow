@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0015_scheduled_task_enqueue"
+HEAD = "0016_subagent_batches"
 
 
 def _url(tmp_path: Path) -> str:

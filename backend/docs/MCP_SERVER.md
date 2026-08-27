@@ -305,7 +305,11 @@ normally use an independently running HTTP/SSE service.
 Server-level OAuth works during background polling and refreshes normally.
 Request-scoped secrets from a particular Agent run are not durable task
 credentials and are unavailable to later background polls; use server-level
-authentication for a task toolset. Restart DeerFlow after changing
+authentication for a task toolset. `headers_from_context` follows the same
+rule: submit is awaited inside the Agent run and carries the mapped headers,
+while status and cancel polls skip them and authenticate with the server's
+static or OAuth credentials — so `on_missing: "deny"` guards the submit but not
+those polls. Declaring both on one server logs a warning at startup. Restart DeerFlow after changing
 `mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
 authentication, transport, or timeout setting on a task-enabled server.
 DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
@@ -344,6 +348,81 @@ Example:
 }
 ```
 
+## Request-Scoped Headers (HTTP/SSE MCP Servers)
+
+When the credential is chosen by the *caller* rather than by the operator —
+multi-tenant gateways, per-run API keys, one shared MCP server fronting several
+environments — declare a `headers_from_context` block instead of registering one
+MCP server per credential.
+
+Each entry maps an HTTP header name to a key of the run request's
+`config.context.secrets` carrier:
+
+```json
+{
+   "mcpServers": {
+      "shared-api": {
+         "enabled": true,
+         "type": "http",
+         "url": "https://mcp.example.com/mcp",
+         "headers": { "Authorization": "Bearer $MCP_DISCOVERY_TOKEN" },
+         "headers_from_context": {
+            "enabled": true,
+            "headers": {
+               "X-Tenant-Id": "tenant_id",
+               "Authorization": "tenant_token"
+            },
+            "on_missing": "deny"
+         }
+      }
+   }
+}
+```
+
+The caller supplies the values on each run request:
+
+```json
+{
+  "config": {
+    "context": {
+      "secrets": {
+        "tenant_id": "acme",
+        "tenant_token": "Bearer <request-scoped credential>"
+      }
+    }
+  }
+}
+```
+
+- The config file stores **names only**, never a credential, so the block is
+  returned unmasked by `GET /api/mcp/config`. The values travel out-of-band with
+  each run and are stripped from persisted run configuration, API responses, and
+  trace payloads.
+- The server's static `headers` are used for startup tool discovery. A mapped
+  header replaces the static one for that tool call, as shown above for
+  `Authorization`. Header names are matched case-insensitively, so a mapped
+  `Authorization` still replaces a static `authorization` instead of putting a
+  second copy of the field on the wire. Mapping one header under two spellings
+  is rejected at config load.
+- `on_missing` defaults to `"deny"`: if the run carries no value for a mapped
+  key, the tool call fails with an actionable error rather than falling back to
+  the discovery credential — which in a multi-tenant deployment would send one
+  tenant's request under another tenant's authority. Set `"passthrough"` to opt
+  out and forward the static headers instead.
+- Precedence for a server declaring several sources: static `headers` <
+  `oauth` < `user_auth` < `headers_from_context`. The value chosen for this one
+  request is the most specific, so it wins.
+- `sse`/`http` only. A stdio server has no HTTP headers; declaring the block
+  there logs a warning and is ignored.
+- Durable background tasks are the one exception, and only half of one: a
+  `task_toolsets` submit is awaited inside the Agent run and carries these
+  headers, but the status and cancel polls run after that run ends, so they skip
+  them and use the server's static/OAuth credentials. See *Durable Background
+  Tasks* above.
+
+Use `user_auth` instead when the credential belongs to a configured DeerFlow
+user rather than to the individual request.
+
 ## Custom Tool Interceptors
 
 You can register custom interceptors that run before every MCP tool call. This is useful for injecting per-request headers (e.g., user auth tokens from the LangGraph execution context), logging, or metrics.
@@ -362,16 +441,19 @@ Declare interceptors in `extensions_config.json` using the `mcpInterceptors` fie
 Each entry is a Python import path in `module:variable` format (resolved via `resolve_variable`). The variable must be a **no-arg builder function** that returns an async interceptor compatible with `MultiServerMCPClient`’s `tool_interceptors` interface, or `None` to skip.
 
 Example interceptor that injects an authorization header from the request-scoped
-LangGraph secret context:
+LangGraph secret context. For a plain header mapping prefer the declarative
+`headers_from_context` block above; write an interceptor when the header value
+needs logic (signing, exchanging the secret for another token, routing on the
+tool name):
 
 ```python
-from langgraph.config import get_config
+from deerflow.runtime.secret_context import extract_request_secrets
 
 
 def build_auth_interceptor():
     async def interceptor(request, handler):
-        config = get_config()
-        secrets = (config.get("context") or {}).get("secrets") or {}
+        runtime = getattr(request, "runtime", None)
+        secrets = extract_request_secrets(getattr(runtime, "context", None))
         token = secrets.get("MCP_AUTH_TOKEN")
         if token:
             request = request.override(
@@ -381,6 +463,16 @@ def build_auth_interceptor():
 
     return interceptor
 ```
+
+Read the run context from `request.runtime`, not from
+`langgraph.config.get_config()`. The context is carried on the LangGraph
+runtime, not on the `RunnableConfig` propagated to child runnables, so
+`get_config().get("context")` is `None` inside a tool call. LangGraph's tool
+node injects the runtime into any tool parameter named `runtime`, which is how
+both the pooled stdio wrapper and `langchain-mcp-adapters`' HTTP/SSE tool
+receive it. When the call originates outside a tool node, fall back to
+`langgraph.runtime.get_runtime()` (see
+`deerflow/mcp/context_headers.py::_current_runtime`).
 
 Supply the credential on each run request through `config.context.secrets`:
 

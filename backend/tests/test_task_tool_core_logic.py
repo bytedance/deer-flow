@@ -13,7 +13,9 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
@@ -371,6 +373,49 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
 
     assert "extensions" not in captured["executor_kwargs"]
+
+
+def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
+    runtime = _make_runtime()
+    captured = {}
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=7))
+    app_config = object()
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    bound_tool = task_tool_module.bind_task_tool(capacity, app_config=app_config)
+    coroutine = getattr(bound_tool, "coroutine", None)
+    assert coroutine is not None
+    asyncio.run(
+        coroutine(
+            runtime=runtime,
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-capacity",
+        )
+    )
+
+    assert captured["executor_kwargs"]["execution_capacity"] is capacity
+    assert captured["executor_kwargs"]["app_config"] is app_config
 
 
 def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):

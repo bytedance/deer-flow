@@ -57,7 +57,10 @@ from deerflow.authz.tool_filter import apply_tool_authorization
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.memory_config import should_use_memory_tools
-from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+from deerflow.config.subagents_config import (
+    DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
+    effective_subagent_concurrency,
+)
 from deerflow.models import create_chat_model
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
@@ -67,6 +70,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.skills.types import Skill
+from deerflow.subagents.capacity import configured_subagent_max_running
 from deerflow.tracing import build_tracing_callbacks
 
 logger = logging.getLogger(__name__)
@@ -463,6 +467,7 @@ def build_middlewares(
     user_id: str | None = None,
     authorization_provider=None,
     extensions=None,
+    subagent_execution_capacity: int | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -485,6 +490,8 @@ def build_middlewares(
             to ``SkillActivationMiddleware`` so it can resolve per-user custom skills.
         authorization_provider: Provider already resolved for assembly-time
             filtering. Reused by the execution-time authorization middleware.
+        subagent_execution_capacity: Startup-frozen process capacity used to
+            keep advertised and enforced task concurrency aligned after reloads.
         extensions: Loaded extensions whose middleware contributions are merged
             into the final stack. Defaults to the process-wide set.
 
@@ -625,7 +632,11 @@ def build_middlewares(
     subagent_enabled = cfg.get("subagent_enabled", False)
     effective_max_subagents_per_run: int | None = None
     if subagent_enabled:
-        max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+        max_concurrent_subagents = effective_subagent_concurrency(
+            cfg.get("max_concurrent_subagents"),
+            resolved_app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
         max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
         effective_max_subagents_per_run = max_total_subagents
         middlewares.append(SubagentLimitMiddleware(max_concurrent=max_concurrent_subagents, max_total=max_total_subagents))
@@ -870,7 +881,12 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
     requested_subagent_enabled = cfg.get("subagent_enabled", False)
-    max_concurrent_subagents = cfg.get("max_concurrent_subagents", 3)
+    subagent_execution_capacity = configured_subagent_max_running()
+    max_concurrent_subagents = effective_subagent_concurrency(
+        cfg.get("max_concurrent_subagents"),
+        resolved_app_config,
+        execution_capacity=subagent_execution_capacity,
+    )
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
     non_interactive = bool(cfg.get("non_interactive", False))
@@ -1014,6 +1030,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             mcp_routing_middleware=mcp_routing_middleware,
             user_id=resolved_user_id,
             authorization_provider=_authz_provider,
+            subagent_execution_capacity=subagent_execution_capacity,
         )
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -1025,6 +1042,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
             allowed_subagents=allowed_subagents,
+            subagent_execution_capacity=subagent_execution_capacity,
         )
         graph = create_agent(
             model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, app_config=resolved_app_config, attach_tracing=False),
@@ -1128,6 +1146,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
         authorization_provider=_authz_provider,
+        subagent_execution_capacity=subagent_execution_capacity,
     )
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
@@ -1141,6 +1160,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         user_id=resolved_user_id,
         skill_names=skill_setup.skill_names or None,
         allowed_subagents=allowed_subagents,
+        subagent_execution_capacity=subagent_execution_capacity,
     )
     graph = create_agent(
         model=create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides),
