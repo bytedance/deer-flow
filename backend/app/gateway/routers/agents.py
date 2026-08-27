@@ -563,9 +563,6 @@ async def delete_agent(name: str) -> None:
     user_id = get_effective_user_id()
     store = get_agent_store()
 
-    if not await asyncio.to_thread(store.exists, name, user_id=user_id):
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-
     # Advance the scope's cancellation epoch BEFORE deleting (#5037): cancel
     # buffered extraction work first so a debounce timer racing the rmtree
     # cannot fire an extraction against the removed scope and resurrect its

@@ -768,6 +768,36 @@ class TestAgentsAPI:
         assert response.status_code == 409
         assert fact_path.read_text(encoding="utf-8") == "memory data"
 
+    def test_delete_with_sql_store_preserves_memory_only_directory(self, agent_client, tmp_path):
+        from sqlalchemy import create_engine
+
+        import app.gateway.routers.agents as agents_router
+        from deerflow.persistence.agents.model import AgentRow
+        from deerflow.persistence.agents.sql import SqlAgentStore
+        from deerflow.persistence.base import Base
+
+        url = f"sqlite:///{tmp_path}/agents.db"
+        engine = create_engine(url)
+        Base.metadata.create_all(engine, tables=[AgentRow.__table__])
+        engine.dispose()
+        store = SqlAgentStore(url)
+
+        agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "lead-agent"
+        facts_dir = agent_dir / "facts"
+        facts_dir.mkdir(parents=True)
+        fact_path = facts_dir / "fact_keep.md"
+        fact_path.write_text("memory data", encoding="utf-8")
+
+        with (
+            patch.object(agents_router, "get_agent_store", return_value=store),
+            patch("deerflow.persistence.agents.sql.get_paths", return_value=_make_paths(tmp_path)),
+        ):
+            response = agent_client.delete("/api/agents/lead-agent")
+
+        assert response.status_code == 409
+        assert "contains memory data" in response.json()["detail"]
+        assert fact_path.read_text(encoding="utf-8") == "memory data"
+
     def test_delete_agent_cancels_pending_memory_updates(self, agent_client, monkeypatch):
         """#3364 stopgap: deletion drops the scope's still-debouncing extraction
         contexts so a timer cannot re-persist state after the agent is gone."""

@@ -1,7 +1,7 @@
 """Memory manager contract + pluggable backend factory.
 
 This module is the shared, backend-agnostic core of the memory package. It
-defines the :class:`MemoryManager` interface (9 methods) that every backend
+defines the :class:`MemoryManager` interface (9 abstract methods) that every backend
 implements, plus a singleton :func:`get_memory_manager` factory that resolves
 the active backend from ``MemoryConfig.manager_class``.
 
