@@ -67,6 +67,24 @@ eviction would lose run history entirely — and `schedule_terminal_eviction`
 is a no-op there. Pending eviction tasks are strongly referenced on the manager
 (`_eviction_tasks`) so a GC pass cannot destroy one mid-delay.
 
+Three hardening rules complete the contract: (1) idempotent-retry
+rehydration (`reuse_idempotent_run`) indexes a store-hydrated record **only
+while it is still pending/running/finalizing** — re-indexing an already
+terminal record would retain it for the process lifetime because the Gateway
+returns `idempotency_reused` immediately and never schedules eviction for it;
+(2) actual removal in `RunManager.cleanup` is gated on a verified durable
+terminal row (`TERMINAL_RUN_STATUSES_FOR_EVICTION`): terminal persistence is
+best-effort, so a read failure retries with one more grace period up to
+`EVICTION_VERIFY_MAX_ATTEMPTS`, a missing row is repaired once from the
+authoritative local snapshot, an active row (or any row once lease ownership
+was lost) is never overwritten by the evictor, and when every attempt fails
+the record is retained with a warning — retention under a broken store beats
+exposing a stale pending row that orphan recovery would rewrite as an error;
+(3) the worker wraps `bridge.publish_end` so a failing END marker still
+schedules bridge cleanup and eviction through `_spawn_background_terminal_task`
+(strong module-level reference, mirroring `_eviction_tasks`), while the
+exception keeps propagating.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`

@@ -392,6 +392,19 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **runtime:** Harden terminal-run eviction (#5009) against the leak and
+  correctness gaps found in review. Terminal records rehydrated by an
+  idempotent retry are no longer re-indexed into `_runs`/`_runs_by_thread`
+  (nothing ever scheduled eviction for them, so they were retained for the
+  process lifetime); `RunManager.cleanup` now removes a record only after the
+  durable row is verified terminal — read failures retry with one more grace
+  period up to `EVICTION_VERIFY_MAX_ATTEMPTS`, a missing row is repaired once
+  from the authoritative local snapshot, an active or lease-lost row is never
+  overwritten, and exhausted attempts deliberately retain the record with a
+  warning so orphan recovery cannot rewrite a completed run as an error; and
+  `run_agent` schedules bridge cleanup plus eviction in a `finally` around
+  `publish_end`, so a failing stream END marker no longer pins terminal state
+  in memory (pinned via tests). ([#5011])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
@@ -2077,3 +2090,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4983]: https://github.com/bytedance/deer-flow/pull/4983
 [#4987]: https://github.com/bytedance/deer-flow/pull/4987
 [#4998]: https://github.com/bytedance/deer-flow/pull/4998
+[#5011]: https://github.com/bytedance/deer-flow/pull/5011

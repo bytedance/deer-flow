@@ -40,6 +40,15 @@ LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachabl
 # started scheduling terminal evictions (bytedance/deer-flow#5009).
 TERMINAL_RUN_EVICTION_DELAY_SECONDS = 300.0
 
+# Store statuses that authorize removing the in-memory record: eviction must
+# not expose a stale pending/running durable row as authoritative history.
+TERMINAL_RUN_STATUSES_FOR_EVICTION = frozenset({status.value for status in RunStatus} - {RunStatus.pending.value, RunStatus.running.value})
+
+# Bounded verification/retry budget for the eviction gate: each retry waits one
+# more grace period, so a store outage delays removal instead of reintroducing
+# unbounded retention through an endless retry loop.
+EVICTION_VERIFY_MAX_ATTEMPTS = 3
+
 _RETRYABLE_SQLITE_MESSAGES = (
     "database is locked",
     "database table is locked",
@@ -1577,8 +1586,17 @@ class RunManager:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
                 if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
+                    # Only in-flight rehydrations enter the local registries:
+                    # they still need same-process tracking (has_inflight,
+                    # interrupt paths). Terminal records were — or should have
+                    # been — evicted already, historical reads fall back to the
+                    # store via get()/list_by_thread(), and re-indexing one here
+                    # would retain it for the process lifetime because the
+                    # Gateway returns idempotency_reused immediately and no new
+                    # eviction is ever scheduled.
+                    if existing.status in (RunStatus.pending, RunStatus.running) or existing.finalizing:
+                        self._runs[existing.run_id] = existing
+                        self._index_run_locked(existing)
                     current = existing
                 current.idempotency_reused = True
                 return current
@@ -1881,15 +1899,106 @@ class RunManager:
         async with self._lock:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
-    async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-        """Remove a run record after an optional delay."""
-        if delay > 0:
-            await asyncio.sleep(delay)
-        async with self._lock:
-            record = self._runs.pop(run_id, None)
-            if record is not None:
-                self._unindex_run_locked(run_id, record.thread_id)
-        logger.debug("Run record %s cleaned up", run_id)
+    async def cleanup(self, run_id: str, *, delay: float = 300, verify_attempts: int = EVICTION_VERIFY_MAX_ATTEMPTS) -> None:
+        """Remove a run record after an optional delay, gated on durable proof.
+
+        With a durable ``RunStore`` the removal is gated on a *verified*
+        terminal store row: terminal persistence is best-effort
+        (``_persist_status`` / ``update_run_completion`` swallow store
+        failures), so blindly dropping the local record could leave a stale
+        ``pending``/``running`` row as the only authority and let recovery
+        rewrite the completed run as an orphan error. Verification failures
+        retry with the same grace-period spacing up to ``verify_attempts``
+        times; a missing durable row is repaired once from the authoritative
+        local snapshot, while a present-but-active row is never overwritten
+        here — its owning worker (or orphan recovery) owns that transition,
+        and a later verification attempt succeeds once it terminalizes. When
+        every attempt fails the record is deliberately retained in memory
+        with a warning: retention under a broken store is the honest trade
+        against losing the only correct completion snapshot.
+        """
+        attempt = 1
+        attempts_allowed = max(1, verify_attempts)
+        while True:
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            async with self._lock:
+                record = self._runs.get(run_id)
+                if record is None:
+                    logger.debug("Run record %s already cleaned up", run_id)
+                    return
+
+            if self._store is None:
+                async with self._lock:
+                    # Memory-only managers keep today's semantics: without a
+                    # store there is nothing to verify against.
+                    current = self._runs.get(run_id)
+                    if current is not None:
+                        self._runs.pop(run_id, None)
+                        self._unindex_run_locked(run_id, current.thread_id)
+                        logger.debug("Run record %s cleaned up", run_id)
+                return
+
+            verified = await self._confirm_durable_terminal_for_cleanup(record)
+            if verified:
+                async with self._lock:
+                    current = self._runs.get(run_id)
+                    if current is not None:
+                        self._runs.pop(run_id, None)
+                        self._unindex_run_locked(run_id, current.thread_id)
+                        logger.debug("Run record %s cleaned up", run_id)
+                return
+
+            if attempt >= attempts_allowed:
+                logger.warning(
+                    "Retaining terminal run %s in memory after %d eviction verification attempts: durable row was not confirmed terminal%s",
+                    run_id,
+                    attempt,
+                    " (lease ownership lost)" if record.ownership_lost else "",
+                )
+                return
+            logger.warning(
+                "Deferring eviction of run %s: durable row was not confirmed terminal (attempt %d/%d)",
+                run_id,
+                attempt,
+                attempts_allowed,
+            )
+            attempt += 1
+
+    async def _confirm_durable_terminal_for_cleanup(self, record: RunRecord) -> bool:
+        """Return True when the durable row provably mirrors the local terminal outcome.
+
+        A missing row is repaired once by re-persisting the local snapshot
+        (upsert) so an unobserved terminal write recovers here instead of
+        needing a dedicated reconciler. An existing active row is left alone:
+        rewriting it from a possibly stale snapshot could clobber a peer's
+        legitimate claim.
+        """
+        row_status: str | None = None
+        try:
+            row = await self._store.get(record.run_id)
+        except Exception:
+            logger.warning("Eviction gate could not read durable row for run %s", record.run_id, exc_info=True)
+            return False
+
+        if row is None:
+            if record.ownership_lost:
+                # A peer owns this run's durable fate; recreating the row here
+                # could resurrect state they are finishing differently.
+                return False
+            if not await self._persist_snapshot_to_store(record.run_id, self._store_put_payload(record)):
+                return False
+            try:
+                row = await self._store.get(record.run_id)
+            except Exception:
+                logger.warning("Eviction gate could not re-read repaired row for run %s", record.run_id, exc_info=True)
+                return False
+            if row is None:
+                return False
+
+        row_status = row.get("status")
+        return row_status in TERMINAL_RUN_STATUSES_FOR_EVICTION
 
     def schedule_terminal_eviction(self, run_id: str, *, delay: float = TERMINAL_RUN_EVICTION_DELAY_SECONDS) -> asyncio.Task[None] | None:
         """Schedule removal of a terminal run from the in-memory registries.

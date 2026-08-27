@@ -5,6 +5,17 @@ run stayed strongly referenced in ``_runs`` / ``_runs_by_thread`` for the
 lifetime of the Gateway process. These tests pin the new contract: workers
 schedule a delayed eviction for terminal runs when a durable ``RunStore``
 backs historical reads, and memory-only managers keep today's semantics.
+
+The hardening cases pin the PR-review follow-ups on top of #5009:
+
+- a rehydrated *terminal* idempotent reuse must not re-enter the in-memory
+  registries (no eviction is scheduled for it, so it would be retained for
+  the process lifetime);
+- removal is gated on a verified durable terminal row, with one repair
+  cycle and deliberate retention when the store cannot confirm terminal
+  state;
+- the worker schedules post-terminal cleanup even when ``publish_end``
+  raises.
 """
 
 from __future__ import annotations
@@ -162,3 +173,193 @@ class TestWorkerSchedulesTerminalEviction:
         assert record.status == RunStatus.error
         assert results == [None]
         assert not run_manager._eviction_tasks
+
+
+async def _forget_local_record(manager: RunManager, run_id: str, thread_id: str) -> None:
+    """Drop the local registries entry so the next admission rehydrates from the store."""
+    async with manager._lock:
+        manager._runs.pop(run_id, None)
+        manager._unindex_run_locked(run_id, thread_id)
+
+
+class TestIdempotentReuseDoesNotReindexTerminalRecords:
+    """Terminal records rehydrated by idempotent retries must not leak in memory."""
+
+    @pytest.mark.asyncio
+    async def test_terminal_reuse_returns_record_without_reindexing(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create_or_reject("thread-idem-terminal", user_id="user-a", idempotency_key="idem-term-1")
+        await manager.set_status(record.run_id, RunStatus.success)
+        await _forget_local_record(manager, record.run_id, "thread-idem-terminal")
+
+        reused = await manager.create_or_reject("thread-idem-terminal", user_id="user-a", idempotency_key="idem-term-1")
+
+        assert reused.run_id == record.run_id
+        assert reused.idempotency_reused is True
+        assert reused.status == RunStatus.success
+        # No eviction is ever scheduled for a reused response (the Gateway
+        # returns immediately), so indexing a terminal record here would pin
+        # it for the process lifetime. History stays reachable via the store.
+        assert record.run_id not in manager._runs
+        assert manager._runs_by_thread.get("thread-idem-terminal") is None
+
+        hydrated = await manager.get(record.run_id)
+        assert hydrated is not None
+        assert hydrated.status == RunStatus.success
+        assert hydrated.store_only is True
+
+    @pytest.mark.asyncio
+    async def test_inflight_reuse_still_indexed_for_tracking(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        await store.put(
+            "run-peer-inflight",
+            thread_id="thread-idem-inflight",
+            assistant_id=None,
+            status="running",
+            operation_kind="run",
+            multitask_strategy="reject",
+            metadata={},
+            kwargs={},
+            created_at="2026-01-01T00:00:00+00:00",
+            user_id="user-a",
+            owner_worker_id="worker-peer",
+            lease_expires_at="2099-01-01T00:00:00+00:00",
+            idempotency_key="idem-inflight-1",
+        )
+
+        reused = await manager.create_or_reject("thread-idem-inflight", user_id="user-a", idempotency_key="idem-inflight-1")
+
+        # A cross-worker inflight row still needs same-process tracking.
+        assert reused.idempotency_reused is True
+        assert reused.status == RunStatus.running
+        assert "run-peer-inflight" in manager._runs
+
+
+class _GatedStore(MemoryRunStore):
+    """Memory store whose reads can be made to fail, simulating an outage."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail_get = False
+
+    async def get(self, run_id, *args, **kwargs):
+        if self.fail_get:
+            raise RuntimeError("store unavailable")
+        return await super().get(run_id, *args, **kwargs)
+
+
+class TestEvictionGatedOnVerifiedDurableTerminalState:
+    """cleanup must not remove the local record without durable proof."""
+
+    @pytest.mark.asyncio
+    async def test_nonterminal_store_row_blocks_eviction_until_verified(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-gate")
+        await manager.set_status(record.run_id, RunStatus.success)
+        # Simulate a failed terminal persistence: only memory knows the truth.
+        store._runs[record.run_id]["status"] = "pending"
+
+        task = manager.schedule_terminal_eviction(record.run_id, delay=0.01)
+        assert task is not None
+        await asyncio.sleep(0.08)
+
+        # All bounded verification attempts failed → deliberate retention.
+        assert record.run_id in manager._runs
+        assert store._runs[record.run_id]["status"] == "pending"
+
+        # Once the store recovers the terminal fact, a fresh eviction passes.
+        store._runs[record.run_id]["status"] = "success"
+        await manager.cleanup(record.run_id, delay=0)
+        assert record.run_id not in manager._runs
+
+    @pytest.mark.asyncio
+    async def test_store_read_failure_retains_record(self):
+        store = _GatedStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-outage")
+        await manager.set_status(record.run_id, RunStatus.success)
+
+        store.fail_get = True
+        try:
+            await manager.cleanup(record.run_id, delay=0, verify_attempts=1)
+        finally:
+            store.fail_get = False
+
+        assert record.run_id in manager._runs
+        assert await manager.get(record.run_id) is not None
+
+    @pytest.mark.asyncio
+    async def test_missing_durable_row_is_repaired_then_evicted(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-repair")
+        await manager.set_status(record.run_id, RunStatus.success)
+        del store._runs[record.run_id]  # simulate lost initial persistence
+
+        await manager.cleanup(record.run_id, delay=0)
+
+        # The authoritative local snapshot repaired the missing row first...
+        repaired = store._runs[record.run_id]
+        assert repaired["status"] == "success"
+        # ...so the verified removal is safe.
+        assert record.run_id not in manager._runs
+
+    @pytest.mark.asyncio
+    async def test_ownership_lost_record_is_never_repaired(self):
+        store = MemoryRunStore()
+        manager = RunManager(store=store)
+        record = await manager.create("thread-eviction-peer")
+        await manager.set_status(record.run_id, RunStatus.success)
+        record.ownership_lost = True  # a peer owns this run's durable fate now
+        del store._runs[record.run_id]
+
+        await manager.cleanup(record.run_id, delay=0, verify_attempts=1)
+
+        # No repair upsert could resurrect state under someone else's lease,
+        # and without verification the local record is retained.
+        assert record.run_id not in store._runs
+        assert record.run_id in manager._runs
+
+
+class TestWorkerSchedulesEvictionWhenPublishEndFails:
+    """A failing END marker must still schedule post-terminal cleanup."""
+
+    @staticmethod
+    def _failing_bridge() -> SimpleNamespace:
+        return SimpleNamespace(
+            publish=AsyncMock(),
+            publish_end=AsyncMock(side_effect=RuntimeError("redis down")),
+            cleanup=AsyncMock(),
+        )
+
+    @pytest.mark.asyncio
+    async def test_publish_end_failure_still_schedules_cleanup_and_eviction(self):
+        store = MemoryRunStore()
+        run_manager = RunManager(store=store)
+        record = await run_manager.create("thread-publish-end-failure")
+
+        evictions: list[tuple[str, dict]] = []
+        run_manager.schedule_terminal_eviction = lambda run_id, **kwargs: evictions.append((run_id, kwargs))  # type: ignore[method-assign]
+
+        bridge = self._failing_bridge()
+        with pytest.raises(RuntimeError, match="redis down"):
+            await run_agent(
+                bridge,
+                run_manager,
+                record,
+                ctx=RunContext(checkpointer=None),
+                agent_factory=MagicMock(),
+                graph_input={"messages": []},
+                config={"configurable": {"thread_id": record.thread_id}},
+                stream_modes=["events"],
+            )
+        await asyncio.sleep(0)
+
+        # The original publish-end exception keeps propagating, but both
+        # post-terminal schedulers ran inside the finally block.
+        assert record.status == RunStatus.error
+        assert evictions == [(record.run_id, {})]
+        bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)

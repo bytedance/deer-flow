@@ -114,6 +114,19 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
 
+# Fire-and-forget post-terminal tasks (stream-bridge cleanup, terminal-run
+# eviction). The event loop only keeps weak references to scheduled tasks, so
+# without this set a GC pass during the cleanup delay could destroy the task
+# before it ever ran (the #4930 failure class applied to stream-bridge tasks).
+_BACKGROUND_TERMINAL_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn_background_terminal_task(coro: Any) -> None:
+    """Schedule a fire-and-forget task with a strong module-level reference."""
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TERMINAL_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TERMINAL_TASKS.discard)
+
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Build the bounded model-state projection without trusting display names."""
@@ -1353,12 +1366,16 @@ async def run_agent(
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
-        # Evict the terminal run from the in-memory registries after its grace
-        # period: a durable RunStore serves later reads through the existing
-        # fallback, while memory-only managers keep today's semantics (#5009).
-        run_manager.schedule_terminal_eviction(run_id)
+        try:
+            await bridge.publish_end(run_id)
+        finally:
+            # Post-terminal scheduling must survive a failed END marker: a
+            # Redis bridge that raises while writing the end frame must not
+            # pin the terminal record (and buffered stream frames) in memory
+            # for the process lifetime. The eviction itself is gated on a
+            # verified durable terminal state inside RunManager.cleanup.
+            _spawn_background_terminal_task(bridge.cleanup(run_id, delay=60))
+            run_manager.schedule_terminal_eviction(run_id)
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
