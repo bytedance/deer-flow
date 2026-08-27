@@ -866,28 +866,33 @@ def _merge_preserving_secrets(
 
     merged_context_headers = incoming.headers_from_context
     if incoming.headers_from_context is not None:
-        # The block's *declared* fields are names, not credentials, so an
-        # explicitly supplied mapping replaces the stored one verbatim — that is
-        # how a round-trip removes an entry. Its extras are a different matter:
-        # `extra="allow"` lets an operator store a secret-bearing key there, GET
-        # masks it (see _mask_server_config), and a round-trip PUT would write
-        # the sentinel back over the stored value. Restore them exactly as
-        # user_auth extras and server-level extras are restored below.
+        # Sub-field-aware merge, mirroring user_auth above: an explicit partial
+        # block (e.g. {"enabled": false}) must not wipe the stored mapping or
+        # reset on_missing back to its default. Only fields the request set are
+        # replaced, so an explicitly supplied ``headers`` (even {}) replaces the
+        # map while omitted fields carry over from the stored block.
+        incoming_ch = incoming.headers_from_context
         base_ch = existing.headers_from_context
+        set_fields = incoming_ch.model_fields_set
+        effective: dict[str, Any] = {}
+        if base_ch is not None:
+            effective.update({name: getattr(base_ch, name) for name in ("enabled", "headers", "on_missing")})
+            effective.update(base_ch.model_extra or {})
+        for name in ("enabled", "headers", "on_missing"):
+            if name in set_fields:
+                effective[name] = getattr(incoming_ch, name)
+        # Extras are masked by GET (see _mask_server_config), so a round-trip
+        # PUT must swap masked sentinel values back for the stored ones — the
+        # same contract user_auth extras and server-level extras get.
         base_ch_extra = (base_ch.model_extra or {}) if base_ch is not None else {}
-        incoming_ch_extra = incoming.headers_from_context.model_extra or {}
-        merged_ch_extra = {
-            key: _merge_extra_value_preserving_masked(
+        for key, value in (incoming_ch.model_extra or {}).items():
+            effective[key] = _merge_extra_value_preserving_masked(
                 key,
                 value,
                 base_ch_extra.get(key),
                 existing_present=key in base_ch_extra,
             )
-            for key, value in incoming_ch_extra.items()
-        }
-        merged_ch_extra.update({key: value for key, value in base_ch_extra.items() if key not in incoming_ch_extra})
-        if merged_ch_extra:
-            merged_context_headers = incoming.headers_from_context.model_copy(update=merged_ch_extra)
+        merged_context_headers = McpContextHeadersConfigResponse(**effective)
 
     update = {
         "env": merged_env,

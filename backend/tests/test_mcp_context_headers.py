@@ -775,6 +775,61 @@ def test_gateway_put_can_replace_the_mapping():
     assert merged.headers_from_context.on_missing == "passthrough"
 
 
+def test_gateway_partial_block_preserves_stored_mapping_and_policy():
+    """A partial headers_from_context PUT must not wipe omitted declared fields."""
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(
+            headers={"X-Tenant-Token": "tenant_token"},
+            on_missing="passthrough",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(enabled=False),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.headers_from_context is not None
+    assert merged.headers_from_context.enabled is False
+    assert merged.headers_from_context.headers == {"X-Tenant-Token": "tenant_token"}
+    assert merged.headers_from_context.on_missing == "passthrough"
+
+
+def test_gateway_partial_block_explicit_empty_mapping_still_clears():
+    """An explicitly supplied empty mapping must clear the stored mapping, not preserve it."""
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(
+            headers={"X-Tenant-Token": "tenant_token"},
+            on_missing="passthrough",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(headers={}),
+    )
+    merged = _merge_preserving_secrets(incoming, existing)
+    assert merged.headers_from_context is not None
+    assert merged.headers_from_context.headers == {}
+    assert merged.headers_from_context.on_missing == "passthrough"
+
+
 def test_gateway_round_trip_restores_masked_extras_inside_the_block():
     """GET masks the block's extras, so PUT must swap the sentinel back."""
     from app.gateway.routers.mcp import (
