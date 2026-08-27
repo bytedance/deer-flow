@@ -1921,6 +1921,7 @@ class RunManager:
             "last_ai_message": record.last_ai_message,
             "first_human_message": record.first_human_message,
             "error": record.error,
+            "stop_reason": record.stop_reason,
         }
 
     @staticmethod

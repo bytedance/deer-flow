@@ -277,6 +277,7 @@ class TestRunRepository:
             message_count=3,
             last_ai_message="The answer is 42",
             first_human_message="What is the meaning?",
+            stop_reason="token_capped",
         )
         row = await repo.get("r1")
         assert updated is True
@@ -287,6 +288,7 @@ class TestRunRepository:
         assert row["message_count"] == 3
         assert row["last_ai_message"] == "The answer is 42"
         assert row["first_human_message"] == "What is the meaning?"
+        assert row["stop_reason"] == "token_capped"
         await _cleanup()
 
     @pytest.mark.anyio

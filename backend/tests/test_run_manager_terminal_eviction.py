@@ -45,6 +45,13 @@ class RecoveringRunStore(MemoryRunStore):
         return row
 
 
+class StatusWriteFailingRunStore(MemoryRunStore):
+    """Store where terminal status writes fail but completion writes succeed."""
+
+    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
+        raise RuntimeError("simulated status-only outage")
+
+
 async def _terminal_run(manager: RunManager, thread_id: str = "thread-eviction") -> str:
     record = await manager.create(thread_id)
     await manager.set_status(record.run_id, RunStatus.success)
@@ -137,6 +144,45 @@ async def test_eviction_waits_for_terminal_persistence_and_retries_after_recover
     assert hydrated.status == RunStatus.error
     assert hydrated.error == "worker failed"
     assert hydrated.stop_reason == "tool_capped"
+    assert hydrated.total_tokens == 42
+    assert hydrated.store_only is True
+
+
+@pytest.mark.asyncio
+async def test_eviction_repairs_stop_reason_when_only_status_write_failed():
+    store = StatusWriteFailingRunStore()
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(max_attempts=1, initial_delay=0),
+    )
+    record = await manager.create("thread-stop-reason-repair")
+    await manager.set_status(
+        record.run_id,
+        RunStatus.error,
+        stop_reason="token_capped",
+    )
+
+    # This mirrors worker finalization: the completion write can make status
+    # terminal even though the earlier status write (carrying stop_reason)
+    # failed. Eviction must repair the missing reason before dropping local
+    # state.
+    await manager.update_run_completion(
+        record.run_id,
+        status=RunStatus.error.value,
+        total_tokens=42,
+    )
+    stored_before_eviction = await store.get(record.run_id)
+    assert stored_before_eviction is not None
+    assert stored_before_eviction["status"] == RunStatus.error.value
+    assert stored_before_eviction["stop_reason"] is None
+
+    task = manager.schedule_terminal_eviction(record.run_id, delay=0)
+    assert task is not None
+    await asyncio.wait_for(task, timeout=1)
+
+    hydrated = await manager.get(record.run_id)
+    assert hydrated is not None
+    assert hydrated.stop_reason == "token_capped"
     assert hydrated.total_tokens == 42
     assert hydrated.store_only is True
 

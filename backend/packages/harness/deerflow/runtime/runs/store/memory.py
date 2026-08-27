@@ -166,7 +166,7 @@ class MemoryRunStore(RunStore):
         if run is not None:
             self._unindex_run(run_id, run["thread_id"])
 
-    async def update_run_completion(self, run_id, *, status, **kwargs):
+    async def update_run_completion(self, run_id, *, status, stop_reason=None, **kwargs):
         run = self._runs.get(run_id)
         if run is None:
             return False
@@ -177,6 +177,8 @@ class MemoryRunStore(RunStore):
         if current_status not in allowed_sources:
             return False
         run["status"] = status
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
         for key, value in kwargs.items():
             if value is not None:
                 run[key] = value

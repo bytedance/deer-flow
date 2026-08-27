@@ -188,8 +188,9 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
     ) -> bool | None:
-        """Persist final completion fields.
+        """Persist final completion fields, including the terminal reason.
 
         Implementations must not replace a different terminal status. Returns
         ``False`` when the row is missing or already has a conflicting terminal

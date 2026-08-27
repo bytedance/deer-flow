@@ -60,8 +60,10 @@ records so history is not lost. Store-backed managers keep one strongly
 referenced task per run; after the grace period it reads the stored row first,
 skips redundant writes when the matching terminal completion snapshot is already
 durable, and repairs only the stale status and/or completion snapshot before
-verification. Only a verified terminal row permits removal from `_runs` and
-`_runs_by_thread`. A missing, active, incomplete, or unreadable stored row retains
+verification. The completion snapshot includes `stop_reason`, so a successful
+completion write cannot hide a failed terminal-status write and allow eviction
+of the only copy of a cap/loop reason. Only a verified terminal row permits
+removal from `_runs` and `_runs_by_thread`. A missing, active, incomplete, or unreadable stored row retains
 the local record, emits a retry-attempt debug record, and retries later. The
 `finalizing` barrier applies to every terminal status, including `timeout` and
 `interrupted`. Shutdown fences new eviction schedules and boundedly cancels
