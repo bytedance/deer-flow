@@ -4,10 +4,13 @@ import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
   ARTIFACT_VIEWER_ROUTE,
   artifactViewerTitle,
+  buildArtifactViewerURL,
   parseArtifactViewerParams,
   parseArtifactViewerQuery,
   resolveArtifactOpenURL,
 } from "@/core/artifacts/viewer";
+import { validateAuthNextPath } from "@/core/auth/next-path";
+import { buildLoginUrl } from "@/core/auth/types";
 
 const threadId = "7cfa5f8f-a2f8-47ad-acbd-da7137baf990";
 
@@ -161,5 +164,41 @@ describe("artifactViewerTitle", () => {
 
   test("falls back to the product name without a target", () => {
     expect(artifactViewerTitle(undefined)).toBe("DeerFlow");
+  });
+});
+
+describe("buildArtifactViewerURL", () => {
+  test("addresses the viewer route for any target, markdown or not", () => {
+    // resolveArtifactOpenURL sends non-markdown to the Gateway; rebuilding the
+    // window's own address must not follow that branch.
+    const params = viewerParams(
+      buildArtifactViewerURL({
+        filepath: "/mnt/user-data/outputs/diagram.png",
+        threadId,
+        isMock: false,
+      }),
+    );
+
+    expect(params.get("path")).toBe("/mnt/user-data/outputs/diagram.png");
+  });
+});
+
+describe("returning to the viewer after re-authentication", () => {
+  test("survives the login redirect and resolves back to the same artifact", () => {
+    const target = {
+      filepath: "/mnt/user-data/outputs/rapport été.md",
+      threadId,
+      isMock: true,
+    };
+
+    const loginUrl = buildLoginUrl(buildArtifactViewerURL(target));
+    const nextPath = new URLSearchParams(
+      loginUrl.slice(loginUrl.indexOf("?") + 1),
+    ).get("next");
+
+    // The login page drops a `next` it considers unsafe — notably anything
+    // containing a raw colon — which would strand the window on /workspace.
+    expect(validateAuthNextPath(nextPath)).toBe(nextPath);
+    expect(parseArtifactViewerParams(viewerParams(nextPath!))).toEqual(target);
   });
 });

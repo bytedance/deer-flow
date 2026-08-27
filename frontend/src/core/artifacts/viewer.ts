@@ -47,6 +47,21 @@ export function resolveArtifactOpenURL({
   if (resolveStoredArtifactLanguage(filepath) !== "markdown") {
     return urlOfArtifact({ filepath, threadId, isMock });
   }
+  return buildArtifactViewerURL({ filepath, threadId, isMock });
+}
+
+/**
+ * Address of the viewer window for *target*.
+ *
+ * Unlike `resolveArtifactOpenURL` this never falls back to the Gateway URL:
+ * callers that already are the viewer window — the auth guard rebuilding its
+ * own address for a post-login return — need the route itself.
+ */
+export function buildArtifactViewerURL({
+  filepath,
+  threadId,
+  isMock,
+}: ArtifactViewerTarget) {
   const params = new URLSearchParams({ path: filepath, thread_id: threadId });
   if (isMock) {
     params.set("mock", "true");

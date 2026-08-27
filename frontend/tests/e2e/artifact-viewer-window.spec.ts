@@ -25,6 +25,8 @@ const MARKDOWN_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.md";
 const HTML_ARTIFACT_PATH = "/mnt/user-data/outputs/presented-report.html";
 const MARKDOWN_THREAD_ID = "00000000-0000-0000-0000-000000003130";
 const HTML_THREAD_ID = "00000000-0000-0000-0000-000000003131";
+const EXPIRED_THREAD_ID = "00000000-0000-0000-0000-000000003132";
+const ARTIFACT_VIEWER_PATH = "/artifacts/view";
 
 function presentFilesMessages(path: string) {
   return [
@@ -161,5 +163,95 @@ test.describe("Artifact viewer window", () => {
       );
 
     await opened.close();
+  });
+
+  test("returns to the same artifact after an expired session", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: EXPIRED_THREAD_ID,
+          title: "Expired session viewer window",
+          messages: presentFilesMessages(MARKDOWN_ARTIFACT_PATH),
+          artifacts: [MARKDOWN_ARTIFACT_PATH],
+        },
+      ],
+    });
+    await stubUnmockedThreadEndpoints(page, EXPIRED_THREAD_ID);
+    // The session is valid for the panel and lapsed for the detached window,
+    // keyed off the requesting frame so the panel's own refetches cannot race
+    // for the 401.
+    await page
+      .context()
+      .route(
+        `**/api/threads/${EXPIRED_THREAD_ID}/artifacts/mnt/user-data/outputs/presented-report.md`,
+        (route) =>
+          route.request().frame().url().includes(ARTIFACT_VIEWER_PATH)
+            ? route.fulfill({
+                status: 401,
+                contentType: "application/json",
+                body: JSON.stringify({ detail: "Not authenticated" }),
+              })
+            : route.fulfill({
+                status: 200,
+                contentType: "text/markdown; charset=utf-8",
+                body: "# Quarterly Report\n",
+              }),
+      );
+
+    // Record the popup's navigation *requests*, not its committed URLs. This
+    // harness runs with DEER_FLOW_AUTH_DISABLED, so `(auth)/layout` treats the
+    // window as signed in and answers /login with a server redirect that never
+    // commits — the request is the only place the redirect target is visible.
+    const navigated: string[] = [];
+    page.context().on("page", (opened) => {
+      opened.on("request", (request) => {
+        if (request.isNavigationRequest()) {
+          navigated.push(request.url());
+        }
+      });
+    });
+
+    await page.goto(`/workspace/chats/${EXPIRED_THREAD_ID}`);
+    await expect(page.getByText("presented-report.md")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByText("presented-report.md").first().click();
+
+    const artifactsPanel = page.locator("#artifacts");
+    await expect(artifactsPanel.getByText("Quarterly Report")).toBeVisible();
+
+    const viewerPromise = page.context().waitForEvent("page");
+    await artifactsPanel
+      .getByRole("button", { name: "Open in new window" })
+      .click();
+    const viewer = await viewerPromise;
+
+    // `about:blank` can appear here and `new URL` throws on an empty string,
+    // so parse defensively — otherwise the poll predicate errors out instead
+    // of retrying.
+    const findLogin = () =>
+      navigated.find((url) => {
+        try {
+          return new URL(url).pathname === "/login";
+        } catch {
+          return false;
+        }
+      });
+
+    await expect.poll(findLogin, { timeout: 15_000 }).toBeDefined();
+
+    const loginUrl = new URL(findLogin()!);
+    const next = loginUrl.searchParams.get("next");
+    expect(next).not.toBe(null);
+    // The whole viewer address travels through login — query string included —
+    // so the user comes back to this artifact, not the default workspace.
+    const returned = new URL(next!, loginUrl.origin);
+    expect(returned.pathname).toBe(ARTIFACT_VIEWER_PATH);
+    expect(returned.searchParams.get("path")).toBe(MARKDOWN_ARTIFACT_PATH);
+    expect(returned.searchParams.get("thread_id")).toBe(EXPIRED_THREAD_ID);
+
+    await viewer.close();
   });
 });
