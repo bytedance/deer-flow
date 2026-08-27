@@ -919,6 +919,7 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
     before the readiness endpoint exists. Reaching readiness through the
     real docker run proves the whole startup chain survives the hardening.
     """
+    from deerflow.community.aio_sandbox.backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT
     from deerflow.community.aio_sandbox.local_backend import wait_for_sandbox_ready
 
     if not _docker_daemon_available():
@@ -937,10 +938,12 @@ def test_default_image_starts_under_hardened_capabilities(monkeypatch):
 
     info = backend.create(thread_id="smoke", sandbox_id="caps-smoke")
     try:
-        # 300s: a cold CI runner must first pull the multi-GB image and then
-        # cold-start the service stack, which can exceed a 120s budget on its
-        # own — the timeout must not conflate slow-start with broken-caps.
-        ready = wait_for_sandbox_ready(info.sandbox_url, timeout=300)
+        # The production deadline, single-sourced: the sync and async
+        # provider paths destroy the container after exactly this budget, so
+        # a longer one here could pass while every real acquisition fails.
+        # (create() completes docker run — including the image pull — before
+        # this timer starts, so the pull is not part of the budget.)
+        ready = wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
         if not ready:
             # Fail diagnosably: the entrypoint's own log tells us whether the
             # capability set is still incomplete (chown/useradd/su errors) or
