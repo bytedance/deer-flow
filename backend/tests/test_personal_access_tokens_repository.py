@@ -52,7 +52,10 @@ def test_pat_token_digest_is_deterministic_and_constant_time_comparable():
     assert pat_token_digest(token) == pat_token_digest(token)
     assert len(pat_token_digest(token)) == 64
     assert digest_matches(pat_token_digest(token), token) is True
-    assert digest_matches(pat_token_digest(token), token[:-1] + "X") is False
+    # The mutated token must differ from the original even when the CSPRNG
+    # tail already ends in "X" (1/62), or this assertion fails intermittently.
+    mutated_tail = "X" if token[-1] != "X" else "Y"
+    assert digest_matches(pat_token_digest(token), token[:-1] + mutated_tail) is False
     assert digest_matches(None, token) is False
     assert digest_matches("", token) is False
 
