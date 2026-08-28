@@ -14,6 +14,7 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildOnceRunAtLocal,
+  describeSchedule,
   pad2,
   parseCron,
   serializeCron,
@@ -136,8 +137,9 @@ export function ScheduledTaskScheduleInput({
   onChange: (value: ScheduleValue) => void;
   scheduleTypeLocked?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const labels = t.scheduledTasks;
+  const schedLocale = locale === "zh-CN" ? "zh" : "en";
 
   const [scheduleType, setScheduleType] = useState<"once" | "cron">(
     initial.schedule_type,
@@ -432,6 +434,26 @@ export function ScheduledTaskScheduleInput({
           {showAllTimezones ? labels.timezone.less : labels.timezone.more}
         </Button>
       )}
+      <div
+        className="text-muted-foreground text-sm"
+        data-testid="schedule-preview"
+      >
+        {describeSchedule(
+          {
+            scheduleType,
+            preset,
+            parts,
+            runAtLocal: buildOnceRunAtLocal(
+              onceYear,
+              onceMonth,
+              onceDay,
+              onceTime,
+            ),
+            timezone,
+          },
+          schedLocale,
+        )}
+      </div>
     </div>
   );
 }

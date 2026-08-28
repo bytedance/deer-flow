@@ -36,18 +36,38 @@ export default function NewScheduledTaskPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const initialThreadId = searchParams.get("thread_id");
+  const initialTitle = searchParams.get("title") ?? "";
+  const initialPrompt = searchParams.get("prompt") ?? "";
+  const initialContextMode = searchParams.get("context_mode");
+  const initialScheduleType = searchParams.get("schedule_type");
+  const initialCron = searchParams.get("cron");
+  const initialRunAt = searchParams.get("run_at");
+  const initialTimezone = searchParams.get("timezone");
   const st = t.scheduledTasks;
   const createTask = useCreateScheduledTask();
   const [contextMode, setContextMode] = useState<
     "fresh_thread_per_run" | "reuse_thread"
-  >(initialThreadId ? "reuse_thread" : "fresh_thread_per_run");
+  >(
+    initialContextMode === "reuse_thread" || initialThreadId
+      ? "reuse_thread"
+      : "fresh_thread_per_run",
+  );
   const [targetThreadId, setTargetThreadId] = useState(initialThreadId ?? "");
-  const [title, setTitle] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [createSchedule, setCreateSchedule] = useState<ScheduleValue>({
-    schedule_type: "cron",
-    schedule_spec: { cron: "0 9 * * *" },
-    timezone: "",
+  const [title, setTitle] = useState(initialTitle);
+  const [prompt, setPrompt] = useState(initialPrompt);
+  const [createSchedule, setCreateSchedule] = useState<ScheduleValue>(() => {
+    if (initialScheduleType === "once") {
+      return {
+        schedule_type: "once",
+        schedule_spec: initialRunAt ? { run_at: initialRunAt } : {},
+        timezone: initialTimezone ?? "",
+      };
+    }
+    return {
+      schedule_type: "cron",
+      schedule_spec: { cron: initialCron ?? "0 9 * * *" },
+      timezone: initialTimezone ?? "",
+    };
   });
 
   const listHref = initialThreadId
@@ -138,6 +158,7 @@ export default function NewScheduledTaskPage() {
             </>
           )}
           <Input
+            autoFocus
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             placeholder={st.create.taskTitle}

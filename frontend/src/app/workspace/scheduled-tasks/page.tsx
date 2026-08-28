@@ -1,6 +1,6 @@
 "use client";
 
-import { CalendarClock, Plus, TriangleAlertIcon } from "lucide-react";
+import { CalendarClock, CopyIcon, Plus, TriangleAlertIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 
@@ -207,6 +207,34 @@ export default function ScheduledTasksPage() {
     ? `/workspace/scheduled-tasks/new?thread_id=${encodeURIComponent(threadId)}`
     : "/workspace/scheduled-tasks/new";
 
+  const duplicateSelectedTask = () => {
+    if (!selectedTask) {
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set(
+      "title",
+      `${selectedTask.title}${st.actions.duplicateTitleSuffix}`,
+    );
+    params.set("prompt", selectedTask.prompt);
+    params.set("context_mode", selectedTask.context_mode);
+    if (selectedTask.thread_id) {
+      params.set("thread_id", selectedTask.thread_id);
+    }
+    params.set("schedule_type", selectedTask.schedule_type);
+    if (typeof selectedTask.schedule_spec.cron === "string") {
+      params.set("cron", selectedTask.schedule_spec.cron);
+    }
+    if (typeof selectedTask.schedule_spec.run_at === "string") {
+      params.set("run_at", selectedTask.schedule_spec.run_at);
+    }
+    if (selectedTask.timezone) {
+      params.set("timezone", selectedTask.timezone);
+    }
+    setDetailOpen(false);
+    router.push(`/workspace/scheduled-tasks/new?${params.toString()}`);
+  };
+
   const statusFilters = [
     { id: "enabled" as const, label: st.filters.enabled },
     { id: "paused" as const, label: st.filters.paused },
@@ -353,6 +381,7 @@ export default function ScheduledTasksPage() {
               pauseTask={pauseTask}
               resumeTask={resumeTask}
               triggerTask={triggerTask}
+              onDuplicate={duplicateSelectedTask}
               setDeleteOpen={setDeleteOpen}
               taskRunsQuery={taskRunsQuery}
               st={st}
@@ -495,6 +524,7 @@ function TaskDetail({
   pauseTask,
   resumeTask,
   triggerTask,
+  onDuplicate,
   setDeleteOpen,
   taskRunsQuery,
   st,
@@ -520,6 +550,7 @@ function TaskDetail({
   pauseTask: ReturnType<typeof usePauseScheduledTask>;
   resumeTask: ReturnType<typeof useResumeScheduledTask>;
   triggerTask: ReturnType<typeof useTriggerScheduledTask>;
+  onDuplicate: () => void;
   setDeleteOpen: (v: boolean) => void;
   taskRunsQuery: ReturnType<typeof useScheduledTaskRuns>;
   st: Translations["scheduledTasks"];
@@ -677,6 +708,10 @@ function TaskDetail({
           onClick={() => triggerTask.mutate(task.id)}
         >
           {st.actions.trigger}
+        </Button>
+        <Button variant="outline" size="sm" onClick={onDuplicate}>
+          <CopyIcon />
+          {st.actions.duplicate}
         </Button>
         <Button
           variant="outline"

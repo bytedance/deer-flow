@@ -394,6 +394,8 @@ export interface Translations {
       pause: string;
       resume: string;
       trigger: string;
+      duplicate: string;
+      duplicateTitleSuffix: string;
       delete: string;
     };
     deleteConfirm: string;
