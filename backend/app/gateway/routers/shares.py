@@ -22,6 +22,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_current_user
 from app.gateway.shares.snapshot import build_share_snapshot, resolve_share_title
 from app.gateway.shares.tokens import generate_share_token, get_share_pepper, share_token_hash
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,7 @@ def _summary(record: dict[str, Any]) -> ShareSummaryResponse:
 
 @router.post("/threads/{thread_id}/shares", response_model=ShareCreatedResponse, status_code=status.HTTP_201_CREATED)
 @require_permission("threads", "read", owner_check=True)
-async def create_share(thread_id: str, request: Request, body: ShareCreateRequest):
+async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateRequest):
     """Create a read-only snapshot share for a thread the caller owns.
 
     The raw share URL is returned exactly once; only its HMAC digest is
@@ -188,7 +189,7 @@ async def create_share(thread_id: str, request: Request, body: ShareCreateReques
 
 @router.get("/threads/{thread_id}/shares", response_model=list[ShareSummaryResponse])
 @require_permission("threads", "read", owner_check=True)
-async def list_shares(thread_id: str, request: Request):
+async def list_shares(thread_id: ThreadId, request: Request):
     """List the caller's shares for a thread. Never returns token hashes.
 
     Read-side owner_check stays permissive by design (matches every other
@@ -204,7 +205,7 @@ async def list_shares(thread_id: str, request: Request):
 
 @router.delete("/threads/{thread_id}/shares/{share_id}", status_code=status.HTTP_204_NO_CONTENT)
 @require_permission("threads", "read", owner_check=True)
-async def revoke_share(thread_id: str, share_id: str, request: Request):
+async def revoke_share(thread_id: ThreadId, share_id: str, request: Request):
     """Revoke one of the caller's shares. Effective on the next public request."""
     _require_enabled()
     user_id = await get_current_user(request)
