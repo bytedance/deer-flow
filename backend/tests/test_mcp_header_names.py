@@ -71,9 +71,11 @@ def test_override_does_not_mutate_the_base():
 # ---------------------------------------------------------------------------
 # illegal_header_value_reason
 #
-# The boundary mirrors what the transport enforces: httpx encodes values as
-# Latin-1; h11's field_vchar is ``[^\x00\s]`` with SP/HTAB allowed only
-# between visible characters. Values h11 accepts must not be rejected here.
+# The boundary mirrors what the transport enforces: the MCP clients hand
+# ``dict[str, str]`` headers to httpx, which encodes ``str`` values as ASCII
+# (raising UnicodeEncodeError before h11 ever sees the value); h11's
+# field_vchar is ``[^\x00\s]`` with SP/HTAB allowed only between visible
+# characters. Values the transport accepts must not be rejected here.
 # ---------------------------------------------------------------------------
 
 
@@ -89,6 +91,7 @@ def test_override_does_not_mutate_the_base():
         " leading-space",
         "trailing-space ",
         "trailing-tab\t",
+        "caf\xe9",  # Latin-1 high byte: h11 would send it, but httpx encodes str values as ASCII first
         "\u043f\u0430\u0440\u043e\u043b\u044c",
     ],
 )
@@ -102,8 +105,7 @@ def test_transport_rejected_values_are_flagged(value):
         "Bearer sk-token",
         "Bearer abc\tdef",
         "two words",
-        "caf\xe9",  # Latin-1 high byte: httpx encodes it, h11 sends it
-        "a\x7fb",  # DEL: h11's field_vchar accepts it
+        "a\x7fb",  # DEL: ASCII-encodable, and h11's field_vchar accepts it
     ],
 )
 def test_transport_accepted_values_are_not_flagged(value):
@@ -114,6 +116,29 @@ def test_reason_never_repeats_the_value():
     reason = illegal_header_value_reason("sk-secret-value\n")
     assert reason is not None
     assert "sk-secret-value" not in reason
+
+
+def test_validator_mirrors_the_mcp_http_client_encoding_boundary():
+    """Pin the boundary against the real client the headers are handed to.
+
+    ``build_server_params`` passes ``dict[str, str]`` headers through the MCP
+    SDK's ``create_mcp_http_client`` into ``httpx.AsyncClient``, which encodes
+    ``str`` header values as ASCII at construction time. A value the validator
+    accepts must construct that client; the canonical counter-example — a
+    Latin-1 high byte h11 itself would happily send — must be flagged by the
+    validator, because httpx raises ``UnicodeEncodeError`` before h11 runs
+    (and that exception repeats the offending value).
+    """
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    assert illegal_header_value_reason("Bearer caf\xe9") is not None
+    with pytest.raises(UnicodeEncodeError):
+        create_mcp_http_client(headers={"Authorization": "Bearer caf\xe9"})
+
+    for value in ("Bearer sk-token", "Bearer abc\tdef ghi", "a\x7fb"):
+        assert illegal_header_value_reason(value) is None
+        client = create_mcp_http_client(headers={"X-Tenant-Token": value})
+        assert client.headers["X-Tenant-Token"] == value
 
 
 # ---------------------------------------------------------------------------

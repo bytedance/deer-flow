@@ -16,9 +16,9 @@ emits the spelling the connection already uses, so the adapter's merge replaces
 the static entry instead of duplicating it.
 
 They also refuse to inject a credential that cannot travel as a header value
-(:func:`illegal_header_value_reason`): httpx encodes values as Latin-1 and h11
-rejects line breaks and surrounding whitespace, and both render the *full
-value* into the exception message — which ``ToolErrorHandlingMiddleware`` then
+(:func:`illegal_header_value_reason`): httpx encodes ``str`` header values as
+ASCII and h11 rejects line breaks and surrounding whitespace, and both render
+the *full value* into the exception message — which ``ToolErrorHandlingMiddleware`` then
 copies into a model-visible ToolMessage, putting the secret in the prompt,
 the checkpoint, and traces. Rejecting up front keeps the error message to the
 credential's name.
@@ -38,15 +38,17 @@ _FORBIDDEN_HEADER_VALUE_CHARS = re.compile(r"[\x00\n\x0b\x0c\r]")
 def illegal_header_value_reason(value: str) -> str | None:
     """Explain why *value* cannot be sent as an HTTP header value, or ``None``.
 
-    Mirrors what the transport enforces — httpx encodes header values as
-    Latin-1, h11 rejects NUL/vertical whitespace and leading or trailing
-    SP/HTAB — without repeating the value, so callers can fail closed with a
-    message that names the credential instead of leaking it.
+    Mirrors what the transport enforces — the MCP clients hand ``dict[str,
+    str]`` headers to ``httpx``, which encodes ``str`` values as ASCII (raising
+    ``UnicodeEncodeError`` before h11 ever sees the value), and h11 rejects
+    NUL/vertical whitespace and leading or trailing SP/HTAB — without
+    repeating the value, so callers can fail closed with a message that names
+    the credential instead of leaking it.
     """
     try:
-        value.encode("latin-1")
+        value.encode("ascii")
     except UnicodeEncodeError:
-        return "contains characters outside Latin-1"
+        return "contains characters outside ASCII"
     if _FORBIDDEN_HEADER_VALUE_CHARS.search(value):
         return "contains a line break or another forbidden control character"
     if value != value.strip(" \t"):

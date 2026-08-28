@@ -212,7 +212,7 @@ conversation:
   another tenant's authority. Set `"on_missing": "passthrough"` to opt out.
 - A value that cannot travel as an HTTP header — a stray newline picked up when
   reading a token from a file, leading/trailing whitespace, characters outside
-  Latin-1 — is always rejected, regardless of `on_missing`. The error names the
+  ASCII — is always rejected, regardless of `on_missing`. The error names the
   offending key but never repeats the value; without this check the HTTP
   client's own rejection would echo the full credential into a model-visible
   tool error.

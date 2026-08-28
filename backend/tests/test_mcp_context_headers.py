@@ -347,7 +347,7 @@ def test_passthrough_still_injects_the_secrets_that_are_present():
 # Illegal header values
 #
 # A secret that cannot travel as an HTTP header value (trailing newline from
-# reading a token file, CR/LF, characters outside Latin-1) must be rejected
+# reading a token file, CR/LF, characters outside ASCII) must be rejected
 # here, before it reaches the HTTP client: h11 renders the full value into its
 # LocalProtocolError message, ToolErrorHandlingMiddleware copies that message
 # into a model-visible ToolMessage, and the secret lands in the prompt, the
@@ -384,11 +384,12 @@ def test_embedded_crlf_is_denied():
         asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="a\r\nX-Injected: b")), AsyncMock()))
 
 
-def test_non_latin1_value_is_denied():
-    """httpx encodes header values as Latin-1 and raises UnicodeEncodeError otherwise."""
+def test_non_ascii_value_is_denied():
+    """httpx encodes str header values as ASCII and raises UnicodeEncodeError otherwise."""
     interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
-    with pytest.raises(ToolException, match="tenant_token"):
-        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="пароль")), AsyncMock()))
+    for value in ("пароль", "Bearer caf\xe9"):
+        with pytest.raises(ToolException, match="tenant_token"):
+            asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=value)), AsyncMock()))
 
 
 def test_leading_or_trailing_whitespace_is_denied():

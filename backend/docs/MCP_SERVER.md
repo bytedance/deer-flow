@@ -411,7 +411,7 @@ The caller supplies the values on each run request:
   out and forward the static headers instead.
 - A value that cannot be sent as an HTTP header — a stray newline picked up
   when reading a token from a file, leading/trailing whitespace, characters
-  outside Latin-1 — is always denied, regardless of `on_missing`. The error
+  outside ASCII — is always denied, regardless of `on_missing`. The error
   names the offending key but never repeats the value; without this check the
   HTTP client's own rejection would echo the full credential into a
   model-visible tool error.

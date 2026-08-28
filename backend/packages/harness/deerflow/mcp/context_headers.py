@@ -29,7 +29,7 @@ multi-tenant deployment would send one tenant's request under another
 tenant's authority. ``on_missing: "passthrough"`` is the explicit opt-out.
 
 A resolved value the transport would refuse (line break, surrounding
-whitespace, non-Latin-1 — see ``mcp/headers.py``) is always denied, regardless
+whitespace, non-ASCII — see ``mcp/headers.py``) is always denied, regardless
 of ``on_missing``: the HTTP client's own rejection renders the full value into
 its exception message, which would otherwise travel into a model-visible tool
 error and the trace, and a passthrough fallback would run the call under the
@@ -148,7 +148,7 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
                 missing.append(secret_key)
                 continue
             # A value the transport would refuse (trailing newline from reading
-            # a token file, CR/LF, non-Latin-1) must be rejected *here*: httpx
+            # a token file, CR/LF, non-ASCII) must be rejected *here*: httpx
             # and h11 render the full value into their exception message, and
             # ToolErrorHandlingMiddleware copies that message into a
             # model-visible ToolMessage — putting the secret in the prompt, the

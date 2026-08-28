@@ -121,7 +121,7 @@ def build_user_scoped_auth_interceptor(extensions_config: ExtensionsConfig) -> A
             )
 
         # A credential the transport would refuse (trailing newline from a
-        # token file or a CRLF env-file, non-Latin-1) must be rejected here:
+        # token file or a CRLF env-file, non-ASCII) must be rejected here:
         # httpx/h11 render the full value into their exception message, which
         # ToolErrorHandlingMiddleware copies into a model-visible ToolMessage.
         # Always denied, regardless of on_missing — the user *is* mapped, so
