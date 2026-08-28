@@ -12,7 +12,7 @@ import pytest
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED, CallToolResult, ErrorData, TextContent
 
-from deerflow.mcp.session_pool import MCPSessionPool, get_session_pool, reset_session_pool
+from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, reset_session_pool
 
 
 @pytest.fixture(autouse=True)
@@ -446,6 +446,46 @@ async def test_session_pool_tool_preserves_disconnect_error_when_eviction_fails(
 
     assert exc_info.value is error
     pool.close_session_if_current.assert_awaited_once_with("srv", "test-user-autouse:default", session)
+
+
+@pytest.mark.asyncio
+async def test_session_pool_disconnect_cleanup_survives_caller_cancellation():
+    """A cancelled caller cannot interrupt disconnected-session teardown."""
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+
+    async def close_session_if_current(*_args):
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+        return True
+
+    session = AsyncMock()
+    session.call_tool = AsyncMock(side_effect=anyio.ClosedResourceError())
+    pool = MagicMock()
+    pool.close_session_if_current = close_session_if_current
+
+    call = asyncio.create_task(
+        call_pooled_session_tool(
+            session,
+            pool,
+            server_name="srv",
+            scope_key="scope",
+            tool_name="act",
+            arguments={},
+            call_kwargs={},
+        )
+    )
+    await cleanup_started.wait()
+    call.cancel()
+    await asyncio.sleep(0)
+    call.cancel()
+    release_cleanup.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+    assert cleanup_finished.is_set()
 
 
 @pytest.mark.asyncio
