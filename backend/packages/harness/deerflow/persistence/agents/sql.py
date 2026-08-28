@@ -199,6 +199,17 @@ class SqlAgentStore(AgentStore):
         if soul is not None:
             row.soul = soul
 
+    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+        effective_user = user_id or get_effective_user_id()
+        with self._Session() as session:
+            row_id = session.scalar(select(AgentRow.id).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
+        if row_id is not None:
+            return "deleted"
+        agent_dir = get_paths().user_agent_dir(effective_user, name)
+        if agent_dir.exists():
+            return "not-custom-agent"
+        return "missing"
+
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:

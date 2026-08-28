@@ -143,7 +143,9 @@ def test_user_isolation(store):
 
 def test_delete_reports_outcome(store):
     store.create("gone", {"name": "gone"}, "s", user_id="u1")
+    assert store.inspect_delete("gone", user_id="u1") == "deleted"
     assert store.delete("gone", user_id="u1") == "deleted"
+    assert store.inspect_delete("gone", user_id="u1") == "missing"
     assert store.delete("gone", user_id="u1") == "missing"
     with pytest.raises(FileNotFoundError):
         store.get("gone", user_id="u1")
@@ -241,6 +243,7 @@ def test_delete_preserves_memory_only_dir_when_no_row(store, tmp_path, monkeypat
     fact = facts_dir / "fact_keep.md"
     fact.write_text("memory data", encoding="utf-8")
 
+    assert store.inspect_delete("ghost", user_id="u1") == "not-custom-agent"
     assert store.delete("ghost", user_id="u1") == "not-custom-agent"
     assert fact.read_text(encoding="utf-8") == "memory data"
 

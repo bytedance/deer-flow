@@ -20,7 +20,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentExistsError, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,22 @@ def _validate_agent_name(name: str) -> None:
         raise HTTPException(
             status_code=422,
             detail=f"Invalid agent name '{name}'. Must match ^[A-Za-z0-9-]+$ (letters, digits, and hyphens only).",
+        )
+
+
+def _raise_for_delete_outcome(name: str, outcome: AgentDeleteOutcome) -> None:
+    """Map a rejected delete outcome to its HTTP response."""
+    if outcome == "legacy":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
+        )
+    if outcome == "missing":
+        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
+    if outcome == "not-custom-agent":
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
 
 
@@ -563,6 +579,14 @@ async def delete_agent(name: str) -> None:
     user_id = get_effective_user_id()
     store = get_agent_store()
 
+    try:
+        outcome = await asyncio.to_thread(store.inspect_delete, name, user_id=user_id)
+    except Exception as e:
+        logger.error(f"Failed to inspect agent '{name}' for deletion: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Failed to inspect agent deletion: {str(e)}")
+
+    _raise_for_delete_outcome(name, outcome)
+
     # Advance the scope's cancellation epoch BEFORE deleting (#5037): cancel
     # buffered extraction work first so a debounce timer racing the rmtree
     # cannot fire an extraction against the removed scope and resurrect its
@@ -586,17 +610,6 @@ async def delete_agent(name: str) -> None:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
 
-    if outcome == "legacy":
-        raise HTTPException(
-            status_code=409,
-            detail=(f"Agent '{name}' only exists in the legacy shared layout and is not scoped to a user. Run scripts/migrate_user_isolation.py to move legacy agents into the per-user layout before deleting."),
-        )
-    if outcome == "missing":
-        raise HTTPException(status_code=404, detail=f"Agent '{name}' not found")
-    if outcome == "not-custom-agent":
-        raise HTTPException(
-            status_code=409,
-            detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
-        )
+    _raise_for_delete_outcome(name, outcome)
 
     logger.info(f"Deleted agent '{name}'")

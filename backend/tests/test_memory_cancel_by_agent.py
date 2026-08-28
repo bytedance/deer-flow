@@ -54,13 +54,14 @@ def test_cancel_by_agent_user_scope_filters_matching_owner_only() -> None:
     queue._items = [
         ConversationContext(thread_id="t1", messages=["a"], agent_name="agent-a", user_id="alice"),
         ConversationContext(thread_id="t2", messages=["b"], agent_name="agent-a", user_id="bob"),
+        ConversationContext(thread_id="t3", messages=["legacy"], agent_name="agent-a", user_id=None),
     ]
 
     assert queue.cancel_by_agent("agent-a", user_id="alice") == 1
-    assert [context.user_id for context in queue._items] == ["bob"]
-    # Unscoped cancellation drops the remaining same-agent entry.
+    assert [context.user_id for context in queue._items] == ["bob", None]
+    # Unscoped cancellation drops only the legacy same-agent entry.
     assert queue.cancel_by_agent("agent-a") == 1
-    assert queue.pending_count == 0
+    assert [context.user_id for context in queue._items] == ["bob"]
 
 
 def test_cancel_by_agent_returns_zero_without_matches() -> None:
@@ -271,15 +272,16 @@ def test_cancel_by_user_drops_every_agent_for_that_user() -> None:
     assert [context.user_id for context in queue._items] == ["bob"]
 
 
-def test_cancel_by_user_without_id_clears_everything() -> None:
+def test_cancel_by_user_without_id_clears_only_unscoped_work() -> None:
     queue = _queue()
     queue._items = [
+        ConversationContext(thread_id="t0", messages=["legacy"], agent_name="agent-a", user_id=None),
         ConversationContext(thread_id="t1", messages=["a"], agent_name="agent-a", user_id="alice"),
         ConversationContext(thread_id="t2", messages=["b"], agent_name="agent-b", user_id="bob"),
     ]
 
-    assert queue.cancel_by_user(None) == 2
-    assert queue.pending_count == 0
+    assert queue.cancel_by_user(None) == 1
+    assert [context.user_id for context in queue._items] == ["alice", "bob"]
 
 
 # ---------------------------------------------------------------------------

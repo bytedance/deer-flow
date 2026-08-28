@@ -157,7 +157,7 @@ class FileAgentStore(AgentStore):
                 shutil.rmtree(agent_dir, ignore_errors=True)
             raise
 
-    def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         name = validate_agent_name(name)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
@@ -171,6 +171,15 @@ class FileAgentStore(AgentStore):
             # (no config.yaml) — preserve it rather than deleting a user's memory
             # (#4279). rmtree below would otherwise take the whole tree.
             return "not-custom-agent"
+        return "deleted"
+
+    def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+        outcome = self.inspect_delete(name, user_id=user_id)
+        if outcome != "deleted":
+            return outcome
+        name = validate_agent_name(name)
+        effective_user = user_id or _ac.get_effective_user_id()
+        agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
         # rmtree removes config.yaml, SOUL.md and the co-located memory.json in
         # one shot — the historical behaviour.
         shutil.rmtree(agent_dir)

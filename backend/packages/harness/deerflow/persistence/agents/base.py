@@ -117,6 +117,10 @@ class AgentStore(abc.ABC):
         """
 
     @abc.abstractmethod
+    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+        """Return the expected delete outcome without changing storage."""
+
+    @abc.abstractmethod
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         """Delete an agent and its co-located memory, returning the outcome."""
 

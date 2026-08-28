@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Keep wildcard identity distinct from the real unscoped value.
+_ANY = object()
+
 
 class QueueFull(Exception):
     """Raised when a non-signal update is rejected under backpressure.
@@ -104,8 +107,8 @@ class MemoryUpdateQueue:
         # (and would be lost on exit). See ``flush_sync`` step (1).
         self._processing_thread: threading.Thread | None = None
         self._reprocess_pending = False
-        # Per-scope cancellation epochs, keyed by
-        # ``(agent_name_or_None, user_id_or_None)`` with ``None`` as a wildcard.
+        # Per-scope cancellation epochs use ``_ANY`` as the wildcard.
+        # ``None`` remains a real legacy or unscoped value.
         # Every cancel assigns the next value of one process-wide clock to its
         # scope key, so epochs stay comparable through
         # ``_generation_for_locked``'s max(): a later user-wide cancel always
@@ -113,7 +116,7 @@ class MemoryUpdateQueue:
         # Entries only appear for scopes actually cancelled — small tuples +
         # ints, bounded by distinct deleted/cleared scopes per process lifetime.
         self._generation_clock = 0
-        self._scope_generations: dict[tuple[str | None, str | None], int] = {}
+        self._scope_generations: dict[tuple[object, object], int] = {}
 
     def add(
         self,
@@ -456,9 +459,8 @@ class MemoryUpdateQueue:
         Agent deletion and scoped memory clearing call this so a debounce Timer
         can no longer fire an extraction LLM call for a scope that no longer
         exists (#3364): the extraction would re-persist state that blocks
-        recreating an agent with the same name. ``user_id=None`` cancels the
-        scope for every user; a specific id limits cancellation to that owner's
-        entries.
+        recreating an agent with the same name. ``user_id=None`` selects the
+        legacy unscoped user. A specific ID selects that owner's entries.
 
         Pending removal alone cannot stop a worker that already snapshotted its
         batch into ``_process_queue`` (the cancel would see an empty ``_items``
@@ -470,7 +472,7 @@ class MemoryUpdateQueue:
         """
         with self._lock:
             self._next_cancellation_epoch_locked((agent_name, user_id))
-            remaining = [context for context in self._items if not (context.agent_name == agent_name and (user_id is None or context.user_id == user_id))]
+            remaining = [context for context in self._items if not (context.agent_name == agent_name and context.user_id == user_id)]
             removed = len(self._items) - len(remaining)
             self._items = remaining
         if removed:
@@ -478,21 +480,17 @@ class MemoryUpdateQueue:
         return removed
 
     def cancel_by_user(self, user_id: str | None = None) -> int:
-        """Drop every pending update owned by ``user_id``; wildcard when ``None``.
+        """Drop every pending update owned by the exact ``user_id``.
 
         Backs global ``clear_memory(user_id=...)``: it removes all agents'
         stored facts, so buffered extractions for any of those agents must be
         dropped too — not just the reserved default bucket (#5037 Finding 2).
         """
         with self._lock:
-            self._next_cancellation_epoch_locked((None, user_id))
-            if user_id is None:
-                removed = len(self._items)
-                self._items = []
-            else:
-                remaining = [context for context in self._items if context.user_id != user_id]
-                removed = len(self._items) - len(remaining)
-                self._items = remaining
+            self._next_cancellation_epoch_locked((_ANY, user_id))
+            remaining = [context for context in self._items if context.user_id != user_id]
+            removed = len(self._items) - len(remaining)
+            self._items = remaining
         if removed:
             logger.info("Cancelled %d pending memory update(s) for user %s", removed, user_id)
         return removed
@@ -510,10 +508,10 @@ class MemoryUpdateQueue:
         globally comparable — a later broader cancel always outdates earlier
         narrower work.
         """
-        candidates = ((agent_name, user_id), (agent_name, None), (None, user_id), (None, None))
+        candidates = ((agent_name, user_id), (agent_name, _ANY), (_ANY, user_id), (_ANY, _ANY))
         return max(self._scope_generations.get(key, 0) for key in candidates)
 
-    def _next_cancellation_epoch_locked(self, key: tuple[str | None, str | None]) -> None:
+    def _next_cancellation_epoch_locked(self, key: tuple[object, object]) -> None:
         """Assign the next process-wide cancellation epoch to ``key``; lock held."""
         self._generation_clock += 1
         self._scope_generations[key] = self._generation_clock

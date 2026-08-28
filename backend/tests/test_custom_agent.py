@@ -756,16 +756,44 @@ class TestAgentsAPI:
         response = agent_client.delete("/api/agents/does-not-exist")
         assert response.status_code == 404
 
-    def test_delete_rejects_memory_only_directory_without_removing_facts(self, agent_client, tmp_path):
+    def test_delete_legacy_agent_does_not_cancel_memory(self, agent_client, tmp_path, monkeypatch):
+        legacy_dir = tmp_path / "agents" / "legacy-agent"
+        legacy_dir.mkdir(parents=True)
+        (legacy_dir / "config.yaml").write_text("name: legacy-agent\n", encoding="utf-8")
+        calls: list[tuple[str, str | None]] = []
+
+        class _RecordingManager:
+            def cancel_by_agent(self, agent_name, *, user_id=None):
+                calls.append((agent_name, user_id))
+                return 1
+
+        monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _RecordingManager())
+
+        response = agent_client.delete("/api/agents/legacy-agent")
+
+        assert response.status_code == 409
+        assert calls == []
+        assert legacy_dir.exists()
+
+    def test_delete_rejects_memory_only_directory_without_cancelling(self, agent_client, tmp_path, monkeypatch):
         agent_dir = tmp_path / "users" / "test-user-autouse" / "agents" / "lead-agent"
         facts_dir = agent_dir / "facts"
         facts_dir.mkdir(parents=True)
         fact_path = facts_dir / "fact_keep.md"
         fact_path.write_text("memory data", encoding="utf-8")
+        calls: list[tuple[str, str | None]] = []
+
+        class _RecordingManager:
+            def cancel_by_agent(self, agent_name, *, user_id=None):
+                calls.append((agent_name, user_id))
+                return 1
+
+        monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _RecordingManager())
 
         response = agent_client.delete("/api/agents/lead-agent")
 
         assert response.status_code == 409
+        assert calls == []
         assert fact_path.read_text(encoding="utf-8") == "memory data"
 
     def test_delete_with_sql_store_preserves_memory_only_directory(self, agent_client, tmp_path):
@@ -803,19 +831,32 @@ class TestAgentsAPI:
         contexts so a timer cannot re-persist state after the agent is gone."""
         agent_client.post("/api/agents", json={"name": "cancel-me", "soul": "bye"})
 
-        calls: list[tuple[str, str | None]] = []
+        import app.gateway.routers.agents as agents_router
+
+        real_store = agents_router.get_agent_store()
+        events: list[str] = []
+
+        class _RecordingStore:
+            def inspect_delete(self, agent_name, *, user_id=None):
+                events.append("inspect")
+                return real_store.inspect_delete(agent_name, user_id=user_id)
+
+            def delete(self, agent_name, *, user_id=None):
+                events.append("delete")
+                return real_store.delete(agent_name, user_id=user_id)
 
         class _RecordingManager:
             def cancel_by_agent(self, agent_name, *, user_id=None):
-                calls.append((agent_name, user_id))
+                events.append("cancel")
                 return 2
 
+        monkeypatch.setattr(agents_router, "get_agent_store", lambda: _RecordingStore())
         monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _RecordingManager())
 
         response = agent_client.delete("/api/agents/cancel-me")
 
         assert response.status_code == 204
-        assert calls == [("cancel-me", "test-user-autouse")]
+        assert events == ["inspect", "cancel", "delete"]
 
     def test_delete_agent_survives_memory_cancel_failure(self, agent_client, monkeypatch):
         """Memory cleanup is best-effort: a broken manager must not fail deletion."""
