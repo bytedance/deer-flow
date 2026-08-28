@@ -1,3 +1,4 @@
+import { resolveStaticDemoArtifact } from "@/core/threads/static-demo";
 import { checkCodeFile, getFileName } from "@/core/utils/files";
 
 import { urlOfArtifact } from "./utils";
@@ -113,4 +114,28 @@ export function parseArtifactViewerQuery(
  */
 export function artifactViewerTitle(filepath: string | undefined) {
   return filepath ? `${getFileName(filepath)} - DeerFlow` : "DeerFlow";
+}
+
+/**
+ * Whether the viewer window has to sit behind the user-auth gate.
+ *
+ * Public `/showcase` threads render with `isMock`, and their artifacts are
+ * served by the unauthenticated demo route, which answers only for an
+ * allowlisted set of files. Gating those would bounce every logged-out
+ * showcase visitor to /login for a document that is already public — and the
+ * raw artifact URL this window replaced stayed reachable.
+ *
+ * The allowlist is the authority, not the flag: `mock=true` is caller-supplied
+ * and on its own grants nothing, because a target the demo route would answer
+ * with 404 still needs a session.
+ */
+export function requiresAuthenticatedViewer(target: ArtifactViewerTarget) {
+  if (!target.isMock) {
+    return true;
+  }
+  const segments = target.filepath
+    .replace(/^\/+/, "")
+    .split("/")
+    .map((segment) => encodeURIComponent(segment));
+  return resolveStaticDemoArtifact(target.threadId, segments) === null;
 }

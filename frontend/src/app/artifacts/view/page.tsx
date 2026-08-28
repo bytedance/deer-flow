@@ -6,6 +6,7 @@ import {
   artifactViewerTitle,
   buildArtifactViewerURL,
   parseArtifactViewerQuery,
+  requiresAuthenticatedViewer,
   type ArtifactViewerTarget,
 } from "@/core/artifacts/viewer";
 import { getServerSideUser } from "@/core/auth/server";
@@ -34,6 +35,9 @@ export async function generateMetadata({
  * document they opened.
  */
 async function requireViewerAccess(target: ArtifactViewerTarget | null) {
+  if (target && !requiresAuthenticatedViewer(target)) {
+    return;
+  }
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":
