@@ -2,6 +2,18 @@
 
 import pytest
 
+
+def _thread_skill_mounts(provisioner_module):
+    return [
+        provisioner_module.ExtraMount(
+            host_path=f"/state/users/alice/threads/thread-1/skills_view/{category}",
+            container_path=f"/mnt/skills/{category}",
+            read_only=True,
+        )
+        for category in ("public", "custom", "legacy", "integrations")
+    ]
+
+
 # ── _build_volumes ─────────────────────────────────────────────────────
 
 
@@ -176,6 +188,43 @@ class TestBuildVolumes:
 
         assert exc_info.value.status_code == 400
 
+    def test_thread_skill_mounts_replace_hostpath_skill_volumes(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+
+        volumes = provisioner_module._build_volumes(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=_thread_skill_mounts(provisioner_module),
+        )
+
+        names = {volume.name for volume in volumes}
+        assert not {"skills-public", "skills-custom", "skills-legacy"} & names
+        assert names == {"user-data", "extra-0", "extra-1", "extra-2", "extra-3"}
+
+    def test_thread_skill_mounts_replace_skills_pvc_with_userdata_pvc_categories(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+
+        volumes = provisioner_module._build_volumes(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=_thread_skill_mounts(provisioner_module),
+        )
+
+        assert all(volume.name != "skills" for volume in volumes)
+        extra_volumes = [volume for volume in volumes if volume.name.startswith("extra-")]
+        assert len(extra_volumes) == 4
+        assert all(volume.persistent_volume_claim.claim_name == "userdata-pvc" for volume in extra_volumes)
+
 
 # ── _build_volume_mounts ───────────────────────────────────────────────
 
@@ -347,6 +396,49 @@ class TestBuildVolumeMounts:
             provisioner_module._build_volume_mounts("thread-1", extra_mounts=extra_mounts)
 
         assert exc_info.value.status_code == 400
+
+    def test_thread_skill_category_mounts_are_unique_in_hostpath_mode(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+
+        mounts = provisioner_module._build_volume_mounts(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=_thread_skill_mounts(provisioner_module),
+        )
+
+        mount_paths = [mount.mount_path for mount in mounts]
+        assert len(mount_paths) == len(set(mount_paths))
+        assert set(mount_paths) == {
+            "/mnt/user-data",
+            "/mnt/skills/public",
+            "/mnt/skills/custom",
+            "/mnt/skills/legacy",
+            "/mnt/skills/integrations",
+        }
+
+    def test_thread_skill_category_mounts_use_userdata_pvc_subpaths(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = "skills-pvc"
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc"
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+
+        mounts = provisioner_module._build_volume_mounts(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=_thread_skill_mounts(provisioner_module),
+        )
+
+        skill_mounts = [mount for mount in mounts if mount.mount_path.startswith("/mnt/skills/")]
+        assert len(skill_mounts) == 4
+        assert all(mount.name != "skills" for mount in mounts)
+        assert {mount.sub_path for mount in skill_mounts} == {f"deer-flow/users/alice/threads/thread-1/skills_view/{category}" for category in ("public", "custom", "legacy", "integrations")}
 
 
 # ── _build_pod integration ─────────────────────────────────────────────

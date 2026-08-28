@@ -110,12 +110,20 @@ DEFAULT_USER_ID = "default"
 MAX_EXTRA_MOUNTS = 10
 ALLOWED_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
+    "/mnt/skills/public",
     "/mnt/skills/custom",
+    "/mnt/skills/legacy",
     "/mnt/skills/integrations",
     "/mnt/integrations/lark-cli/config",
     "/mnt/integrations/lark-cli/config/locks",
     "/mnt/integrations/lark-cli/data",
     "/mnt/integrations/lark-cli/runtime",
+}
+MANAGED_SKILL_CATEGORY_MOUNT_PATHS = {
+    "/mnt/skills/public",
+    "/mnt/skills/custom",
+    "/mnt/skills/legacy",
+    "/mnt/skills/integrations",
 }
 
 # Path to the kubeconfig *inside* the provisioner container.
@@ -505,12 +513,18 @@ def _build_volumes(
     """
     volumes: list[k8s_client.V1Volume] = []
     del include_legacy_skills  # retained for request compatibility
+    skill_overrides = {
+        posixpath.normpath(mount.container_path)
+        for mount in _validated_extra_mounts(extra_mounts)
+        if posixpath.normpath(mount.container_path)
+        in MANAGED_SKILL_CATEGORY_MOUNT_PATHS
+    }
+    all_skill_categories_overridden = MANAGED_SKILL_CATEGORY_MOUNT_PATHS <= skill_overrides
 
     # ── Skills volumes ────────────────────────────────────────────────
 
-    if SKILLS_PVC_NAME:
-        # PVC mode: three-way subPath not yet supported; fall back to
-        # single-volume mount for backward compatibility.
+    if SKILLS_PVC_NAME and not all_skill_categories_overridden:
+        # An unrestricted thread keeps the operator-provided skills PVC root.
         logger.warning("SKILLS_PVC_NAME is set — three-way skills layout is not supported in PVC mode yet; falling back to single /mnt/skills mount")
         volumes.append(
             k8s_client.V1Volume(
@@ -521,18 +535,19 @@ def _build_volumes(
                 ),
             )
         )
-    else:
+    elif not SKILLS_PVC_NAME:
         # hostPath mode: three-way layout
         public_path = join_host_path(DEER_FLOW_HOST_BASE_DIR, "skills_view", "public")
-        volumes.append(
-            k8s_client.V1Volume(
-                name="skills-public",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path=public_path,
-                    type="Directory",
-                ),
+        if "/mnt/skills/public" not in skill_overrides:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-public",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=public_path,
+                        type="Directory",
+                    ),
+                )
             )
-        )
 
         user_custom_path = join_host_path(
             DEER_FLOW_HOST_BASE_DIR,
@@ -541,28 +556,30 @@ def _build_volumes(
             "skills_view",
             "custom",
         )
-        volumes.append(
-            k8s_client.V1Volume(
-                name="skills-custom",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path=user_custom_path,
-                    type="Directory",
-                ),
+        if "/mnt/skills/custom" not in skill_overrides:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-custom",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=user_custom_path,
+                        type="Directory",
+                    ),
+                )
             )
-        )
 
         legacy_path = join_host_path(
             DEER_FLOW_HOST_BASE_DIR, "users", user_id, "skills_view", "legacy"
         )
-        volumes.append(
-            k8s_client.V1Volume(
-                name="skills-legacy",
-                host_path=k8s_client.V1HostPathVolumeSource(
-                    path=legacy_path,
-                    type="Directory",
-                ),
+        if "/mnt/skills/legacy" not in skill_overrides:
+            volumes.append(
+                k8s_client.V1Volume(
+                    name="skills-legacy",
+                    host_path=k8s_client.V1HostPathVolumeSource(
+                        path=legacy_path,
+                        type="Directory",
+                    ),
+                )
             )
-        )
 
     # ── User-data volume ──────────────────────────────────────────────
 
@@ -652,8 +669,15 @@ def _build_volume_mounts(
     """
     mounts: list[k8s_client.V1VolumeMount] = []
     del include_legacy_skills  # retained for request compatibility
+    skill_overrides = {
+        posixpath.normpath(mount.container_path)
+        for mount in _validated_extra_mounts(extra_mounts)
+        if posixpath.normpath(mount.container_path)
+        in MANAGED_SKILL_CATEGORY_MOUNT_PATHS
+    }
+    all_skill_categories_overridden = MANAGED_SKILL_CATEGORY_MOUNT_PATHS <= skill_overrides
 
-    if SKILLS_PVC_NAME:
+    if SKILLS_PVC_NAME and not all_skill_categories_overridden:
         skills_mount = k8s_client.V1VolumeMount(
             name="skills",
             mount_path="/mnt/skills",
@@ -665,26 +689,25 @@ def _build_volume_mounts(
                 thread_id=thread_id,
             )
         mounts.append(skills_mount)
-    else:
-        mounts.extend(
-            [
-                k8s_client.V1VolumeMount(
-                    name="skills-public",
-                    mount_path="/mnt/skills/public",
-                    read_only=True,
-                ),
-                k8s_client.V1VolumeMount(
-                    name="skills-custom",
-                    mount_path="/mnt/skills/custom",
-                    read_only=True,
-                ),
-                k8s_client.V1VolumeMount(
-                    name="skills-legacy",
-                    mount_path="/mnt/skills/legacy",
-                    read_only=True,
-                ),
-            ]
-        )
+    elif not SKILLS_PVC_NAME:
+        default_skill_mounts = [
+            k8s_client.V1VolumeMount(
+                name="skills-public",
+                mount_path="/mnt/skills/public",
+                read_only=True,
+            ),
+            k8s_client.V1VolumeMount(
+                name="skills-custom",
+                mount_path="/mnt/skills/custom",
+                read_only=True,
+            ),
+            k8s_client.V1VolumeMount(
+                name="skills-legacy",
+                mount_path="/mnt/skills/legacy",
+                read_only=True,
+            ),
+        ]
+        mounts.extend(mount for mount in default_skill_mounts if mount.mount_path not in skill_overrides)
 
     userdata_mount = k8s_client.V1VolumeMount(
         name="user-data",

@@ -31,7 +31,9 @@ logger = logging.getLogger(__name__)
 
 _PROVISIONER_EXTRA_MOUNT_PATHS = {
     "/mnt/acp-workspace",
+    "/mnt/skills/public",
     "/mnt/skills/custom",
+    "/mnt/skills/legacy",
     "/mnt/skills/integrations",
     "/mnt/integrations/lark-cli/config",
     "/mnt/integrations/lark-cli/config/locks",

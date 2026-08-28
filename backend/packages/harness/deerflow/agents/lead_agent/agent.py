@@ -506,6 +506,8 @@ def build_middlewares(
         "app_config": resolved_app_config,
         "lazy_init": True,
     }
+    if available_skills is not None:
+        runtime_middleware_kwargs["available_skills"] = available_skills
     if authorization_provider is not None:
         runtime_middleware_kwargs["authorization_provider"] = authorization_provider
     if authorization_provider is not None and deferred_setup is not None:

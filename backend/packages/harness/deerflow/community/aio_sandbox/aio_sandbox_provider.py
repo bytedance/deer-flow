@@ -44,6 +44,7 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.skills.types import SkillCategory
 
 from .aio_sandbox import AioSandbox
 from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
@@ -142,6 +143,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
           NODE_ENV: production
           API_KEY: $MY_API_KEY
     """
+
+    supports_agent_skill_isolation = True
 
     # How long `_held_teardown_lease` waits for its heartbeat thread to exit
     # before deferring the final lease release to that (still-running) thread.
@@ -723,6 +726,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
+    @staticmethod
+    def _thread_skill_projection_active(thread_id: str, user_id: str) -> bool:
+        return get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists()
+
+    @staticmethod
+    def _policy_scoped_sandbox_id(thread_id: str, user_id: str) -> str:
+        """Return a domain-separated identity for a thread policy sandbox."""
+        seed = b"agent-skills-v1\0" + user_id.encode() + b"\0" + thread_id.encode()
+        return hashlib.sha256(seed).hexdigest()[:16]
+
     def _assert_active_identity_available_locked(
         self,
         sandbox_id: str,
@@ -763,12 +776,20 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
-        skills_mounts = self._get_skills_mounts(user_id=user_id)
+        skills_mounts = self._get_skills_mounts(thread_id, user_id=user_id)
         if skills_mounts:
             mounts.extend(skills_mounts)
             logger.info(f"Adding skills mounts: {skills_mounts}")
 
-        user_skill_mounts = self._get_user_skill_mounts(user_id=user_id)
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        thread_projection_active = bool(
+            thread_id
+            and self._thread_skill_projection_active(
+                thread_id,
+                effective_user_id,
+            )
+        )
+        user_skill_mounts = [] if thread_projection_active else self._get_user_skill_mounts(user_id=user_id)
         if user_skill_mounts:
             mounts.extend(user_skill_mounts)
             logger.info(f"Adding user skill mounts: {user_skill_mounts}")
@@ -825,7 +846,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         ]
 
     @staticmethod
-    def _get_skills_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
+    def _get_skills_mounts(
+        thread_id: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> list[tuple[str, str, bool]]:
         """Get skills directory mount configurations for three-way skills layout.
 
         Mirrors ``LocalSandboxProvider._build_thread_path_mappings`` for AIO
@@ -843,9 +868,27 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             config = get_app_config()
             container_path = config.skills.container_path
             effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
-            AioSandboxProvider._ensure_skills_projection(effective_user_id)
             paths = get_paths()
             host_base_dir = str(paths.host_base_dir)
+
+            if thread_id and AioSandboxProvider._thread_skill_projection_active(
+                thread_id,
+                effective_user_id,
+            ):
+                host_root = paths.host_thread_skills_view_dir(
+                    thread_id,
+                    user_id=effective_user_id,
+                )
+                return [
+                    (
+                        join_host_path(host_root, category.value),
+                        f"{container_path}/{category.value}",
+                        True,
+                    )
+                    for category in SkillCategory
+                ]
+
+            AioSandboxProvider._ensure_skills_projection(effective_user_id)
 
             # 1. Public skills: global, read-only — static, shared by all threads
             mounts.append(
@@ -1275,7 +1318,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
-        return self._deterministic_sandbox_id(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else str(uuid.uuid4())[:8]
+        if not thread_id:
+            return str(uuid.uuid4())[:8]
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        if self._thread_skill_projection_active(thread_id, effective_user_id):
+            return self._policy_scoped_sandbox_id(
+                thread_id,
+                effective_user_id,
+            )
+        return self._deterministic_sandbox_id(thread_id, effective_user_id)
 
     def _reuse_in_process_sandbox(self, thread_id: str | None, *, user_id: str | None = None, post_lock: bool = False) -> str | None:
         """Reuse an active in-process sandbox for a thread if one is still tracked."""
@@ -1284,21 +1335,40 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)
+        policy_scoped_skills = self._thread_skill_projection_active(
+            thread_id,
+            effective_user_id,
+        )
+        expected_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
+        stale_id: str | None = None
         with self._lock:
             if key not in self._thread_sandboxes:
                 return None
 
             existing_id = self._thread_sandboxes[key]
-            if self._being_torn_down_locally(existing_id):
+            if policy_scoped_skills and existing_id != expected_id:
+                stale_id = existing_id
+            elif self._being_torn_down_locally(existing_id):
                 # A reaper thread in this process is stopping this container.
                 # Same answer as a peer's `del:` lease: cold-start instead.
                 logger.info("Cached sandbox %s is being destroyed by this instance; not reusing it", existing_id)
                 return None
-            if existing_id in self._sandboxes:
+            elif existing_id in self._sandboxes:
                 info = self._sandbox_infos.get(existing_id)
             else:
                 del self._thread_sandboxes[key]
                 return None
+
+        if stale_id is not None:
+            logger.info(
+                "Replacing sandbox %s with policy-scoped identity %s for user/thread %s/%s",
+                stale_id,
+                expected_id,
+                effective_user_id,
+                thread_id,
+            )
+            self.destroy(stale_id)
+            return None
 
         alive = self._check_tracked_sandbox_alive(existing_id, info) if info is not None else True
         if alive is False:

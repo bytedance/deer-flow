@@ -3,6 +3,7 @@ import threading
 from collections import OrderedDict
 from pathlib import Path
 
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -64,6 +65,7 @@ class LocalSandboxProvider(SandboxProvider):
 
     uses_thread_data_mounts = True
     needs_upload_permission_adjustment = False
+    supports_agent_skill_isolation = True
 
     def __init__(self, max_cached_threads: int = DEFAULT_MAX_CACHED_THREAD_SANDBOXES):
         """Initialize the local sandbox provider with static path mappings.
@@ -73,6 +75,7 @@ class LocalSandboxProvider(SandboxProvider):
                 the LRU cache. When exceeded, the least-recently-used entry is
                 evicted on the next ``acquire``.
         """
+        self._skills_container_path = DEFAULT_SKILLS_CONTAINER_PATH
         self._path_mappings = self._setup_path_mappings()
         self._generic_sandbox: LocalSandbox | None = None
         self._thread_sandboxes: OrderedDict[tuple[str, str], LocalSandbox] = OrderedDict()
@@ -101,6 +104,7 @@ class LocalSandboxProvider(SandboxProvider):
 
             config = get_app_config()
             container_path = config.skills.container_path
+            self._skills_container_path = container_path.rstrip("/")
             projection = self._ensure_skills_projection()
 
             # Public skills: global, read-only — static, shared by all threads
@@ -132,6 +136,7 @@ class LocalSandboxProvider(SandboxProvider):
             # ``/mnt/skills/custom`` to the init-time user's directory.
 
             # Map custom mounts from sandbox config
+            _RESERVED_CONTAINER_PATHS = {container_path}
             _RESERVED_CONTAINER_PREFIXES = [
                 f"{container_path}/public",
                 f"{container_path}/custom",
@@ -163,7 +168,7 @@ class LocalSandboxProvider(SandboxProvider):
                         continue
 
                     # Reject mounts that conflict with reserved container paths
-                    if any(container_path == p or container_path.startswith(p + "/") for p in _RESERVED_CONTAINER_PREFIXES):
+                    if container_path in _RESERVED_CONTAINER_PATHS or any(container_path == p or container_path.startswith(p + "/") for p in _RESERVED_CONTAINER_PREFIXES):
                         logger.warning(
                             "Mount container_path conflicts with reserved prefix, skipping: %s",
                             mount.container_path,
@@ -217,7 +222,7 @@ class LocalSandboxProvider(SandboxProvider):
         return (user_id, thread_id)
 
     @staticmethod
-    def _ensure_skills_projection(user_id: str | None = None):
+    def _ensure_skills_projection(user_id: str | None = None, *, thread_id: str | None = None):
         """Best-effort: a projection failure must not fail sandbox acquire.
 
         Mirrors the surrounding skill-mount setup, which has always logged
@@ -227,7 +232,11 @@ class LocalSandboxProvider(SandboxProvider):
         acquire once the underlying condition clears.
         """
         from deerflow.config import get_app_config
-        from deerflow.skills.projection import ensure_skill_projections
+        from deerflow.skills.projection import (
+            ensure_skill_projections,
+            get_thread_skill_projection_paths,
+            thread_skill_projection_exists,
+        )
         from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 
         try:
@@ -236,9 +245,17 @@ class LocalSandboxProvider(SandboxProvider):
                 storage = get_or_new_skill_storage(app_config=config)
             else:
                 storage = get_or_new_user_skill_storage(user_id, app_config=config)
+                if thread_id is not None and thread_skill_projection_exists(storage, thread_id):
+                    return get_thread_skill_projection_paths(storage, thread_id)
             return ensure_skill_projections(storage)
         except Exception as exc:
-            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            logger.warning(
+                "Could not ensure skills projection for user/thread %s/%s: %s",
+                user_id,
+                thread_id,
+                exc,
+                exc_info=True,
+            )
             return None
 
     @staticmethod
@@ -326,7 +343,7 @@ class LocalSandboxProvider(SandboxProvider):
             ),
         ]
 
-        # Per-user category mounts stay present for the sandbox lifetime. Their
+        # Category mounts stay present for the sandbox lifetime. Their
         # enabled-only contents change beneath these stable roots.
         try:
             config = get_app_config()
@@ -334,29 +351,72 @@ class LocalSandboxProvider(SandboxProvider):
             projection = skill_projection if skill_projection is not None else LocalSandboxProvider._ensure_skills_projection(effective_user_id)
 
             if projection is not None:
-                mappings.extend(
-                    [
-                        PathMapping(
-                            container_path=f"{skills_container_path}/custom",
-                            local_path=str(projection.custom),
-                            read_only=True,
-                        ),
-                        PathMapping(
-                            container_path=f"{skills_container_path}/legacy",
-                            local_path=str(projection.legacy),
-                            read_only=True,
-                        ),
-                        PathMapping(
-                            container_path=f"{skills_container_path}/integrations",
-                            local_path=str(projection.integrations),
-                            read_only=True,
-                        ),
-                    ]
+                thread_projection_root = paths.thread_skills_view_dir(
+                    thread_id,
+                    user_id=effective_user_id,
                 )
+                if projection.public.parent == thread_projection_root:
+                    mappings.append(
+                        PathMapping(
+                            container_path=skills_container_path,
+                            local_path=str(thread_projection_root),
+                            read_only=True,
+                        )
+                    )
+                else:
+                    mappings.extend(
+                        [
+                            PathMapping(
+                                container_path=f"{skills_container_path}/public",
+                                local_path=str(projection.public),
+                                read_only=True,
+                            ),
+                            PathMapping(
+                                container_path=f"{skills_container_path}/custom",
+                                local_path=str(projection.custom),
+                                read_only=True,
+                            ),
+                            PathMapping(
+                                container_path=f"{skills_container_path}/legacy",
+                                local_path=str(projection.legacy),
+                                read_only=True,
+                            ),
+                            PathMapping(
+                                container_path=f"{skills_container_path}/integrations",
+                                local_path=str(projection.integrations),
+                                read_only=True,
+                            ),
+                        ]
+                    )
         except Exception as exc:
             logger.warning("Could not setup per-thread skills projection mounts: %s", exc, exc_info=True)
 
         return mappings
+
+    def _without_managed_skill_mappings(
+        self,
+        mappings: list[PathMapping],
+        *,
+        policy_scoped: bool,
+    ) -> list[PathMapping]:
+        """Drop mappings that would overlap the selected managed skill view.
+
+        Ordinary sandboxes retain operator-defined mounts elsewhere below the
+        configured skills root for backward compatibility. A policy-scoped
+        sandbox removes the entire subtree before installing its coherent root
+        mapping, so a nested custom mount cannot bypass the Agent allowlist.
+        """
+        root = self._skills_container_path
+        managed_categories = tuple(f"{root}/{category}" for category in ("public", "custom", "legacy", "integrations"))
+
+        def conflicts(mapping: PathMapping) -> bool:
+            path = mapping.container_path.rstrip("/")
+            if path == root:
+                return True
+            prefixes = (root,) if policy_scoped else managed_categories
+            return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+
+        return [mapping for mapping in mappings if not conflicts(mapping)]
 
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Return a sandbox id scoped to *thread_id* (or the generic singleton).
@@ -390,23 +450,28 @@ class LocalSandboxProvider(SandboxProvider):
         # triggers a full rebuild (~400 ms measured locally) under the
         # cross-process projection lock, serializing concurrent acquires and
         # mutations for that user. Acceptable for an editing-frequency event.
-        skill_projection = self._ensure_skills_projection(effective_user_id)
+        skill_projection = self._ensure_skills_projection(
+            effective_user_id,
+            thread_id=thread_id,
+        )
         key = self._thread_key(thread_id, effective_user_id)
-
-        # Fast path under lock.
-        with self._lock:
-            cached = self._thread_sandboxes.get(key)
-            if cached is not None:
-                # Mark as most-recently used so frequently-touched threads
-                # survive eviction.
-                self._thread_sandboxes.move_to_end(key)
-        if cached is not None:
-            return cached.id
 
         # ``_build_thread_path_mappings`` touches the filesystem
         # (``ensure_thread_dirs``); release the lock during I/O.
-        new_mappings = list(self._path_mappings)
-        self._append_public_skill_mapping(new_mappings, skill_projection)
+        from deerflow.config.paths import get_paths
+
+        policy_scoped = bool(
+            skill_projection is not None
+            and skill_projection.public.parent
+            == get_paths().thread_skills_view_dir(
+                thread_id,
+                user_id=effective_user_id,
+            )
+        )
+        new_mappings = self._without_managed_skill_mappings(
+            list(self._path_mappings),
+            policy_scoped=policy_scoped,
+        )
         new_mappings += self._build_thread_path_mappings(
             thread_id,
             user_id=effective_user_id,
@@ -414,11 +479,15 @@ class LocalSandboxProvider(SandboxProvider):
         )
 
         with self._lock:
-            # Re-check after the lock-free I/O: another caller may have
-            # populated the cache while we were computing mappings.
             cached = self._thread_sandboxes.get(key)
-            if cached is None:
-                cached = LocalSandbox(self._sandbox_id_for_thread(thread_id, effective_user_id), path_mappings=new_mappings)
+            if cached is None or cached.path_mappings != new_mappings:
+                replacement = LocalSandbox(
+                    self._sandbox_id_for_thread(thread_id, effective_user_id),
+                    path_mappings=new_mappings,
+                )
+                if cached is not None:
+                    replacement._agent_written_paths.update(cached._agent_written_paths)
+                cached = replacement
                 self._thread_sandboxes[key] = cached
                 self._evict_until_within_cap_locked()
             else:

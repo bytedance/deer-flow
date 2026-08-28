@@ -133,6 +133,14 @@ skills:
 - **Empty list `[]`**: the agent has no skills.
 - **Named list**: the agent loads only those specific skills.
 
+For a lead custom Agent, an explicit list is enforced in both discovery and the
+sandbox filesystem. `/mnt/skills` contains only the intersection of globally
+enabled, user-visible, and Agent-allowed skills; shell commands and file tools
+cannot read an omitted skill through its old shared path. Local, AIO, and E2B
+sandboxes support this isolation. A different sandbox provider must advertise
+the same contract or an explicit policy fails closed before the run acquires a
+sandbox. Agent configuration changes take effect on the thread's next run.
+
 ## Skill evolution
 
 DeerFlow includes an optional **skill evolution** feature that allows the agent to autonomously create and improve skills in the `skills/custom/` directory:

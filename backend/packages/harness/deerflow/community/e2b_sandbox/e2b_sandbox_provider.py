@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from e2b import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
@@ -80,6 +80,9 @@ from .capacity import (
     make_e2b_capacity_store,
 )
 from .e2b_sandbox import DEFAULT_E2B_HOME_DIR, E2BSandbox, _is_sandbox_gone_error
+
+if TYPE_CHECKING:
+    from deerflow.skills.projection import SkillProjectionPaths
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +190,7 @@ class E2BSandboxProvider(SandboxProvider):
     # remote backend in AioSandboxProvider sets the same flag).
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
+    supports_agent_skill_isolation = True
 
     # ── Construction & config ────────────────────────────────────────────
 
@@ -1170,7 +1174,7 @@ class E2BSandboxProvider(SandboxProvider):
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
         try:
-            self._apply_mounts(client, user_id=user_id)
+            self._apply_mounts(client, user_id=user_id, thread_id=thread_id)
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
@@ -1795,7 +1799,11 @@ class E2BSandboxProvider(SandboxProvider):
         if exit_code not in (0, None) or "BOOTSTRAP_OK" not in stdout:
             raise RuntimeError(f"e2b bootstrap script failed with exit code {exit_code}; stderr={stderr.strip()}")
 
-    def _skill_projection_mounts(self, user_id: str) -> list[tuple[Path, str, bool]]:
+    def _skill_projection_mounts(
+        self,
+        user_id: str,
+        thread_id: str | None = None,
+    ) -> list[tuple[Path, str, bool]]:
         """Best-effort: a projection failure must not drop configured mounts too.
 
         Unlike Local/AIO's ``_ensure_skills_projection``, this used to raise
@@ -1805,10 +1813,24 @@ class E2BSandboxProvider(SandboxProvider):
         no mounts applied at all). Swallowing here keeps the two mount
         sources independent, matching the other two providers.
         """
+        from deerflow.config.paths import get_paths
         from deerflow.skills.projection import ensure_skill_projections
         from deerflow.skills.storage import get_or_new_user_skill_storage
 
         try:
+            # The middleware performs a strict, fail-closed upload after acquire
+            # for a policy-scoped thread. Do not first upload the shared view and
+            # briefly hydrate the VM with skills outside the Agent allowlist.
+            if (
+                thread_id
+                and get_paths()
+                .thread_skills_view_dir(
+                    thread_id,
+                    user_id=user_id,
+                )
+                .exists()
+            ):
+                return []
             config = get_app_config()
             storage = get_or_new_user_skill_storage(user_id, app_config=config)
             projection = ensure_skill_projections(storage)
@@ -1823,7 +1845,13 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
             return []
 
-    def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
+    def _apply_mounts(
+        self,
+        client: E2BClientSandbox,
+        *,
+        user_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> None:
         started_at = time.monotonic()
         deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
         budget = _MountUploadBudget(
@@ -1844,7 +1872,7 @@ class E2BSandboxProvider(SandboxProvider):
             )
 
         effective_user_id = user_id or get_effective_user_id()
-        projection_mounts = self._skill_projection_mounts(effective_user_id)
+        projection_mounts = self._skill_projection_mounts(effective_user_id, thread_id) if thread_id is not None else self._skill_projection_mounts(effective_user_id)
         configured_mounts = self._config.get("mounts") or []
         skills_root = get_app_config().skills.container_path.rstrip("/")
 
@@ -1892,6 +1920,76 @@ class E2BSandboxProvider(SandboxProvider):
                 break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
+
+    def sync_agent_skills(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection: SkillProjectionPaths,
+    ) -> None:
+        """Replace E2B's uploaded skills with the prepared thread projection."""
+        del thread_id, user_id  # Scope is already encoded in ``projection``.
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+        if sandbox is None:
+            raise RuntimeError(f"E2B sandbox {sandbox_id} is not available for skill synchronization")
+
+        skills_root = get_app_config().skills.container_path.rstrip("/")
+        if not skills_root.startswith("/") or skills_root == "":
+            raise ValueError("The skills container path must be an absolute non-root path")
+
+        projection_root = projection.public.parent
+        manifest_path = projection_root / ".projection-manifest.json"
+        manifest = manifest_path.read_bytes()
+        signature = hashlib.sha256(manifest).hexdigest()
+        marker_path = f"{skills_root}/.deerflow-projection-signature"
+        try:
+            remote_signature = sandbox.client.files.read(marker_path)
+        except Exception:
+            remote_signature = None
+        if isinstance(remote_signature, bytes):
+            remote_signature = remote_signature.decode("utf-8", errors="replace")
+        if remote_signature == signature:
+            return
+
+        quoted_root = shlex.quote(skills_root)
+        category_paths = [
+            f"{skills_root}/public",
+            f"{skills_root}/custom",
+            f"{skills_root}/legacy",
+            f"{skills_root}/integrations",
+        ]
+        quoted_categories = " ".join(shlex.quote(path) for path in category_paths)
+        reset_script = f'set -e; sudo rm -rf -- {quoted_root}; sudo mkdir -p -- {quoted_categories}; sudo chown -R "$(id -u):$(id -g)" -- {quoted_root}; echo SKILLS_RESET_OK'
+        result = sandbox.client.commands.run(reset_script)
+        stdout = getattr(result, "stdout", "") or ""
+        stderr = getattr(result, "stderr", "") or ""
+        exit_code = getattr(result, "exit_code", 0)
+        if exit_code not in (0, None) or "SKILLS_RESET_OK" not in stdout:
+            raise RuntimeError(f"Failed to reset E2B skill projection (exit_code={exit_code}, stderr={stderr.strip()})")
+
+        started_at = time.monotonic()
+        budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
+        for source, destination in zip(
+            (
+                projection.public,
+                projection.custom,
+                projection.legacy,
+                projection.integrations,
+            ),
+            category_paths,
+            strict=True,
+        ):
+            self._upload_tree(
+                sandbox.client,
+                source,
+                destination,
+                True,
+                budget=budget,
+            )
+        sandbox.client.files.write(marker_path, signature.encode("utf-8"))
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")

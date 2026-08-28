@@ -366,6 +366,159 @@ def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_pat
     assert "/mnt/skills/integrations/lark-cli/disabled-integration/SKILL.md" not in uploaded_paths
 
 
+def test_policy_scoped_thread_skips_shared_projection_during_create(
+    monkeypatch,
+    tmp_path,
+):
+    paths = Paths(base_dir=tmp_path)
+    paths.thread_skills_view_dir("thread-1", user_id="user-1").mkdir(parents=True)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+
+    provider = _make_provider()
+
+    assert provider._skill_projection_mounts("user-1", "thread-1") == []
+
+
+def test_sync_agent_skills_replaces_remote_tree_and_caches_manifest_signature(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    _write_skill(projection.public, "allowed-skill")
+    (root / ".projection-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_signature": "source-a",
+                "view_signature": "view-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    files = FakeFilesAPI(
+        {
+            "/mnt/skills/public/excluded-skill/SKILL.md": b"excluded",
+        }
+    )
+
+    def reset_remote_tree(command: str):
+        assert "sudo rm -rf -- /mnt/skills" in command
+        for path in list(files.store):
+            if path.startswith("/mnt/skills/"):
+                files.store.pop(path)
+        return SimpleNamespace(
+            stdout="SKILLS_RESET_OK\n",
+            stderr="",
+            exit_code=0,
+        )
+
+    commands = FakeCommandsAPI([reset_remote_tree])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands, files=files)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    provider.sync_agent_skills(
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        projection=projection,
+    )
+
+    assert "/mnt/skills/public/excluded-skill/SKILL.md" not in files.store
+    assert files.store["/mnt/skills/public/allowed-skill/SKILL.md"].startswith(b"---")
+    assert "/mnt/skills/.deerflow-projection-signature" in files.store
+    first_command_count = len(commands.calls)
+    first_write_count = len(files.write_calls)
+
+    provider.sync_agent_skills(
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        projection=projection,
+    )
+
+    assert len(commands.calls) == first_command_count
+    assert len(files.write_calls) == first_write_count
+
+
+def test_sync_agent_skills_leaves_no_signature_after_upload_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    (root / ".projection-manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    commands = FakeCommandsAPI([SimpleNamespace(stdout="SKILLS_RESET_OK\n", stderr="", exit_code=0)])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_upload_tree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert "/mnt/skills/.deerflow-projection-signature" not in client.files.store
+
+
 def test_upload_tree_streams_file_contents(tmp_path):
     source = tmp_path / "large.bin"
     source.write_bytes(b"mount content")

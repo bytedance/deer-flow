@@ -279,13 +279,64 @@ def test_get_extra_mounts_provisioner_payload_has_unique_container_paths(tmp_pat
     assert len(validated_paths) == len(set(validated_paths))
     assert set(validated_paths) == {
         "/mnt/acp-workspace",
+        "/mnt/skills/public",
         "/mnt/skills/custom",
+        "/mnt/skills/legacy",
         "/mnt/skills/integrations",
         lark_cli.LARK_CLI_SANDBOX_CONFIG_DIR,
         lark_cli.LARK_CLI_SANDBOX_LOCKS_DIR,
         lark_cli.LARK_CLI_SANDBOX_DATA_DIR,
         lark_cli.LARK_CLI_SANDBOX_RUNTIME_DIR,
     }
+
+
+def test_thread_skill_projection_mounts_all_categories(
+    tmp_path,
+    monkeypatch,
+):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    paths = Paths(base_dir=tmp_path / "home")
+    projection_root = paths.thread_skills_view_dir(
+        "thread-policy",
+        user_id="alice",
+    )
+    for category in ("public", "custom", "legacy", "integrations"):
+        (projection_root / category).mkdir(parents=True, exist_ok=True)
+    config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
+    monkeypatch.setattr(aio_mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: paths)
+
+    mounts = aio_mod.AioSandboxProvider._get_skills_mounts(
+        "thread-policy",
+        user_id="alice",
+    )
+
+    assert {container_path: host_path for host_path, container_path, _ in mounts} == {f"/mnt/skills/{category}": str(projection_root / category) for category in ("public", "custom", "legacy", "integrations")}
+    assert all(read_only for _host, _container, read_only in mounts)
+
+
+def test_thread_skill_projection_uses_distinct_sandbox_identity(
+    tmp_path,
+    monkeypatch,
+):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    paths = Paths(base_dir=tmp_path / "home")
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: paths)
+    provider = _make_provider(tmp_path)
+
+    shared_id = provider._sandbox_id_for_thread("thread-policy", "alice")
+    paths.thread_skills_view_dir(
+        "thread-policy",
+        user_id="alice",
+    ).mkdir(parents=True)
+    policy_id = provider._sandbox_id_for_thread("thread-policy", "alice")
+
+    assert policy_id != shared_id
+    assert policy_id == provider._sandbox_id_for_thread("thread-policy", "alice")
+    assert policy_id != provider._deterministic_sandbox_id(
+        "thread-policy:agent-skills-v1",
+        "alice",
+    )
 
 
 def test_join_host_path_preserves_windows_drive_letter_style():
