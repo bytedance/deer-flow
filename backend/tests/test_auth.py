@@ -921,7 +921,7 @@ def test_rate_limiter_resets_on_success():
 def test_get_client_ip_direct_connection_no_proxy(monkeypatch):
     """Direct mode (no AUTH_TRUSTED_PROXIES): use TCP peer regardless of X-Real-IP."""
     monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client.host = "203.0.113.42"
@@ -936,7 +936,7 @@ def test_get_client_ip_x_real_ip_ignored_when_no_trusted_proxy(monkeypatch):
     request to dodge per-IP rate limits in dev / direct mode.
     """
     monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client.host = "127.0.0.1"
@@ -947,7 +947,7 @@ def test_get_client_ip_x_real_ip_ignored_when_no_trusted_proxy(monkeypatch):
 def test_get_client_ip_x_real_ip_honored_from_trusted_proxy(monkeypatch):
     """X-Real-IP is honored when the TCP peer matches AUTH_TRUSTED_PROXIES."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client.host = "10.5.6.7"  # in trusted CIDR
@@ -958,7 +958,7 @@ def test_get_client_ip_x_real_ip_honored_from_trusted_proxy(monkeypatch):
 def test_get_client_ip_x_real_ip_rejected_from_untrusted_peer(monkeypatch):
     """X-Real-IP is rejected when the TCP peer is NOT in the trusted list."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client.host = "8.8.8.8"  # NOT in trusted CIDR
@@ -969,7 +969,7 @@ def test_get_client_ip_x_real_ip_rejected_from_untrusted_peer(monkeypatch):
 def test_get_client_ip_xff_never_honored(monkeypatch):
     """X-Forwarded-For is never used; only X-Real-IP from a trusted peer."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "10.0.0.0/8")
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client.host = "10.0.0.1"
@@ -980,7 +980,7 @@ def test_get_client_ip_xff_never_honored(monkeypatch):
 def test_get_client_ip_invalid_trusted_proxy_entry_skipped(monkeypatch, caplog):
     """Garbage entries in AUTH_TRUSTED_PROXIES are warned and skipped."""
     monkeypatch.setenv("AUTH_TRUSTED_PROXIES", "not-an-ip,10.0.0.0/8")
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client.host = "10.5.6.7"
@@ -991,7 +991,7 @@ def test_get_client_ip_invalid_trusted_proxy_entry_skipped(monkeypatch, caplog):
 def test_get_client_ip_no_client_returns_unknown(monkeypatch):
     """No request.client → 'unknown' marker (no crash)."""
     monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
-    from app.gateway.routers.auth import _get_client_ip
+    from app.gateway.client_ip import get_client_ip as _get_client_ip
 
     req = MagicMock()
     req.client = None

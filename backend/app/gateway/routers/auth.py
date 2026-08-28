@@ -2,12 +2,10 @@
 
 import asyncio
 import logging
-import os
 import re
 import secrets
 import time
 import urllib.parse
-from ipaddress import ip_address, ip_network
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
@@ -34,6 +32,7 @@ from app.gateway.auth.oidc_state import (
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+from app.gateway.client_ip import get_client_ip
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
 from deerflow.config.auth_config import OIDCProviderConfig
@@ -174,65 +173,9 @@ _LOCKOUT_SECONDS = 300  # 5 minutes
 _login_attempts: dict[str, tuple[int, float]] = {}
 
 
-def _trusted_proxies() -> list:
-    """Parse ``AUTH_TRUSTED_PROXIES`` env var into a list of ip_network objects.
-
-    Comma-separated CIDR or single-IP entries. Empty / unset = no proxy is
-    trusted (direct mode). Invalid entries are skipped with a logger warning.
-    Read live so env-var overrides take effect immediately and tests can
-    ``monkeypatch.setenv`` without poking a module-level cache.
-    """
-    raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
-    if not raw:
-        return []
-    nets = []
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry:
-            continue
-        try:
-            nets.append(ip_network(entry, strict=False))
-        except ValueError:
-            logger.warning("AUTH_TRUSTED_PROXIES: ignoring invalid entry %r", entry)
-    return nets
-
-
-def _get_client_ip(request: Request) -> str:
-    """Extract the real client IP for rate limiting.
-
-    Trust model:
-
-    - The TCP peer (``request.client.host``) is always the baseline. It is
-      whatever the kernel reports as the connecting socket — unforgeable
-      by the client itself.
-    - ``X-Real-IP`` is **only** honored if the TCP peer is in the
-      ``AUTH_TRUSTED_PROXIES`` allowlist (set via env var, comma-separated
-      CIDR or single IPs). When set, the gateway is assumed to be behind a
-      reverse proxy (nginx, Cloudflare, ALB, …) that overwrites
-      ``X-Real-IP`` with the original client address.
-    - With no ``AUTH_TRUSTED_PROXIES`` set, ``X-Real-IP`` is silently
-      ignored — closing the bypass where any client could rotate the
-      header to dodge per-IP rate limits in dev / direct-gateway mode.
-
-    ``X-Forwarded-For`` is intentionally NOT used because it is naturally
-    client-controlled at the *first* hop and the trust chain is harder to
-    audit per-request.
-    """
-    peer_host = request.client.host if request.client else None
-
-    trusted = _trusted_proxies()
-    if trusted and peer_host:
-        try:
-            peer_ip = ip_address(peer_host)
-            if any(peer_ip in net for net in trusted):
-                real_ip = request.headers.get("x-real-ip", "").strip()
-                if real_ip:
-                    return real_ip
-        except ValueError:
-            # peer_host wasn't a parseable IP (e.g. "unknown") — fall through
-            pass
-
-    return peer_host or "unknown"
+# Client-IP resolution for the login limiter lives in app.gateway.client_ip
+# (shared with the share-resolution throttle): the TCP peer is the baseline,
+# and X-Real-IP is honored only when the peer is in AUTH_TRUSTED_PROXIES.
 
 
 def _check_rate_limit(ip: str) -> None:
@@ -293,7 +236,7 @@ async def login_local(
     remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
-    client_ip = _get_client_ip(request)
+    client_ip = get_client_ip(request)
     _check_rate_limit(client_ip)
 
     user = await get_local_provider().authenticate({"email": form_data.username, "password": form_data.password})
@@ -464,7 +407,7 @@ _SETUP_STATUS_INFLIGHT_GUARD = asyncio.Lock()
 @router.get("/setup-status")
 async def setup_status(request: Request):
     """Check if an admin account exists. Returns needs_setup=True when no admin exists."""
-    client_ip = _get_client_ip(request)
+    client_ip = get_client_ip(request)
     now = time.time()
 
     # Return cached result when within TTL — avoids 429 on multi-tab reconnection.

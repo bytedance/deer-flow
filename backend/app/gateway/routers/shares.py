@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
+from app.gateway.client_ip import get_client_ip
 from app.gateway.deps import get_config, get_current_user
 from app.gateway.shares.snapshot import (
     ShareSnapshotTooLarge,
@@ -37,9 +38,14 @@ _EXPIRY_CHOICES_DAYS = (1, 7, 30)
 
 # Bounded in-memory per-IP throttle for public token resolution. The token is
 # high-entropy so guessing is infeasible; this exists to blunt hammering of
-# the resolution endpoint (bearer-in-URL compensating control, #4548).
+# the resolution endpoint (bearer-in-URL compensating control, #4548). The
+# bucket key comes from the deployment-wide trusted-proxy model
+# (app.gateway.client_ip): behind the shipped nginx, deployments must set
+# AUTH_TRUSTED_PROXIES to the proxy network or every anonymous visitor
+# shares the proxy's single bucket.
 _PUBLIC_RESOLVE_WINDOW_SECONDS = 60.0
 _PUBLIC_RESOLVE_MAX_PER_WINDOW = 60
+_PUBLIC_RESOLVE_TRACKER_MAX_IPS = 4096
 _public_resolve_hits: dict[str, list[float]] = {}
 
 
@@ -54,9 +60,25 @@ def _public_resolve_throttled(client_ip: str | None) -> bool:
         return True
     hits.append(now)
     _public_resolve_hits[client_ip] = hits
-    if len(_public_resolve_hits) > 4096:  # bound the tracker itself
-        _public_resolve_hits.clear()
+    _prune_resolve_tracker(now)
     return False
+
+
+def _prune_resolve_tracker(now: float) -> None:
+    """Bound the tracker without flushing it.
+
+    Clearing wholesale would let anyone rotating past the IP cap reset every
+    visitor's hit history; stale entries go first, then the longest-idle
+    survivors, until the tracker is back under the cap.
+    """
+    if len(_public_resolve_hits) <= _PUBLIC_RESOLVE_TRACKER_MAX_IPS:
+        return
+    window_start = now - _PUBLIC_RESOLVE_WINDOW_SECONDS
+    for ip in [ip for ip, stamps in _public_resolve_hits.items() if not stamps or stamps[-1] <= window_start]:
+        del _public_resolve_hits[ip]
+    while len(_public_resolve_hits) > _PUBLIC_RESOLVE_TRACKER_MAX_IPS:
+        longest_idle = min(_public_resolve_hits, key=lambda ip: _public_resolve_hits[ip][-1])
+        del _public_resolve_hits[longest_idle]
 
 
 def _sharing_config():
@@ -253,7 +275,7 @@ async def get_public_share(share_token: str, request: Request, response: Respons
     repo = getattr(request.app.state, "share_repo", None)
     if repo is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-    if _public_resolve_throttled(request.client.host if request.client else None):
+    if _public_resolve_throttled(get_client_ip(request)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     record = await repo.get_active_by_token_hash(share_token_hash(share_token, get_share_pepper()))

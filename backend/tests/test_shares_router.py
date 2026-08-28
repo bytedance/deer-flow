@@ -9,6 +9,7 @@ endpoint never touching thread state under a synthetic principal.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
@@ -479,3 +480,45 @@ def test_public_resolution_is_throttled_per_ip(tmp_path):
         statuses = [client.get(f"/api/shares/{token}").status_code for _ in range(shares_router._PUBLIC_RESOLVE_MAX_PER_WINDOW + 5)]
     assert statuses[0] == 200
     assert statuses[-1] == 404  # throttled within the window
+
+
+def test_public_resolution_buckets_by_resolved_client_ip(tmp_path, monkeypatch):
+    """Behind a trusted proxy the throttle keys on the resolved client IP, not
+    the proxy peer — visitors get separate buckets instead of one global one
+    (the shipped nginx topology previously made the limit effectively global)."""
+    resolved = {"current": "198.51.100.1"}
+
+    def fake_get_client_ip(request):
+        return resolved["current"]
+
+    monkeypatch.setattr(shares_router, "get_client_ip", fake_get_client_ip)
+    with _client(tmp_path) as (client, repo):
+        token = _mint(client, repo)
+        # Visitor A fills their own bucket…
+        for _ in range(shares_router._PUBLIC_RESOLVE_MAX_PER_WINDOW):
+            assert client.get(f"/api/shares/{token}").status_code == 200
+        assert client.get(f"/api/shares/{token}").status_code == 404  # A is throttled
+        # …but visitor B is a separate bucket and still resolves.
+        resolved["current"] = "198.51.100.2"
+        assert client.get(f"/api/shares/{token}").status_code == 200
+
+
+def test_resolve_tracker_prunes_oldest_without_flushing_everyone():
+    """Exceeding the tracker cap evicts the longest-idle entries instead of
+    clearing everything — a wholesale flush would reset every visitor's hit
+    history and let anyone rotating past the cap un-throttle themselves."""
+    cap = shares_router._PUBLIC_RESOLVE_TRACKER_MAX_IPS
+    now = time.monotonic()
+    shares_router._public_resolve_hits.clear()
+    try:
+        # Fill the tracker just under the cap with fresh-but-older entries…
+        for index in range(cap - 1):
+            shares_router._public_resolve_hits[f"10.1.{index // 256}.{index % 256}"] = [now - 5.0]
+        # …then two very recent visitors who must survive the prune.
+        assert not shares_router._public_resolve_throttled("198.51.100.9")
+        assert not shares_router._public_resolve_throttled("198.51.100.10")  # pushes past the cap
+        assert len(shares_router._public_resolve_hits) == cap
+        assert "198.51.100.9" in shares_router._public_resolve_hits
+        assert "198.51.100.10" in shares_router._public_resolve_hits
+    finally:
+        shares_router._public_resolve_hits.clear()

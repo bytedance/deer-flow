@@ -41,7 +41,11 @@ middleware exemption is prefix-based, so two contract tests pin that nothing
 non-GET may mount under `/api/shares/`). Properties: per-request
 expiry/revocation checks with indistinguishable 404s for unknown/revoked/
 expired; per-IP resolve throttle (in-memory, per-worker — a courtesy control,
-the token is 256-bit unguessable); `Referrer-Policy: no-referrer` +
+the token is 256-bit unguessable; the bucket key uses the deployment-wide
+trusted-proxy model from `app.gateway.client_ip`, shared with the login
+limiter — behind the shipped nginx, deployments must set
+`AUTH_TRUSTED_PROXIES` to the proxy network or every anonymous visitor shares
+the proxy's single bucket); `Referrer-Policy: no-referrer` +
 `Cache-Control: no-store` (the bearer-URL response must never survive in a
 browser/proxy cache past revocation); and zero thread-state access — explicit
 share records are the only gate in every mode, including auth-disabled. A
