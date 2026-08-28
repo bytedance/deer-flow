@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check check-agent-guidance install extension-install extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check check-agent-guidance install extension-install extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis setup-sandbox
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -137,10 +137,12 @@ dev:
 	@$(PYTHON) ./scripts/check.py
 	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev
 
-# Start all services in production mode (with optimizations)
+# Start all services in production mode (with optimizations).
+# SKIP_FRONTEND_BUILD=1 reuses the existing frontend build instead of running
+# `next build`; see scripts/serve.sh --skip-frontend-build.
 start:
 	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod $(if $(filter 1,$(SKIP_FRONTEND_BUILD)),--skip-frontend-build)
 
 # Start all services in daemon mode (background)
 dev-daemon:
@@ -150,7 +152,7 @@ dev-daemon:
 # Start prod services in daemon mode (background)
 start-daemon:
 	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon
+	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon $(if $(filter 1,$(SKIP_FRONTEND_BUILD)),--skip-frontend-build)
 
 # Start nginx alone in the foreground with the local dev config
 nginx:

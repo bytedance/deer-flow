@@ -607,6 +607,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         extra_config={"max_results": 5},
     ),
     SearchProvider(
+        name="serply",
+        display_name="Serply",
+        description="Google Search, News and Scholar results, API key required",
+        use="deerflow.community.serply.tools:web_search_tool",
+        env_var="SERPLY_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
         name="groundroute",
         display_name="GroundRoute",
         description="One key across six engines, price-routed with failover, API key required",

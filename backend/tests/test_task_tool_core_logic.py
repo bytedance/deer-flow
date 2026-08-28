@@ -13,7 +13,9 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
@@ -261,6 +263,51 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Unknown subagent type 'general-purpose'. Available: general-purpose"
 
 
+def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = ["planner"]
+    captured = {}
+
+    def available(*, allowed_subagents):
+        captured["allowed"] = allowed_subagents
+        return ["planner"]
+
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", available)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert captured["allowed"] == ["planner"]
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: planner" in message.content
+
+
+def test_task_tool_explains_when_caller_policy_permits_no_subagents(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = []
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, allowed_subagents: [])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-empty-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: none permitted by caller policy" in message.content
+
+
 def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     """The lead run binds one immutable extension snapshot; delegation must
     carry that same object rather than re-reading the process singleton, which
@@ -326,6 +373,49 @@ def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
 
     assert "extensions" not in captured["executor_kwargs"]
+
+
+def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
+    runtime = _make_runtime()
+    captured = {}
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=7))
+    app_config = object()
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    bound_tool = task_tool_module.bind_task_tool(capacity, app_config=app_config)
+    coroutine = getattr(bound_tool, "coroutine", None)
+    assert coroutine is not None
+    asyncio.run(
+        coroutine(
+            runtime=runtime,
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-capacity",
+        )
+    )
+
+    assert captured["executor_kwargs"]["execution_capacity"] is capacity
+    assert captured["executor_kwargs"]["app_config"] is app_config
 
 
 def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
@@ -483,6 +573,7 @@ def test_task_tool_rejects_non_mapping_attributes(monkeypatch):
 
 def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
 
     result = _run_task_tool(

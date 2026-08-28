@@ -17,20 +17,22 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 ## Commands
 
-| Command          | Purpose                                           |
-| ---------------- | ------------------------------------------------- |
-| `pnpm dev`       | Dev server with Turbopack (http://localhost:3000) |
-| `pnpm build`     | Production build                                  |
-| `pnpm check`     | Lint + type check (run before committing)         |
-| `pnpm lint`      | ESLint only                                       |
-| `pnpm lint:fix`  | ESLint with auto-fix                              |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply)     |
-| `pnpm test`      | Run unit tests with Rstest                        |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)          |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)            |
-| `pnpm start`     | Start production server                           |
+| Command          | Purpose                                                             |
+| ---------------- | ------------------------------------------------------------------- |
+| `pnpm dev`       | Platform-aware dev server (Webpack on Windows, Turbopack elsewhere) |
+| `pnpm build`     | Production build                                                    |
+| `pnpm check`     | Lint + type check (run before committing)                           |
+| `pnpm lint`      | ESLint only                                                         |
+| `pnpm lint:fix`  | ESLint with auto-fix                                                |
+| `pnpm format`    | Prettier check (`pnpm format:write` to apply)                       |
+| `pnpm test`      | Run unit tests with Rstest                                          |
+| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)                            |
+| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)                              |
+| `pnpm start`     | Start production server                                             |
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
+
+Use `DEER_FLOW_DEV_BUNDLER=turbo` or `DEER_FLOW_DEV_BUNDLER=webpack` with `pnpm dev` to override the platform default when diagnosing a local Next.js bundler issue.
 
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 
@@ -55,7 +57,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`content/`** — MDX content (blog posts, docs) rendered by the app
