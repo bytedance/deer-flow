@@ -499,6 +499,40 @@ credentials must never be placed in either run metadata surface
 for the supported interceptor flow and the required rotation and retained-copy
 cleanup when migrating from legacy metadata credentials.
 
+##### Parallel Search (optional)
+
+The `parallel-search` entry in `extensions_config.example.json` is disabled by
+default. To opt in, copy that entry into `mcpServers` in your root
+`extensions_config.json`, set `"enabled": true`, and restart DeerFlow. It connects
+to `https://search.parallel.ai/mcp` over HTTP and adds `web_search` and `web_fetch`
+without changing existing search providers or defaults.
+
+This is a third-party service operated by Parallel.ai. Tool calls send search
+objectives and queries to Parallel for `web_search`, and requested page URLs and
+any extraction objective for `web_fetch`. These inputs can contain information
+from your conversation, so enable it only if you are comfortable sending that
+data to Parallel.
+
+Access is anonymous by default: no API key or authentication headers are needed.
+For higher rate limits, optionally add this `headers` field to the
+`parallel-search` entry in your local `extensions_config.json`:
+
+```json
+{
+  "headers": {
+    "Authorization": "$PARALLEL_AUTHORIZATION"
+  }
+}
+```
+
+Set `PARALLEL_AUTHORIZATION` in the DeerFlow backend's environment to the full
+value `Bearer <your-parallel-api-key>`, then restart DeerFlow. Include `Bearer `
+in the environment variable because DeerFlow expands only whole-string
+`$ENV_VAR` references, not `Bearer $ENV_VAR`. Keep the actual key out of committed
+files. Remove the `headers` field to return to anonymous access. See the
+[Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for details.
+
 #### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
