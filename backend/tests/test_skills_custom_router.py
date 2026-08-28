@@ -202,8 +202,21 @@ def test_upload_skill_archive_rejects_non_skill_extension(monkeypatch):
     assert install_called is False
 
 
+def test_upload_skill_archive_keeps_multipart_openapi_contract():
+    app = _make_test_app(SimpleNamespace())
+
+    operation = app.openapi()["paths"]["/api/skills/install/upload"]["post"]
+    request_body = operation["requestBody"]
+    archive_schema = request_body["content"]["multipart/form-data"]["schema"]
+
+    assert request_body["required"] is True
+    assert archive_schema["required"] == ["archive"]
+    assert archive_schema["properties"]["archive"] == {"type": "string", "format": "binary"}
+
+
 def test_upload_skill_archive_rejects_oversized_payload(monkeypatch):
     install_called = False
+    copy_called = False
 
     class _Storage:
         async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
@@ -213,6 +226,13 @@ def test_upload_skill_archive_rejects_oversized_payload(monkeypatch):
 
     monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: _Storage())
+
+    def _unexpected_copy(source):
+        nonlocal copy_called
+        copy_called = True
+        raise AssertionError("oversized upload reached the post-parse copy")
+
+    monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _unexpected_copy)
     app = _make_test_app(SimpleNamespace())
 
     with TestClient(app) as client:
@@ -224,6 +244,7 @@ def test_upload_skill_archive_rejects_oversized_payload(monkeypatch):
     assert response.status_code == 413
     assert "upload limit" in response.json()["detail"]
     assert install_called is False
+    assert copy_called is False
 
 
 def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):

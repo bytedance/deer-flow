@@ -234,7 +234,9 @@ ingress:
   enabled: true
   className: "nginx"
   host: "deer-flow.example.com"
-  annotations: {}
+  annotations:
+    # Allows a 100 MiB .skill archive plus multipart framing at the outer ingress.
+    nginx.ingress.kubernetes.io/proxy-body-size: "101m"
   tls:
     enabled: false
     secretName: ""
