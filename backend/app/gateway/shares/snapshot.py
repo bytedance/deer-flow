@@ -35,7 +35,8 @@ async def build_share_snapshot(
 
     collected: list[dict[str, Any]] = []
     before_seq: int | None = None
-    while len(collected) < _SNAPSHOT_MAX_MESSAGES:
+    truncated = False
+    while True:
         rows, has_more = await _scan_thread_message_page(
             thread_id,
             limit=_SNAPSHOT_SCAN_PAGE_SIZE,
@@ -48,7 +49,19 @@ async def build_share_snapshot(
         collected.extend(rows)
         if not has_more:
             break
+        if len(collected) >= _SNAPSHOT_MAX_MESSAGES:
+            # The design freezes the *complete* visible transcript; when the
+            # cap bites, the share must not pretend to be complete silently.
+            truncated = True
+            break
         before_seq = rows[0]["seq"]
+    if truncated:
+        logger.warning(
+            "Share snapshot for thread %s truncated at %d scanned rows (cap %d)",
+            thread_id,
+            len(collected),
+            _SNAPSHOT_MAX_MESSAGES,
+        )
     # Backward pages arrive newest-page-first; flip to chronological order.
     collected.reverse()
 

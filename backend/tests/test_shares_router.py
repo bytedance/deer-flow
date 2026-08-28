@@ -37,11 +37,15 @@ THREAD_A = "thread-owned-by-a"
 _SNAPSHOT = {"version": 1, "messages": [{"id": "m1", "role": "user", "content": "hello"}]}
 
 
-def _config(*, enabled: bool, allow_no_expiry: bool = False) -> AppConfig:
+def _config(*, enabled: bool, allow_no_expiry: bool = False, default_expiry_days: int = 30) -> AppConfig:
     return AppConfig.model_validate(
         {
             "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-            "conversation_sharing": {"enabled": enabled, "allow_no_expiry": allow_no_expiry},
+            "conversation_sharing": {
+                "enabled": enabled,
+                "allow_no_expiry": allow_no_expiry,
+                "default_expiry_days": default_expiry_days,
+            },
         }
     )
 
@@ -60,10 +64,10 @@ def _thread_store() -> MemoryThreadMetaStore:
 
 
 @contextmanager
-def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_repo=True):
+def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_repo=True, default_expiry_days: int = 30):
     from app.gateway.shares.tokens import set_share_pepper
 
-    set_app_config(_config(enabled=enabled, allow_no_expiry=allow_no_expiry))
+    set_app_config(_config(enabled=enabled, allow_no_expiry=allow_no_expiry, default_expiry_days=default_expiry_days))
     set_share_pepper("test-pepper")
     app = make_authed_test_app(user_factory=lambda: user)
     app.include_router(shares_router.router)
@@ -137,6 +141,22 @@ def test_create_returns_show_once_url_and_persists_only_hash(tmp_path):
     row = asyncio.run(repo.get(body["share_id"]))
     assert row["token_hash"] != body["share_url"].split("/share/")[-1]
     assert row["snapshot_json"] == _SNAPSHOT
+    # created_at reflects the persisted record, not response-time now().
+    assert body["created_at"] == str(row["created_at"])
+
+
+def test_operator_default_expiry_is_honored_without_coercion(tmp_path):
+    """A configured default outside {1,7,30} must be used as-is, not coerced."""
+    with _client(tmp_path, default_expiry_days=14) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            response = _create(client)
+    assert response.status_code == 201
+    row = asyncio.run(repo.get(response.json()["share_id"]))
+    from datetime import UTC, datetime
+
+    expires_at = datetime.fromisoformat(str(row["expires_at"]))
+    delta_days = (expires_at - datetime.now(UTC)).total_seconds() / 86400
+    assert 13.9 < delta_days < 14.1
 
 
 def test_create_rejects_invalid_expiry_choices_and_no_expiry(tmp_path):
@@ -190,6 +210,8 @@ def test_public_get_resolves_snapshot_without_thread_access(tmp_path):
     assert body["snapshot"] == _SNAPSHOT
     # No private identifiers cross the boundary.
     assert "thread_id" not in body and "token_hash" not in body
+    # Token-in-URL mitigation: the public response forbids referrer leakage.
+    assert response.headers["Referrer-Policy"] == "no-referrer"
 
 
 def test_public_get_is_exempt_from_auth_middleware(tmp_path):
@@ -227,7 +249,7 @@ def _null_owner_thread_store() -> MemoryThreadMetaStore:
 def test_auth_disabled_mode_does_not_auto_publish(monkeypatch, tmp_path):
     """DEER_FLOW_AUTH_DISABLED=1 must not make conversations implicitly public.
 
-    The synthetic admin can mint links through the owner route, but public
+    The synthetic admin can mint links for threads they own, but public
     resolution still requires an explicit share record in every mode.
     """
     _enable_auth_disabled(monkeypatch)
@@ -235,7 +257,11 @@ def test_auth_disabled_mode_does_not_auto_publish(monkeypatch, tmp_path):
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
     app.include_router(shares_router.router)
-    app.state.thread_store = _null_owner_thread_store()
+    # The synthetic auth-disabled principal is the "default" admin; give it a
+    # genuinely owned thread (strict ownership applies in every mode).
+    store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(store.create("thread-admin-owned", user_id="default"))
+    app.state.thread_store = store
     repo = asyncio.run(_make_repo(tmp_path))
     app.state.share_repo = repo
     from app.gateway.shares.tokens import set_share_pepper
@@ -246,8 +272,8 @@ def test_auth_disabled_mode_does_not_auto_publish(monkeypatch, tmp_path):
             # No record yet: 404 even though every requester is a synthetic admin.
             assert client.get("/api/shares/dfs_any-token").status_code == 404
 
-            # The synthetic admin can mint a link through the owner route…
-            created = client.post("/api/threads/thread-null-owner/shares", json={})
+            # The synthetic admin can mint a link for an owned thread…
+            created = client.post("/api/threads/thread-admin-owned/shares", json={})
             assert created.status_code == 201, created.text
             token = created.json()["share_url"].split("/share/")[-1]
 
@@ -256,6 +282,51 @@ def test_auth_disabled_mode_does_not_auto_publish(monkeypatch, tmp_path):
     finally:
         set_share_pepper(None)
         reset_app_config()
+
+
+def test_null_owner_and_untracked_threads_cannot_be_published(tmp_path):
+    """Strict ownership on create: permissive owner_check semantics must not
+    let an authenticated user publish pre-auth (user_id=NULL) or untracked
+    legacy threads."""
+    store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(store.create("thread-null-owner", user_id=None))
+    set_app_config(_config(enabled=True))
+    app = make_authed_test_app(user_factory=lambda: USER_A)
+    app.include_router(shares_router.router)
+    app.state.thread_store = store
+    app.state.share_repo = asyncio.run(_make_repo(tmp_path))
+    from app.gateway.shares.tokens import set_share_pepper
+
+    set_share_pepper("test-pepper")
+    try:
+        with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            assert client.post("/api/threads/thread-null-owner/shares", json={}).status_code == 404
+            assert client.post("/api/threads/thread-never-existed/shares", json={}).status_code == 404
+    finally:
+        set_share_pepper(None)
+        reset_app_config()
+
+
+def test_only_the_public_get_is_mounted_under_the_exempt_prefix():
+    """The /api/shares/ auth exemption is prefix-based in the middleware, so
+    the mounted surface under it must stay exactly one anonymous GET — a
+    future route there would otherwise ship silently unauthenticated."""
+    import importlib
+    import pkgutil
+
+    from fastapi.routing import APIRoute
+
+    import app.gateway.routers as routers_pkg
+
+    for module_info in pkgutil.iter_modules(routers_pkg.__path__):
+        module = importlib.import_module(f"app.gateway.routers.{module_info.name}")
+        router = getattr(module, "router", None)
+        if router is None:
+            continue
+        for route in router.routes:
+            if isinstance(route, APIRoute) and route.path.startswith("/api/shares/"):
+                assert route.methods == {"GET"}, f"{module_info.name}: {route.path} is {route.methods}, not GET-only"
+                assert route.path == "/api/shares/{share_token}"
 
 
 def test_null_owner_thread_without_share_record_is_not_public(tmp_path):

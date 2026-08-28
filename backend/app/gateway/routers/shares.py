@@ -15,7 +15,7 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
@@ -112,7 +112,10 @@ def _resolve_expiry(body: ShareCreateRequest):
         return None
     days = body.expires_in_days
     if days is None:
-        days = _EXPIRY_CHOICES_DAYS[-1] if config.default_expiry_days not in _EXPIRY_CHOICES_DAYS else config.default_expiry_days
+        # Operator-configured default is honored as-is (the config field
+        # already bounds it); the {1,7,30} choice set applies only to
+        # client-supplied values, mirroring the Share dialog's options.
+        days = config.default_expiry_days
     elif days not in _EXPIRY_CHOICES_DAYS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"expires_in_days must be one of {list(_EXPIRY_CHOICES_DAYS)}")
     from datetime import UTC, datetime, timedelta
@@ -139,13 +142,22 @@ async def create_share(thread_id: str, request: Request, body: ShareCreateReques
     persisted. The snapshot is frozen at creation — later messages or edits
     never modify an existing share.
     """
-    from datetime import UTC, datetime
-
     _require_enabled()
     repo = _share_repo(request)
     user_id = await get_current_user(request)
     if user_id is None:  # pragma: no cover - decorator guarantees auth
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
+
+    # Publishing is strict-ownership: the thread row must exist and name the
+    # caller as its owner. The decorator's owner_check is deliberately
+    # permissive for reads (missing rows and user_id=NULL legacy rows pass),
+    # which is wrong for a publishing action — any authenticated user could
+    # otherwise mint a public link for pre-auth shared data.
+    from app.gateway.deps import get_thread_store
+
+    meta = await get_thread_store(request).get(thread_id, user_id=None)
+    if meta is None or not meta.get("user_id") or str(meta["user_id"]) != str(user_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Thread {thread_id} not found")
 
     snapshot = await build_share_snapshot(thread_id, request=request, user_id=user_id)
     if not snapshot["messages"]:
@@ -169,7 +181,7 @@ async def create_share(thread_id: str, request: Request, body: ShareCreateReques
         share_id=str(record["id"]),
         title=str(record["title"]),
         expires_at=str(record["expires_at"]) if record.get("expires_at") else None,
-        created_at=str(datetime.now(UTC).isoformat()),
+        created_at=str(record["created_at"]),
         share_url=f"/share/{token}",
     )
 
@@ -197,7 +209,7 @@ async def revoke_share(thread_id: str, share_id: str, request: Request):
 
 
 @router.get("/shares/{share_token}", response_model=PublicShareResponse)
-async def get_public_share(share_token: str, request: Request):
+async def get_public_share(share_token: str, request: Request, response: Response):
     """Resolve a bearer share token into its public snapshot DTO.
 
     Deliberately unauthenticated (the token *is* the credential). Returns
@@ -205,6 +217,11 @@ async def get_public_share(share_token: str, request: Request):
     revoked links, and expired links. Reads only the dedicated share record;
     never touches thread state or history under any synthetic principal.
     """
+    # The token rides in the URL path, so outbound leakage must be blunted:
+    # a strict referrer policy keeps the URL out of Referer on any link the
+    # rendered page follows (nginx access-log masking is a deployment-side
+    # control documented with this feature).
+    response.headers["Referrer-Policy"] = "no-referrer"
     if not _sharing_config().enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     repo = getattr(request.app.state, "share_repo", None)

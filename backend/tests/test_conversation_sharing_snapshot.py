@@ -63,6 +63,27 @@ async def test_snapshot_skips_empty_text_messages():
     assert snapshot["messages"] == []
 
 
+async def test_snapshot_cap_is_truncated_loudly(caplog):
+    """When the message cap bites, the share must not pretend completeness silently."""
+    page = [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in range(1, 11)]
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+        return (page, True)  # always more available
+
+    import logging
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 10)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        with caplog.at_level(logging.WARNING, logger="app.gateway.shares.snapshot"):
+            snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert len(snapshot["messages"]) == 10
+    assert any("truncated" in record.message for record in caplog.records)
+
+
 async def test_resolve_share_title_uses_thread_meta_with_fallback():
     class _Store:
         async def get(self, thread_id, **_kwargs):
