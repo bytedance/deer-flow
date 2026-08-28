@@ -22,10 +22,31 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
+from deerflow.agents.middlewares.model_response import finish_reason, has_model_content, last_ai_message
 from deerflow.config.app_config import AppConfig
 from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 
 logger = logging.getLogger(__name__)
+
+
+class EmptyModelResponseError(RuntimeError):
+    """The model completed normally without producing persistent content."""
+
+    code = "EMPTY_RESPONSE"
+
+    def __init__(self, message: str = "Model returned a completed response with no content") -> None:
+        super().__init__(message)
+
+
+def _raise_for_empty_response(response: ModelCallResult) -> None:
+    """Convert an empty stop into a retryable error before graph persistence."""
+    message = last_ai_message(response)
+    if message is None or has_model_content(message):
+        return
+    reason = finish_reason(message)
+    if reason in (None, "", "stop", "end_turn"):
+        raise EmptyModelResponseError()
+
 
 _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 _BUSY_PATTERNS = (
@@ -94,6 +115,7 @@ _BURST_PATTERNS = (
 # value of 2 means "1 first attempt + 1 retry" (the CR-requested
 # "keep one retry" behavior).
 _RETRY_BUDGET_OVERRIDES: dict[str, int] = {
+    "EmptyModelResponseError": 2,
     "StreamChunkTimeoutError": 2,
 }
 
@@ -411,6 +433,9 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self._circuit_state = "closed"
         self._circuit_probe_in_flight = False
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        return {"empty_response_retry_limit": 1}
+
     def _max_attempts_for(self, exc: BaseException, reason: str = "transient") -> int:
         """Return the effective max attempt count for this exception.
 
@@ -499,6 +524,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         error_code = _extract_error_code(exc)
         status_code = _extract_status_code(exc)
 
+        if isinstance(exc, EmptyModelResponseError):
+            return True, "empty_response"
         if _matches_any(lowered, _QUOTA_PATTERNS) or _matches_any(str(error_code).lower(), _QUOTA_PATTERNS):
             return False, "quota"
         if _matches_any(lowered, _AUTH_PATTERNS):
@@ -647,6 +674,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         reason_text = {
             "busy": "provider is busy",
             "burst_rate": "provider is throttling request burst rate",
+            "empty_response": "provider returned an empty response",
         }.get(reason, "provider request failed temporarily")
         # ``max_attempts`` is the *effective* budget for this call (from
         # ``_max_attempts_for``), not the configured ceiling: a burst-rate call
@@ -684,6 +712,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return "The configured LLM provider rejected the request because authentication or access is invalid. Please check the provider credentials and try again."
         if reason == "burst_rate":
             return "The configured LLM provider is temporarily throttling requests because the request rate increased too quickly (burst-rate limit). Please wait a moment and try again."
+        if reason == "empty_response":
+            return "The configured LLM provider returned an empty response after one automatic retry. Please continue the conversation or use a different model."
         if reason in {"busy", "transient"}:
             # Stream-drop failures (chunk-gap timeout, peer-closed connection,
             # raw read error) almost always point at a single oversized
@@ -791,6 +821,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         while True:
             try:
                 response = self._bounded_model_call_sync(request, handler)
+                _raise_for_empty_response(response)
                 self._record_success()
                 return response
             except GraphBubbleUp:
@@ -850,6 +881,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         while True:
             try:
                 response = await self._bounded_model_call(request, handler)
+                _raise_for_empty_response(response)
                 self._record_success()
                 return response
             except GraphBubbleUp:

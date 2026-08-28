@@ -9,10 +9,12 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langchain.agents.middleware.types import ModelResponse
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
+    EmptyModelResponseError,
     LLMErrorHandlingMiddleware,
 )
 from deerflow.config.app_config import AppConfig, LlmCallConfig
@@ -233,6 +235,124 @@ def test_sync_model_call_uses_retry_after_header(monkeypatch: pytest.MonkeyPatch
     assert waits == [2.0]
     assert dispatched_events == events
     assert [event["type"] for event in events] == ["llm_retry"]
+
+
+def test_sync_empty_stop_retries_before_response_is_returned(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty stop is retried before the failed attempt reaches graph state."""
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+        return AIMessage(content="recovered", response_metadata={"finish_reason": "stop"})
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert result.content == "recovered"
+    assert attempts == 2
+
+
+def test_persistent_empty_stop_returns_explicit_error_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, AIMessage)
+    assert attempts == 2
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert result.additional_kwargs["error_reason"] == "empty_response"
+    assert result.additional_kwargs["error_type"] == "EmptyModelResponseError"
+    assert "empty response" in str(result.content).lower()
+
+
+@pytest.mark.anyio
+async def test_async_empty_stop_retries_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+        return AIMessage(content="recovered asynchronously", response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    result = await middleware.awrap_model_call(SimpleNamespace(), handler)
+
+    assert result.content == "recovered asynchronously"
+    assert attempts == 2
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        AIMessage(content=" ", response_metadata={"finish_reason": "stop"}),
+        AIMessage(content="", additional_kwargs={"reasoning_content": "thinking"}, response_metadata={"finish_reason": "stop"}),
+        AIMessage(content=[{"type": "thinking", "thinking": "thinking"}], response_metadata={"finish_reason": "stop"}),
+        AIMessage(content=[{"type": "reasoning", "reasoning": "thinking"}], response_metadata={"finish_reason": "stop"}),
+        AIMessage(
+            content="",
+            tool_calls=[{"id": "call-1", "name": "bash", "args": {}}],
+            response_metadata={"finish_reason": "tool_calls"},
+        ),
+        AIMessage(content="", response_metadata={"finish_reason": "length"}),
+    ],
+)
+def test_nonempty_or_non_stop_response_is_not_classified_as_empty(message: AIMessage) -> None:
+    middleware = _build_middleware(retry_max_attempts=3)
+    attempts = 0
+
+    def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return message
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert result is message
+    assert attempts == 1
+
+
+def test_empty_model_response_container_retries_before_graph_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The production ModelResponse container is classified at the same boundary."""
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def handler(_request) -> ModelResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return ModelResponse(result=[AIMessage(content="", response_metadata={"finish_reason": "stop"})])
+        return ModelResponse(result=[AIMessage(content="recovered", response_metadata={"finish_reason": "stop"})])
+
+    result = middleware.wrap_model_call(SimpleNamespace(), handler)
+
+    assert isinstance(result, ModelResponse)
+    assert result.result[-1].content == "recovered"
+    assert attempts == 2
+
+
+def test_empty_response_error_uses_one_retry_budget() -> None:
+    middleware = _build_middleware(retry_max_attempts=3)
+
+    assert middleware._max_attempts_for(EmptyModelResponseError()) == 2
 
 
 def test_sync_retry_event_preserves_langgraph_control_flow(monkeypatch: pytest.MonkeyPatch) -> None:
