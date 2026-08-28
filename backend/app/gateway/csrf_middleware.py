@@ -222,7 +222,7 @@ class CSRFMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Cross-site auth request denied."},
             )
 
-        if should_check_csrf(request) and not _is_auth and not request.headers.get("authorization"):
+        if should_check_csrf(request) and not _is_auth and request.headers.get("authorization") is None:
             # Bearer-authenticated requests (PAT, #4849) are exempt from the
             # cookie double-submit check only — the cross-site origin check on
             # auth endpoints above still runs for every request. Safety rests

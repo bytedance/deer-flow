@@ -142,14 +142,14 @@ def _session_cookie(client: TestClient, user_id: str = "user-1", token_version: 
     return token
 
 
-def _create_pat(client: TestClient, *, scopes: list[str] | None = None, user_id: str = "user-1", expires_in_days: int | None = None) -> dict:
+def _create_pat(client: TestClient, *, name: str = "test-token", scopes: list[str] | None = None, user_id: str = "user-1", expires_in_days: int | None = None) -> dict:
     """Create a PAT via the management API with session auth + CSRF pair."""
     from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
 
     _session_cookie(client, user_id=user_id)
     csrf = generate_csrf_token()
     client.cookies.set(CSRF_COOKIE_NAME, csrf)
-    payload = {"name": "test-token", "scopes": scopes or ["runs:read", "threads:read"]}
+    payload = {"name": name, "scopes": scopes or ["runs:read", "threads:read"]}
     if expires_in_days is not None:
         payload["expires_in_days"] = expires_in_days
     response = client.post(
@@ -269,6 +269,14 @@ def test_garbage_bearer_riding_cookie_dies_at_auth_not_csrf(client):
     assert response.status_code == 401
 
 
+def test_empty_authorization_header_is_present_and_dies_at_auth_not_csrf(client):
+    _session_cookie(client)
+    response = client.post("/api/threads/t1/runs/stream", headers={"Authorization": ""})
+    # An explicitly empty header is present-but-invalid: the same 401 from
+    # AuthMiddleware as any other invalid credential, never a CSRF 403.
+    assert response.status_code == 401
+
+
 def test_auth_endpoint_origin_check_not_bypassed_by_bearer(client):
     response = client.post(
         "/api/v1/auth/login/local",
@@ -301,6 +309,24 @@ def test_create_rejects_unknown_scope(client):
     response = client.post("/api/v1/auth/pats", json={"name": "bad", "scopes": ["runs:write"]}, headers={CSRF_HEADER_NAME: csrf})
     assert response.status_code == 400
     assert "Unknown PAT scopes" in response.json()["detail"]
+
+
+def test_create_rejects_whitespace_only_name(client):
+    from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+
+    _session_cookie(client)
+    csrf = generate_csrf_token()
+    client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    for name in (" ", "\t\n"):
+        response = client.post("/api/v1/auth/pats", json={"name": name, "scopes": ["runs:read"]}, headers={CSRF_HEADER_NAME: csrf})
+        # Rejected by request validation (422) before token generation.
+        assert response.status_code == 422, name
+        assert "non-whitespace" in response.text
+
+
+def test_create_trims_surrounding_whitespace_in_name(client):
+    created = _create_pat(client, name="  ci bot  ")
+    assert created["name"] == "ci bot"
 
 
 def test_revoke_is_scoped_to_owner(client):

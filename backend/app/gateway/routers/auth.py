@@ -479,6 +479,16 @@ class PATCreateRequest(BaseModel):
     scopes: list[str] = Field(min_length=1)
     expires_in_days: int | None = Field(default=None, ge=1, le=365)  # None = never expires
 
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_non_empty_name(cls, value: str) -> str:
+        # A whitespace-only name passes min_length but would persist as an
+        # empty label; the trimmed value is what gets stored and shown.
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("PAT name must contain at least one non-whitespace character")
+        return stripped
+
 
 class PATCreatedResponse(BaseModel):
     """Create response — ``token`` is the raw show-once credential."""

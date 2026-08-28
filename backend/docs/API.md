@@ -23,8 +23,11 @@ login. Programmatic clients can instead use a **personal access token (PAT)**
 sent as a Bearer credential:
 
 ```http
-GET /api/threads
+POST /api/threads/search
 Authorization: Bearer dfp_...
+Content-Type: application/json
+
+{}
 ```
 
 PATs require a configured database backend (SQLite/PostgreSQL) — on the
