@@ -100,8 +100,8 @@ Revocation is immediate.
 - A request carrying an `Authorization` header that fails validation gets a
   hard `401` — it never falls back to the session cookie.
 - **Route-level default-deny:** PAT requests are admitted only to the
-  thread/run lifecycle routes the v1 scopes govern — `GET/POST /api/threads`
-  (list/create), `POST /api/threads/search`, `GET/PATCH/DELETE
+  thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
+  (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
   /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
   `branches` subroutes, `GET/POST /api/threads/{thread_id}/runs/*`
   (run create/stream/wait/list/get/cancel/join; feedback read & submit), and

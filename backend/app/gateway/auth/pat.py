@@ -46,7 +46,7 @@ PAT_MAX_NAME_LENGTH = 128
 # is explicitly listed here, and only together with the thread/run lifecycle
 # the v1 scopes govern; everything else answers 403 regardless of scopes.
 _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
-    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads$")),
+    (frozenset({"POST"}), re.compile(r"^/api/threads$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/search$")),
     (frozenset({"GET", "PATCH", "DELETE"}), re.compile(r"^/api/threads/[^/]+$")),
     (frozenset({"GET", "PUT", "DELETE"}), re.compile(r"^/api/threads/[^/]+/goal$")),

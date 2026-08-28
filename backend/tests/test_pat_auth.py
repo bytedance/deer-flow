@@ -447,6 +447,17 @@ def test_pat_policy_allows_thread_lifecycle_routes(client):
     assert response.json() == {"deleted": True}
 
 
+def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
+    """Route-policy regression (#5041 review): the allowlist must not admit
+    methods the router does not implement. The Gateway has no GET collection
+    route for /api/threads — pre-authorizing it would make a future GET
+    collection route PAT-reachable without an explicit policy change."""
+    from app.gateway.auth.pat import is_pat_allowed_route
+
+    assert is_pat_allowed_route("POST", "/api/threads") is True
+    assert is_pat_allowed_route("GET", "/api/threads") is False
+
+
 def test_pat_scopes_enforced_on_stateless_run_entry(client):
     """Follow-up to the review's P1-1: the stateless run entrypoints now
     carry @require_permission("runs", "create"), so a threads:read-only PAT
