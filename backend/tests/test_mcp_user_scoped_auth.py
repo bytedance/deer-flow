@@ -284,6 +284,46 @@ def test_explicit_users_map_still_replaces_and_can_remove():
     assert merged.user_auth.users == {"u1": "Bearer s1"}  # u2 removed, u1 preserved through mask
 
 
+def test_complete_replacement_user_auth_honors_omitted_subfields():
+    from app.gateway.routers.mcp import (
+        McpServerConfigResponse,
+        McpUserScopedAuthConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            header="X-Api-Key",
+            users={"u1": "Bearer s1", "u2": "Bearer s2"},
+            on_missing="passthrough",
+            custom_note="remove-me",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://x",
+        user_auth=McpUserScopedAuthConfigResponse(
+            enabled=False,
+            users={"u1": "***"},
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        incoming,
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.user_auth is not None
+    assert merged.user_auth.enabled is False
+    assert merged.user_auth.header == "Authorization"
+    assert merged.user_auth.users == {"u1": "Bearer s1"}
+    assert merged.user_auth.on_missing == "deny"
+    assert "custom_note" not in (merged.user_auth.model_extra or {})
+
+
 def test_user_auth_extra_keys_survive_parse_mask_and_merge():
     from app.gateway.routers.mcp import (
         McpServerConfigResponse,

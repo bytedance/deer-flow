@@ -767,6 +767,8 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
 def _merge_preserving_secrets(
     incoming: McpServerConfigResponse,
     existing: McpServerConfigResponse,
+    *,
+    preserve_omitted_fields: bool = True,
 ) -> McpServerConfigResponse:
     """Merge incoming config with existing, preserving secrets masked by GET.
 
@@ -782,6 +784,11 @@ def _merge_preserving_secrets(
     so masked GET responses can be safely round-tripped. To explicitly clear
     a stored secret, clients may send an empty string, which is converted
     to ``None`` before persisting.
+
+    ``preserve_omitted_fields`` keeps the legacy bulk PUT's partial-update
+    behavior. Targeted PUT disables it because that endpoint is a complete
+    replacement: omissions must delete/reset ordinary fields, while explicit
+    masked placeholders still restore only their matching stored secrets.
     """
     merged_env = {}
     for k, v in incoming.env.items():
@@ -822,51 +829,54 @@ def _merge_preserving_secrets(
         )
     merged_user_auth = incoming.user_auth
     if incoming.user_auth is not None:
-        # Sub-field-aware merge: a partial user_auth payload (e.g. just
-        # {"enabled": false}) must not wipe the stored credential map or reset
-        # other stored sub-fields. Only sub-fields the request explicitly set
-        # replace stored values; the rest carry over — the same contract the
-        # block-level `model_fields_set` check below applies one level up.
         incoming_ua = incoming.user_auth
         base = existing.user_auth
         set_fields = incoming_ua.model_fields_set
-        effective: dict[str, Any] = {}
-        if base is not None:
-            effective.update({name: getattr(base, name) for name in ("enabled", "header", "users", "on_missing")})
-            effective.update(base.model_extra or {})
-        for name in ("enabled", "header", "on_missing"):
-            if name in set_fields:
-                effective[name] = getattr(incoming_ua, name)
-        # Extras are masked by GET (see _mask_server_config), so a round-trip
-        # PUT must swap masked sentinel values back for the stored ones —
-        # the same contract server-level extras get below.
         base_extra = (base.model_extra or {}) if base is not None else {}
+        merged_extra: dict[str, Any] = {}
         for key, value in (incoming_ua.model_extra or {}).items():
-            effective[key] = _merge_extra_value_preserving_masked(
+            merged_extra[key] = _merge_extra_value_preserving_masked(
                 key,
                 value,
                 base_extra.get(key),
                 existing_present=key in base_extra,
             )
-        if "users" in set_fields:
-            # An explicitly sent map replaces the stored one (so a full
-            # round-trip can remove a user), with masked values swapped back
-            # for the stored credentials.
-            existing_users = base.users if base is not None else {}
-            merged_users = {}
-            for k, v in incoming_ua.users.items():
-                if v == _MASKED_VALUE:
-                    if k in existing_users:
-                        merged_users[k] = existing_users[k]
-                    else:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Cannot set user_auth credential for '{k}' to masked value '***'; provide a real value.",
-                        )
+
+        existing_users = base.users if base is not None else {}
+        merged_users = {}
+        for k, v in incoming_ua.users.items():
+            if v == _MASKED_VALUE:
+                if k in existing_users:
+                    merged_users[k] = existing_users[k]
                 else:
-                    merged_users[k] = v
-            effective["users"] = merged_users
-        merged_user_auth = McpUserScopedAuthConfigResponse(**effective)
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot set user_auth credential for '{k}' to masked value '***'; provide a real value.",
+                    )
+            else:
+                merged_users[k] = v
+
+        if preserve_omitted_fields:
+            # A partial user_auth payload (for example only enabled=false)
+            # inherits omitted sub-fields under the legacy bulk PUT contract.
+            effective: dict[str, Any] = {}
+            if base is not None:
+                effective.update({name: getattr(base, name) for name in ("enabled", "header", "users", "on_missing")})
+                effective.update(base_extra)
+            for name in ("enabled", "header", "on_missing"):
+                if name in set_fields:
+                    effective[name] = getattr(incoming_ua, name)
+            effective.update(merged_extra)
+            if "users" in set_fields:
+                effective["users"] = merged_users
+            merged_user_auth = McpUserScopedAuthConfigResponse(**effective)
+        else:
+            # Targeted PUT is a complete replacement. Start from the incoming
+            # block so omitted ordinary sub-fields reset and omitted extras or
+            # users disappear; only explicit masked values above are restored.
+            merged_user_auth = incoming_ua.model_copy(
+                update={"users": merged_users, **merged_extra},
+            )
 
     update = {
         "env": merged_env,
@@ -874,11 +884,11 @@ def _merge_preserving_secrets(
         "oauth": merged_oauth,
         "user_auth": merged_user_auth,
     }
-    if "user_auth" not in incoming.model_fields_set:
+    if preserve_omitted_fields and "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
-    if "routing" not in incoming.model_fields_set:
+    if preserve_omitted_fields and "routing" not in incoming.model_fields_set:
         update["routing"] = existing.routing
-    if "tools" not in incoming.model_fields_set:
+    if preserve_omitted_fields and "tools" not in incoming.model_fields_set:
         update["tools"] = existing.tools
     incoming_extra = incoming.model_extra or {}
     existing_extra = existing.model_extra or {}
@@ -889,9 +899,10 @@ def _merge_preserving_secrets(
             existing_extra.get(key),
             existing_present=key in existing_extra,
         )
-    for key, value in (existing.model_extra or {}).items():
-        if key not in (incoming.model_extra or {}):
-            update[key] = value
+    if preserve_omitted_fields:
+        for key, value in (existing.model_extra or {}).items():
+            if key not in (incoming.model_extra or {}):
+                update[key] = value
     merged = incoming.model_copy(update=update)
     _ensure_no_masked_secrets(merged)
     return merged
@@ -1126,6 +1137,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         merged = _merge_preserving_secrets(
             body.server,
             McpServerConfigResponse(**raw_server),
+            preserve_omitted_fields=False,
         )
         _ensure_no_masked_secrets(merged)
         raw_servers[body.server_name] = merged.model_dump()

@@ -764,6 +764,79 @@ async def test_update_mcp_server_preserves_latest_sibling_and_masked_secret(monk
 
 
 @pytest.mark.asyncio
+async def test_update_mcp_server_honors_deletions_in_complete_replacement(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original_sibling = {
+        "enabled": False,
+        "command": "uvx",
+        "args": ["changed-by-another-tab"],
+    }
+    config_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "target": {
+                        "enabled": True,
+                        "type": "http",
+                        "url": "https://old.example/mcp",
+                        "headers": {"Authorization": "Bearer real-secret"},
+                        "api_key": "real-extra-secret",
+                        "custom_note": "remove-me",
+                        "routing": {
+                            "mode": "prefer",
+                            "priority": 80,
+                            "keywords": ["legacy"],
+                        },
+                        "tools": {
+                            "search": {
+                                "routing": {"priority": 90},
+                            }
+                        },
+                        "user_auth": {
+                            "users": {"u1": "Bearer user-secret"},
+                        },
+                    },
+                    "sibling": original_sibling,
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    await update_mcp_server(
+        _request_with_role("admin"),
+        McpServerConfigUpdateRequest(
+            server_name="target",
+            server=McpServerConfigResponse(
+                enabled=True,
+                type="http",
+                url="https://new.example/mcp",
+                headers={"Authorization": "***"},
+                api_key="***",
+            ),
+        ),
+    )
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    target = persisted["mcpServers"]["target"]
+    assert persisted["mcpServers"]["sibling"] == original_sibling
+    assert target["headers"]["Authorization"] == "Bearer real-secret"
+    assert target["api_key"] == "real-extra-secret"
+    assert "custom_note" not in target
+    assert target["user_auth"] is None
+    assert target["routing"] == McpServerConfigResponse().routing.model_dump()
+    assert target["tools"] == {}
+
+
+@pytest.mark.asyncio
 async def test_update_mcp_server_rejects_masked_array_structural_edit_without_writing(monkeypatch, tmp_path):
     config_path = tmp_path / "extensions_config.json"
     original = {
