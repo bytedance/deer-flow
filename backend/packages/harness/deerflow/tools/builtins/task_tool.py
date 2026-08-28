@@ -12,6 +12,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_receipt import SUBAGENT_TOOL_RECEIPTS_KEY, child_receipts_for_result
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
@@ -183,8 +184,20 @@ def _task_result_command(
     stop_reason: SubagentStopReasonValue | None = None,
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
+    child_messages: list[dict[str, Any]] | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
+    additional_kwargs = make_subagent_additional_kwargs(
+        status,
+        result=result,
+        error=metadata_error,
+        stop_reason=stop_reason,
+        model_name=model_name,
+        token_usage=usage,
+    )
+    child_receipts = child_receipts_for_result(child_messages)
+    if child_receipts:
+        additional_kwargs[SUBAGENT_TOOL_RECEIPTS_KEY] = child_receipts
     return Command(
         update={
             "messages": [
@@ -192,14 +205,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
-                    additional_kwargs=make_subagent_additional_kwargs(
-                        status,
-                        result=result,
-                        error=metadata_error,
-                        stop_reason=stop_reason,
-                        model_name=model_name,
-                        token_usage=usage,
-                    ),
+                    additional_kwargs=additional_kwargs,
                 )
             ]
         }
@@ -501,6 +507,7 @@ async def task_tool(
                     stop_reason=result.stop_reason,
                     model_name=effective_model,
                     usage=usage,
+                    child_messages=result.ai_messages,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
@@ -526,6 +533,7 @@ async def task_tool(
                     stop_reason=result.stop_reason,
                     model_name=effective_model,
                     usage=usage,
+                    child_messages=result.ai_messages,
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -547,6 +555,7 @@ async def task_tool(
                     error=result.error,
                     model_name=effective_model,
                     usage=usage,
+                    child_messages=result.ai_messages,
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -568,6 +577,7 @@ async def task_tool(
                     error=result.error,
                     model_name=effective_model,
                     usage=usage,
+                    child_messages=result.ai_messages,
                 )
 
             # Still running, wait before next poll
@@ -603,6 +613,7 @@ async def task_tool(
                     error=message,
                     model_name=effective_model,
                     usage=usage,
+                    child_messages=getattr(result, "ai_messages", None),
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.

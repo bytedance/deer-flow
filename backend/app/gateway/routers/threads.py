@@ -24,6 +24,7 @@ from langgraph.types import Overwrite
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.exc import IntegrityError
 
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from app.gateway.authz import require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
@@ -35,6 +36,7 @@ from app.gateway.checkpoint_lineage import (
 from app.gateway.deps import get_checkpointer, get_run_event_store
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.services import (
+    _strip_external_message_metadata,
     build_checkpoint_state_accessor,
     build_checkpoint_state_mutation_accessor,
     build_thread_checkpoint_state_accessor,
@@ -1266,6 +1268,12 @@ async def update_thread_state(thread_id: ThreadId, body: ThreadStateUpdateReques
         checkpoint_id=body.checkpoint_id,
     )
     values = dict(body.values or {})
+    # State updates are an external API boundary too. Apply the same
+    # server-owned message-metadata filtering used by run inputs so callers
+    # cannot inject forged tool receipts into a durable checkpoint.
+    is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+    if not is_internal_caller and isinstance(values.get("messages"), list):
+        values["messages"] = [_strip_external_message_metadata(message) for message in values["messages"]]
     writable_channels = graph_writable_channels(getattr(accessor, "graph", None))
     if writable_channels is not None:
         unknown_fields = sorted(set(values) - writable_channels)

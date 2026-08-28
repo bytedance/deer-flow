@@ -32,6 +32,7 @@ from app.gateway.internal_auth import (
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.tool_receipt import SUBAGENT_TOOL_RECEIPTS_KEY, TOOL_RECEIPT_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
@@ -108,6 +109,8 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = frozenset(
         _DYNAMIC_CONTEXT_REMINDER_KEY,
         _REMINDER_DATE_KEY,
         _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+        TOOL_RECEIPT_KEY,
+        SUBAGENT_TOOL_RECEIPTS_KEY,
     }
 )
 
@@ -225,15 +228,24 @@ async def _orphan_recovery_observed_after_heartbeat(
 
 def _strip_external_message_metadata(message: Any) -> Any:
     """Remove server-owned metadata from an untrusted input message."""
-    if not isinstance(message, BaseMessage):
+    if isinstance(message, BaseMessage):
+        additional_kwargs = dict(message.additional_kwargs)
+    elif isinstance(message, Mapping):
+        raw_kwargs = message.get("additional_kwargs")
+        if not isinstance(raw_kwargs, Mapping):
+            return message
+        additional_kwargs = dict(raw_kwargs)
+    else:
         return message
-    additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
-    if additional_kwargs == message.additional_kwargs:
+    original_kwargs = message.additional_kwargs if isinstance(message, BaseMessage) else message.get("additional_kwargs")
+    if additional_kwargs == original_kwargs:
         return message
-    return message.model_copy(update={"additional_kwargs": additional_kwargs})
+    if isinstance(message, BaseMessage):
+        return message.model_copy(update={"additional_kwargs": additional_kwargs})
+    return {**message, "additional_kwargs": additional_kwargs}
 
 
 def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool = False) -> dict[str, Any]:
@@ -250,10 +262,10 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content``, dynamic-context reminder markers, and the
-    transient view-image context marker are server-owned. External callers
-    cannot supply them; trusted internal channel calls may preserve metadata
-    they added before invoking this boundary.
+    ``original_user_content``, dynamic-context reminder markers, the
+    transient view-image context marker, and tool receipts are server-owned.
+    External callers cannot supply them; trusted internal channel calls may
+    preserve metadata they added before invoking this boundary.
     """
     if raw_input is None:
         return {}

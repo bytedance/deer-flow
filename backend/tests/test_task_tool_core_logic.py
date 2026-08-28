@@ -11,6 +11,7 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_receipt import SUBAGENT_TOOL_RECEIPTS_KEY, TOOL_RECEIPT_KEY
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
@@ -192,6 +193,42 @@ def test_task_result_command_derives_content_from_status_payload():
     assert capped.additional_kwargs[SUBAGENT_RESULT_BRIEF_KEY] == "investigated 3 of 5 sources"
     assert len(capped.additional_kwargs[SUBAGENT_RESULT_SHA256_KEY]) == 64
     assert capped.additional_kwargs[SUBAGENT_STOP_REASON_KEY] == "token_capped"
+
+
+def test_task_result_command_carries_child_tool_receipts():
+    child = ToolMessage(content="wrote", tool_call_id="child-call", name="write_file")
+    child.additional_kwargs[TOOL_RECEIPT_KEY] = {
+        "tool_call_id": "child-call",
+        "tool_name": "write_file",
+        "status": "success",
+        "args_sha256": "a" * 16,
+        "output_sha256": "b" * 16,
+        "output_bytes": 5,
+        "created_at": "2026-08-28T00:00:00+00:00",
+    }
+
+    message = _task_tool_message(
+        task_tool_module._task_result_command(
+            tool_call_id="parent-task",
+            status="completed",
+            result="wrote the file [r1]",
+            child_messages=[child.model_dump()],
+        )
+    )
+
+    bundle = message.additional_kwargs[SUBAGENT_TOOL_RECEIPTS_KEY]
+    assert bundle == [
+        {
+            "id": "r1",
+            "tool_call_id": "child-call",
+            "tool_name": "write_file",
+            "status": "success",
+            "args_sha256": "a" * 16,
+            "output_sha256": "b" * 16,
+            "output_bytes": 5,
+            "created_at": "2026-08-28T00:00:00+00:00",
+        }
+    ]
 
 
 def test_task_result_command_carries_loop_capped_from_real_loop_detection():
