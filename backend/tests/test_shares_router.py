@@ -15,7 +15,9 @@ from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from _router_auth_helpers import make_authed_test_app
-from fastapi import FastAPI
+from collections.abc import Callable
+from fastapi import FastAPI, Request, Response
+from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -65,11 +67,21 @@ def _thread_store() -> MemoryThreadMetaStore:
 
 @contextmanager
 def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_repo=True, default_expiry_days: int = 30):
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
     from app.gateway.shares.tokens import set_share_pepper
+
+    class _AuthSourceTag(BaseHTTPMiddleware):
+        # The shared stub middleware deliberately does not set auth_source
+        # (other suites depend on its anonymous-resolution semantics); these
+        # routes resolve the caller via get_current_user, which requires it.
+        async def dispatch(self, request: Request, call_next: Callable) -> Response:
+            request.state.auth_source = AUTH_SOURCE_SESSION
+            return await call_next(request)
 
     set_app_config(_config(enabled=enabled, allow_no_expiry=allow_no_expiry, default_expiry_days=default_expiry_days))
     set_share_pepper("test-pepper")
     app = make_authed_test_app(user_factory=lambda: user)
+    app.add_middleware(_AuthSourceTag)
     app.include_router(shares_router.router)
     app.state.thread_store = _thread_store()
     repo = asyncio.run(_make_repo(tmp_path)) if with_repo else None
@@ -288,15 +300,22 @@ def test_null_owner_and_untracked_threads_cannot_be_published(tmp_path):
     """Strict ownership on create: permissive owner_check semantics must not
     let an authenticated user publish pre-auth (user_id=NULL) or untracked
     legacy threads."""
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+    from app.gateway.shares.tokens import set_share_pepper
+
+    class _AuthSourceTag(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next: Callable) -> Response:
+            request.state.auth_source = AUTH_SOURCE_SESSION
+            return await call_next(request)
+
     store = MemoryThreadMetaStore(InMemoryStore())
     asyncio.run(store.create("thread-null-owner", user_id=None))
     set_app_config(_config(enabled=True))
     app = make_authed_test_app(user_factory=lambda: USER_A)
+    app.add_middleware(_AuthSourceTag)
     app.include_router(shares_router.router)
     app.state.thread_store = store
     app.state.share_repo = asyncio.run(_make_repo(tmp_path))
-    from app.gateway.shares.tokens import set_share_pepper
-
     set_share_pepper("test-pepper")
     try:
         with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):

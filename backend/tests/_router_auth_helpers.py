@@ -74,11 +74,8 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
         self._user_factory = user_factory
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
-
         user = self._user_factory()
         request.state.user = user
-        request.state.auth_source = AUTH_SOURCE_SESSION
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
         return await call_next(request)
 
