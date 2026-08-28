@@ -440,6 +440,8 @@ export const zhCN: Translations = {
       pause: "暂停",
       resume: "恢复",
       trigger: "立即触发",
+      duplicate: "复制",
+      duplicateTitleSuffix: "（副本）",
       delete: "删除",
     },
     deleteConfirm: "确定要删除该定时任务吗？此操作不可撤销。",

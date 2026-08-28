@@ -29,6 +29,8 @@ logger = logging.getLogger(__name__)
 UPLOAD_STAGING_PREFIX = ".upload-"
 UPLOAD_STAGING_SUFFIX = ".part"
 
+_MAX_FILENAME_BYTES = 255
+
 
 def get_uploads_dir(thread_id: str, *, user_id: str | None = None) -> Path:
     """Return the uploads directory path for a thread (no side effects)."""
@@ -66,15 +68,30 @@ def normalize_filename(filename: str) -> str:
     # but they indicate a Windows-style path that should be stripped or rejected.
     if "\\" in safe:
         raise ValueError(f"Filename contains backslash: {filename!r}")
-    if len(safe.encode("utf-8")) > 255:
+    if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
     return safe
+
+
+def _fit_utf8_bytes(text: str, budget: int) -> str:
+    """Truncate *text* to at most *budget* UTF-8 bytes without splitting a code point."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= budget:
+        return text
+    return encoded[:budget].decode("utf-8", errors="ignore")
 
 
 def claim_unique_filename(name: str, seen: set[str]) -> str:
     """Generate a unique filename by appending ``_N`` suffix on collision.
 
     Automatically adds the returned name to *seen* so callers don't need to.
+
+    The deduplicated name stays within the 255-byte filename limit that
+    :func:`normalize_filename` enforces: when appending ``_N`` (plus the
+    preserved extension) would exceed it, the stem is truncated on a UTF-8
+    boundary to make room. Otherwise a maximum-length upload that collides
+    would produce a name the filesystem (and a later ``normalize_filename``
+    call on the write path) rejects.
 
     Args:
         name: Candidate filename.
@@ -88,10 +105,18 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
         return name
     stem, suffix = Path(name).stem, Path(name).suffix
     counter = 1
-    candidate = f"{stem}_{counter}{suffix}"
-    while candidate in seen:
+    while True:
+        tag = f"_{counter}"
+        budget = _MAX_FILENAME_BYTES - len(tag.encode("utf-8")) - len(suffix.encode("utf-8"))
+        if budget < 1:
+            # Pathological suffix that leaves no room for a stem; keep the
+            # unique tag and fit the rest (stem + suffix tail) around it.
+            candidate = _fit_utf8_bytes(stem + suffix, _MAX_FILENAME_BYTES - len(tag.encode("utf-8"))) + tag
+        else:
+            candidate = f"{_fit_utf8_bytes(stem, budget)}{tag}{suffix}"
+        if candidate not in seen:
+            break
         counter += 1
-        candidate = f"{stem}_{counter}{suffix}"
     seen.add(candidate)
     return candidate
 

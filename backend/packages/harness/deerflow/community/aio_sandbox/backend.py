@@ -41,6 +41,13 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
     return not (address.is_loopback or address.is_private or address.is_link_local)
 
 
+# The readiness deadline the local-container provider paths (sync and async)
+# enforce before destroying a sandbox that never became ready. Tests that
+# validate the shipped image must use this same budget: a longer one can
+# pass while every real acquisition still fails.
+SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
+
+
 def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
