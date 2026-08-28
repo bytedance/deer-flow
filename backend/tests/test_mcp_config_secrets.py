@@ -795,6 +795,11 @@ async def test_update_mcp_server_honors_deletions_in_complete_replacement(monkey
                         "user_auth": {
                             "users": {"u1": "Bearer user-secret"},
                         },
+                        "headers_from_context": {
+                            "enabled": True,
+                            "headers": {"X-Tenant": "tenant_id"},
+                            "on_missing": "passthrough",
+                        },
                     },
                     "sibling": original_sibling,
                 },
@@ -832,6 +837,7 @@ async def test_update_mcp_server_honors_deletions_in_complete_replacement(monkey
     assert target["api_key"] == "real-extra-secret"
     assert "custom_note" not in target
     assert target["user_auth"] is None
+    assert target["headers_from_context"] is None
     assert target["routing"] == McpServerConfigResponse().routing.model_dump()
     assert target["tools"] == {}
 
