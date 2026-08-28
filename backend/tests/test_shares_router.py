@@ -310,7 +310,13 @@ def test_null_owner_and_untracked_threads_cannot_be_published(tmp_path):
 def test_only_the_public_get_is_mounted_under_the_exempt_prefix():
     """The /api/shares/ auth exemption is prefix-based in the middleware, so
     the mounted surface under it must stay exactly one anonymous GET — a
-    future route there would otherwise ship silently unauthenticated."""
+    future route there would otherwise ship silently unauthenticated.
+
+    Two scans: live routers (mounted APIRoutes) and an AST sweep of every
+    app/gateway module for route decorators targeting /api/shares/ paths, so
+    a route registered on a differently-named router or directly on the app
+    object cannot slip past the live scan.
+    """
     import importlib
     import pkgutil
 
@@ -327,6 +333,31 @@ def test_only_the_public_get_is_mounted_under_the_exempt_prefix():
             if isinstance(route, APIRoute) and route.path.startswith("/api/shares/"):
                 assert route.methods == {"GET"}, f"{module_info.name}: {route.path} is {route.methods}, not GET-only"
                 assert route.path == "/api/shares/{share_token}"
+
+
+def test_no_non_get_route_decorator_targets_the_exempt_prefix():
+    """AST sweep: any decorator call like ``X.post("/api/shares/...")`` in
+    app/gateway code must be GET — regardless of the router attribute name or
+    whether it is registered on the app object directly."""
+    import ast
+    from pathlib import Path
+
+    gateway_dir = Path(__file__).resolve().parent.parent / "app" / "gateway"
+    violations = []
+    for path in sorted(gateway_dir.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            if node.func.attr not in {"get", "post", "put", "patch", "delete"}:
+                continue
+            if not node.args or not isinstance(node.args[0], ast.Constant) or not isinstance(node.args[0].value, str):
+                continue
+            if not node.args[0].value.startswith("/api/shares/"):
+                continue
+            if node.func.attr != "get":
+                violations.append(f"{path.name}: {node.func.attr} {node.args[0].value}")
+    assert not violations, "non-GET routes under the auth-exempt /api/shares/ prefix:\n" + "\n".join(violations)
 
 
 def test_null_owner_thread_without_share_record_is_not_public(tmp_path):

@@ -189,7 +189,13 @@ async def create_share(thread_id: str, request: Request, body: ShareCreateReques
 @router.get("/threads/{thread_id}/shares", response_model=list[ShareSummaryResponse])
 @require_permission("threads", "read", owner_check=True)
 async def list_shares(thread_id: str, request: Request):
-    """List the caller's shares for a thread. Never returns token hashes."""
+    """List the caller's shares for a thread. Never returns token hashes.
+
+    Read-side owner_check stays permissive by design (matches every other
+    thread read): foreign-owned threads 404 at the decorator, and on a
+    null-owner thread the repository's owner scoping already returns only
+    the caller's own (strict-ownership create guarantees there are none).
+    """
     _require_enabled()
     user_id = await get_current_user(request)
     records = await _share_repo(request).list_by_thread(thread_id, user_id or "")

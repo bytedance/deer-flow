@@ -318,7 +318,7 @@ GET /api/models/{model_name}
 
 Read-only public sharing of a conversation snapshot. Requires `conversation_sharing.enabled` in `config.yaml` (off by default) and a SQL database backend. The share-token pepper is environment-backed (`SHARE_TOKEN_PEPPER`); a 0600-persisted secret is generated locally when absent.
 
-Owner endpoints (authenticated, owner-checked):
+Owner endpoints (authenticated, strict row ownership — the thread must exist and be owned by the caller; legacy `user_id=NULL` threads cannot be shared):
 
 #### Create Share
 
