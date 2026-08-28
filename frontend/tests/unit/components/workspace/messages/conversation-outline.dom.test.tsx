@@ -24,6 +24,7 @@ function renderOutline(
         onChapterSelect={() => undefined}
         {...props}
       />
+      <div role="log">Conversation transcript</div>
     </I18nContext.Provider>,
   );
 }
@@ -70,5 +71,6 @@ describe("ConversationOutline", () => {
 
     expect(onChapterSelect).toHaveBeenCalledWith("human-1");
     expect(screen.getByTestId("conversation-outline-menu")).toBeTruthy();
+    expect(screen.getByRole("log")).toBeTruthy();
   });
 });

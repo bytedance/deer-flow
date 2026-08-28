@@ -58,7 +58,8 @@ export const VirtualMessageList = forwardRef<
   { groups, isLoading, renderGroup, onActiveGroupChange },
   ref,
 ) {
-  const { isAtBottom, scrollRef, scrollToBottom } = useStickToBottomContext();
+  const { isAtBottom, scrollRef, scrollToBottom, stopScroll } =
+    useStickToBottomContext();
   const listRef = useRef<HTMLDivElement | null>(null);
   const activeIndex = isLoading ? groups.length - 1 : -1;
   const getItemKey = useCallback(
@@ -132,6 +133,7 @@ export const VirtualMessageList = forwardRef<
         if (groupIndex < 0 || groupIndex >= groups.length) {
           return;
         }
+        stopScroll();
         const behavior = options?.behavior ?? "auto";
         const align = options?.align ?? "start";
         if (shouldVirtualize) {
@@ -158,7 +160,13 @@ export const VirtualMessageList = forwardRef<
         requestAnimationFrame(settleOnExactGroup);
       },
     }),
-    [alignGroupToViewport, groups.length, shouldVirtualize, virtualizer],
+    [
+      alignGroupToViewport,
+      groups.length,
+      shouldVirtualize,
+      stopScroll,
+      virtualizer,
+    ],
   );
 
   useEffect(() => {

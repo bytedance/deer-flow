@@ -68,7 +68,7 @@ export function ConversationOutline({
 
   return (
     <div className="pointer-events-none absolute top-1/2 right-2 z-20 -translate-y-1/2 sm:right-3">
-      <DropdownMenu open={open} onOpenChange={setOpen}>
+      <DropdownMenu modal={false} open={open} onOpenChange={setOpen}>
         <DropdownMenuTrigger asChild>
           <Button
             aria-label={t.conversation.outlineLabel}
