@@ -832,6 +832,19 @@ tools:
   #   # wait_for_timeout_ms: 2000        # Extra wait after page load in milliseconds
   #   # wait_for_selector: "article"     # CSS selector to wait for before returning
 
+  # Web fetch tool (uses a self-hosted Playwright HTTP service).
+  # Use for JavaScript-rendered pages. Enable only one web_fetch provider.
+  # Service API: POST {url, waitFor}; returns content/html/markdown.
+  # - name: web_fetch
+  #   group: web
+  #   use: deerflow.community.playwright.tools:web_fetch_tool
+  #   base_url: http://localhost:3000/scrape  # Docker: use a Gateway-reachable service URL
+  #   wait_for_ms: 3000
+  #   timeout_s: 120
+  #   retries: 3  # Additional retries after the first attempt
+  #   max_chars: 20000
+  #   # allow_private_addresses: false  # SSRF guard; keep false in production.
+
   # Web fetch tool (uses Crawl4AI - self-hosted headless Chromium, no third-party API key)
   # Crawl4AI returns server-cleaned "fit" markdown directly (no readability step needed),
   # ideal for JavaScript-heavy sites. Self-host it:
