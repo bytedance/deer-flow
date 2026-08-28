@@ -29,6 +29,13 @@ To make this impossible, every pooled session is owned by a dedicated
 session back to the caller, and then *waits* on a close event. All shutdown
 paths only ever **signal** that event; the owner task performs ``__aexit__``
 itself, guaranteeing enter and exit always happen in the same task.
+
+The owner task is also the only writer that promotes a creation into the pool:
+once ``initialize()`` succeeds it registers the session in ``_entries`` and
+resolves the creation's future in one atomic critical section, so callers can
+only ever receive a session the pool already owns (and will retire via LRU
+eviction or the close_* paths) — never one whose lifetime is still tied to a
+single caller that might get cancelled.
 """
 
 from __future__ import annotations
@@ -64,6 +71,10 @@ class MCPSessionPool:
         # In-flight creations, keyed by (server, scope). Lets concurrent callers
         # on the same loop share a single creation instead of each spawning a
         # duplicate session. Value: (loop, ready_future, owner_task, close_event).
+        # The owner task promotes the record into ``_entries`` and resolves
+        # ``ready`` with the session in one atomic critical section (see
+        # ``_run_session``), so ``ready`` resolving with a *result* always means
+        # the session is registered — never merely handed to one caller.
         self._inflight: dict[
             tuple[str, str],
             tuple[
@@ -89,16 +100,19 @@ class MCPSessionPool:
 
     async def _run_session(
         self,
+        key: tuple[str, str],
         connection: dict[str, Any],
         ready: asyncio.Future[ClientSession],
         close_evt: asyncio.Event,
     ) -> None:
         """Own a single MCP session for its entire lifetime.
 
-        Enters the session context manager, initializes it, publishes the live
-        session via ``ready``, then blocks until ``close_evt`` is set. The
-        context manager is *always* exited from this task, satisfying anyio's
-        cancel-scope same-task requirement.
+        Enters the session context manager, initializes it, and *commits* the
+        session: promotes the in-flight record into ``_entries`` and resolves
+        ``ready`` with the live session in one atomic critical section, then
+        blocks until ``close_evt`` is set. The context manager is *always*
+        exited from this task, satisfying anyio's cancel-scope same-task
+        requirement.
         """
         from langchain_mcp_adapters.sessions import create_session
 
@@ -117,8 +131,29 @@ class MCPSessionPool:
         # leaking the session/subprocess.
         try:
             await session.initialize()
-            if not ready.done():
-                ready.set_result(session)
+            # Commit point. ``ready`` resolves with a *result* only inside the
+            # critical section that also registers the session in ``_entries``:
+            # a resolved-with-result future therefore means the session is
+            # pool-owned (visible to LRU eviction and the close_* paths), never
+            # the private property of one caller. Joiners waiting on ``ready``
+            # can only ever receive a committed session, and an unwind path can
+            # check the outcome race-free. If the record was already removed
+            # (the creator unwound or a close_* ran), the creation is aborted:
+            # ``ready`` carries the cancellation instead, so no caller can end
+            # up holding an unmanaged session.
+            loop = asyncio.get_running_loop()
+            task = asyncio.current_task()
+            with self._lock:
+                still_ours = self._inflight.get(key) == (loop, ready, task, close_evt)
+                if still_ours:
+                    self._inflight.pop(key)
+                    self._entries[key] = (session, loop, task, close_evt)
+                    if not ready.done():
+                        ready.set_result(session)
+            if still_ours:
+                logger.info("Created persistent MCP session for %s/%s", key[0], key[1])
+            elif not ready.done():
+                ready.set_exception(asyncio.CancelledError("MCP session pool was closed while the session was being created"))
             await close_evt.wait()
         except BaseException as e:
             if not ready.done():
@@ -194,7 +229,7 @@ class MCPSessionPool:
                 # await so concurrent callers join us instead of racing.
                 ready = current_loop.create_future()
                 close_evt = asyncio.Event()
-                task = current_loop.create_task(self._run_session(connection, ready, close_evt))
+                task = current_loop.create_task(self._run_session(key, connection, ready, close_evt))
                 self._inflight[key] = (current_loop, ready, task, close_evt)
 
             # Evict LRU entries when at capacity.
@@ -228,13 +263,17 @@ class MCPSessionPool:
             # awaits. A cancellation here (routine — both production call
             # sites wrap get_session in asyncio.wait_for(session_init_timeout))
             # would otherwise orphan that owner: it finishes initialize(),
-            # publishes ready, and blocks on close_evt forever — invisible to
-            # LRU eviction, which only scans _entries. Unwind exactly like the
-            # Phase-3 path. Every evicted owner was already signalled in the
-            # atomic loop above, so skipping the remaining teardown *awaits*
-            # (not signals) on unwind is safe: each victim still tears down in
-            # its own task.
-            if task is not None:
+            # commits, and blocks on close_evt forever — invisible to LRU
+            # eviction, which only scans _entries. Unwind exactly like the
+            # Phase-3 path — unless the owner already committed while we were
+            # parked here: then the session is registered in _entries and may
+            # already be in a joiner's hands, so tearing it down would close it
+            # underneath them. A committed session is pool property; LRU
+            # eviction and the close_* paths own it from here on. Every evicted
+            # owner was already signalled in the atomic loop above, so skipping
+            # the remaining teardown *awaits* (not signals) on unwind is safe:
+            # each victim still tears down in its own task.
+            if task is not None and not self._creation_committed(ready):
                 assert ready is not None and close_evt is not None
                 try:
                     await self._shutdown(close_evt, task, cancel=True, ready=ready)
@@ -247,57 +286,56 @@ class MCPSessionPool:
 
         # Phase 2b: a concurrent creation for this key is already in progress on
         # this loop — share its result rather than create a duplicate session.
+        # The creator's owner task resolves ``ready`` with a result only at the
+        # commit critical section that also registers the session, so a value
+        # returned here is always pool-owned; if the creation is aborted (the
+        # creator unwound or a close_* ran), ``ready`` carries the exception and
+        # this joiner fails with it instead of holding an unmanaged session.
         if join is not None:
             return await asyncio.shield(join)
 
         assert ready is not None and close_evt is not None and task is not None
 
-        # Phase 3: wait for our owner task to publish the initialized session.
+        # Phase 3: wait for our owner task to commit the initialized session.
+        # A successful result means the session is already registered in
+        # _entries — the commit critical section did both — so from that moment
+        # the pool, not this call, owns its lifetime.
         try:
             session = await asyncio.shield(ready)
         except BaseException:
-            # Two distinct cases reach here:
+            # Three distinct cases reach here:
             #
             # 1. The owner task failed (e.g. connect/initialize error) and
             #    reported it via ready.set_exception(). It is *already* in its
             #    finally block running cm.__aexit__ in its own task, so we must
             #    NOT cancel it — doing so would interrupt that cleanup. We only
             #    wait for it to finish unwinding.
-            # 2. This call itself was cancelled (CancelledError). Because of the
-            #    shield, `ready` is still pending and the owner task is alive and
-            #    blocked. We signal close and cancel it so it exits the cancel
-            #    scope in its own task, then wait for it to finish.
-            #
-            # The session is never registered yet, so nobody else can close it;
-            # waiting here guarantees we never leak a session or owner task.
-            owner_already_failed = ready.done() and not ready.cancelled() and ready.exception() is not None
-            if not owner_already_failed:
-                close_evt.set()
-                task.cancel()
-            try:
-                await asyncio.shield(task)
-            except BaseException:
-                logger.debug("Owner task ended during get_session unwind", exc_info=True)
-            with self._lock:
-                if self._inflight.get(key) == (current_loop, ready, task, close_evt):
-                    self._inflight.pop(key)
+            # 2. This call itself was cancelled (CancelledError) while the
+            #    creation was still in flight. Because of the shield, `ready`
+            #    is still pending and the owner task is alive. We signal close
+            #    and cancel it so it exits the cancel scope in its own task,
+            #    then wait for it to finish.
+            # 3. This call was cancelled at the very moment the owner
+            #    committed: `ready` resolved with a result and the session is
+            #    registered in _entries. Joiners may already hold it, so we
+            #    must NOT tear it down — just propagate the cancellation and
+            #    leave the pooled session to LRU eviction / close_*.
+            if not self._creation_committed(ready):
+                owner_already_failed = ready.done() and not ready.cancelled() and ready.exception() is not None
+                if not owner_already_failed:
+                    close_evt.set()
+                    task.cancel()
+                try:
+                    await asyncio.shield(task)
+                except BaseException:
+                    logger.debug("Owner task ended during get_session unwind", exc_info=True)
+                with self._lock:
+                    if self._inflight.get(key) == (current_loop, ready, task, close_evt):
+                        self._inflight.pop(key)
             raise
 
-        # Phase 4: promote the in-flight creation to a registered entry — but
-        # only if our in-flight record is still the live one. A concurrent
-        # close_* / close_all may have removed it while we were initializing; in
-        # that case we must NOT resurrect the session into _entries. Instead we
-        # own the teardown: signal our owner task and wait for it to run
-        # __aexit__ in its own task, then surface the cancellation.
-        with self._lock:
-            still_ours = self._inflight.get(key) == (current_loop, ready, task, close_evt)
-            if still_ours:
-                self._inflight.pop(key)
-                self._entries[key] = (session, current_loop, task, close_evt)
-        if not still_ours:
-            await self._shutdown(close_evt, task, ready=ready)
-            raise asyncio.CancelledError("MCP session pool was closed while the session was being created")
-        logger.info("Created persistent MCP session for %s/%s", server_name, scope_key)
+        # Phase 4: the commit inside the owner task already promoted the
+        # creation into a registered entry; nothing left to decide here.
         return session
 
     # ------------------------------------------------------------------
@@ -327,6 +365,20 @@ class MCPSessionPool:
         same-task exit anyio requires — so callers must skip the cancel.
         """
         return ready is not None and ready.done() and not ready.cancelled() and ready.exception() is not None
+
+    @staticmethod
+    def _creation_committed(ready: asyncio.Future[ClientSession] | None) -> bool:
+        """True once the creation's session is registered in ``_entries``.
+
+        ``_run_session`` resolves ``ready`` with a *result* only inside the
+        commit critical section that also moves the record into ``_entries``,
+        so this is exactly the state in which the session is pool-owned —
+        visible to LRU eviction and the close_* paths, and possibly already
+        handed to a joiner. Unwind paths must not tear such a session down:
+        closing it here would yank a live session from a joiner's hands
+        (#5008 review).
+        """
+        return ready is not None and ready.done() and not ready.cancelled() and ready.exception() is None
 
     @classmethod
     def _cancel_owner(cls, loop: asyncio.AbstractEventLoop, task: asyncio.Task[Any], ready: asyncio.Future[ClientSession] | None = None) -> None:

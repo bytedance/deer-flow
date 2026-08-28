@@ -1448,6 +1448,150 @@ async def test_get_session_cancelled_during_eviction_teardown_does_not_leak():
 
 
 @pytest.mark.asyncio
+async def test_cancelled_creator_does_not_close_session_held_by_joiner():
+    """Cancelling the creator must not close a session a joiner already holds.
+
+    Reproduces the review race deterministically: MAX_SESSIONS=1, the creator
+    parks in Phase 2 awaiting a hung LRU victim while its owner finishes
+    initialize(); a second caller for the same key then receives the session.
+    Cancelling the creator afterwards must leave that session open and
+    registered — once the creation committed, the session is pool property
+    (LRU eviction / close_* own it), never the cancelled caller's (#5008
+    review).
+    """
+    pool = MCPSessionPool()
+    pool.MAX_SESSIONS = 1
+
+    # A pre-registered LRU victim whose teardown hangs: the creator parks in
+    # Phase 2 awaiting it, so the cancel below lands while the creator is
+    # between publishing the in-flight record and awaiting ready.
+    victim_hang = asyncio.Event()
+
+    async def victim_owner() -> None:
+        await victim_hang.wait()
+
+    loop = asyncio.get_running_loop()
+    victim_task = asyncio.create_task(victim_owner())
+    pool._entries[("victim", "scope")] = (MagicMock(), loop, victim_task, asyncio.Event())
+
+    gate = asyncio.Event()
+    cms: list[_BlockingInitCm] = []
+    creator: asyncio.Task | None = None
+
+    def make_cm(*args, **kwargs):
+        cm = _BlockingInitCm(gate)
+        cms.append(cm)
+        return cm
+
+    try:
+        with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+            conn = {"transport": "stdio", "command": "x", "args": []}
+            creator = asyncio.create_task(pool.get_session("srv", "scope-2", conn))
+            # The creator publishes its in-flight record before awaiting the
+            # hung victim, so this is deterministic.
+            for _ in range(100):
+                if ("srv", "scope-2") in pool._inflight:
+                    break
+                await asyncio.sleep(0.01)
+            assert ("srv", "scope-2") in pool._inflight
+
+            # The owner finishes initialize() and commits while its creator is
+            # still parked on the victim's teardown. The second caller then
+            # receives the initialized session (Phase 2b before this fix, the
+            # _entries fast path after) — either way it now holds it.
+            gate.set()
+            joiner = asyncio.create_task(pool.get_session("srv", "scope-2", conn))
+            session = await asyncio.wait_for(asyncio.shield(joiner), timeout=5.0)
+            assert cms, "owner task must have been created"
+
+            # On the bug, this unwind unconditionally shut the owner down even
+            # though a joiner held the session: __aexit__ ran underneath it.
+            creator.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(asyncio.shield(creator), timeout=5.0)
+
+            await asyncio.sleep(0.02)
+            assert not cms[0].closed, "cancelling the creator must not close a session already handed to a caller"
+            assert ("srv", "scope-2") in pool._entries, "committed session must stay registered after creator cancellation"
+            assert pool._entries[("srv", "scope-2")][0] is session, "the joiner's session must be the registered one"
+            assert ("srv", "scope-2") not in pool._inflight
+
+        # Cleanup: close the pool so the parked owner finishes deterministically.
+        await pool.close_all()
+        for _ in range(100):
+            if cms[0].closed:
+                break
+            await asyncio.sleep(0.01)
+        assert cms[0].closed, "owner must still tear down through the pool close paths"
+
+        current = asyncio.current_task()
+        leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
+        assert not leaked, "owner task must not be left pending after cleanup"
+    finally:
+        if creator is not None and not creator.done():
+            creator.cancel()
+        victim_hang.set()
+        victim_task.cancel()
+        try:
+            await victim_task
+        except BaseException:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_joiner_follows_creation_outcome_when_creator_is_cancelled():
+    """A joiner must follow the creation's outcome, never hold an orphan.
+
+    If the creator is cancelled while the shared owner is still initializing,
+    the creation is aborted before it commits: the joiner fails with the same
+    cancellation instead of receiving (or hanging on) a session whose teardown
+    is already underway. Drift guard for the outcome-gated join semantics.
+    """
+    pool = MCPSessionPool()
+    gate = asyncio.Event()
+    cms: list[_BlockingInitCm] = []
+
+    def make_cm(*a, **kw):
+        cm = _BlockingInitCm(gate)
+        cms.append(cm)
+        return cm
+
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        conn = {"transport": "stdio", "command": "x", "args": []}
+        creator = asyncio.create_task(pool.get_session("s", "same", conn))
+        for _ in range(100):
+            if ("s", "same") in pool._inflight:
+                break
+            await asyncio.sleep(0.01)
+        assert ("s", "same") in pool._inflight
+
+        # Second caller joins the in-flight creation instead of duplicating it.
+        joiner = asyncio.create_task(pool.get_session("s", "same", conn))
+        await asyncio.sleep(0.01)
+
+        # The creator is cancelled mid-init: the creation aborts, and the
+        # joiner must observe that outcome rather than succeed or hang.
+        creator.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await creator
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(asyncio.shield(joiner), timeout=5.0)
+
+    assert len(cms) == 1, "the joiner must not have created a duplicate session"
+    for _ in range(100):
+        if cms[0].closed:
+            break
+        await asyncio.sleep(0.01)
+    assert cms[0].closed, "aborted creation must still run its __aexit__"
+    assert len(pool._entries) == 0
+    assert len(pool._inflight) == 0
+
+    current = asyncio.current_task()
+    leaked = [t for t in asyncio.all_tasks() if t is not current and not t.done() and "_run_session" in str(t.get_coro())]
+    assert not leaked, "owner task must not be left pending after the creation aborted"
+
+
+@pytest.mark.asyncio
 async def test_eviction_teardown_completes_normally_then_session_is_returned():
     """Non-cancelled path: eviction teardown runs to completion and the caller
     proceeds to Phase 3 unchanged — guards the Phase-2 try/except against
