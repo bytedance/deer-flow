@@ -88,6 +88,27 @@ describe("uploads api", () => {
   });
 
   test.each([
+    [
+      "object",
+      { msg: "Archive rejected", code: "invalid_archive", retryable: false },
+      '{"msg":"Archive rejected","code":"invalid_archive","retryable":false}',
+    ],
+    [
+      "array",
+      [{ msg: "Archive rejected", code: "invalid_archive", retryable: false }],
+      '[{"msg":"Archive rejected","code":"invalid_archive","retryable":false}]',
+    ],
+  ])(
+    "serializes a generic %s detail containing msg without a validation loc",
+    async (_label, detail, expected) => {
+      const error = await uploadError(jsonResponse(400, { detail }));
+
+      expect(error.message).toBe(expected);
+      expect(error.message).not.toContain("[object Object]");
+    },
+  );
+
+  test.each([
     ["missing", {}],
     ["null", { detail: null }],
     ["blank string", { detail: "   " }],

@@ -42,7 +42,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function formatValidationIssue(issue: unknown): string | null {
-  if (!isRecord(issue) || typeof issue.msg !== "string") {
+  if (
+    !isRecord(issue) ||
+    typeof issue.msg !== "string" ||
+    !Array.isArray(issue.loc)
+  ) {
     return null;
   }
 
@@ -50,16 +54,14 @@ function formatValidationIssue(issue: unknown): string | null {
     return null;
   }
 
-  const location = Array.isArray(issue.loc)
-    ? issue.loc
-        .filter(
-          (part): part is string | number =>
-            typeof part === "string" || typeof part === "number",
-        )
-        .map(String)
-        .filter((part) => part.length > 0)
-        .join(".")
-    : "";
+  const location = issue.loc
+    .filter(
+      (part): part is string | number =>
+        typeof part === "string" || typeof part === "number",
+    )
+    .map(String)
+    .filter((part) => part.length > 0)
+    .join(".");
 
   return location.length > 0 ? `${location}: ${issue.msg}` : issue.msg;
 }
