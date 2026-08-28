@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -15,6 +16,11 @@ DEFAULT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 TRACE_TEXT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [trace_id=%(trace_id)s] - %(message)s"
 _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
 
+# Raw share tokens (``dfs_…``, #4548) are bearer credentials carried in the
+# URL; they must never reach any log sink, access logs included.
+_SHARE_TOKEN_LOG_PATTERN = re.compile(r"dfs_[A-Za-z0-9_-]+")
+_SHARE_TOKEN_REDACTION_MASK = "dfs_***"
+
 
 class TraceContextFilter(logging.Filter):
     """Inject the current request trace id into every log record."""
@@ -23,6 +29,21 @@ class TraceContextFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.trace_id = get_current_trace_id() or "-"
+        return True
+
+
+class ShareTokenRedactionFilter(logging.Filter):
+    """Mask raw share tokens (``dfs_…``) in any rendered log message."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except (TypeError, ValueError):  # malformed %-args: leave the record alone
+            return True
+        if "dfs_" not in message:
+            return True
+        record.msg = _SHARE_TOKEN_LOG_PATTERN.sub(_SHARE_TOKEN_REDACTION_MASK, message)
+        record.args = None
         return True
 
 
@@ -83,6 +104,24 @@ def _trace_formatter(format_name: str | None) -> logging.Formatter:
     return TraceTextFormatter(TRACE_TEXT_LOG_FORMAT, datefmt=DEFAULT_LOG_DATE_FORMAT)
 
 
+def install_share_token_redaction() -> None:
+    """Attach share-token redaction to the root handlers and uvicorn's access logger.
+
+    ``uvicorn.access`` logs the full request path — share token included —
+    with ``propagate=False`` and its own handler, so a root-handler filter
+    never sees those records; it gets a logger-level filter instead. Every
+    other logger reaches the root handlers. Idempotent, so it is safe to call
+    at app import time and again from ``configure_logging``.
+    """
+    _ensure_root_handler()
+    for handler in logging.root.handlers:
+        if not any(isinstance(existing, ShareTokenRedactionFilter) for existing in handler.filters):
+            handler.addFilter(ShareTokenRedactionFilter())
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(existing, ShareTokenRedactionFilter) for existing in access_logger.filters):
+        access_logger.addFilter(ShareTokenRedactionFilter())
+
+
 def configure_logging(config: object) -> None:
     """Configure DeerFlow logging from an AppConfig-like object.
 
@@ -92,6 +131,7 @@ def configure_logging(config: object) -> None:
     only the additional ``trace_id`` field.
     """
     _ensure_root_handler()
+    install_share_token_redaction()
 
     logging_config = getattr(config, "logging", None)
     enhance = getattr(logging_config, "enhance", None)

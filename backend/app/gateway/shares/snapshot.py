@@ -19,6 +19,20 @@ _SNAPSHOT_SCAN_PAGE_SIZE = 200
 _SNAPSHOT_MAX_MESSAGES = 2000
 
 
+class ShareSnapshotTooLarge(Exception):
+    """The thread's visible transcript exceeds the share snapshot cap.
+
+    A share promises the *complete* visible transcript (#4548); instead of
+    silently dropping the oldest messages, creation must fail loudly.
+    """
+
+    def __init__(self, thread_id: str, scanned_messages: int, cap: int):
+        super().__init__(f"thread {thread_id} exceeds the {cap}-message share snapshot cap")
+        self.thread_id = thread_id
+        self.scanned_messages = scanned_messages
+        self.cap = cap
+
+
 async def build_share_snapshot(
     thread_id: str,
     *,
@@ -33,9 +47,13 @@ async def build_share_snapshot(
         _scan_thread_message_page,
     )
 
-    collected: list[dict[str, Any]] = []
+    # ``_scan_thread_message_page`` pages backward (newest page first) and
+    # returns every page internally ascending by ``seq``; keep pages intact
+    # and flip only the page order at the end. Reversing the flattened rows
+    # instead would also invert each page (single-page threads came out
+    # newest-first).
+    pages: list[list[dict[str, Any]]] = []
     before_seq: int | None = None
-    truncated = False
     while True:
         rows, has_more = await _scan_thread_message_page(
             thread_id,
@@ -46,24 +64,23 @@ async def build_share_snapshot(
         )
         if not rows:
             break
-        collected.extend(rows)
+        pages.append(rows)
         if not has_more:
             break
-        if len(collected) >= _SNAPSHOT_MAX_MESSAGES:
-            # The design freezes the *complete* visible transcript; when the
-            # cap bites, the share must not pretend to be complete silently.
-            truncated = True
-            break
-        before_seq = rows[0]["seq"]
-    if truncated:
-        logger.warning(
-            "Share snapshot for thread %s truncated at %d scanned rows (cap %d)",
-            thread_id,
-            len(collected),
-            _SNAPSHOT_MAX_MESSAGES,
-        )
-    # Backward pages arrive newest-page-first; flip to chronological order.
-    collected.reverse()
+        scanned = sum(len(page) for page in pages)
+        if scanned >= _SNAPSHOT_MAX_MESSAGES:
+            # The share contract is the complete visible transcript; when the
+            # cap bites with older rows remaining, refuse rather than publish
+            # an apparently-complete share that silently omits them.
+            logger.warning(
+                "Share snapshot for thread %s exceeded the %d-message cap; refusing partial share",
+                thread_id,
+                _SNAPSHOT_MAX_MESSAGES,
+            )
+            raise ShareSnapshotTooLarge(thread_id, scanned, _SNAPSHOT_MAX_MESSAGES)
+        before_seq = rows[0]["seq"]  # pages are ascending: row 0 is the oldest
+    pages.reverse()
+    collected: list[dict[str, Any]] = [row for page in pages for row in page]
 
     messages: list[dict[str, Any]] = []
     for row in collected:

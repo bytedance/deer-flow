@@ -20,7 +20,11 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_current_user
-from app.gateway.shares.snapshot import build_share_snapshot, resolve_share_title
+from app.gateway.shares.snapshot import (
+    ShareSnapshotTooLarge,
+    build_share_snapshot,
+    resolve_share_title,
+)
 from app.gateway.shares.tokens import generate_share_token, get_share_pepper, share_token_hash
 from deerflow.utils.thread_id import ThreadId
 
@@ -160,7 +164,15 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     if meta is None or not meta.get("user_id") or str(meta["user_id"]) != str(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Thread {thread_id} not found")
 
-    snapshot = await build_share_snapshot(thread_id, request=request, user_id=user_id)
+    try:
+        snapshot = await build_share_snapshot(thread_id, request=request, user_id=user_id)
+    except ShareSnapshotTooLarge as exc:
+        # A share promises the complete visible transcript; a conversation
+        # too long to snapshot is rejected instead of silently truncated.
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=f"This conversation has more than {exc.cap} visible messages and is too long to share",
+        ) from exc
     if not snapshot["messages"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This conversation has no visible messages to share")
 

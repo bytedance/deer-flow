@@ -5,15 +5,25 @@ stubbed so the mapping/filters are pinned independently: only visible human/
 AI text survives, hidden/control rows are dropped even when the scan let them
 through, ids are snapshot-local, and backward pages are flipped to
 chronological order.
+
+The stubs mirror the canonical helper's contract exactly (``_scan_visible_
+thread_messages`` returns each page ascending by ``seq``; backward pages
+arrive newest-page-first) — diverging stubs previously masked a page-order
+regression in the builder.
 """
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 
 import pytest
 
-from app.gateway.shares.snapshot import build_share_snapshot, resolve_share_title
+from app.gateway.shares.snapshot import (
+    ShareSnapshotTooLarge,
+    build_share_snapshot,
+    resolve_share_title,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -23,22 +33,15 @@ def _row(seq: int, content: dict) -> dict:
 
 
 async def test_snapshot_keeps_only_visible_human_and_ai_text():
+    # Canonical helper contract: newest backward page first, each page
+    # internally ascending by seq.
     pages = [
-        # Newest backward page (page arrives ascending within itself).
-        [
-            _row(4, {"type": "ai", "content": "final answer"}),
-            _row(3, {"type": "ai", "name": "summary", "content": "summary text"}),
-            _row(2, {"type": "remove", "content": ""}),
-        ],
-        # Older backward page.
-        [
-            _row(1, {"type": "human", "content": "hello"}),
-            _row(0, {"type": "ai", "content": "", "additional_kwargs": {"hide_from_ui": True}}),
-        ],
+        [_row(2, {"type": "remove", "content": ""}), _row(3, {"type": "ai", "name": "summary", "content": "summary text"}), _row(4, {"type": "ai", "content": "final answer"})],
+        [_row(0, {"type": "ai", "content": "", "additional_kwargs": {"hide_from_ui": True}}), _row(1, {"type": "human", "content": "hello"})],
     ]
 
     async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
-        assert before_seq in (None, 4)  # second page continues from the first row's seq
+        assert before_seq in (None, 2)  # next cursor is the page's oldest seq
         return (pages[0] if before_seq is None else pages[1]), before_seq is None
 
     with pytest.MonkeyPatch.context() as mp:
@@ -52,6 +55,27 @@ async def test_snapshot_keeps_only_visible_human_and_ai_text():
     ]
 
 
+async def test_snapshot_preserves_order_across_many_pages():
+    """Pages flip order only as wholes; rows inside a page stay ascending."""
+    pages = [
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in (7, 8)],
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in (4, 5, 6)],
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in (1, 2, 3)],
+    ]
+    calls = {"n": 0}
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page, calls["n"] < len(pages)
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert [m["content"] for m in snapshot["messages"]] == [f"m{seq}" for seq in range(1, 9)]
+
+
 async def test_snapshot_skips_empty_text_messages():
     async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
         return ([_row(1, {"type": "human", "content": "   "})], False)
@@ -63,14 +87,12 @@ async def test_snapshot_skips_empty_text_messages():
     assert snapshot["messages"] == []
 
 
-async def test_snapshot_cap_is_truncated_loudly(caplog):
-    """When the message cap bites, the share must not pretend completeness silently."""
+async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
+    """When the cap bites with older rows remaining, creation must fail loudly."""
     page = [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in range(1, 11)]
 
     async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
         return (page, True)  # always more available
-
-    import logging
 
     from app.gateway.shares import snapshot as snapshot_module
 
@@ -78,10 +100,12 @@ async def test_snapshot_cap_is_truncated_loudly(caplog):
         mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 10)
         mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
         with caplog.at_level(logging.WARNING, logger="app.gateway.shares.snapshot"):
-            snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+            with pytest.raises(ShareSnapshotTooLarge) as excinfo:
+                await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
-    assert len(snapshot["messages"]) == 10
-    assert any("truncated" in record.message for record in caplog.records)
+    assert excinfo.value.cap == 10
+    assert excinfo.value.scanned_messages == 10
+    assert any("refusing partial share" in record.message for record in caplog.records)
 
 
 async def test_resolve_share_title_uses_thread_meta_with_fallback():

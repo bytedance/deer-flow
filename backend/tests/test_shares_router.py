@@ -9,19 +9,19 @@ endpoint never touching thread state under a synthetic principal.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 from _router_auth_helpers import make_authed_test_app
-from collections.abc import Callable
 from fastapi import FastAPI, Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.testclient import TestClient
 from langgraph.store.memory import InMemoryStore
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
+from starlette.middleware.base import BaseHTTPMiddleware
 
 import deerflow.persistence.models  # noqa: F401  (register every table)
 from app.gateway.auth.models import User
@@ -191,6 +191,19 @@ def test_create_empty_conversation_conflict(tmp_path):
         with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value={"version": 1, "messages": []})):
             response = _create(client)
     assert response.status_code == 409
+
+
+def test_create_rejects_oversized_conversation_without_persisting(tmp_path):
+    """A conversation too long to snapshot is rejected, never silently truncated."""
+    from app.gateway.shares.snapshot import ShareSnapshotTooLarge
+
+    with _client(tmp_path) as (client, repo):
+        snapshot_mock = AsyncMock(side_effect=ShareSnapshotTooLarge(THREAD_A, 2000, 2000))
+        with patch.object(shares_router, "build_share_snapshot", snapshot_mock):
+            response = _create(client)
+        assert response.status_code == 413
+        assert "too long to share" in response.json()["detail"]
+        assert asyncio.run(repo.list_by_thread(THREAD_A, str(USER_A.id))) == []
 
 
 def test_list_strips_token_hashes(tmp_path):
