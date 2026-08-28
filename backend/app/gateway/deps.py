@@ -452,16 +452,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # Initialize repositories — one get_session_factory() call for all.
         sf = get_session_factory()
         if sf is not None:
+            from deerflow.persistence.conversation_shares import ConversationShareRepository
             from deerflow.persistence.feedback import FeedbackRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            app.state.share_repo = ConversationShareRepository(sf)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            # Memory backend has no durable share storage; share routes fail
+            # explicitly instead of minting links nobody can resolve later.
+            app.state.share_repo = None
 
         # Services are app-scoped. Capture this app's immutable extension set
         # once and close over the same object for teardown; the process-wide

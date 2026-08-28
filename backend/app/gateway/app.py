@@ -33,6 +33,7 @@ from app.gateway.routers import (
     models,
     runs,
     scheduled_tasks,
+    shares,
     skills,
     subagent_batches,
     subagents,
@@ -812,6 +813,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(uploads.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
+    app.include_router(shares.router)
     app.include_router(threads.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks

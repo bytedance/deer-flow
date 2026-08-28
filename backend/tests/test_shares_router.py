@@ -1,0 +1,251 @@
+"""HTTP-level security tests for read-only conversation sharing (#4548).
+
+Pins the authorization properties from the design: owner-scoped
+create/list/revoke, narrow middleware exemption for the public GET only,
+indistinguishable 404s for invalid/revoked/expired links, and the public
+endpoint never touching thread state under a synthetic principal.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
+from unittest.mock import AsyncMock, patch
+from uuid import uuid4
+
+from _router_auth_helpers import make_authed_test_app
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+from langgraph.store.memory import InMemoryStore
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
+
+import deerflow.persistence.models  # noqa: F401  (register every table)
+from app.gateway.auth.models import User
+from app.gateway.auth_middleware import AuthMiddleware
+from app.gateway.routers import shares as shares_router
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.persistence.base import Base
+from deerflow.persistence.conversation_shares import ConversationShareRepository
+from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+USER_A = User(email="owner-a@example.com", password_hash="x", system_role="user", id=uuid4())
+USER_B = User(email="intruder-b@example.com", password_hash="x", system_role="user", id=uuid4())
+THREAD_A = "thread-owned-by-a"
+
+_SNAPSHOT = {"version": 1, "messages": [{"id": "m1", "role": "user", "content": "hello"}]}
+
+
+def _config(*, enabled: bool, allow_no_expiry: bool = False) -> AppConfig:
+    return AppConfig.model_validate(
+        {
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "conversation_sharing": {"enabled": enabled, "allow_no_expiry": allow_no_expiry},
+        }
+    )
+
+
+async def _make_repo(tmp_path) -> ConversationShareRepository:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/shares.db", poolclass=NullPool)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return ConversationShareRepository(async_sessionmaker(engine, expire_on_commit=False))
+
+
+def _thread_store() -> MemoryThreadMetaStore:
+    store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(store.create(THREAD_A, user_id=str(USER_A.id)))
+    return store
+
+
+@contextmanager
+def _client(tmp_path, *, user=USER_A, enabled=True, allow_no_expiry=False, with_repo=True):
+    from app.gateway.shares.tokens import set_share_pepper
+
+    set_app_config(_config(enabled=enabled, allow_no_expiry=allow_no_expiry))
+    set_share_pepper("test-pepper")
+    app = make_authed_test_app(user_factory=lambda: user)
+    app.include_router(shares_router.router)
+    app.state.thread_store = _thread_store()
+    repo = asyncio.run(_make_repo(tmp_path)) if with_repo else None
+    app.state.share_repo = repo
+    shares_router._public_resolve_hits.clear()
+    try:
+        with TestClient(app) as client:
+            yield client, repo
+    finally:
+        set_share_pepper(None)
+        reset_app_config()
+
+
+def _create(client: TestClient, *, thread_id: str = THREAD_A, payload: dict | None = None) -> object:
+    return client.post(f"/api/threads/{thread_id}/shares", json=payload or {})
+
+
+# ── Feature gate ──────────────────────────────────────────────────────────
+
+
+def test_disabled_deployment_rejects_management_and_public(tmp_path):
+    with _client(tmp_path, enabled=False) as (client, _repo):
+        assert _create(client).status_code == 403
+        assert client.get("/api/threads/" + THREAD_A + "/shares").status_code == 403
+        assert client.get("/api/shares/dfs_whatever").status_code == 404
+
+
+def test_memory_backend_fails_explicitly(tmp_path):
+    with _client(tmp_path, with_repo=False) as (client, _none):
+        response = _create(client)
+        assert response.status_code == 503
+
+
+# ── Ownership ─────────────────────────────────────────────────────────────
+
+
+def test_cross_user_create_returns_404(tmp_path):
+    with _client(tmp_path, user=USER_B) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            response = _create(client)
+    assert response.status_code == 404
+    assert repo is not None and asyncio.run(repo.list_by_thread(THREAD_A, str(USER_B.id))) == []
+
+
+def test_cross_user_revoke_returns_404(tmp_path):
+    with _client(tmp_path) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            created = _create(client).json()
+        switch = _client(tmp_path, user=USER_B)
+        with switch as (client_b, _repo_b):
+            client_b.cookies.clear()
+            response = client_b.delete(f"/api/threads/{THREAD_A}/shares/{created['share_id']}")
+    assert response.status_code == 404
+    # The share is still active for the real owner.
+    assert asyncio.run(repo.get(created["share_id"]))["revoked_at"] is None
+
+
+# ── Create semantics ──────────────────────────────────────────────────────
+
+
+def test_create_returns_show_once_url_and_persists_only_hash(tmp_path):
+    with _client(tmp_path) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            response = _create(client, payload={"title": "My title"})
+    assert response.status_code == 201
+    body = response.json()
+    assert body["share_url"].startswith("/share/dfs_")
+    assert body["expires_at"] is not None  # default finite expiry
+    row = asyncio.run(repo.get(body["share_id"]))
+    assert row["token_hash"] != body["share_url"].split("/share/")[-1]
+    assert row["snapshot_json"] == _SNAPSHOT
+
+
+def test_create_rejects_invalid_expiry_choices_and_no_expiry(tmp_path):
+    with _client(tmp_path) as (client, _repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            assert _create(client, payload={"expires_in_days": 5}).status_code == 400
+            assert _create(client, payload={"never_expires": True}).status_code == 400
+
+
+def test_create_allows_no_expiry_when_deployed_for_it(tmp_path):
+    with _client(tmp_path, allow_no_expiry=True) as (client, _repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            response = _create(client, payload={"never_expires": True})
+    assert response.status_code == 201
+    assert response.json()["expires_at"] is None
+
+
+def test_create_empty_conversation_conflict(tmp_path):
+    with _client(tmp_path) as (client, _repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value={"version": 1, "messages": []})):
+            response = _create(client)
+    assert response.status_code == 409
+
+
+def test_list_strips_token_hashes(tmp_path):
+    with _client(tmp_path) as (client, _repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            _create(client)
+        listed = client.get(f"/api/threads/{THREAD_A}/shares").json()
+    assert len(listed) == 1
+    assert "token_hash" not in listed[0]
+    assert "share_url" not in listed[0]
+
+
+# ── Public resolution ─────────────────────────────────────────────────────
+
+
+def _mint(client: TestClient, repo: ConversationShareRepository, **overrides) -> str:
+    with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+        created = _create(client).json()
+    return created["share_url"].split("/share/")[-1]
+
+
+def test_public_get_resolves_snapshot_without_thread_access(tmp_path):
+    with _client(tmp_path) as (client, repo):
+        token = _mint(client, repo)
+        with patch("app.gateway.deps.get_thread_store", side_effect=AssertionError("public read must not touch thread state")):
+            response = client.get(f"/api/shares/{token}")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["snapshot"] == _SNAPSHOT
+    # No private identifiers cross the boundary.
+    assert "thread_id" not in body and "token_hash" not in body
+
+
+def test_public_get_is_exempt_from_auth_middleware(tmp_path):
+    """Anonymous request reaches the route (404 for the unknown token), not 401."""
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.include_router(shares_router.router)
+    set_app_config(_config(enabled=True))
+    app.state.share_repo = None
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/shares/dfs_unknown-token")
+    finally:
+        reset_app_config()
+    assert response.status_code == 404  # route verdict, not middleware 401
+
+
+def test_revoked_expired_and_unknown_tokens_share_one_404(tmp_path):
+    with _client(tmp_path) as (client, repo):
+        token = _mint(client, repo)
+        # Resolve via repo list to find the share id for revocation.
+        rows = asyncio.run(repo.list_by_thread(THREAD_A, str(USER_A.id)))
+        assert asyncio.run(repo.revoke(rows[0]["id"], THREAD_A, str(USER_A.id))) is True
+        revoked = client.get(f"/api/shares/{token}")
+        assert revoked.status_code == 404
+
+        # An expired link behaves identically.
+        expired_token = "dfs_expired"
+        asyncio.run(
+            repo.create(
+                thread_id=THREAD_A,
+                owner_user_id=str(USER_A.id),
+                token_hash=_hash(expired_token),
+                title="t",
+                snapshot_json=_SNAPSHOT,
+                expires_at=datetime.now(UTC) - timedelta(seconds=1),
+            )
+        )
+        expired = client.get(f"/api/shares/{expired_token}")
+        assert expired.status_code == 404
+
+        unknown = client.get("/api/shares/dfs_garbage")
+        assert unknown.status_code == 404
+        # Indistinguishable: same status, same body.
+        assert revoked.json() == expired.json() == unknown.json()
+
+
+def _hash(token: str) -> str:
+    from app.gateway.shares.tokens import share_token_hash
+
+    return share_token_hash(token, "test-pepper")
+
+
+def test_public_resolution_is_throttled_per_ip(tmp_path):
+    with _client(tmp_path) as (client, repo):
+        token = _mint(client, repo)
+        statuses = [client.get(f"/api/shares/{token}").status_code for _ in range(shares_router._PUBLIC_RESOLVE_MAX_PER_WINDOW + 5)]
+    assert statuses[0] == 200
+    assert statuses[-1] == 404  # throttled within the window
