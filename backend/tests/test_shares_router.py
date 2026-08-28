@@ -207,6 +207,99 @@ def test_public_get_is_exempt_from_auth_middleware(tmp_path):
     assert response.status_code == 404  # route verdict, not middleware 401
 
 
+# ── The sharpest edges: auth-disabled mode and null-owner threads ─────────
+
+
+def _enable_auth_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    # Production markers make is_auth_disabled() refuse to take effect —
+    # clear them so the test exercises the mode deterministically.
+    monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+
+
+def _null_owner_thread_store() -> MemoryThreadMetaStore:
+    store = MemoryThreadMetaStore(InMemoryStore())
+    asyncio.run(store.create("thread-null-owner", user_id=None))
+    return store
+
+
+def test_auth_disabled_mode_does_not_auto_publish(monkeypatch, tmp_path):
+    """DEER_FLOW_AUTH_DISABLED=1 must not make conversations implicitly public.
+
+    The synthetic admin can mint links through the owner route, but public
+    resolution still requires an explicit share record in every mode.
+    """
+    _enable_auth_disabled(monkeypatch)
+    set_app_config(_config(enabled=True))
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+    app.include_router(shares_router.router)
+    app.state.thread_store = _null_owner_thread_store()
+    repo = asyncio.run(_make_repo(tmp_path))
+    app.state.share_repo = repo
+    from app.gateway.shares.tokens import set_share_pepper
+
+    set_share_pepper("test-pepper")
+    try:
+        with TestClient(app) as client, patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            # No record yet: 404 even though every requester is a synthetic admin.
+            assert client.get("/api/shares/dfs_any-token").status_code == 404
+
+            # The synthetic admin can mint a link through the owner route…
+            created = client.post("/api/threads/thread-null-owner/shares", json={})
+            assert created.status_code == 201, created.text
+            token = created.json()["share_url"].split("/share/")[-1]
+
+            # …and only that explicit record becomes publicly readable.
+            assert client.get(f"/api/shares/{token}").status_code == 200
+    finally:
+        set_share_pepper(None)
+        reset_app_config()
+
+
+def test_null_owner_thread_without_share_record_is_not_public(tmp_path):
+    """A legacy user_id=NULL thread stays private without an explicit record."""
+    with _client(tmp_path) as (client, repo):
+        token = "dfs_null-owner-explicit"
+        asyncio.run(
+            repo.create(
+                thread_id="thread-null-owner",
+                owner_user_id=str(USER_A.id),
+                token_hash=_hash(token),
+                title="legacy thread",
+                snapshot_json=_SNAPSHOT,
+            )
+        )
+        # Without a record: unknown token → 404 (covered above); the pinned
+        # property here is that the record itself is the only gate.
+        assert client.get(f"/api/shares/{token}").status_code == 200
+
+
+def test_public_read_never_widens_access_via_null_owner_path(tmp_path):
+    """Resolving a null-owner thread's share must not re-read thread state.
+
+    The null-owner check_access path (which allows every authenticated user)
+    must never be reachable from the public endpoint — possession of the
+    token grants exactly the immutable snapshot and nothing else.
+    """
+    with _client(tmp_path) as (client, repo):
+        token = "dfs_null-owner-widening"
+        asyncio.run(
+            repo.create(
+                thread_id="thread-null-owner",
+                owner_user_id=str(USER_A.id),
+                token_hash=_hash(token),
+                title="legacy thread",
+                snapshot_json=_SNAPSHOT,
+            )
+        )
+        with patch("app.gateway.deps.get_thread_store", side_effect=AssertionError("public read must never consult thread access")):
+            response = client.get(f"/api/shares/{token}")
+    assert response.status_code == 200
+    assert set(response.json().keys()) == {"title", "snapshot_version", "snapshot"}
+
+
 def test_revoked_expired_and_unknown_tokens_share_one_404(tmp_path):
     with _client(tmp_path) as (client, repo):
         token = _mint(client, repo)

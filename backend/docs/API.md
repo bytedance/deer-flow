@@ -314,6 +314,63 @@ GET /api/models/{model_name}
 }
 ```
 
+### Conversation Sharing (#4548)
+
+Read-only public sharing of a conversation snapshot. Requires `conversation_sharing.enabled` in `config.yaml` (off by default) and a SQL database backend. The share-token pepper is environment-backed (`SHARE_TOKEN_PEPPER`); a 0600-persisted secret is generated locally when absent.
+
+Owner endpoints (authenticated, owner-checked):
+
+#### Create Share
+
+```http
+POST /api/threads/{thread_id}/shares
+Content-Type: application/json
+```
+
+**Request Body:**
+```json
+{
+  "title": "Optional custom title",
+  "expires_in_days": 30,
+  "never_expires": false
+}
+```
+
+- `expires_in_days` — one of `1`, `7`, `30`; defaults to `conversation_sharing.default_expiry_days`.
+- `never_expires` — only accepted when the deployment sets `conversation_sharing.allow_no_expiry`.
+
+**Response (`201`):**
+```json
+{
+  "share_id": "…",
+  "title": "…",
+  "expires_at": "2026-09-27T10:00:00Z",
+  "created_at": "2026-08-28T10:00:00Z",
+  "share_url": "/share/dfs_…"
+}
+```
+
+`share_url` carries the raw token and is returned **exactly once**; only an HMAC-SHA-256 digest is stored. The snapshot is frozen at creation — later messages or edits never modify an existing share.
+
+#### List / Revoke
+
+```http
+GET /api/threads/{thread_id}/shares
+DELETE /api/threads/{thread_id}/shares/{share_id}
+```
+
+Listing returns management metadata (never token hashes); revocation is effective on the next public request.
+
+Public endpoint (anonymous — the token is the credential):
+
+#### Resolve Share
+
+```http
+GET /api/shares/{share_token}
+```
+
+Returns `{title, snapshot_version, snapshot}` where `snapshot` is the allowlisted public DTO (snapshot-local ids, `user`/`assistant` roles, renderable text only — no run/thread/user identifiers, no tool arguments or debug data). Invalid, revoked, and expired tokens all return the same `404`. Resolution is rate-limited per IP.
+
 ### MCP Configuration
 
 #### Get MCP Config

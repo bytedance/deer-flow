@@ -2796,3 +2796,17 @@ authorization:
 #                                         # also match a host-owned table name.
 #     config:
 #       label: example                    # extension-private values, if any
+
+# Read-only conversation sharing (#4548). Disabled by default — enabling it
+# lets thread owners mint public snapshot links. The share-token pepper is
+# deliberately NOT configured here: set SHARE_TOKEN_PEPPER in the environment
+# (a 0600-persisted secret is generated locally when absent).
+
+conversation_sharing:
+  enabled: false
+  # Default link lifetime in days (1/7/30 are the offered choices).
+  default_expiry_days: 30
+  # Allow the explicit "never expires" advanced choice. Off by default:
+  # finite expiry plus immediate revocation are the compensating controls
+  # for bearer-token-in-URL sharing.
+  allow_no_expiry: false
