@@ -153,7 +153,9 @@ eviction task continues to own lease renewal after the worker task returns; the
 five-minute retention delay therefore cannot let an active durable row expire
 and be rewritten as an orphan before its convergence retry. Renewal stops when
 the record is confirmed or evicted, the supervisor ends, ownership is fenced,
-or shutdown cancels it.
+or shutdown cancels it. Lease renewal writes are monotonic: a heartbeat chosen
+before a checkpoint mutation fence cannot overwrite the newer deadline written
+when that fence releases.
 
 Idempotent conflict hydration is always a one-shot, store-only response. It is
 never inserted into `RunManager`'s execution indexes, including when the

@@ -1,6 +1,6 @@
 import asyncio
 import copy
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Annotated, Any, NotRequired, TypedDict
@@ -49,16 +49,51 @@ class _RenewalQueuedBehindCheckpointFenceStore(MemoryRunStore):
         super().__init__()
         self.renewal_selected = asyncio.Event()
         self.allow_renewal_to_contend = asyncio.Event()
+        self.renewal_completed = asyncio.Event()
+        self.requested_lease_expires_at = None
 
     async def renew_lease(self, run_id, *, owner_worker_id, lease_expires_at):
+        self.requested_lease_expires_at = lease_expires_at
         self.renewal_selected.set()
         await self.allow_renewal_to_contend.wait()
         async with self._checkpoint_mutation_lock:
-            return await super().renew_lease(
+            result = await super().renew_lease(
                 run_id,
                 owner_worker_id=owner_worker_id,
                 lease_expires_at=lease_expires_at,
             )
+        self.renewal_completed.set()
+        return result
+
+
+class _RenewalReleasedAfterCheckpointFenceStore(
+    _RenewalQueuedBehindCheckpointFenceStore,
+):
+    """Give fence release a deterministic deadline newer than the queued renewal."""
+
+    @asynccontextmanager
+    async def checkpoint_mutation_fence(
+        self,
+        run_id,
+        *,
+        expected_owner_worker_id,
+        lease_seconds,
+    ):
+        del lease_seconds
+        async with self._checkpoint_mutation_lock:
+            run = self._runs[run_id]
+            assert run["status"] in ("pending", "running")
+            assert run["owner_worker_id"] == expected_owner_worker_id
+            fence = SimpleNamespace(acquired=True, lease_expires_at=None)
+            try:
+                yield fence
+            finally:
+                assert self.requested_lease_expires_at is not None
+                release_deadline = datetime.fromisoformat(
+                    self.requested_lease_expires_at,
+                ) + timedelta(seconds=1)
+                fence.lease_expires_at = release_deadline.isoformat()
+                run["lease_expires_at"] = fence.lease_expires_at
 
 
 class FakeCheckpointer:
@@ -340,6 +375,48 @@ async def test_selected_heartbeat_cannot_revoke_active_checkpoint_fence():
     assert record.ownership_lost is False
     assert record.lease_expires_at != old_expiry
     assert datetime.fromisoformat(record.lease_expires_at) > datetime.now(UTC)
+
+
+@pytest.mark.anyio
+async def test_selected_heartbeat_cannot_regress_post_fence_lease_deadline():
+    store = _RenewalReleasedAfterCheckpointFenceStore()
+    ownership = RunOwnershipConfig(
+        heartbeat_enabled=True,
+        lease_seconds=60,
+        grace_seconds=0,
+    )
+    manager = RunManager(
+        store=store,
+        worker_id="worker-a",
+        run_ownership_config=ownership,
+    )
+    record = await manager.create_or_reject("thread-heartbeat-fence-deadline")
+    await manager.try_start(record.run_id)
+
+    old_expiry = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+    record.lease_expires_at = old_expiry
+    store._runs[record.run_id]["lease_expires_at"] = old_expiry
+
+    renewal_task = asyncio.create_task(manager._renew_leases())
+    await asyncio.wait_for(store.renewal_selected.wait(), timeout=1)
+
+    async with manager.fence_checkpoint_mutation(record.run_id) as acquired:
+        assert acquired is True
+        store.allow_renewal_to_contend.set()
+        await asyncio.sleep(0)
+        assert not renewal_task.done()
+
+    await asyncio.wait_for(renewal_task, timeout=1)
+
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert store.renewal_completed.is_set()
+    assert store.requested_lease_expires_at is not None
+    assert datetime.fromisoformat(record.lease_expires_at) > datetime.fromisoformat(
+        store.requested_lease_expires_at,
+    )
+    assert stored["lease_expires_at"] == record.lease_expires_at
+    assert record.ownership_lost is False
 
 
 def _make_rollback_point(*, checkpoint_id="ckpt-1", messages=("before",), pending_writes=()):

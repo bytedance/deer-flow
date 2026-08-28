@@ -1615,6 +1615,41 @@ class TestRunRepository:
         await _cleanup()
 
     @pytest.mark.anyio
+    async def test_lease_renewal_does_not_shorten_existing_deadline(self, tmp_path):
+        """Queued SQL lease writes preserve a newer release-time deadline."""
+        repo = await _make_repo(tmp_path)
+        newer_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=newer_lease,
+        )
+
+        stale_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        assert (
+            await repo.update_lease(
+                "run-1",
+                owner_worker_id="worker-a",
+                lease_expires_at=stale_lease,
+            )
+            is True
+        )
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        renewal = await repo.renew_lease(
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=stale_lease,
+        )
+
+        assert renewal.renewed is True
+        assert renewal.cancel_action == "rollback"
+        row = await repo.get("run-1")
+        assert row["lease_expires_at"] == newer_lease
+        await _cleanup()
+
+    @pytest.mark.anyio
     async def test_request_cancel_rejects_terminal_run(self, tmp_path):
         repo = await _make_repo(tmp_path)
         await repo.put("run-1", thread_id="t1", status="success")

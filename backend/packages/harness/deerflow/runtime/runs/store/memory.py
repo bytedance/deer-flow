@@ -456,8 +456,19 @@ class MemoryRunStore(RunStore):
             return False
         if run.get("owner_worker_id") != owner_worker_id:
             return False
+        requested_deadline = datetime.fromisoformat(lease_expires_at)
+        if requested_deadline.tzinfo is None:
+            requested_deadline = requested_deadline.replace(tzinfo=UTC)
+        stored_lease_expires_at = run.get("lease_expires_at")
+        try:
+            stored_deadline = datetime.fromisoformat(stored_lease_expires_at)
+            if stored_deadline.tzinfo is None:
+                stored_deadline = stored_deadline.replace(tzinfo=UTC)
+        except (TypeError, ValueError):
+            stored_deadline = None
         run["owner_worker_id"] = owner_worker_id
-        run["lease_expires_at"] = lease_expires_at
+        if stored_deadline is None or requested_deadline > stored_deadline:
+            run["lease_expires_at"] = lease_expires_at
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 

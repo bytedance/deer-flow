@@ -376,7 +376,14 @@ class RunStore(abc.ABC):
         owner_worker_id: str,
         lease_expires_at: str,
     ) -> bool:
-        """Renew the lease on an active run. Returns ``False`` when no row matched."""
+        """Renew the lease on an active run without shortening its deadline.
+
+        Returns ``False`` when no row matched. ``True`` confirms that the
+        durable deadline is at least the requested value; it need not equal it.
+        Implementations must preserve a later existing deadline when an older,
+        already-selected renewal arrives after another ownership operation has
+        extended the lease.
+        """
         pass
 
     async def renew_lease(
@@ -392,7 +399,9 @@ class RunStore(abc.ABC):
         cancellation action, so third-party stores remain source-compatible
         without adding a background read. Stores that support multi-process
         cancellation must override this method to renew and observe the
-        request atomically.
+        request atomically. Like ``update_lease``, a renewal must never shorten
+        an existing deadline; ``renewed=True`` confirms the requested deadline
+        as a durable lower bound.
         """
         renewed = await self.update_lease(
             run_id,

@@ -1660,6 +1660,40 @@ async def test_update_lease_renews_row():
 
 
 @pytest.mark.anyio
+async def test_update_lease_does_not_shorten_existing_deadline():
+    """An out-of-order renewal must not regress a newer durable lease."""
+    store = MemoryRunStore()
+    newer_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+    await store.put(
+        "run-1",
+        thread_id="thread-1",
+        status="running",
+        owner_worker_id="w1",
+        lease_expires_at=newer_lease,
+    )
+
+    stale_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+    updated = await store.update_lease(
+        "run-1",
+        owner_worker_id="w1",
+        lease_expires_at=stale_lease,
+    )
+
+    assert updated is True
+    stored = await store.get("run-1")
+    assert stored["lease_expires_at"] == newer_lease
+
+    renewal = await store.renew_lease(
+        "run-1",
+        owner_worker_id="w1",
+        lease_expires_at=stale_lease,
+    )
+    assert renewal.renewed is True
+    stored = await store.get("run-1")
+    assert stored["lease_expires_at"] == newer_lease
+
+
+@pytest.mark.anyio
 async def test_update_lease_returns_false_for_terminal_run():
     """update_lease must return False when the run is not pending/running."""
     store = MemoryRunStore()

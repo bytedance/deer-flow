@@ -35,6 +35,15 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
     return or_(lease_col.is_(None), lease_col < cutoff)
 
 
+def _monotonic_lease_deadline(candidate: datetime):
+    """Keep a later durable lease when a queued renewal arrives out of order."""
+    return case(
+        (RunRow.lease_expires_at.is_(None), candidate),
+        (RunRow.lease_expires_at < candidate, candidate),
+        else_=RunRow.lease_expires_at,
+    )
+
+
 def _database_wall_clock(dialect_name: str):
     """Return a statement-time wall clock suitable for lease fencing.
 
@@ -858,7 +867,7 @@ class RunRepository(RunStore):
         lease_dt = datetime.fromisoformat(lease_expires_at)
         values: dict[str, Any] = {
             "owner_worker_id": owner_worker_id,
-            "lease_expires_at": lease_dt,
+            "lease_expires_at": _monotonic_lease_deadline(lease_dt),
             "updated_at": datetime.now(UTC),
         }
         async with self._sf() as session:
@@ -884,7 +893,7 @@ class RunRepository(RunStore):
                     RunRow.status.in_(("pending", "running")),
                 )
                 .values(
-                    lease_expires_at=lease_dt,
+                    lease_expires_at=_monotonic_lease_deadline(lease_dt),
                     updated_at=datetime.now(UTC),
                 )
                 .returning(RunRow.run_id, RunRow.cancel_action)

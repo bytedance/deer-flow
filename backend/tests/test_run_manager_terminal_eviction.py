@@ -587,11 +587,7 @@ async def test_local_rollback_requires_a_live_owned_durable_lease():
     await manager.try_start(record.run_id)
     expired = "2000-01-01T00:00:00+00:00"
     record.lease_expires_at = expired
-    assert await store.update_lease(
-        record.run_id,
-        owner_worker_id="worker-local",
-        lease_expires_at=expired,
-    )
+    store._runs[record.run_id]["lease_expires_at"] = expired
 
     outcome = await manager.cancel(record.run_id, action="rollback")
     stored = await store.get(record.run_id)
@@ -1483,11 +1479,7 @@ async def test_same_terminal_status_with_conflicting_snapshot_is_authoritative()
         error="local worker failed",
         persist=False,
     )
-    assert await store.update_lease(
-        record.run_id,
-        owner_worker_id="worker-local",
-        lease_expires_at="2000-01-01T00:00:00+00:00",
-    )
+    store._runs[record.run_id]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
     assert await store.claim_for_takeover(
         record.run_id,
         grace_seconds=0,
@@ -1528,11 +1520,7 @@ async def test_normal_completion_does_not_overwrite_same_status_peer_terminal():
         stop_reason="tool_capped",
         persist=False,
     )
-    assert await store.update_lease(
-        record.run_id,
-        owner_worker_id="worker-local",
-        lease_expires_at="2000-01-01T00:00:00+00:00",
-    )
+    store._runs[record.run_id]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
     assert await store.claim_for_takeover(
         record.run_id,
         grace_seconds=0,
@@ -1578,11 +1566,7 @@ async def test_matching_same_status_peer_terminal_still_fences_local_side_effect
         error="identical failure",
         persist=False,
     )
-    assert await store.update_lease(
-        record.run_id,
-        owner_worker_id="worker-local",
-        lease_expires_at="2000-01-01T00:00:00+00:00",
-    )
+    store._runs[record.run_id]["lease_expires_at"] = "2000-01-01T00:00:00+00:00"
     assert await store.claim_for_takeover(
         record.run_id,
         grace_seconds=0,
