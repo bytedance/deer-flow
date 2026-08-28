@@ -21,7 +21,7 @@ from typing import Any
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
-from deerflow.authz.runtime import resolve_authorization_provider
+from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
 from deerflow.config.app_config import AppConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
@@ -90,6 +90,37 @@ def _resolve_authorization_inputs(
     return provider, authz_config, principal
 
 
+async def _resolve_authorization_inputs_async(
+    *,
+    context: Mapping[str, Any],
+    app_config: AppConfig | None,
+) -> tuple[AuthorizationProvider, Any, Principal] | None:
+    """Discover off-loop, then construct custom providers on this event loop."""
+    authz_config = getattr(app_config, "authorization", None)
+    if authz_config is None or getattr(authz_config, "enabled", None) is not True:
+        return None
+
+    try:
+        if getattr(authz_config, "provider", None) is None:
+            # There is no module to import. Preserve the synchronous resolver's
+            # missing-provider validation without an unnecessary worker hop.
+            provider = resolve_authorization_provider(authz_config)
+        else:
+            spec = await asyncio.to_thread(resolve_authorization_provider_spec, authz_config)
+            # Async providers may create loop-affine clients in __init__.
+            provider = construct_authorization_provider(spec, authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
+        if authz_config.fail_closed:
+            raise SandboxAuthorizationError() from None
+        return None
+    if provider is None:
+        return None
+
+    principal = build_principal_from_context(context, default_role=authz_config.default_role)
+    return provider, authz_config, principal
+
+
 def _authorization_request(principal: Principal) -> AuthzRequest:
     return AuthzRequest(principal=principal, resource="sandbox", action="execute", target=_SANDBOX_TARGET)
 
@@ -130,13 +161,12 @@ def authorize_sandbox_execution(*, context: Mapping[str, Any], app_config: AppCo
 async def authorize_sandbox_execution_async(*, context: Mapping[str, Any], app_config: AppConfig | None) -> None:
     """Asynchronously check ``authorize("sandbox", "execute")`` before use.
 
-    Provider resolution may import and construct a custom provider, so keep the
-    shared synchronous resolution path off the event loop as well as the config
-    file load performed by :func:`safe_app_config_async`.
+    Provider discovery may import a custom module, so it runs off the event
+    loop. Provider construction stays on the event loop because a valid async
+    provider may create loop-affine clients in ``__init__``.
     """
     context_snapshot = dict(context)
-    inputs = await asyncio.to_thread(
-        _resolve_authorization_inputs,
+    inputs = await _resolve_authorization_inputs_async(
         context=context_snapshot,
         app_config=app_config,
     )

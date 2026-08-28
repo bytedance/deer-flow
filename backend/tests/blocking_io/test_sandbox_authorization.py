@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
-from deerflow.authz.provider import AuthzDecision
 from deerflow.config.app_config import AppConfig
-from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -19,7 +18,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_reused_async_sandbox_offloads_config_and_provider_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both config hashing and custom-provider construction may block."""
+    """Config hashing and class discovery stay off-loop; construction does not."""
     from deerflow.authz import sandbox_authz
     from deerflow.sandbox import tools as sandbox_tools
 
@@ -29,21 +28,29 @@ async def test_reused_async_sandbox_offloads_config_and_provider_resolution(tmp_
     app_config = AppConfig(
         models=[ModelConfig(name="gpt-4", model="gpt-4", use="langchain_openai:ChatOpenAI")],
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
-        authorization=AuthorizationConfig(enabled=True, fail_closed=True, default_role="user"),
+        authorization=AuthorizationConfig(
+            enabled=True,
+            fail_closed=True,
+            default_role="user",
+            provider=AuthorizationProviderConfig(
+                use="deerflow.authz.rbac:RbacAuthorizationProvider",
+                config={"roles": {"user": {"sandbox": {"allow": "*"}}}},
+            ),
+        ),
     )
-    provider = MagicMock()
-    provider.aauthorize = AsyncMock(return_value=AuthzDecision(allow=True))
 
     def blocking_config_load():
         probe.read_text(encoding="utf-8")
         return app_config
 
-    def blocking_provider_resolution(_config):
+    discover_provider = sandbox_authz.resolve_authorization_provider_spec
+
+    def blocking_provider_discovery(config):
         probe.read_text(encoding="utf-8")
-        return provider
+        return discover_provider(config)
 
     monkeypatch.setattr(sandbox_authz, "safe_app_config", blocking_config_load)
-    monkeypatch.setattr(sandbox_authz, "resolve_authorization_provider", blocking_provider_resolution)
+    monkeypatch.setattr(sandbox_authz, "resolve_authorization_provider_spec", blocking_provider_discovery)
 
     sandbox = MagicMock()
     sandbox_provider = MagicMock()
@@ -56,4 +63,3 @@ async def test_reused_async_sandbox_offloads_config_and_provider_resolution(tmp_
     )
 
     assert await sandbox_tools.ensure_sandbox_initialized_async(runtime) is sandbox
-    provider.aauthorize.assert_awaited_once()

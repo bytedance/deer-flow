@@ -426,6 +426,18 @@ Phase 1 最低验证要求：
   `ReadBeforeWriteMiddleware` 的普通 sandbox 工具继续在各自调用入口重新授权；同步与异步
   deny 均保持工具级错误而非 run 级异常。
 
+#### PR #5006 review 补充：异步 provider 的构造线程
+
+- 自定义 provider 的模块发现可能触发阻塞 import，但 provider 构造函数也可能创建
+  asyncio loop-affine 客户端。`runtime.py` 因此把解析拆成两阶段：
+  `resolve_authorization_provider_spec()` 在线程池完成 class-path 发现，
+  `construct_authorization_provider()` 在调用方事件循环构造并校验实例。
+- 同步 `resolve_authorization_provider()` 继续组合这两个阶段，保持原有调用契约与错误语义。
+  async sandbox gate 的发现和构造任一失败仍统一遵循 `fail_closed` / `fail_open`。
+- 回归覆盖同时固定两个边界：阻塞文件探针证明 config hash 与 class discovery 不占用
+  event loop；loop-affine provider 在 `__init__` 调用 `asyncio.get_running_loop()` 并在
+  `aauthorize()` 验证仍是同一个 loop。
+
 ### 新记录模板
 
 ```markdown

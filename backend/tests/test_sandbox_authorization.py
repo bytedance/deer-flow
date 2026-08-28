@@ -13,7 +13,9 @@ and is called from:
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import asyncio
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -22,7 +24,7 @@ from deerflow.authz.provider import AuthzDecision, AuthzReason
 from deerflow.authz.rbac import RbacAuthorizationProvider
 from deerflow.authz.sandbox_authz import authorize_sandbox_execution
 from deerflow.config.app_config import AppConfig
-from deerflow.config.authorization_config import AuthorizationConfig
+from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
@@ -718,6 +720,49 @@ def test_ensure_sandbox_initialized_async_rechecks_authz_for_reused_sandbox(monk
         asyncio.run(sandbox_tools.ensure_sandbox_initialized_async(runtime))
     sandbox_provider.get.assert_not_called()
     sandbox_provider.acquire_async.assert_not_called()
+
+
+def test_async_provider_is_constructed_on_running_event_loop(monkeypatch):
+    """A loop-affine custom provider must not be constructed in a worker."""
+    from deerflow.authz.sandbox_authz import authorize_sandbox_execution_async
+
+    provider_module = ModuleType("loop_affine_authz_test_provider")
+    constructed_on = []
+
+    class LoopAffineProvider:
+        name = "loop-affine"
+
+        def __init__(self):
+            self.loop = asyncio.get_running_loop()
+            constructed_on.append(self.loop)
+
+        def authorize(self, request):
+            return AuthzDecision(allow=True)
+
+        async def aauthorize(self, request):
+            assert asyncio.get_running_loop() is self.loop
+            return AuthzDecision(allow=True)
+
+        def filter_resources(self, principal, resource_type, candidates):
+            return list(candidates)
+
+    provider_module.LoopAffineProvider = LoopAffineProvider
+    monkeypatch.setitem(sys.modules, provider_module.__name__, provider_module)
+
+    app_config = _make_app_config()
+    app_config.authorization = AuthorizationConfig(
+        enabled=True,
+        fail_closed=True,
+        default_role="user",
+        provider=AuthorizationProviderConfig(use=f"{provider_module.__name__}:LoopAffineProvider"),
+    )
+
+    async def _run() -> None:
+        running_loop = asyncio.get_running_loop()
+        await authorize_sandbox_execution_async(context=_context(), app_config=app_config)
+        assert constructed_on == [running_loop]
+
+    asyncio.run(_run())
 
 
 def test_async_sandbox_tool_authorizes_once_via_async_provider(monkeypatch):
