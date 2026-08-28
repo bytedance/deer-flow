@@ -23,7 +23,7 @@ login. Programmatic clients can instead use a **personal access token (PAT)**
 sent as a Bearer credential:
 
 ```http
-GET /api/models
+GET /api/threads
 Authorization: Bearer dfp_...
 ```
 
@@ -97,15 +97,17 @@ Revocation is immediate.
 - A request carrying an `Authorization` header that fails validation gets a
   hard `401` — it never falls back to the session cookie.
 - **Route-level default-deny:** PAT requests are admitted only to the
-  thread/run lifecycle routes the v1 scopes govern — `GET/POST /api/threads`,
-  `POST /api/threads/search`, `GET/PATCH/DELETE /api/threads/{thread_id}`,
-  the thread `goal`/`state`/`compact`/`history`/`branches` subroutes, and
-  `/api/threads/{thread_id}/runs/*` plus `/api/runs/stream|wait|messages|feedback`.
-  Every other authenticated route — memory, agents, MCP/skills config,
-  integrations, channels, uploads — answers `403` to PAT callers regardless
-  of scopes. Scope enforcement alone only constrains permission-decorated
-  routes, so the allowlist is the outer boundary; session-cookie callers are
-  unaffected.
+  thread/run lifecycle routes the v1 scopes govern — `GET/POST /api/threads`
+  (list/create), `POST /api/threads/search`, `GET/PATCH/DELETE
+  /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
+  `branches` subroutes, `GET/POST /api/threads/{thread_id}/runs/*`
+  (run create/stream/wait/list/get/cancel/join; feedback read & submit), and
+  `POST /api/runs/stream|wait` plus `GET /api/runs/{run_id}/messages|feedback`.
+  Every other authenticated route — memory, agents, models, MCP/skills
+  config, integrations, channels, uploads — answers `403` to PAT callers
+  regardless of scopes. Scope enforcement alone only constrains
+  permission-decorated routes, so the allowlist is the outer boundary;
+  session-cookie callers are unaffected.
 - PAT credentials never carry admin capability, even when the owning user is
   an admin. This includes extension-contributed admin routes: the extension
   principal projection suppresses every admin signal for PAT callers.

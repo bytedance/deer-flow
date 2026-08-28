@@ -92,6 +92,16 @@ def _make_pat_app(with_pat_repo: bool = True):
     async def thread_delete(request: Request):
         return {"deleted": True}
 
+    # Mirrors the real stateless run entrypoint (routers/runs.py), including
+    # the @require_permission decorator, so scope enforcement is exercised
+    # end-to-end through the middleware's permission intersection.
+    from app.gateway.authz import require_permission
+
+    @app.post("/api/runs/stream")
+    @require_permission("runs", "create")
+    async def stateless_run_stream(request: Request):
+        return {"ok": True}
+
     return app
 
 
@@ -409,6 +419,21 @@ def test_pat_policy_allows_thread_lifecycle_routes(client):
     response = client.delete("/api/threads/t1", headers={"Authorization": f"Bearer {created['token']}"})
     assert response.status_code == 200
     assert response.json() == {"deleted": True}
+
+
+def test_pat_scopes_enforced_on_stateless_run_entry(client):
+    """Follow-up to the review's P1-1: the stateless run entrypoints now
+    carry @require_permission("runs", "create"), so a threads:read-only PAT
+    cannot start runs even though the route sits inside the PAT allowlist."""
+    read_only = _create_pat(client, scopes=["threads:read"])
+    client.cookies.clear()
+    denied = client.post("/api/runs/stream", headers={"Authorization": f"Bearer {read_only['token']}"})
+    assert denied.status_code == 403
+
+    create_scope = _create_pat(client, scopes=["runs:create"])
+    client.cookies.clear()
+    allowed = client.post("/api/runs/stream", headers={"Authorization": f"Bearer {create_scope['token']}"})
+    assert allowed.status_code == 200
 
 
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):

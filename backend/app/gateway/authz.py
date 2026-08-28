@@ -552,14 +552,22 @@ def require_permission(
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             request = kwargs.get("request")
             if request is None:
-                # Unit tests may call decorated route handlers directly without
-                # constructing a FastAPI Request object. Inject a minimal stub
-                # when the wrapped function declares `request`.
-                if "request" in inspect.signature(func).parameters:
+                # Unit tests may call decorated route handlers directly — with
+                # or without constructing a FastAPI Request object — and may
+                # pass ``request`` positionally. Bind to the real signature
+                # first so a positional request is found rather than
+                # duplicated by the stub injection below.
+                try:
+                    bound = inspect.signature(func).bind_partial(*args, **kwargs)
+                except TypeError:
+                    bound = None
+                if bound is not None and "request" in bound.arguments:
+                    request = bound.arguments["request"]
+                elif "request" in inspect.signature(func).parameters:
                     kwargs["request"] = _make_test_request_stub()
+                    request = kwargs["request"]
                 else:
                     return await func(*args, **kwargs)
-                request = kwargs["request"]
 
             if getattr(request, "_deerflow_test_bypass_auth", False):
                 return await func(*args, **kwargs)
