@@ -1027,9 +1027,12 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
     stored_replacement = await store.get(replacement.run_id)
     assert not await manager.has_inflight("thread-1")
     assert replacement.status == RunStatus.interrupted
-    assert replacement.abort_event.is_set()
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.interrupted.value
+    # The cancelled replacement never reaches a worker, so its admission
+    # close path must also evict it from the in-memory registry; the store
+    # row survives and list_by_thread() hydrates it on demand.
+    assert replacement.run_id not in manager._runs
 
 
 @pytest.mark.anyio

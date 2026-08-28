@@ -1145,11 +1145,6 @@ async def run_agent(
             )
 
     finally:
-        # Evict the finished run's in-memory registry record after a delay.
-        # Scheduled first so an exception later in this finally block cannot
-        # skip it: the delay far outlasts finalization, and the backing
-        # RunStore remains the source of truth for run history either way.
-        run_manager.schedule_cleanup(run_id)
         if record.ownership_lost:
             logger.warning(
                 "Skipping durable finalization for run %s because this worker no longer owns its lease",
@@ -1182,8 +1177,13 @@ async def run_agent(
 
         # Persist any subagent step events still buffered (#3779) — including on
         # abort/exception paths, where the stream loop broke before its own flush.
+        # Guarded so a flush failure cannot skip the end frame or the record
+        # eviction at the tail of this finally block.
         if not record.ownership_lost and subagent_events is not None:
-            await subagent_events.flush()
+            try:
+                await subagent_events.flush()
+            except Exception:
+                logger.warning("Failed to flush subagent events for run %s", run_id, exc_info=True)
 
         if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
             try:
@@ -1355,11 +1355,21 @@ async def run_agent(
                     "Extension task-stop notification interrupted for run %s; completing cleanup first",
                     run_id,
                 )
-        if record.finalizing:
-            await run_manager.set_finalizing(run_id, False)
+        try:
+            if record.finalizing:
+                await run_manager.set_finalizing(run_id, False)
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+            await bridge.publish_end(run_id)
+        finally:
+            asyncio.create_task(bridge.cleanup(run_id, delay=60))
+            # Everything finalization owed — durable terminal state, receipts,
+            # duration, observers, the finalizing-barrier release, and the end
+            # frame — is done. Evict the registry record now (event-driven),
+            # after the manager confirms the terminal state is durable.
+            try:
+                await run_manager.evict_finished_run(run_id)
+            except Exception:
+                logger.warning("Failed to evict run record %s after finalization", run_id, exc_info=True)
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt

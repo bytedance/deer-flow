@@ -342,7 +342,7 @@ class _IntegrationRunManager:
     async def set_finalizing(self, *_args, **_kwargs):
         return None
 
-    def schedule_cleanup(self, *_args, **_kwargs):
+    async def evict_finished_run(self, *_args, **_kwargs):
         return None
 
 

@@ -30,12 +30,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Delay before a finished run's in-memory record is evicted from the registry.
-# The backing RunStore is the source of truth for run history; the in-memory
-# record only needs to outlive terminal status polling and short-window
-# list/get overrides, so it holds the run's full ``kwargs["input"]`` payload
-# for at most this long after the worker finishes.
-RUN_RECORD_CLEANUP_DELAY_SECONDS = 300.0
+# Event-driven registry eviction: a finished run's in-memory record (which
+# retains the run's full ``kwargs["input"]`` payload) is removed as soon as
+# finalization completes and the terminal state is confirmed in the backing
+# RunStore. When that confirmation fails — the best-effort terminal writes can
+# have failed, leaving the in-memory record the only correct snapshot — the
+# eviction is retried with backoff before the record is given up on.
+RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS = 5
+RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS = 30.0
 
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
@@ -885,8 +887,8 @@ class RunManager:
 
         await self._persist_status(record, RunStatus.error, error=error)
         # No worker can attach after this point, so the terminal record has no
-        # other path off the registry — schedule its eviction here.
-        self.schedule_cleanup(run_id)
+        # other path off the registry — evict it now, once durable.
+        await self.evict_finished_run(run_id)
         return True
 
     async def get_many_by_thread(
@@ -1349,6 +1351,18 @@ class RunManager:
         # ------------------------------------------------------------------
 
         if not self.heartbeat_enabled:
+            if self._store is not None:
+                # The record may have been evicted from this worker's registry
+                # after the run finished (event-driven eviction). A durably
+                # interrupted row must stay idempotently cancellable (202)
+                # instead of degrading to not_active_locally (409).
+                try:
+                    row = await self._store.get(run_id)
+                except Exception:
+                    logger.warning("Failed to fetch run %s from store during cancel", run_id, exc_info=True)
+                    return CancelOutcome.unknown
+                if row is not None and row.get("status") == RunStatus.interrupted.value:
+                    return CancelOutcome.cancelled
             return CancelOutcome.not_active_locally
 
         if self._store is None:
@@ -1502,6 +1516,10 @@ class RunManager:
                 record.error = stored.get("error")
                 record.stop_reason = stored.get("stop_reason")
                 record.updated_at = _now_iso()
+        # The replacement admission never reaches a worker (its admission
+        # caller never received it), so this is its only registry eviction
+        # path. The store row was verified terminal above.
+        await self.evict_finished_run(record.run_id)
 
     async def _admit_thread_operation(
         self,
@@ -1576,20 +1594,19 @@ class RunManager:
                 if existing.thread_id != thread_id or existing.user_id != user_id:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
-                if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
-                    current = existing
-                    if existing.status not in (RunStatus.pending, RunStatus.running):
-                        # Store-only terminal overlay: no local worker will
-                        # pass through run_agent's cleanup scheduling, so
-                        # evict this hydration from the registry itself.
-                        # Active rows are skipped — a locally-owned run is
-                        # cleaned by its own worker, and a row owned by
-                        # another worker must stay visible while it runs.
-                        self.schedule_cleanup(existing.run_id)
-                current.idempotency_reused = True
-                return current
+                if current is not None:
+                    current.idempotency_reused = True
+                    return current
+                # Store-only row: never cache it in this worker's registry.
+                # An active row is owned by another worker — this worker
+                # attaches no run_agent for the reuse, its heartbeat ignores
+                # foreign-owned records, and a cached active copy would
+                # outlive the owner's completion, shadowing the terminal
+                # store row in get()/list_by_thread() and fencing the thread
+                # through local_inflight forever. A terminal row needs no
+                # cache either: get()/list_by_thread() hydrate it on demand.
+                existing.idempotency_reused = True
+                return existing
 
             # 1) Local inflight check (same-worker guard; cross-worker is the
             #    store's partial unique index below).
@@ -1889,15 +1906,8 @@ class RunManager:
         async with self._lock:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
-    async def cleanup(self, run_id: str, *, delay: float = RUN_RECORD_CLEANUP_DELAY_SECONDS) -> None:
-        """Remove a run record after an optional delay.
-
-        Only the process-local registry entry is removed; the backing RunStore
-        keeps the durable run history, and later lookups fall back to store
-        hydration. Terminal paths schedule this via :meth:`schedule_cleanup`
-        so finished records (which retain the run's full ``kwargs`` payload)
-        cannot accumulate for the lifetime of the process.
-        """
+    async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+        """Remove a run record after an optional delay."""
         if delay > 0:
             await asyncio.sleep(delay)
         async with self._lock:
@@ -1906,18 +1916,92 @@ class RunManager:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
 
-    def schedule_cleanup(self, run_id: str, *, delay: float = RUN_RECORD_CLEANUP_DELAY_SECONDS) -> asyncio.Task[None]:
-        """Schedule :meth:`cleanup` as a named background task.
+    async def evict_finished_run(self, run_id: str) -> None:
+        """Evict a finished run's registry record, event-driven.
 
-        Callers must only schedule this once the run is terminal (or the
-        record is a store-only hydration that no local worker owns), because
-        ``cleanup`` removes the record unconditionally. The returned task is
-        referenced by the event loop's timers while it sleeps, mirroring the
-        StreamBridge cleanup scheduling in the worker.
+        This is the terminal-path companion to ``run_agent``'s finalization
+        tail, ``fail_start_if_pending`` and ``_close_cancelled_admission``: it
+        must only be awaited once the run is terminal and every finalization
+        step has completed, so dropping the record cannot race anything that
+        still references it.
+
+        The in-memory record may hold the only copy of a terminal outcome
+        whose best-effort durable write failed, so the backing store row is
+        verified first and repaired from the in-memory snapshot when stale.
+        When durability cannot be confirmed the record is retained and a
+        bounded background retry takes over. Without a backing store there is
+        no fallback for ``get``/``list_by_thread`` and the registry is the
+        only idempotency dedup, so nothing is evicted in that mode.
         """
-        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
-        task.set_name(f"deerflow-run-record-cleanup-{run_id}")
-        return task
+        if await self._evict_run_record_if_durable(run_id):
+            return
+        task = asyncio.create_task(self._retry_eviction_until_durable(run_id))
+        task.set_name(f"deerflow-run-record-eviction-retry-{run_id}")
+
+    async def _evict_run_record_if_durable(self, run_id: str) -> bool:
+        """Remove *run_id*'s record once its terminal state is durable.
+
+        Returns ``True`` when this call is complete (record removed, absent,
+        not evictable, or no store backing) and ``False`` when the terminal
+        state could not be confirmed in the store and the eviction should be
+        retried.
+        """
+        async with self._lock:
+            record = self._runs.get(run_id)
+        if record is None:
+            return True
+        if record.status in (RunStatus.pending, RunStatus.running) or record.finalizing:
+            # Still owned by a live worker or a finalizing barrier; its own
+            # terminal path performs the eviction. Never race it.
+            return True
+        if self._store is None:
+            # No durable fallback: eviction would erase the run entirely and
+            # break in-memory idempotency dedup. Retain in this mode.
+            return True
+        try:
+            row = await self._call_store_with_retry("eviction get", run_id, lambda: self._store.get(run_id))
+        except Exception:
+            logger.warning("Failed to read run %s from the store during registry eviction", run_id, exc_info=True)
+            return False
+        if row is not None and row.get("status") not in (RunStatus.pending.value, RunStatus.running.value):
+            # The durable row is terminal — any terminal outcome, including a
+            # peer takeover — so the store remains the source of truth and the
+            # in-memory copy can be dropped.
+            await self._remove_run_record(run_id, expected=record)
+            return True
+        # Row missing or still active: this record holds the only terminal
+        # snapshot, so repair the row from it before dropping the record.
+        repaired = await self._persist_snapshot_to_store(run_id, self._store_put_payload(record))
+        if repaired:
+            await self._remove_run_record(run_id, expected=record)
+            return True
+        return False
+
+    async def _retry_eviction_until_durable(self, run_id: str) -> None:
+        for attempt in range(1, RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS + 1):
+            await asyncio.sleep(RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS)
+            if await self._evict_run_record_if_durable(run_id):
+                return
+            logger.warning(
+                "Run record %s retained: terminal state not yet confirmed in the run store (eviction retry %d/%d)",
+                run_id,
+                attempt,
+                RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS,
+            )
+        logger.error(
+            "Run record %s retained after %d eviction retries; its run-store row may be stale",
+            run_id,
+            RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS,
+        )
+
+    async def _remove_run_record(self, run_id: str, *, expected: RunRecord) -> None:
+        async with self._lock:
+            current = self._runs.get(run_id)
+            if current is not expected:
+                return
+            self._runs.pop(run_id, None)
+            self._unindex_run_locked(run_id, current.thread_id)
+        logger.debug("Run record %s evicted", run_id)
 
     # ------------------------------------------------------------------
     # Lease heartbeat

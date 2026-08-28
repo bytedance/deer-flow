@@ -1,23 +1,23 @@
-"""Regression tests for in-memory run-record eviction after a run finishes.
+"""Regression tests for event-driven in-memory run-record eviction.
 
-The ``RunManager._runs`` registry used to grow without bound: ``cleanup()``
-existed but no production path ever called it, so every ``RunRecord`` —
-including its ``kwargs["input"]`` copy of the full conversation payload —
-stayed resident for the lifetime of the Gateway process. These tests pin the
-delayed-eviction scheduling on every terminal path.
+The ``RunManager._runs`` registry used to grow without bound: no production
+path ever removed a finished record, so every ``RunRecord`` — including its
+``kwargs["input"]`` copy of the full conversation payload — stayed resident
+for the lifetime of the Gateway process. These tests pin the terminal-path
+contract: once a run is terminal and finalization has completed, the registry
+record is evicted immediately, but only after the terminal state is confirmed
+in the backing RunStore (repaired from the in-memory snapshot when the
+best-effort durable writes failed).
 """
-
-import asyncio
 
 import pytest
 from langchain_core.messages import AIMessage
 
+from deerflow.runtime import CancelOutcome
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import RunContext, run_agent
-
-CLEANUP_TASK_NAME = "deerflow-run-record-cleanup-{run_id}"
 
 
 def _make_bridge():
@@ -32,21 +32,6 @@ def _make_bridge():
             return None
 
     return _Bridge()
-
-
-def _scheduled_cleanup_task(run_id: str) -> asyncio.Task | None:
-    for task in asyncio.all_tasks():
-        if task.get_name() == CLEANUP_TASK_NAME.format(run_id=run_id):
-            return task
-    return None
-
-
-async def _cancel(task: asyncio.Task) -> None:
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
 
 
 class _OkAgent:
@@ -73,88 +58,164 @@ async def _run_to_completion(run_manager: RunManager, record, *, agent_factory) 
 
 
 @pytest.mark.anyio
-async def test_successful_run_schedules_delayed_record_cleanup():
+async def test_successful_run_evicts_record_after_finalization():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _OkAgent())
+    assert record.status == RunStatus.success
+
+    # Event-driven: once run_agent returns, finalization is complete and the
+    # record is already gone from the registry — no delay window.
+    assert record.run_id not in run_manager._runs
+    # The durable store row survives and hydrates on demand.
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    assert await run_manager.list_by_thread("thread-1") != []
+
+
+@pytest.mark.anyio
+async def test_failed_run_evicts_record_after_finalization():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _ExplodingAgent())
+    assert record.status == RunStatus.error
+
+    assert record.run_id not in run_manager._runs
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_fail_start_if_pending_evicts_record():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    marked = await run_manager.fail_start_if_pending(record.run_id, error="worker attach failed")
+    assert marked is True
+
+    assert record.run_id not in run_manager._runs
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_eviction_skipped_without_store_backing():
+    """No RunStore means no fallback for get()/list_by_thread() and the
+    registry is the only idempotency dedup — records must be retained."""
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
 
     await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _OkAgent())
     assert record.status == RunStatus.success
 
-    task = _scheduled_cleanup_task(record.run_id)
-    assert task is not None, "run_agent must schedule delayed in-memory record cleanup"
-    await _cancel(task)
-
-    # The scheduled task would remove the record after its delay; verify the
-    # record is in an evictable state and removal actually empties the registry.
-    await run_manager.cleanup(record.run_id, delay=0)
-    assert await run_manager.get(record.run_id) is None
-    assert await run_manager.list_by_thread("thread-1") == []
+    assert record.run_id in run_manager._runs
+    assert await run_manager.get(record.run_id) is record
 
 
 @pytest.mark.anyio
-async def test_failed_run_schedules_delayed_record_cleanup():
-    run_manager = RunManager()
+async def test_eviction_retains_record_until_terminal_state_durable():
+    """When the store cannot confirm the terminal state, the record — which
+    may hold the only correct snapshot — is retained for retry."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
     record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success)
 
-    await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _ExplodingAgent())
-    assert record.status == RunStatus.error
+    original_get = store.get
 
-    task = _scheduled_cleanup_task(record.run_id)
-    assert task is not None, "cleanup must also be scheduled when the run fails"
-    await _cancel(task)
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store unavailable")
 
-    await run_manager.cleanup(record.run_id, delay=0)
-    assert await run_manager.get(record.run_id) is None
+    store.get = failing_get
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is False
+    assert record.run_id in run_manager._runs
+
+    store.get = original_get
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert record.run_id not in run_manager._runs
 
 
 @pytest.mark.anyio
-async def test_fail_start_if_pending_schedules_delayed_record_cleanup():
-    run_manager = RunManager()
+async def test_eviction_repairs_stale_store_row_from_memory_snapshot():
+    """A still-active durable row is repaired from the in-memory terminal
+    snapshot before the record is dropped."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
     record = await run_manager.create("thread-1")
+    # Stage a terminal outcome in memory without a durable write.
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    row = await store.get(record.run_id)
+    assert row is not None and row["status"] != RunStatus.success.value
 
-    marked = await run_manager.fail_start_if_pending(record.run_id, error="worker attach failed")
-    assert marked is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
 
-    task = _scheduled_cleanup_task(record.run_id)
-    assert task is not None, "fail_start_if_pending must schedule cleanup for the terminal record"
-    await _cancel(task)
-
-    await run_manager.cleanup(record.run_id, delay=0)
-    assert await run_manager.get(record.run_id) is None
+    row = await store.get(record.run_id)
+    assert row is not None and row["status"] == RunStatus.success.value
+    assert record.run_id not in run_manager._runs
 
 
 @pytest.mark.anyio
-async def test_idempotent_reuse_of_terminal_store_run_schedules_cleanup():
-    """A hydrated store-only overlay must not outlive its reuse either."""
+async def test_idempotent_reuse_does_not_cache_store_rows():
+    """Store-only idempotency hydrations are returned uncached: an active row
+    belongs to another worker and a cached active copy would outlive the
+    owner's completion (fencing the thread via local_inflight forever), while
+    a terminal row is served on demand by store hydration."""
     store = MemoryRunStore()
     owning = RunManager(store=store)
     admitted = await owning.create_or_reject("thread-1", idempotency_key="idem-1")
-    await owning.set_status(admitted.run_id, RunStatus.success)
+    await owning.set_status(admitted.run_id, RunStatus.running)
 
-    # A second worker sharing the store reuses the idempotency key and
-    # hydrates the terminal row into its own in-memory registry.
     reusing = RunManager(store=store)
     reused = await reusing.create_or_reject("thread-1", idempotency_key="idem-1")
     assert reused.run_id == admitted.run_id
-    assert reused.status == RunStatus.success
+    assert reused.idempotency_reused is True
+    assert reused.run_id not in reusing._runs
 
-    task = _scheduled_cleanup_task(admitted.run_id)
-    assert task is not None, "hydrated terminal overlays must schedule their own eviction"
-    await _cancel(task)
+    # After the owning worker finishes, the reusing worker neither holds a
+    # stale active copy nor fences the thread.
+    await owning.set_status(admitted.run_id, RunStatus.success)
+    assert not await reusing.has_inflight("thread-1")
+    terminal_reuse = await reusing.create_or_reject("thread-1", idempotency_key="idem-1")
+    assert terminal_reuse.run_id == admitted.run_id
+    assert terminal_reuse.idempotency_reused is True
+    assert terminal_reuse.run_id not in reusing._runs
 
-    await reusing.cleanup(admitted.run_id, delay=0)
-    assert await reusing.get(admitted.run_id, raise_on_store_error=True) is not None  # store row survives
-    assert admitted.run_id not in reusing._runs
+    hydrated = await reusing.get(admitted.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
 
 
 @pytest.mark.anyio
-async def test_idempotent_reuse_of_active_local_run_does_not_schedule_cleanup():
-    """An in-flight run's record is owned by its worker; no speculative eviction."""
-    run_manager = RunManager()
+async def test_idempotent_reuse_of_active_local_run_returns_live_record():
+    """Same-worker reuse of a live run returns the registered record itself."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
     record = await run_manager.create_or_reject("thread-1", idempotency_key="idem-2")
 
     reused = await run_manager.create_or_reject("thread-1", idempotency_key="idem-2")
     assert reused is record
     assert reused.idempotency_reused is True
 
-    assert _scheduled_cleanup_task(record.run_id) is None
+
+@pytest.mark.anyio
+async def test_cancel_stays_idempotent_after_record_eviction():
+    """Single-worker mode: after eviction, a durably interrupted run still
+    cancels idempotently (202 semantics) instead of 409."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+    assert await run_manager.cancel(record.run_id) == CancelOutcome.cancelled
+
+    await run_manager.evict_finished_run(record.run_id)
+    assert record.run_id not in run_manager._runs
+
+    assert await run_manager.cancel(record.run_id) == CancelOutcome.cancelled
