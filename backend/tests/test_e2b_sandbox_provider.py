@@ -467,6 +467,80 @@ def test_sync_agent_skills_replaces_remote_tree_and_caches_manifest_signature(
     assert len(files.write_calls) == first_write_count
 
 
+@pytest.mark.parametrize(
+    "container_path",
+    [
+        "skills",
+        "/",
+        "//mnt/skills",
+        "/mnt//skills",
+        "/mnt/skills/.",
+        "/mnt/skills/..",
+        "/mnt",
+        "/mnt/user-data",
+        "/mnt/acp-workspace",
+        "/home",
+        "/home/user",
+    ],
+)
+def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
+    monkeypatch,
+    tmp_path,
+    container_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path=container_path)),
+    )
+    client = FakeClient(sandbox_id="sandbox-1")
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    with pytest.raises(ValueError, match="safe E2B skills reset target"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert client.files.read_calls == []
+    assert client.commands.calls == []
+
+
+@pytest.mark.parametrize(
+    ("container_path", "expected"),
+    [
+        ("/mnt/skills", "/mnt/skills"),
+        ("/mnt/skills/", "/mnt/skills"),
+        ("/home/user/skills", "/home/user/skills"),
+        ("/custom-skills", "/custom-skills"),
+    ],
+)
+def test_validate_skills_reset_root_accepts_isolated_directories(
+    container_path,
+    expected,
+):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    assert mod._validate_skills_reset_root(container_path, home_dir="/home/user") == expected
+
+
 def test_sync_agent_skills_leaves_no_signature_after_upload_failure(
     monkeypatch,
     tmp_path,

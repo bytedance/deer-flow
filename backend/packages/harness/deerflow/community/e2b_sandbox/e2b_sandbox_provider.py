@@ -40,6 +40,7 @@ import atexit
 import json
 import logging
 import os
+import posixpath
 import shlex
 import signal
 import threading
@@ -51,7 +52,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from e2b import SandboxQuery
@@ -118,6 +119,31 @@ _MOUNT_PASS_DEADLINE_SECONDS = 120
 
 def _mount_deadline_reason(deadline_seconds: int) -> str:
     return f"time budget {deadline_seconds}s"
+
+
+def _validate_skills_reset_root(container_path: str, *, home_dir: str) -> str:
+    """Return a canonical E2B skills root that is safe to replace recursively."""
+    candidate = container_path.rstrip("/")
+    if not candidate or not candidate.startswith("/") or candidate.startswith("//"):
+        raise ValueError("The skills container path is not a safe E2B skills reset target: it must be an absolute non-root path")
+
+    normalized = posixpath.normpath(candidate)
+    if normalized != candidate:
+        raise ValueError("The skills container path is not a safe E2B skills reset target: it must not contain redundant separators, '.' or '..'")
+
+    root = PurePosixPath(normalized)
+    protected_roots = {
+        PurePosixPath("/mnt/user-data"),
+        PurePosixPath("/mnt/acp-workspace"),
+    }
+    normalized_home = posixpath.normpath(home_dir.rstrip("/") or DEFAULT_E2B_HOME_DIR)
+    if normalized_home.startswith("/") and not normalized_home.startswith("//"):
+        protected_roots.add(PurePosixPath(normalized_home))
+
+    for protected in protected_roots:
+        if protected == root or protected.is_relative_to(root):
+            raise ValueError(f"The skills container path is not a safe E2B skills reset target: {normalized!r} equals or contains protected path {str(protected)!r}")
+    return normalized
 
 
 class _MountPassLimitExceeded(Exception):
@@ -1936,9 +1962,10 @@ class E2BSandboxProvider(SandboxProvider):
         if sandbox is None:
             raise RuntimeError(f"E2B sandbox {sandbox_id} is not available for skill synchronization")
 
-        skills_root = get_app_config().skills.container_path.rstrip("/")
-        if not skills_root.startswith("/") or skills_root == "":
-            raise ValueError("The skills container path must be an absolute non-root path")
+        skills_root = _validate_skills_reset_root(
+            get_app_config().skills.container_path,
+            home_dir=sandbox.home_dir,
+        )
 
         projection_root = projection.public.parent
         manifest_path = projection_root / ".projection-manifest.json"
