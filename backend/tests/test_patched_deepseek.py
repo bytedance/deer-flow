@@ -132,6 +132,74 @@ def test_no_reasoning_content_is_noop():
     assert "reasoning_content" not in assistant_msg
 
 
+def test_thinking_tool_call_without_reasoning_gets_empty_placeholder():
+    """Thinking-mode tool turns require an empty reasoning placeholder."""
+    model = _make_model(extra_body={"thinking": {"type": "enabled"}})
+    human = HumanMessage(content="Check the repository")
+    ai = AIMessage(
+        content="",
+        tool_calls=[{"id": "call-1", "name": "bash", "args": {"command": "git status"}}],
+    )
+    base_payload = {
+        "messages": [
+            _make_payload_message("user", "Check the repository"),
+            _make_payload_message(
+                "assistant",
+                None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"git status"}'},
+                    }
+                ],
+            ),
+        ]
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [human, ai])
+            payload = model._get_request_payload([human, ai])
+
+    assistant_msg = payload["messages"][1]
+    assert assistant_msg["content"] == ""
+    assert assistant_msg["reasoning_content"] == ""
+
+
+def test_disabled_thinking_tool_call_does_not_invent_reasoning_placeholder():
+    """Disabled thinking must not expand the provider payload shape."""
+    model = _make_model(extra_body={"thinking": {"type": "disabled"}})
+    ai = AIMessage(
+        content="",
+        tool_calls=[{"id": "call-1", "name": "bash", "args": {"command": "pwd"}}],
+    )
+    base_payload = {
+        "messages": [
+            _make_payload_message(
+                "assistant",
+                None,
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": '{"command":"pwd"}'},
+                    }
+                ],
+            )
+        ]
+    }
+
+    with patch.object(type(model).__bases__[0], "_get_request_payload", return_value=base_payload):
+        with patch.object(model, "_convert_input") as mock_convert:
+            mock_convert.return_value = MagicMock(to_messages=lambda: [ai])
+            payload = model._get_request_payload([ai])
+
+    assistant_msg = payload["messages"][0]
+    assert assistant_msg["content"] == ""
+    assert "reasoning_content" not in assistant_msg
+
+
 def test_reasoning_content_multi_turn():
     """All assistant turns each get their own reasoning_content."""
     model = _make_model()
