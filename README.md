@@ -392,6 +392,11 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 | **Stop** | `./scripts/serve.sh --stop`<br/>`make stop` | `./scripts/docker.sh stop`<br/>`make docker-stop` | `./scripts/deploy.sh down`<br/>`make down` |
 | **Restart** | `./scripts/serve.sh --restart [flags]` | `./scripts/docker.sh restart` | — |
 
+`make start` and `make start-daemon` rebuild the frontend with `next build` on
+every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
+`--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
+is opt-in: it fails fast when `frontend/.next` has no completed build.
+
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
 #### LangGraph Studio (Optional)
