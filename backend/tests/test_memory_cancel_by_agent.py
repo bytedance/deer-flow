@@ -183,6 +183,27 @@ def test_user_wide_cancel_kills_other_agents_old_batch_without_touching_new_work
     assert executed == [["a-old"], ["a-new"]]
 
 
+def test_unscoped_cancel_does_not_stale_snapshotted_scoped_user_work() -> None:
+    mock_updater = MagicMock(return_value=True)
+    queue = _queue(mock_updater)
+    queue._items = [
+        ConversationContext(thread_id="t-legacy", messages=["legacy"], agent_name="agent-a", user_id=None),
+        ConversationContext(thread_id="t-alice", messages=["alice"], agent_name="agent-a", user_id="alice"),
+    ]
+    gate = threading.Event()
+    started = threading.Event()
+    worker = _start_blocked_worker(queue, mock_updater, gate, started)
+    try:
+        # The worker owns both contexts. The cancel must not stale Alice's tail.
+        assert queue.cancel_by_user(None) == 0
+    finally:
+        gate.set()
+        worker.join(timeout=5.0)
+
+    executed = [call.kwargs["messages"] for call in mock_updater.update_memory.call_args_list]
+    assert executed == [["legacy"], ["alice"]]
+
+
 def test_cancelled_scope_prevents_subsequent_batch_after_user_wide_cancel() -> None:
     mock_updater = MagicMock(return_value=True)
     queue = _queue(mock_updater)
