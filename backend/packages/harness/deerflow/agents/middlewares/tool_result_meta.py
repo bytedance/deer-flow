@@ -243,10 +243,31 @@ def stamp_exception_meta(msg: ToolMessage, exc_info: str) -> ToolMessage:
     return msg
 
 
+# Structured task/subagent failures (see subagents/status_contract.py). These
+# producers put authoritative status in additional_kwargs["subagent_status"] while
+# leaving ToolMessage.status at LangChain's default "success" and using display
+# text that does not start with "Error:" — so content heuristics alone mis-label
+# them as success. Honor the structured field before any content analysis.
+_SUBAGENT_FAILURE_STATUSES = frozenset({"failed", "cancelled", "timed_out", "polling_timed_out"})
+
+
 def normalize_tool_message(msg: ToolMessage) -> ToolMessage:
     """Attach deerflow_tool_meta to a ToolMessage if not already present."""
     existing = (msg.additional_kwargs or {}).get(TOOL_META_KEY)
     if existing is not None:
+        return msg
+
+    kwargs = msg.additional_kwargs or {}
+    subagent_status = kwargs.get("subagent_status")
+    if subagent_status in _SUBAGENT_FAILURE_STATUSES:
+        error_text = kwargs.get("subagent_error")
+        if not isinstance(error_text, str) or not error_text:
+            error_text = msg.content if isinstance(msg.content, str) else ""
+        attrs = _classify_error_text(str(error_text))
+        meta = _make_meta(status="error", source="tool_return", **attrs)
+        updated_kwargs = dict(kwargs)
+        updated_kwargs[TOOL_META_KEY] = meta
+        msg.additional_kwargs = updated_kwargs
         return msg
 
     content = msg.content if isinstance(msg.content, str) else ""
