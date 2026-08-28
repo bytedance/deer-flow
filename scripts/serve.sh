@@ -272,6 +272,16 @@ stop_all() {
     echo "✓ All services stopped"
 }
 
+# Validate the reusable frontend build before any stop_all runs, so start and
+# restart never tear down a healthy stack only to fail here. --stop is exempt.
+if [ "$ACTION" != "stop" ] && ! $DEV_MODE && $SKIP_FRONTEND_BUILD; then
+    if [ ! -f "$REPO_ROOT/frontend/.next/BUILD_ID" ]; then
+        echo "✗ --skip-frontend-build requires an existing frontend build."
+        echo "  Run 'make start' once (full build), or: cd frontend && pnpm run build"
+        exit 1
+    fi
+fi
+
 # ── Action routing ───────────────────────────────────────────────────────────
 
 if [ "$ACTION" = "stop" ]; then
@@ -313,11 +323,7 @@ if $DEV_MODE; then
         echo "  Note: --skip-frontend-build is ignored in dev mode (next dev does not build)."
     fi
 elif $SKIP_FRONTEND_BUILD; then
-    if [ ! -f "$REPO_ROOT/frontend/.next/BUILD_ID" ]; then
-        echo "✗ --skip-frontend-build requires an existing frontend build."
-        echo "  Run 'make start' once (full build), or: cd frontend && pnpm run build"
-        exit 1
-    fi
+    # The BUILD_ID preflight above already guarantees a reusable build exists.
     FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run start"
 else
     FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
