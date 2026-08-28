@@ -235,8 +235,11 @@ def test_public_get_resolves_snapshot_without_thread_access(tmp_path):
     assert body["snapshot"] == _SNAPSHOT
     # No private identifiers cross the boundary.
     assert "thread_id" not in body and "token_hash" not in body
-    # Token-in-URL mitigation: the public response forbids referrer leakage.
+    # Token-in-URL mitigations: the public response forbids referrer leakage
+    # and any browser/proxy caching, so revoked or expired shares stop being
+    # served the moment the server rejects them.
     assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 def test_public_get_is_exempt_from_auth_middleware(tmp_path):

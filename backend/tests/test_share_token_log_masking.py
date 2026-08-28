@@ -27,16 +27,14 @@ _TOKEN = "dfs_A9z-_0123456789abcdefghijklmnopqrstuv"
 
 @pytest.fixture()
 def _restore_filters():
-    root = logging.getLogger()
-    access = logging.getLogger("uvicorn.access")
-    root_handlers = root.handlers[:]
-    root_filters = [h.filters[:] for h in root_handlers]
-    access_filters = access.filters[:]
+    loggers = [logging.getLogger(name) for name in ("", "uvicorn", "uvicorn.access", "uvicorn.error")]
+    saved = [(target, target.handlers[:], [h.filters[:] for h in target.handlers], target.filters[:]) for target in loggers]
     yield
-    for handler, filters in zip(root_handlers, root_filters, strict=True):
-        handler.filters = filters
-    root.handlers = root_handlers
-    access.filters = access_filters
+    for target, handlers, handler_filters, logger_filters in saved:
+        target.handlers = handlers
+        for handler, filters in zip(handlers, handler_filters, strict=True):
+            handler.filters = filters
+        target.filters = logger_filters
 
 
 def _record(msg, args=None):
@@ -66,6 +64,19 @@ def test_filter_leaves_ordinary_records_untouched():
     assert record.getMessage() == "GET /api/threads/thread-1/runs/wait"
 
 
+def test_filter_ignores_dfs_inside_larger_words():
+    # Only token-position `dfs_` is masked (left boundary): mid-word
+    # occurrences keep their text, while `dfs_` after a separator still
+    # masks even short bodies — fragments of truncated tokens are masked too.
+    record = _record("wrote backup_dfs_2024.txt")
+    assert ShareTokenRedactionFilter().filter(record) is True
+    assert record.getMessage() == "wrote backup_dfs_2024.txt"
+
+    record = _record("prefix dfs_9 suffix")
+    assert ShareTokenRedactionFilter().filter(record) is True
+    assert record.getMessage() == "prefix dfs_*** suffix"
+
+
 def test_filter_survives_malformed_format_args():
     record = _record("%d arguments but %s", ("not-a-number",))
     assert ShareTokenRedactionFilter().filter(record) is True  # not our problem to crash on
@@ -77,10 +88,13 @@ def test_install_share_token_redaction_covers_root_handlers_and_access_logger(_r
 
     for handler in logging.getLogger().handlers:
         assert any(isinstance(f, ShareTokenRedactionFilter) for f in handler.filters)
-    access_filters = [f for f in logging.getLogger("uvicorn.access").filters if isinstance(f, ShareTokenRedactionFilter)]
-    # uvicorn.access propagates nowhere; a duplicate logger-level filter
-    # would double-render already-masked records — exactly one is required.
-    assert len(access_filters) == 1
+    # The uvicorn logger tree terminates at `uvicorn`'s own handlers with
+    # propagate=False, so no uvicorn record ever reaches root handlers:
+    # every logger in that tree needs exactly one filter of its own — a
+    # duplicate logger-level filter would double-render records.
+    for name in ("uvicorn.access", "uvicorn", "uvicorn.error"):
+        filters = [f for f in logging.getLogger(name).filters if isinstance(f, ShareTokenRedactionFilter)]
+        assert len(filters) == 1, name
 
 
 # ── nginx access-log masking ───────────────────────────────────────────────
@@ -130,3 +144,27 @@ def test_nginx_masks_share_tokens_in_access_log(config_path: Path) -> None:
     # Management routes carry no secret in the URL and stay readable.
     for untouched in ("POST /api/threads/thread-1/shares HTTP/1.1", "GET /api/threads/thread-1/runs/wait HTTP/1.1"):
         assert _apply(pattern, value, untouched) == untouched
+
+
+def _location_block(config_text: str, location: str) -> str:
+    """Extract one `location ^~ <path> { … }` block from an nginx config."""
+    start = config_text.index(f"location ^~ {location} {{")
+    depth = 0
+    for index in range(start, len(config_text)):
+        if config_text[index] == "{":
+            depth += 1
+        elif config_text[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return config_text[start:index]
+    raise AssertionError(f"unterminated location block for {location}")
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
+@pytest.mark.parametrize("location", ["/api/shares/", "/share/"])
+def test_nginx_share_locations_suppress_request_lines_in_error_log(config_path: Path, location: str) -> None:
+    """nginx error messages embed the full request line and error_log cannot
+    be format-masked, so share locations must raise the threshold to crit —
+    the level at or above which messages no longer carry request lines."""
+    block = _location_block(config_path.read_text(encoding="utf-8"), location)
+    assert re.search(r"error_log\s+\S+\s+crit;", block), f"{config_path.name} {location}: error_log must be crit"

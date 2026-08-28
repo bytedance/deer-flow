@@ -17,8 +17,10 @@ TRACE_TEXT_LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - [trace_id=%(tr
 _TRACE_FILTER_NAME = "deerflow_trace_context_filter"
 
 # Raw share tokens (``dfs_…``, #4548) are bearer credentials carried in the
-# URL; they must never reach any log sink, access logs included.
-_SHARE_TOKEN_LOG_PATTERN = re.compile(r"dfs_[A-Za-z0-9_-]+")
+# URL; they must never reach any log sink, access logs included. The left
+# boundary keeps the mask from mangling unrelated words that merely contain
+# ``dfs_`` (a real token always starts right after ``/`` or whitespace).
+_SHARE_TOKEN_LOG_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])dfs_[A-Za-z0-9_-]+")
 _SHARE_TOKEN_REDACTION_MASK = "dfs_***"
 
 
@@ -105,21 +107,24 @@ def _trace_formatter(format_name: str | None) -> logging.Formatter:
 
 
 def install_share_token_redaction() -> None:
-    """Attach share-token redaction to the root handlers and uvicorn's access logger.
+    """Attach share-token redaction across the logging tree.
 
     ``uvicorn.access`` logs the full request path — share token included —
-    with ``propagate=False`` and its own handler, so a root-handler filter
-    never sees those records; it gets a logger-level filter instead. Every
-    other logger reaches the root handlers. Idempotent, so it is safe to call
-    at app import time and again from ``configure_logging``.
+    with ``propagate=False`` and its own handler, and the rest of uvicorn's
+    logger tree (``uvicorn``, ``uvicorn.error``) terminates at ``uvicorn``'s
+    own handlers, so none of those records ever reach root handlers: each
+    gets a logger-level filter instead. Every other logger reaches the root
+    handlers, where the same filter is installed. Idempotent, so it is safe
+    to call at app import time and again from ``configure_logging``.
     """
     _ensure_root_handler()
     for handler in logging.root.handlers:
         if not any(isinstance(existing, ShareTokenRedactionFilter) for existing in handler.filters):
             handler.addFilter(ShareTokenRedactionFilter())
-    access_logger = logging.getLogger("uvicorn.access")
-    if not any(isinstance(existing, ShareTokenRedactionFilter) for existing in access_logger.filters):
-        access_logger.addFilter(ShareTokenRedactionFilter())
+    for logger_name in ("uvicorn.access", "uvicorn", "uvicorn.error"):
+        target = logging.getLogger(logger_name)
+        if not any(isinstance(existing, ShareTokenRedactionFilter) for existing in target.filters):
+            target.addFilter(ShareTokenRedactionFilter())
 
 
 def configure_logging(config: object) -> None:

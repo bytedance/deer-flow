@@ -108,6 +108,36 @@ async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
     assert any("refusing partial share" in record.message for record in caplog.records)
 
 
+async def test_snapshot_exactly_at_cap_with_no_more_rows_shares_completely():
+    """At-cap scans with no older rows remaining are complete, not rejected.
+
+    Pins the loop's check order: the ``has_more`` exit must win over the cap
+    rejection, or exactly-at-cap conversations would flip from shareable to
+    413 on a refactor that swaps the two branches.
+    """
+    # Canonical helper contract: newest backward page first, each page
+    # internally ascending.
+    pages = [
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in (5, 6)],
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in (1, 2, 3, 4)],
+    ]
+    calls = {"n": 0}
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page, calls["n"] < len(pages)
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 6)  # == total rows
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert [m["content"] for m in snapshot["messages"]] == [f"m{seq}" for seq in range(1, 7)]
+
+
 async def test_resolve_share_title_uses_thread_meta_with_fallback():
     class _Store:
         async def get(self, thread_id, **_kwargs):

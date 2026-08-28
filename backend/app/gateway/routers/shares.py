@@ -138,7 +138,12 @@ def _summary(record: dict[str, Any]) -> ShareSummaryResponse:
     )
 
 
-@router.post("/threads/{thread_id}/shares", response_model=ShareCreatedResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/threads/{thread_id}/shares",
+    response_model=ShareCreatedResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_413_CONTENT_TOO_LARGE: {"description": "Conversation exceeds the share message cap and cannot be shared"}},
+)
 @require_permission("threads", "read", owner_check=True)
 async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateRequest):
     """Create a read-only snapshot share for a thread the caller owns.
@@ -236,11 +241,13 @@ async def get_public_share(share_token: str, request: Request, response: Respons
     revoked links, and expired links. Reads only the dedicated share record;
     never touches thread state or history under any synthetic principal.
     """
-    # The token rides in the URL path, so outbound leakage must be blunted:
-    # a strict referrer policy keeps the URL out of Referer on any link the
-    # rendered page follows (nginx access-log masking is a deployment-side
-    # control documented with this feature).
+    # The token rides in the URL path, so leakage must be blunted on every
+    # transport surface: a strict referrer policy keeps the URL out of
+    # Referer on any link the rendered page follows, and no-store keeps the
+    # bearer-URL response out of browser/proxy caches so a revoked or
+    # expired share stops being served the moment the server rejects it.
     response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
     if not _sharing_config().enabled:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     repo = getattr(request.app.state, "share_repo", None)
