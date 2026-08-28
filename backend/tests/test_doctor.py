@@ -356,6 +356,17 @@ class TestCheckWebSearch:
         assert result.status == "warn"
         assert "SERPER_API_KEY" in (result.fix or "")
 
+    def test_tencent_wsa_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tencent_wsa.tools:web_search_tool\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "warn"
+        assert "tencent_wsa configured but TENCENTCLOUD_WSA_APIKEY not set" in result.detail
+        assert "TENCENTCLOUD_WSA_APIKEY" in (result.fix or "")
+
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"
         cfg.write_text("config_version: 5\ntools: []\n")
