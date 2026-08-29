@@ -22,11 +22,44 @@ def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding()
     assert capture.read() == "caf\u00e9"
 
 
-def test_bounded_pipe_capture_preserves_text_mode_newline_normalization():
-    capture = _BoundedPipeCapture()
+def test_bounded_pipe_capture_applies_text_mode_newline_normalization_when_enabled():
+    capture = _BoundedPipeCapture(normalize_newlines=True)
     capture.append(b"crlf\r\nbare-cr\rlf\n")
 
     assert capture.read() == "crlf\nbare-cr\nlf\n"
+
+
+def test_bounded_pipe_capture_preserves_posix_newlines_by_default():
+    capture = _BoundedPipeCapture()
+    capture.append(b"crlf\r\nbare-cr\rlf\n")
+
+    assert capture.read() == "crlf\r\nbare-cr\rlf\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX capture semantics")
+def test_posix_command_capture_preserves_newlines():
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_posix_command(
+        [sys.executable, "-c", "import os; os.write(1, b'crlf\\r\\nbare-cr\\rlf\\n')"],
+        10,
+    )
+
+    assert stdout == "crlf\r\nbare-cr\rlf\n"
+    assert stderr == ""
+    assert returncode == 0
+    assert timed_out is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows text-mode newline semantics")
+def test_windows_command_capture_normalizes_newlines():
+    stdout, stderr, returncode, timed_out = LocalSandbox._run_windows_command(
+        [sys.executable, "-c", "import os; os.write(1, b'crlf\\r\\nbare-cr\\rlf\\n')"],
+        10,
+    )
+
+    assert stdout == "crlf\nbare-cr\nlf\n"
+    assert stderr == ""
+    assert returncode == 0
+    assert timed_out is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows text-mode encoding semantics")

@@ -35,9 +35,16 @@ _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
 class _BoundedPipeCapture:
     """Drain a subprocess pipe while keeping only bounded output in memory."""
 
-    def __init__(self, *, limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES, encoding: str = "utf-8") -> None:
+    def __init__(
+        self,
+        *,
+        limit_bytes: int = _COMMAND_CAPTURE_LIMIT_BYTES,
+        encoding: str = "utf-8",
+        normalize_newlines: bool = False,
+    ) -> None:
         self._limit_bytes = limit_bytes
         self._encoding = encoding
+        self._normalize_newlines = normalize_newlines
         self._chunks: list[bytes] = []
         self._kept_bytes = 0
         self._total_bytes = 0
@@ -61,9 +68,10 @@ class _BoundedPipeCapture:
             kept_bytes = self._kept_bytes
 
         output = data.decode(self._encoding, errors="replace")
-        # Match ``subprocess.run(..., text=True)``: text streams use universal
-        # newlines, translating both CRLF and bare CR to LF.
-        output = output.replace("\r\n", "\n").replace("\r", "\n")
+        if self._normalize_newlines:
+            # Match ``subprocess.run(..., text=True)``: text streams use universal
+            # newlines, translating both CRLF and bare CR to LF.
+            output = output.replace("\r\n", "\n").replace("\r", "\n")
         if truncated:
             notice = f"\n... [output truncated after {kept_bytes} of {total_bytes} bytes; remaining output discarded] ..."
             output += notice
@@ -174,8 +182,14 @@ class LocalSandbox(Sandbox):
                 pass
 
     @staticmethod
-    def _start_pipe_drain(fd: int, name: str, *, encoding: str = "utf-8") -> tuple[_BoundedPipeCapture, threading.Thread]:
-        capture = _BoundedPipeCapture(encoding=encoding)
+    def _start_pipe_drain(
+        fd: int,
+        name: str,
+        *,
+        encoding: str = "utf-8",
+        normalize_newlines: bool = False,
+    ) -> tuple[_BoundedPipeCapture, threading.Thread]:
+        capture = _BoundedPipeCapture(encoding=encoding, normalize_newlines=normalize_newlines)
         thread = threading.Thread(target=LocalSandbox._drain_pipe, args=(fd, capture), name=name, daemon=True)
         thread.start()
         return capture, thread
@@ -574,8 +588,18 @@ class LocalSandbox(Sandbox):
                     pass
 
         encoding = locale.getpreferredencoding(False)
-        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(stdout_read_fd, "deerflow-bash-stdout-drain", encoding=encoding)
-        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(stderr_read_fd, "deerflow-bash-stderr-drain", encoding=encoding)
+        stdout_capture, stdout_thread = LocalSandbox._start_pipe_drain(
+            stdout_read_fd,
+            "deerflow-bash-stdout-drain",
+            encoding=encoding,
+            normalize_newlines=True,
+        )
+        stderr_capture, stderr_thread = LocalSandbox._start_pipe_drain(
+            stderr_read_fd,
+            "deerflow-bash-stderr-drain",
+            encoding=encoding,
+            normalize_newlines=True,
+        )
 
         try:
             try:
