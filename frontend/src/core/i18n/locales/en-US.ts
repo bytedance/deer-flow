@@ -124,6 +124,8 @@ export const enUS: Translations = {
     loadingFullFile: "Loading full file...",
     previewFailed:
       "This file could not be previewed. You can still download it.",
+    viewSource: "View source",
+    missingTarget: "This link does not say which artifact to display.",
   },
 
   // Citations
@@ -620,6 +622,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    outlineLabel: "Conversation outline",
+    outlineAttachmentFallback: "Image or file message",
   },
 
   // Chats

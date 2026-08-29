@@ -132,6 +132,50 @@ def test_upload_files_auto_renames_duplicate_form_filenames(tmp_path):
     assert (thread_uploads_dir / "data_1.txt").read_bytes() == b"second"
 
 
+def test_upload_files_deduplicates_max_length_filenames_without_failing_the_batch(tmp_path):
+    # A 255-byte filename is the longest normalize_filename accepts. Before
+    # the byte-budget truncation in claim_unique_filename, deduplicating a
+    # duplicate at that length produced a 257-byte name that the write path
+    # rejected, failing the whole request with a 500 and rolling back files
+    # that had already been written.
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    provider = MagicMock()
+    provider.uses_thread_data_mounts = True
+
+    max_length_name = "a" * 251 + ".txt"
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=provider),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="innocent.txt", file=BytesIO(b"kept")),
+                    UploadFile(filename=max_length_name, file=BytesIO(b"first")),
+                    UploadFile(filename=max_length_name, file=BytesIO(b"second")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert len(result.files) == 3
+    deduped_name = result.files[2].filename
+    assert deduped_name != max_length_name
+    assert deduped_name.endswith("_1.txt")
+    assert len(deduped_name.encode("utf-8")) <= 255
+    assert (thread_uploads_dir / "innocent.txt").read_bytes() == b"kept"
+    assert (thread_uploads_dir / max_length_name).read_bytes() == b"first"
+    assert (thread_uploads_dir / deduped_name).read_bytes() == b"second"
+
+
 def test_upload_files_skips_acquire_when_thread_data_is_mounted(tmp_path):
     thread_uploads_dir = tmp_path / "uploads"
     thread_uploads_dir.mkdir(parents=True)
