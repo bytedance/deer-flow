@@ -145,6 +145,13 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         # config env is merged into every command and would otherwise only surface
         # as a confusing SDK error at create/exec time.
         _validate_extra_env(environment)
+        # Tenki 1.x removed projects: ``Client.create`` no longer takes project_id
+        # and IdentityWorkspace no longer carries ``projects``. Scope is the
+        # workspace alone. Warn rather than fail so an existing config.yaml keeps
+        # booting — SandboxConfig is extra="allow", so a stale key would otherwise
+        # be read by nobody and silently change how scope resolves.
+        if _opt("project_id") is not None:
+            logger.warning("sandbox.project_id is ignored: Tenki 1.x removed projects. Scope is resolved by workspace alone — set sandbox.workspace_id if the account has more than one.")
         return {
             "max_duration": float(max_duration if max_duration is not None else DEFAULT_MAX_DURATION),
             # Off by default (the SDK default). Warm-pool sandboxes stay running
@@ -155,7 +162,6 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             "base_url": _opt("base_url"),
             "image": _opt("image"),  # None → Tenki account default base image
             "home_dir": _opt("home_dir") or DEFAULT_TENKI_HOME_DIR,
-            "project_id": _opt("project_id"),
             "workspace_id": _opt("workspace_id"),
             "cpu_cores": _opt("cpu_cores"),
             "memory_mb": _opt("memory_mb"),
@@ -175,25 +181,23 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 self._client = client
             return self._client
 
-    def _resolve_scope(self) -> tuple[str | None, str | None]:
-        """Return (project_id, workspace_id), auto-selecting when unambiguous.
+    def _resolve_scope(self) -> str | None:
+        """Return the workspace id to create in, auto-selecting when unambiguous.
 
-        Tenki's ``create`` needs a project scope. When the caller didn't set one
-        in config, pick it if the account has exactly one workspace and project;
-        otherwise raise with the choices so the operator can set ``project_id``.
+        Tenki 1.x scopes a sandbox by workspace; the project layer that 0.4.0
+        required is gone from both ``Client.create`` and ``IdentityWorkspace``.
+        When the caller didn't set ``workspace_id`` in config, pick it if the
+        account has exactly one workspace; otherwise raise with the choices so
+        the operator can set it.
         """
-        project_id = self._config["project_id"]
         workspace_id = self._config["workspace_id"]
-        if project_id is not None:
-            return project_id, workspace_id
+        if workspace_id is not None:
+            return workspace_id
 
         identity = self._get_client().who_am_i()
         workspaces = list(identity.workspaces or [])
-        if workspace_id is not None:
-            workspaces = [w for w in workspaces if w.id == workspace_id]
         workspace = self._require_single(workspaces, "workspace", "workspace_id")
-        project = self._require_single(list(workspace.projects or []), "project", "project_id")
-        return project.id, workspace.id
+        return workspace.id
 
     @staticmethod
     def _require_single(items: list[Any], kind: str, param: str) -> Any:
@@ -285,10 +289,9 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
         client = self._get_client()
-        project_id, workspace_id = self._resolve_scope()
+        workspace_id = self._resolve_scope()
         create_kwargs: dict[str, Any] = {
             "name": self._sandbox_name(sandbox_id),
-            "project_id": project_id,
             "workspace_id": workspace_id,
             "sticky": self._config["sticky"],
             # Wait for readiness ourselves (below) instead of inside create():
