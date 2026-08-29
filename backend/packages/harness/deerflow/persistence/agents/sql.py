@@ -192,7 +192,7 @@ class SqlAgentStore(AgentStore):
             except IntegrityError as e:
                 raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
-    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> str:
         effective_user = user_id or get_effective_user_id()
         with _scope_lock(self._url, effective_user, name):
             try:
@@ -201,16 +201,18 @@ class SqlAgentStore(AgentStore):
                     row = self._row(session, name, effective_user)
                     if row is not None:
                         self._apply_update(row, config, soul)
-                        return
+                        return row.id
+                    incarnation = uuid.uuid4().hex
                     session.add(
                         AgentRow(
-                            id=uuid.uuid4().hex,
+                            id=incarnation,
                             user_id=effective_user,
                             name=name.lower(),
                             config=_config_document(config or {}),
                             soul=soul or "",
                         )
                     )
+                return incarnation
             except IntegrityError:
                 # A stale pre-insert read can still race with a writer that does
                 # not use this store. Reapply the update to the winning row.
@@ -220,6 +222,7 @@ class SqlAgentStore(AgentStore):
                     if existing is None:
                         raise
                     self._apply_update(existing, config, soul)
+                    return existing.id
 
     @staticmethod
     def _apply_update(row: AgentRow, config: dict | None, soul: str | None) -> None:

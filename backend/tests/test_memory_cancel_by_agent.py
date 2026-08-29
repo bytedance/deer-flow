@@ -20,10 +20,14 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.runtime import Runtime
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.queue import ConversationContext, MemoryUpdateQueue
+from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+from deerflow.config.memory_config import MemoryConfig
+from deerflow.tools.builtins.setup_agent_tool import setup_agent
 
 
 def _queue(updater: MagicMock | None = None) -> MemoryUpdateQueue:
@@ -440,4 +444,49 @@ def test_deleted_agent_rejects_run_that_enqueues_after_delete(tmp_path, monkeypa
     )
     manager._queue.flush()
 
+    assert not paths_module.get_paths().user_agent_dir("alice", "phoenix").exists()
+
+
+def test_bootstrap_memory_is_cancelled_with_created_incarnation(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.agents.middlewares import memory_middleware as memory_middleware_module
+    from deerflow.config import paths as paths_module
+    from deerflow.persistence.agents.file import FileAgentStore
+    from deerflow.tools.builtins import setup_agent_tool
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    monkeypatch.setattr(setup_agent_tool, "get_agent_store", lambda: store)
+    setup_result = setup_agent.func(
+        soul="bootstrap soul",
+        description="bootstrap agent",
+        runtime=MagicMock(
+            context={"agent_name": "phoenix", "user_id": "alice"},
+            tool_call_id="setup-call",
+        ),
+    )
+    incarnation = setup_result.update["created_agent_incarnation"]
+    manager = DeerMem(
+        backend_config={"storage_path": str(tmp_path), "debounce_seconds": 300},
+        incarnation_guard=lambda name, token, user_id: store.guard_incarnation(name, token, user_id=user_id),
+    )
+    monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
+    middleware = MemoryMiddleware(
+        agent_name="phoenix",
+        require_created_agent_incarnation=True,
+        memory_config=MemoryConfig(enabled=True),
+    )
+    middleware.after_agent(
+        {
+            **setup_result.update,
+            "messages": [HumanMessage(content="Create phoenix"), AIMessage(content="Created")],
+        },
+        Runtime(context={"thread_id": "bootstrap-thread", "user_id": "alice"}),
+    )
+
+    assert store.delete_if_incarnation("phoenix", incarnation, user_id="alice") == "deleted"
+    cancelled = manager.cancel_by_agent("phoenix", user_id="alice", agent_incarnation=incarnation)
+    manager._queue.flush()
+
+    assert cancelled == 1
     assert not paths_module.get_paths().user_agent_dir("alice", "phoenix").exists()

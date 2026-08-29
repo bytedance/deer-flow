@@ -48,6 +48,7 @@ def setup_agent(
         )
 
     agent_name: str | None = runtime.context.get("agent_name") if runtime.context else None
+    created_agent_incarnation: str | None = None
 
     try:
         agent_name = validate_agent_name(agent_name)
@@ -62,7 +63,7 @@ def setup_agent(
                 config_data["description"] = description
             if skills is not None:
                 config_data["skills"] = skills
-            get_agent_store().update(agent_name, config_data, soul, user_id=user_id)
+            created_agent_incarnation = get_agent_store().update(agent_name, config_data, soul, user_id=user_id)
         else:
             # Default agent (no agent_name): SOUL.md lives at the global base
             # dir. It is not a custom-agent record, so it stays file-based
@@ -75,6 +76,7 @@ def setup_agent(
         return Command(
             update={
                 "created_agent_name": agent_name,
+                "created_agent_incarnation": created_agent_incarnation,
                 "messages": [ToolMessage(content=f"Agent '{agent_name}' created successfully!", tool_call_id=runtime.tool_call_id)],
             }
         )

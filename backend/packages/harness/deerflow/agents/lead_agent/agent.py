@@ -316,6 +316,7 @@ def _create_summarization_middleware(
     run_model_name: str | None = None,
     extensions=None,
     agent_incarnation: str | None = None,
+    require_created_agent_incarnation: bool = False,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config.
 
@@ -330,6 +331,8 @@ def _create_summarization_middleware(
     }
     if agent_incarnation is not None:
         kwargs["agent_incarnation"] = agent_incarnation
+    if require_created_agent_incarnation:
+        kwargs["require_created_agent_incarnation"] = True
     return create_summarization_middleware(**kwargs)
 
 
@@ -473,6 +476,7 @@ def build_middlewares(
     extensions=None,
     subagent_execution_capacity: int | None = None,
     agent_incarnation: str | None = None,
+    require_created_agent_incarnation: bool = False,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -569,6 +573,7 @@ def build_middlewares(
         run_model_name=model_name,
         extensions=resolved_extensions,
         agent_incarnation=agent_incarnation,
+        require_created_agent_incarnation=require_created_agent_incarnation,
     )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
@@ -601,6 +606,8 @@ def build_middlewares(
             memory_kwargs = {"memory_config": resolved_app_config.memory}
             if agent_incarnation is not None:
                 memory_kwargs["agent_incarnation"] = agent_incarnation
+            if require_created_agent_incarnation:
+                memory_kwargs["require_created_agent_incarnation"] = True
             middlewares.append(MemoryMiddleware(agent_name=agent_name, **memory_kwargs))
     else:
         if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
@@ -608,6 +615,8 @@ def build_middlewares(
         memory_kwargs = {"memory_config": resolved_app_config.memory}
         if agent_incarnation is not None:
             memory_kwargs["agent_incarnation"] = agent_incarnation
+        if require_created_agent_incarnation:
+            memory_kwargs["require_created_agent_incarnation"] = True
         middlewares.append(MemoryMiddleware(agent_name=agent_name, **memory_kwargs))
 
     # Add ViewImageMiddleware only if the current model supports vision.
@@ -1061,6 +1070,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             authorization_provider=_authz_provider,
             subagent_execution_capacity=subagent_execution_capacity,
             agent_incarnation=agent_incarnation,
+            require_created_agent_incarnation=True,
         )
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,

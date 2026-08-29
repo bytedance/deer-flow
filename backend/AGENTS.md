@@ -218,6 +218,7 @@ Only a successful conditional delete cancels process-local memory work for that 
 Each custom-agent run captures the definition's durable incarnation before execution.
 Memory persistence checks that incarnation under the same lock used by delete and recreate.
 Process-local queue generations only reduce obsolete work. They do not provide the durable fence.
+Bootstrap setup stores the created incarnation in graph state. Later memory writes require this incarnation and fail closed when it is missing.
 
 ### Test-Driven Development (TDD) — MANDATORY
 

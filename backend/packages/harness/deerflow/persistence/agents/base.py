@@ -140,13 +140,14 @@ class AgentStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
-        """Write an agent's config and/or soul (upsert).
+    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> str:
+        """Write an agent's config and/or soul and return its incarnation.
 
         ``config`` / ``soul`` are each independently optional: ``None`` means
         "leave that part unchanged" — the agents router updates config only when
         a config field changed, and soul only when one was supplied. Creates the
         record if it does not exist (the ``setup_agent`` / first-write path).
+        The return value identifies the record written under the same scope lock.
         """
 
     @abc.abstractmethod

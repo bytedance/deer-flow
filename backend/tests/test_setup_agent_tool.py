@@ -75,6 +75,21 @@ def test_setup_agent_rejects_absolute_agent_name_before_writing(tmp_path, monkey
     assert not (Path(absolute_agent) / "SOUL.md").exists()
 
 
+def test_setup_agent_returns_created_incarnation(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    runtime = _DummyRuntime(
+        context={"agent_name": "test-agent", "user_id": "runtime-user"},
+        tool_call_id="tool-incarnation",
+    )
+
+    result = setup_agent.func(soul="test soul", description="desc", runtime=runtime)
+
+    from deerflow.persistence.agents import get_agent_store
+
+    snapshot = get_agent_store().get_snapshot("test-agent", user_id="runtime-user")
+    assert result.update["created_agent_incarnation"] == snapshot.incarnation
+
+
 # --- Data loss prevention tests ---
 
 

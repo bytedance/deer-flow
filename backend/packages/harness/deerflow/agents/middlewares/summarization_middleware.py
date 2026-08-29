@@ -56,6 +56,7 @@ class SummarizationEvent:
     thread_id: str | None
     agent_name: str | None
     runtime: Runtime
+    state: AgentState | None = None
 
 
 @dataclass(frozen=True)
@@ -644,7 +645,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # messages into durable memory for a summary that never materializes would
         # duplicate that work on the next attempt. Messages are still removed after
         # this returns (in _maybe_summarize), so hooks run before they are gone.
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime, state)
         self._record_compaction(
             source_content_hashes,
             summary=summary,
@@ -684,7 +685,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 raise SummaryGenerationError("summary generation failed")
             return None
         # Fire hooks only once a replacement summary exists (see compact_state).
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._fire_hooks(messages_to_summarize, preserved_messages, runtime, state)
         self._record_compaction(
             source_content_hashes,
             summary=summary,
@@ -754,6 +755,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
         runtime: Runtime,
+        state: AgentState,
     ) -> None:
         if not self._before_summarization_hooks:
             return
@@ -764,6 +766,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             thread_id=_resolve_thread_id(runtime),
             agent_name=_resolve_agent_name(runtime),
             runtime=runtime,
+            state=state,
         )
 
         for hook in self._before_summarization_hooks:
@@ -807,6 +810,7 @@ def create_summarization_middleware(
     run_model_name: str | None = None,
     extensions=None,
     agent_incarnation: str | None = None,
+    require_created_agent_incarnation: bool = False,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
@@ -874,7 +878,10 @@ def create_summarization_middleware(
         from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
         if agent_incarnation is None:
-            hooks.append(memory_flush_hook)
+            if require_created_agent_incarnation:
+                hooks.append(lambda event: memory_flush_hook(event, require_created_agent_incarnation=True))
+            else:
+                hooks.append(memory_flush_hook)
         else:
             hooks.append(lambda event: memory_flush_hook(event, agent_incarnation=agent_incarnation))
 

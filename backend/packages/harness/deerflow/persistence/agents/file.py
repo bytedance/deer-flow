@@ -206,7 +206,7 @@ class FileAgentStore(AgentStore):
                 shutil.rmtree(agent_dir, ignore_errors=True)
                 raise
 
-    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
+    def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> str:
         name = validate_agent_name(name)
         effective_user = user_id or _ac.get_effective_user_id()
         with _agent_scope_lock(name, effective_user):
@@ -215,10 +215,12 @@ class FileAgentStore(AgentStore):
             agent_dir.mkdir(parents=True, exist_ok=True)
             try:
                 if not pre_existing:
-                    (agent_dir / _INCARNATION_FILENAME).write_text(uuid.uuid4().hex, encoding="utf-8")
+                    incarnation = uuid.uuid4().hex
+                    (agent_dir / _INCARNATION_FILENAME).write_text(incarnation, encoding="utf-8")
                 else:
-                    _read_or_create_incarnation(agent_dir, name=name, user_id=effective_user)
+                    incarnation = _read_or_create_incarnation(agent_dir, name=name, user_id=effective_user)
                 self._write(agent_dir, config, soul)
+                return incarnation
             except Exception:
                 if not pre_existing:
                     shutil.rmtree(agent_dir, ignore_errors=True)

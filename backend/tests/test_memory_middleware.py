@@ -65,3 +65,44 @@ def test_after_agent_preserves_run_incarnation_at_enqueue(monkeypatch):
     manager.add_for_incarnation.assert_called_once()
     assert manager.add_for_incarnation.call_args.kwargs["agent_incarnation"] == "run-incarnation"
     manager.add.assert_not_called()
+
+
+def test_after_bootstrap_agent_uses_created_incarnation(monkeypatch):
+    manager = MagicMock()
+    monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
+    middleware = MemoryMiddleware(
+        agent_name="researcher",
+        require_created_agent_incarnation=True,
+        memory_config=MemoryConfig(enabled=True),
+    )
+
+    middleware.after_agent(
+        {
+            "messages": [HumanMessage(content="Create it"), AIMessage(content="Created")],
+            "created_agent_name": "researcher",
+            "created_agent_incarnation": "bootstrap-incarnation",
+        },
+        Runtime(context={"thread_id": "thread-123", "user_id": "runtime-user"}),
+    )
+
+    manager.add_for_incarnation.assert_called_once()
+    assert manager.add_for_incarnation.call_args.kwargs["agent_incarnation"] == "bootstrap-incarnation"
+    manager.add.assert_not_called()
+
+
+def test_after_bootstrap_agent_skips_memory_without_created_incarnation(monkeypatch):
+    manager = MagicMock()
+    monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
+    middleware = MemoryMiddleware(
+        agent_name="researcher",
+        require_created_agent_incarnation=True,
+        memory_config=MemoryConfig(enabled=True),
+    )
+
+    middleware.after_agent(
+        {"messages": [HumanMessage(content="Create it"), AIMessage(content="Creation failed")]},
+        Runtime(context={"thread_id": "thread-123", "user_id": "runtime-user"}),
+    )
+
+    manager.add.assert_not_called()
+    manager.add_for_incarnation.assert_not_called()

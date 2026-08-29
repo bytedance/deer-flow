@@ -285,6 +285,8 @@ class ThreadState(AgentState):
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
     background_tasks: NotRequired[list[BackgroundTaskState]]
+    created_agent_name: NotRequired[str | None]
+    created_agent_incarnation: NotRequired[str | None]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:

@@ -780,6 +780,49 @@ def test_build_middlewares_passes_run_incarnation_to_memory_paths(monkeypatch):
     }
 
 
+def test_build_middlewares_requires_created_incarnation_for_bootstrap_memory(monkeypatch):
+    app_config = _make_app_config([_make_model("safe-model", supports_thinking=False)])
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(lead_agent_module, "build_lead_runtime_middlewares", lambda *, app_config, lazy_init: [])
+    monkeypatch.setattr(
+        lead_agent_module,
+        "_create_summarization_middleware",
+        lambda **kwargs: (
+            captured.setdefault(
+                "summary_requires_created_incarnation",
+                kwargs.get("require_created_agent_incarnation"),
+            )
+            and None
+        ),
+    )
+    monkeypatch.setattr(lead_agent_module, "_create_todo_list_middleware", lambda is_plan_mode: None)
+    monkeypatch.setattr(lead_agent_module, "TitleMiddleware", lambda *, app_config, extensions: "title")
+    monkeypatch.setattr(
+        lead_agent_module,
+        "MemoryMiddleware",
+        lambda agent_name=None, **kwargs: (
+            captured.setdefault(
+                "memory_requires_created_incarnation",
+                kwargs.get("require_created_agent_incarnation"),
+            )
+            or "memory"
+        ),
+    )
+
+    lead_agent_module.build_middlewares(
+        {"configurable": {}},
+        model_name="safe-model",
+        agent_name="researcher",
+        require_created_agent_incarnation=True,
+        app_config=app_config,
+    )
+
+    assert captured == {
+        "summary_requires_created_incarnation": True,
+        "memory_requires_created_incarnation": True,
+    }
+
+
 def test_build_middlewares_orders_skill_activation_before_policy_and_durable_context(monkeypatch):
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware

@@ -447,6 +447,51 @@ def test_memory_flush_hook_preserves_run_incarnation(monkeypatch: pytest.MonkeyP
     manager.add_nowait.assert_not_called()
 
 
+def test_memory_flush_hook_uses_bootstrap_created_incarnation(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MagicMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_manager", lambda: manager)
+
+    memory_flush_hook(
+        SummarizationEvent(
+            thread_id="main",
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=tuple(_messages()[2:]),
+            agent_name="researcher",
+            runtime=_runtime(thread_id="main", agent_name="researcher", user_id="alice"),
+            state={
+                "created_agent_name": "researcher",
+                "created_agent_incarnation": "bootstrap-incarnation",
+            },
+        ),
+        require_created_agent_incarnation=True,
+    )
+
+    manager.add_nowait_for_incarnation.assert_called_once()
+    assert manager.add_nowait_for_incarnation.call_args.kwargs["agent_incarnation"] == "bootstrap-incarnation"
+    manager.add_nowait.assert_not_called()
+
+
+def test_memory_flush_hook_skips_bootstrap_without_created_incarnation(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MagicMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_manager", lambda: manager)
+
+    memory_flush_hook(
+        SummarizationEvent(
+            thread_id="main",
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=tuple(_messages()[2:]),
+            agent_name="researcher",
+            runtime=_runtime(thread_id="main", agent_name="researcher", user_id="alice"),
+        ),
+        require_created_agent_incarnation=True,
+    )
+
+    manager.add_nowait.assert_not_called()
+    manager.add_nowait_for_incarnation.assert_not_called()
+
+
 def test_stale_user_peer_is_compressed_not_rescued() -> None:
     """A stale untagged ``__user`` peer is no longer rescued — only the latest user message is.
 
