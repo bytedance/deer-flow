@@ -21,4 +21,17 @@ describe("core copy loading", () => {
       "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
     );
   });
+
+  it("loads the Traditional Chinese copy with Taiwan terminology", async () => {
+    const taiwanese = await loadTranslations("zh-TW");
+    expect(taiwanese.locale.localName).toBe("繁體中文");
+    expect(taiwanese.common.settings).toBe("設定");
+    expect(taiwanese.common.loadMore).toBe("載入更多");
+    expect(taiwanese.inputBox.disclaimer).toBe(
+      "內容由AI產生，重要資訊請務必核查",
+    );
+    expect(taiwanese.channels.descriptions.buzz).toBe(
+      "透過 DeerFlow 智慧體接收 Buzz 頻道訊息和私聊。",
+    );
+  });
 });

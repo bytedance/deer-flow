@@ -1,5 +1,9 @@
 import { formatDistanceToNow } from "date-fns";
-import { enUS as dateFnsEnUS, zhCN as dateFnsZhCN } from "date-fns/locale";
+import {
+  enUS as dateFnsEnUS,
+  zhCN as dateFnsZhCN,
+  zhTW as dateFnsZhTW,
+} from "date-fns/locale";
 
 import { detectLocale, type Locale } from "@/core/i18n";
 import { getLocaleFromCookie } from "@/core/i18n/cookies";
@@ -8,6 +12,8 @@ function getDateFnsLocale(locale: Locale) {
   switch (locale) {
     case "zh-CN":
       return dateFnsZhCN;
+    case "zh-TW":
+      return dateFnsZhTW;
     case "en-US":
     default:
       return dateFnsEnUS;

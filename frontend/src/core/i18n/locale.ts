@@ -1,4 +1,4 @@
-export const SUPPORTED_LOCALES = ["en-US", "zh-CN"] as const;
+export const SUPPORTED_LOCALES = ["en-US", "zh-CN", "zh-TW"] as const;
 export type Locale = (typeof SUPPORTED_LOCALES)[number];
 export const DEFAULT_LOCALE: Locale = "en-US";
 
@@ -33,7 +33,19 @@ export function normalizeLocale(locale: string | null | undefined): Locale {
     return locale;
   }
 
-  if (locale.toLowerCase().startsWith("zh")) {
+  const normalized = locale.toLowerCase();
+
+  // Traditional Chinese tags (Taiwan, Hong Kong, and the generic Hant tag)
+  // resolve to zh-TW instead of falling back to Simplified zh-CN.
+  if (
+    normalized.startsWith("zh-tw") ||
+    normalized.startsWith("zh-hant") ||
+    normalized.startsWith("zh-hk")
+  ) {
+    return "zh-TW";
+  }
+
+  if (normalized.startsWith("zh")) {
     return "zh-CN";
   }
 
