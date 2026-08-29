@@ -327,6 +327,7 @@ Notes:
 - The MVP supports only `once` and `cron`.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
+- With `channel_connections.enabled: true`, the scheduler enqueues IM outcome notifications for the task owner's connected identities. A delivery worker (same poll cadence as the scheduler) pushes them. Manual triggers and interrupts stay silent; channel/transport outages park rows without consuming the retry budget; platform rejections exhaust ~15 minutes of counted retries then settle `failed`. Only WeCom currently implements proactive `send_notification`.
 
 ### Agent Storage
 

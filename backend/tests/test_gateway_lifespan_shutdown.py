@@ -473,3 +473,104 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
     assert shutdown_elapsed < 1.0
     manager.shutdown_flush.assert_called_once_with(5.0)
     manager.close.assert_not_called()
+
+
+# ── notification delivery worker wiring (issue #4254) ───────────────────────
+
+
+@asynccontextmanager
+async def _langgraph_with_scheduled_repos(app, _startup_config):
+    app.state.scheduled_task_repo = MagicMock()
+    app.state.scheduled_task_run_repo = MagicMock()
+    yield
+
+
+def _notification_startup_config(*, channel_connections_enabled: bool = True):
+    from deerflow.config.channel_connections_config import ChannelConnectionsConfig
+
+    return SimpleNamespace(
+        log_level="INFO",
+        memory=SimpleNamespace(token_counting="char", enabled=False, shutdown_flush_timeout_seconds=5.0),
+        scheduler=SimpleNamespace(
+            enabled=False,
+            poll_interval_seconds=5,
+            lease_seconds=30,
+            max_concurrent_runs=1,
+            multi_instance=False,
+            queue_timeout_seconds=3600,
+        ),
+        run_ownership=SimpleNamespace(grace_seconds=30),
+        channel_connections=ChannelConnectionsConfig.model_validate({"enabled": channel_connections_enabled}),
+    )
+
+
+async def _run_lifespan_with_notification_worker(*, channel_service_available: bool):
+    from app.gateway.app import lifespan
+
+    app = FastAPI()
+    startup_config = _notification_startup_config()
+    close_oidc_service = AsyncMock()
+    stop_channel_service = AsyncMock()
+    fake_service = MagicMock()
+    fake_service.get_status = MagicMock(return_value={})
+    worker_start = AsyncMock()
+    worker_stop = AsyncMock()
+    worker_instance = MagicMock()
+    worker_instance.start = worker_start
+    worker_instance.stop = worker_stop
+    scheduled_service = MagicMock()
+    scheduled_service.start = AsyncMock()
+    scheduled_service.stop = AsyncMock()
+    session_factory = MagicMock()
+    shutdown_events: list[str] = []
+
+    async def fake_start(_startup_config, **_kwargs):
+        return fake_service
+
+    async def record_worker_stop():
+        shutdown_events.append("worker")
+
+    async def record_channel_stop():
+        shutdown_events.append("channels")
+
+    worker_stop.side_effect = record_worker_stop
+    stop_channel_service.side_effect = record_channel_stop
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _langgraph_with_scheduled_repos),
+        patch("app.gateway.app._ensure_admin_user", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("app.gateway.app.auth.close_oidc_service", close_oidc_service),
+        patch("app.channels.service.start_channel_service", side_effect=fake_start),
+        patch("app.channels.service.get_channel_service", return_value=fake_service if channel_service_available else None),
+        patch("app.channels.service.stop_channel_service", stop_channel_service),
+        patch("deerflow.persistence.engine.get_session_factory", return_value=session_factory),
+        patch("app.scheduler.ScheduledTaskService", return_value=scheduled_service),
+        patch("app.scheduler.notification_delivery.NotificationDeliveryWorker", return_value=worker_instance),
+        patch("deerflow.persistence.run.RunRepository"),
+    ):
+        async with lifespan(app):
+            worker_on_app = getattr(app.state, "notification_delivery_worker", None)
+        return worker_start, worker_stop, stop_channel_service, worker_on_app, shutdown_events
+
+
+def test_lifespan_skips_notification_worker_when_channel_service_missing(caplog) -> None:
+    caplog.set_level(logging.WARNING, logger="app.gateway.app")
+    worker_start, worker_stop, stop_channel_service, worker_on_app, _shutdown_events = asyncio.run(_run_lifespan_with_notification_worker(channel_service_available=False))
+
+    worker_start.assert_not_awaited()
+    assert worker_on_app is None
+    assert any("write-only outbox" in record.message for record in caplog.records)
+    stop_channel_service.assert_awaited_once()
+
+
+def test_lifespan_starts_notification_worker_when_enqueue_and_channel_are_wired() -> None:
+    worker_start, worker_stop, stop_channel_service, worker_on_app, shutdown_events = asyncio.run(_run_lifespan_with_notification_worker(channel_service_available=True))
+
+    worker_start.assert_awaited_once()
+    assert worker_on_app is not None
+    worker_stop.assert_awaited_once()
+    stop_channel_service.assert_awaited_once()
+    assert shutdown_events.index("worker") < shutdown_events.index("channels")

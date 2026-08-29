@@ -224,6 +224,12 @@ This section accumulates work toward the **2.1.0** milestone
 
 #### Channels
 
+- **scheduler / channels:** Push scheduled-task outcomes to the owner's bound
+  IM identities via a durable `notification_deliveries` outbox and
+  `NotificationDeliveryWorker`. Activates only when `channel_connections.enabled`
+  is true and a channel service is running; manual triggers and interrupts stay
+  silent. WeCom implements proactive `send_notification`; other providers fail
+  visibly in the outbox until they grow a push path. ([#4843], [#4254])
 - **channels:** Expose the IM `channel_user_id` to sandbox commands as
   `DEERFLOW_CHANNEL_USER_ID`. ([#3926])
 - **channels:** Queue rapid same-thread messages and preserve topic-card

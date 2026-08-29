@@ -739,12 +739,13 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 - 当某次执行处于 `queued`、`launching` 或 `running` 时冻结任务定义，避免持久化的执行意外换用新的 prompt、thread 或调度；将任务切换为暂停或删除任务会取消已在等待的执行，而 `launching`/`running` 执行结束后才能重试这些变更；显式手动触发在调度已暂停时仍可等待并执行，且不会自动恢复调度
 - 支持暂停、恢复、手动触发、查看历史和删除任务
 - 定时任务通过正常的 DeerFlow run 生命周期执行
+- 当 `channel_connections.enabled: true` 时，会把定时运行成功/失败的摘要推送到任务所有者已绑定的 IM 身份（outbox + 投递 worker）。手动「立即运行」和中断不推送。渠道/传输宕机时会停车且不耗尽重试；平台拒绝大约重试 15 分钟后落为 `failed`。目前主动推送由企业微信实现；其它已绑定渠道会入队，但在实现 `send_notification` 前会失败。
 
 当前 MVP 限制：
 
 - 暂时还没有可在对话中创建任务的 `schedule_task` 工具
 - 没有纯文本通知任务
-- 没有渠道或 GitHub 分发目标
+- 没有渠道或 GitHub 分发目标（上面的结果推送不是分发目标）
 - 第一版没有 `interval` 调度类型
 
 通过 `config.yaml -> scheduler.enabled` 开启后台轮询。手动触发使用同样的 scheduled-task 资源和执行路径。
