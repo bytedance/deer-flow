@@ -31,6 +31,7 @@ from app.gateway.routers.mcp import (
     _validate_mcp_update_request,
     create_mcp_servers,
     delete_mcp_server,
+    get_mcp_configuration,
     reset_mcp_tools_cache_endpoint,
     update_mcp_configuration,
     update_mcp_server,
@@ -78,6 +79,46 @@ def test_mask_removes_oauth_secrets():
     # Non-secret fields preserved
     assert masked.oauth.client_id == "my-client"
     assert masked.oauth.token_url == "https://auth.example.com/token"
+
+
+def test_mask_scrubs_sensitive_oauth_extras_but_preserves_safe_extras():
+    server = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            vendor_endpoint="https://vendor.example.com/oauth",
+            vendor_api_key="vendor-secret",
+            nested={"refreshToken": "refresh-secret", "safe": "visible"},
+        ),
+    )
+
+    masked = _mask_server_config(server)
+
+    assert masked.oauth is not None
+    assert masked.oauth.model_extra == {
+        "vendor_endpoint": "https://vendor.example.com/oauth",
+        "vendor_api_key": "***",
+        "nested": {"refreshToken": "***", "safe": "visible"},
+    }
+
+
+def test_mask_scrubs_sensitive_oauth_extra_token_params():
+    server = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            extra_token_params={
+                "api_key": "vendor-secret",
+                "resource": "https://resource.example.com",
+            },
+        ),
+    )
+
+    masked = _mask_server_config(server)
+
+    assert masked.oauth is not None
+    assert masked.oauth.extra_token_params == {
+        "api_key": "***",
+        "resource": "https://resource.example.com",
+    }
 
 
 def test_mask_preserves_non_secret_fields():
@@ -182,6 +223,131 @@ def test_merge_preserves_oauth_secrets_when_none():
     assert merged.oauth is not None
     assert merged.oauth.client_secret == "existing-secret"
     assert merged.oauth.refresh_token == "existing-refresh"
+
+
+def test_merge_round_trip_preserves_masked_oauth_extras():
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            vendor_endpoint="https://vendor.example.com/oauth",
+            vendor_api_key="vendor-secret",
+            nested={"refreshToken": "refresh-secret", "safe": "visible"},
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        _mask_server_config(existing),
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.oauth is not None
+    assert merged.oauth.model_extra == {
+        "vendor_endpoint": "https://vendor.example.com/oauth",
+        "vendor_api_key": "vendor-secret",
+        "nested": {"refreshToken": "refresh-secret", "safe": "visible"},
+    }
+
+
+def test_merge_round_trip_preserves_masked_oauth_extra_token_params():
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            extra_token_params={
+                "api_key": "vendor-secret",
+                "resource": "https://resource.example.com",
+            },
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            extra_token_params={
+                "api_key": "***",
+                "resource": "https://resource.example.com",
+            },
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        incoming,
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.oauth is not None
+    assert merged.oauth.extra_token_params == existing.oauth.extra_token_params
+
+
+def test_merge_targeted_oauth_replacement_removes_omitted_extras():
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            vendor_api_key="vendor-secret",
+            vendor_note="remove-me",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            vendor_api_key="***",
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        incoming,
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.oauth is not None
+    assert merged.oauth.model_extra == {"vendor_api_key": "vendor-secret"}
+
+
+def test_merge_bulk_oauth_update_preserves_omitted_extras():
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            vendor_api_key="vendor-secret",
+            vendor_note="keep-me",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            enabled=False,
+            token_url="https://auth.example.com/token",
+        ),
+    )
+
+    merged = _merge_preserving_secrets(incoming, existing)
+
+    assert merged.oauth is not None
+    assert merged.oauth.enabled is False
+    assert merged.oauth.model_extra == {
+        "vendor_api_key": "vendor-secret",
+        "vendor_note": "keep-me",
+    }
+
+
+def test_merge_rejects_structural_edits_to_masked_oauth_extra_arrays():
+    existing = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            providers=[{"name": "alpha", "apiKey": "secret-alpha"}],
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        oauth=McpOAuthConfigResponse(
+            token_url="https://auth.example.com/token",
+            providers=[
+                {"name": "alpha", "apiKey": "***"},
+                {"name": "beta", "apiKey": "secret-beta"},
+            ],
+        ),
+    )
+
+    with pytest.raises(HTTPException):
+        _merge_preserving_secrets(incoming, existing)
 
 
 def test_merge_accepts_new_secret_values():
@@ -950,6 +1116,139 @@ async def test_bulk_update_rejects_masked_secret_for_new_server_without_writing(
 
     assert exc_info.value.status_code == 400
     assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [create_mcp_servers, update_mcp_configuration])
+async def test_new_server_writes_reject_masked_headers_from_context_extra_without_writing(handler, monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {"mcpServers": {}, "skills": {}}
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await handler(
+            _request_with_role("admin"),
+            McpConfigUpdateRequest(
+                mcp_servers={
+                    "added": McpServerConfigResponse(
+                        type="http",
+                        url="https://new.example/mcp",
+                        headers_from_context={"api_key": "***"},
+                    )
+                }
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", [create_mcp_servers, update_mcp_configuration])
+@pytest.mark.parametrize(
+    "oauth_fields",
+    [
+        {"client_secret": "***"},
+        {"refresh_token": "***"},
+        {"vendor_api_key": "***"},
+        {"extra_token_params": {"api_key": "***"}},
+    ],
+)
+async def test_new_server_writes_reject_masked_oauth_secret_without_writing(handler, oauth_fields, monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {"mcpServers": {}, "skills": {}}
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def fake_reload_extensions_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", fake_reload_extensions_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await handler(
+            _request_with_role("admin"),
+            McpConfigUpdateRequest(
+                mcp_servers={
+                    "added": McpServerConfigResponse(
+                        type="http",
+                        url="https://new.example/mcp",
+                        oauth=McpOAuthConfigResponse(
+                            token_url="https://auth.example.com/token",
+                            **oauth_fields,
+                        ),
+                    )
+                }
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+async def test_targeted_oauth_extra_round_trip_preserves_extensions_and_secrets(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "target": {
+                "enabled": True,
+                "type": "http",
+                "url": "https://old.example/mcp",
+                "oauth": {
+                    "token_url": "https://auth.example.com/token",
+                    "vendor_endpoint": "https://vendor.example.com/oauth",
+                    "vendor_api_key": "vendor-secret",
+                    "nested": {"refreshToken": "refresh-secret", "safe": "visible"},
+                },
+            }
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    def load_config():
+        return ExtensionsConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", load_config)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    get_response = await get_mcp_configuration(_request_with_role("admin"))
+    masked = get_response.mcp_servers["target"]
+    assert masked.oauth is not None
+    assert masked.oauth.model_extra == {
+        "vendor_endpoint": "https://vendor.example.com/oauth",
+        "vendor_api_key": "***",
+        "nested": {"refreshToken": "***", "safe": "visible"},
+    }
+
+    await update_mcp_server(
+        _request_with_role("admin"),
+        McpServerConfigUpdateRequest(
+            server_name="target",
+            server=masked.model_copy(update={"url": "https://new.example/mcp"}),
+        ),
+    )
+
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))
+    target = persisted["mcpServers"]["target"]
+    assert target["url"] == "https://new.example/mcp"
+    assert target["oauth"]["vendor_endpoint"] == "https://vendor.example.com/oauth"
+    assert target["oauth"]["vendor_api_key"] == "vendor-secret"
+    assert target["oauth"]["nested"] == {
+        "refreshToken": "refresh-secret",
+        "safe": "visible",
+    }
 
 
 @pytest.mark.asyncio

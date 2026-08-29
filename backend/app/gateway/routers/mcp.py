@@ -424,6 +424,9 @@ class McpOAuthConfigResponse(BaseModel):
     default_token_type: str = Field(default="Bearer", description="Default token type when response omits token_type")
     refresh_skew_seconds: int = Field(default=60, description="Refresh this many seconds before expiry")
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
+    # Mirror the harness-side McpOAuthConfig (extra="allow"): provider-specific
+    # OAuth fields must survive the Gateway's GET -> edit -> PUT round-trip.
+    model_config = ConfigDict(extra="allow")
 
 
 class McpServerConfigResponse(BaseModel):
@@ -594,14 +597,30 @@ def _ensure_no_masked_secrets(server: McpServerConfigResponse) -> None:
         if _contains_masked_sensitive_extra_value(str(key), value):
             reject(f"extra config key '{key}'")
 
-    if server.user_auth is None:
-        return
-    for key, value in server.user_auth.users.items():
-        if value == _MASKED_VALUE:
-            reject(f"user_auth credential '{key}'")
-    for key, value in (server.user_auth.model_extra or {}).items():
-        if _contains_masked_sensitive_extra_value(str(key), value):
-            reject(f"user_auth extra config key '{key}'")
+    if server.oauth is not None:
+        if server.oauth.client_secret == _MASKED_VALUE:
+            reject("oauth client_secret")
+        if server.oauth.refresh_token == _MASKED_VALUE:
+            reject("oauth refresh_token")
+        for key, value in server.oauth.extra_token_params.items():
+            if _contains_masked_sensitive_extra_value(str(key), value):
+                reject(f"oauth extra_token_params key '{key}'")
+        for key, value in (server.oauth.model_extra or {}).items():
+            if _contains_masked_sensitive_extra_value(str(key), value):
+                reject(f"oauth extra config key '{key}'")
+
+    if server.user_auth is not None:
+        for key, value in server.user_auth.users.items():
+            if value == _MASKED_VALUE:
+                reject(f"user_auth credential '{key}'")
+        for key, value in (server.user_auth.model_extra or {}).items():
+            if _contains_masked_sensitive_extra_value(str(key), value):
+                reject(f"user_auth extra config key '{key}'")
+
+    if server.headers_from_context is not None:
+        for key, value in (server.headers_from_context.model_extra or {}).items():
+            if _contains_masked_sensitive_extra_value(str(key), value):
+                reject(f"headers_from_context extra config key '{key}'")
 
 
 def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing_value: Any, *, existing_present: bool) -> Any:
@@ -792,10 +811,14 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
     masked_headers = {k: _MASKED_VALUE for k in server.headers}
     masked_oauth = None
     if server.oauth is not None:
+        masked_extra_token_params = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else value for key, value in server.oauth.extra_token_params.items()}
+        masked_oauth_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.oauth.model_extra or {}).items()}
         masked_oauth = server.oauth.model_copy(
             update={
                 "client_secret": None,
                 "refresh_token": None,
+                "extra_token_params": masked_extra_token_params,
+                **masked_oauth_extra,
             }
         )
     masked_user_auth = None
@@ -880,14 +903,52 @@ def _merge_preserving_secrets(
             merged_headers[k] = v
 
     merged_oauth = incoming.oauth
-    if incoming.oauth is not None and existing.oauth is not None:
-        # None = preserve (masked round-trip), "" = explicitly clear, else = new value
-        merged_client_secret = existing.oauth.client_secret if incoming.oauth.client_secret is None else (None if incoming.oauth.client_secret == "" else incoming.oauth.client_secret)
-        merged_refresh_token = existing.oauth.refresh_token if incoming.oauth.refresh_token is None else (None if incoming.oauth.refresh_token == "" else incoming.oauth.refresh_token)
-        merged_oauth = incoming.oauth.model_copy(
+    if incoming.oauth is not None:
+        incoming_oauth = incoming.oauth
+        base_oauth = existing.oauth
+        base_extra_token_params = base_oauth.extra_token_params if base_oauth is not None else {}
+        merged_extra_token_params: dict[str, str] = {}
+        for key, value in incoming_oauth.extra_token_params.items():
+            if value == _MASKED_VALUE and _is_sensitive_extra_key(key):
+                if key not in base_extra_token_params:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Cannot set oauth extra_token_params key '{key}' to masked value '***'; provide a real value.",
+                    )
+                merged_extra_token_params[key] = base_extra_token_params[key]
+            else:
+                merged_extra_token_params[key] = value
+        if preserve_omitted_fields and "extra_token_params" not in incoming_oauth.model_fields_set:
+            merged_extra_token_params = dict(base_extra_token_params)
+
+        base_oauth_extra = (base_oauth.model_extra or {}) if base_oauth is not None else {}
+        merged_oauth_extra: dict[str, Any] = {}
+        for key, value in (incoming_oauth.model_extra or {}).items():
+            merged_oauth_extra[key] = _merge_extra_value_preserving_masked(
+                key,
+                value,
+                base_oauth_extra.get(key),
+                existing_present=key in base_oauth_extra,
+            )
+        if preserve_omitted_fields:
+            for key, value in base_oauth_extra.items():
+                if key not in (incoming_oauth.model_extra or {}):
+                    merged_oauth_extra[key] = value
+
+        if base_oauth is not None:
+            # None = preserve (masked round-trip), "" = explicitly clear,
+            # else = new value.
+            merged_client_secret = base_oauth.client_secret if incoming_oauth.client_secret is None else (None if incoming_oauth.client_secret == "" else incoming_oauth.client_secret)
+            merged_refresh_token = base_oauth.refresh_token if incoming_oauth.refresh_token is None else (None if incoming_oauth.refresh_token == "" else incoming_oauth.refresh_token)
+        else:
+            merged_client_secret = incoming_oauth.client_secret
+            merged_refresh_token = incoming_oauth.refresh_token
+        merged_oauth = incoming_oauth.model_copy(
             update={
                 "client_secret": merged_client_secret,
                 "refresh_token": merged_refresh_token,
+                "extra_token_params": merged_extra_token_params,
+                **merged_oauth_extra,
             }
         )
     merged_user_auth = incoming.user_auth
