@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0016_subagent_batches"
+HEAD = "0017_oauth_identity_pg_partial"
 BASELINE = "0001_baseline"
 
 

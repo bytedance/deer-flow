@@ -42,6 +42,37 @@ from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from deerflow.config.database_config import DatabaseConfig
 
 
+def read_count(n_ops: int, read_ratio: float) -> int:
+    """Exact number of reads out of n_ops -- round() rather than int()'s
+    truncation-toward-zero, so the documented default (n_ops=50,
+    read_ratio=0.7) yields 35 reads, not 34."""
+    return round(n_ops * read_ratio)
+
+
+def is_read_op(i: int, n_ops: int, n_reads: int) -> bool:
+    """Whether op index i (0-based) is a read, given exactly n_reads reads
+    spread evenly across n_ops slots.
+
+    The previous check, `(i % 100) < int(read_ratio * 100)`, assumed n_ops
+    was always >= 100: for the documented/default n_ops=50 (or any n_ops <=
+    100), i % 100 == i, so every op satisfies i < read_ratio*100 up to i=69
+    and every op after that fails it -- meaning the entire 50-op run was
+    either all reads or all writes depending on read_ratio, never the
+    claimed mixed workload.
+
+    This instead uses modular (Bresenham-style) spacing: stepping i*n_reads
+    through n_ops slots visits exactly n_reads distinct residues below
+    n_reads, evenly distributed rather than clustered at the front, and
+    produces precisely n_reads True values across the n_ops calls for any
+    n_ops/n_reads pair.
+    """
+    if n_ops <= 0 or n_reads <= 0:
+        return False
+    if n_reads >= n_ops:
+        return True
+    return (i * n_reads) % n_ops < n_reads
+
+
 def make_session_factory(backend: str, pg_url: str, pg_schema: str):
     """Build engine + session factory directly, without the Alembic
     bootstrap dance -- caller guarantees the schema already exists.
@@ -74,8 +105,9 @@ async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float
     repo = SQLiteUserRepository(sf)
 
     results = []
+    n_reads = read_count(n_ops, read_ratio)
     for i in range(n_ops):
-        is_read = (i % 100) < int(read_ratio * 100)
+        is_read = is_read_op(i, n_ops, n_reads)
         t0 = time.perf_counter()
         ok = True
         err = None

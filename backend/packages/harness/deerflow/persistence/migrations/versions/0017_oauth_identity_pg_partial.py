@@ -1,8 +1,11 @@
 """partial postgres predicate for idx_users_oauth_identity.
 
-Revision ID: 0017_users_oauth_identity_partial_pg
+Revision ID: 0017_oauth_identity_pg_partial
 Revises: 0016_subagent_batches
 Create Date: 2026-08-29
+
+alembic_version.version_num is VARCHAR(32); revision ids in this chain must
+stay at or under that length or stamping/upgrading a database fails outright.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017_users_oauth_identity_partial_pg"
+revision: str = "0017_oauth_identity_pg_partial"
 down_revision: str | Sequence[str] | None = "0016_subagent_batches"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
