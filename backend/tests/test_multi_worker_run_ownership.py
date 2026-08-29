@@ -21,12 +21,41 @@ import pytest
 
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import ORPHAN_RECOVERY_STOP_REASON, RunManager, RunStatus, ThreadOperationKind
+from deerflow.runtime.runs import manager as runs_manager_module
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, _generate_worker_id
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+class _SteppingDatetime(datetime):
+    """``datetime`` whose ``now()`` strictly advances between calls.
+
+    Windows timer coalescing can make consecutive ``datetime.now()`` calls
+    return identical values while a test runs, so a lease renewed inside the
+    same clock tick as its original expiry lands byte-identical and strict
+    timestamp comparisons fail. Every call advances at least one microsecond,
+    keeping lease-advance assertions deterministic on any host clock.
+    """
+
+    _last: datetime | None = None
+
+    @classmethod
+    def now(cls, tz=None):
+        real = datetime.now(UTC)
+        last = cls._last
+        if last is not None and real <= last:
+            real = last + timedelta(microseconds=1)
+        cls._last = real
+        return real if tz is None else real.astimezone(tz)
+
+
+def _use_stepping_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Patch the runs manager onto the strictly advancing clock."""
+    _SteppingDatetime._last = None
+    monkeypatch.setattr(runs_manager_module, "datetime", _SteppingDatetime)
 
 
 def _lease_config(**kwargs) -> RunOwnershipConfig:
@@ -821,7 +850,7 @@ async def test_heartbeat_renews_active_run_leases():
 
 
 @pytest.mark.anyio
-async def test_heartbeat_renews_pending_run_before_task_is_spawned():
+async def test_heartbeat_renews_pending_run_before_task_is_spawned(monkeypatch):
     """A run sitting in ``pending`` between ``create_thread_operation_atomic`` and task
     spawn must still have its lease renewed.
 
@@ -833,6 +862,7 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     hydrate — peer reconciliation reclaimed the run as an orphan and
     marked it ``error`` even though this worker still intended to run it.
     """
+    _use_stepping_clock(monkeypatch)
     config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
     store = MemoryRunStore()
     manager = _make_manager(store=store, run_ownership_config=config)
@@ -845,23 +875,22 @@ async def test_heartbeat_renews_pending_run_before_task_is_spawned():
     original_lease = record.lease_expires_at
     assert original_lease is not None
 
-    # Force a measurable gap so the renewed lease strictly post-dates the
-    # original — without this the two timestamps land in the same
-    # microsecond on fast hosts and the strict comparison fails trivially.
-    await asyncio.sleep(0.001)
-
     store.update_lease = AsyncMock(wraps=store.update_lease)
 
     await manager._renew_leases()
 
     store.update_lease.assert_awaited_once()
     assert record.lease_expires_at is not None
+    # The stepping clock guarantees the renewed lease strictly post-dates the
+    # original even when the host clock's microsecond component is frozen
+    # inside one tick for the whole test.
     assert record.lease_expires_at > original_lease
 
 
 @pytest.mark.anyio
-async def test_transient_renewal_exception_before_deadline_keeps_run_alive():
+async def test_transient_renewal_exception_before_deadline_keeps_run_alive(monkeypatch):
     """A renewal error is retryable while the last confirmed lease is valid."""
+    _use_stepping_clock(monkeypatch)
     config = _lease_config(lease_seconds=30, heartbeat_enabled=True)
     store = MemoryRunStore()
     manager = _make_manager(store=store, worker_id="worker-a", run_ownership_config=config)
