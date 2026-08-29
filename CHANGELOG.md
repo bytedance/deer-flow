@@ -91,8 +91,10 @@ This section accumulates work toward the **2.1.0** milestone
 #### Authentication
 - **auth:** Personal access tokens (PAT) for programmatic API access:
   `POST/GET/DELETE /api/v1/auth/pats` manage tokens (shown once, stored as
-  HMAC digests); a default-deny route policy admits only implemented
-  stateless endpoints, scoped to the token's `threads`/`runs` permissions.
+  SHA-256 digests); a default-deny route policy admits only the thread/run
+  lifecycle routes, narrowed further by the token's `threads`/`runs` scopes,
+  and any request dimension that carries cancel capability (`?action=`,
+  `multitask_strategy`) additionally requires `runs:cancel`.
 
 #### Agents & runtime
 
