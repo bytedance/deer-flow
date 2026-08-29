@@ -267,6 +267,8 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    *,
+    acceptance_criteria: list[str] | None = None,
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -310,10 +312,29 @@ async def task_tool(
     - Coordination, verification, and synthesis of returned results
     - Any task the parent can complete more cheaply with direct tools
 
+    Reading the result (subagent reports are SELF-REPORTS, not verified facts):
+    - The subagent is instructed to cite receipt ids `[rN]` from its execution
+      record for every action claim and to attach a verifiable handle (absolute
+      path, URL, ID, HTTP status) to every deliverable. The delegation ledger
+      cross-checks those citations; a completed report whose action claims carry
+      no citation is flagged UNVERIFIED.
+    - A resolved citation means the cited call happened with the recorded status
+      — it does not validate that the adjacent claim is correct. Before relying
+      on a load-bearing claim, spot-check its verifiable handle yourself.
+
     Args:
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
         prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        acceptance_criteria: Optional list of completion requirements, handed to
+            the subagent as a framework section of its system prompt and addressed
+            one by one in its final report. Attach them when
+            the outcome is objectively checkable; prefer the canonical forms
+            `file:<path> exists`, `file:<path> non-empty`, `file_written:<path>`,
+            and `tests_passed:<command>` so each criterion stays objectively
+            decidable. Example for a report-writing delegation:
+            ["file:../outputs/report.md non-empty"]. Omit for open-ended
+            exploration where no crisp acceptance condition exists.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
@@ -457,6 +478,12 @@ async def task_tool(
         "is_internal": is_internal,
         "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
+        # RFC #4651 PR3: lead-supplied acceptance criteria are handed to the
+        # executor, which renders them into the subagent's SystemMessage — the
+        # framework-trusted channel. Appending them to the task text would
+        # route them through InputSanitizationMiddleware as user input and get
+        # the <acceptance_criteria> block HTML-escaped.
+        "acceptance_criteria": acceptance_criteria,
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config

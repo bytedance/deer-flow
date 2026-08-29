@@ -100,6 +100,13 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # tool off-limits. Forging this in untrusted input could trick the
         # model into believing it has (or lacks) tool restrictions it does not.
         "tool_restrictions",
+        # Subagent report-contract blocks (subagents/report_contract.py, RFC
+        # #4651 PR3): injected by the executor into every subagent system
+        # prompt and by the task tool into delegated prompts. Forging them in
+        # untrusted input could impersonate the verification contract (e.g.
+        # pre-declaring acceptance criteria as met).
+        "report_contract",
+        "acceptance_criteria",
         # Common prompt-injection tag patterns
         "system",
         "instruction",

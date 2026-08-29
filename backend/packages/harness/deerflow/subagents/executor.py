@@ -36,6 +36,7 @@ from deerflow.subagents.capacity import (
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.report_contract import build_report_contract_section, render_acceptance_criteria_section
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
@@ -536,6 +537,7 @@ class SubagentExecutor:
         deerflow_trace_id: str | None = None,
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
+        acceptance_criteria: list[str] | None = None,
     ):
         """Initialize the executor.
 
@@ -568,6 +570,9 @@ class SubagentExecutor:
                 Direct ``create_deerflow_agent`` callers pass one through their
                 ``SubagentRuntime``; application factories fall back to the
                 startup-configured process singleton.
+            acceptance_criteria: Optional lead-supplied completion requirements
+                (RFC #4651 PR3), rendered into the subagent's ``SystemMessage``
+                by ``_build_initial_state`` — the framework-trusted channel.
         """
         self.config = config
         self.app_config = app_config
@@ -608,6 +613,9 @@ class SubagentExecutor:
         # generation underneath the delegated work.
         self.extensions = extensions
         self.execution_capacity = execution_capacity
+        # Raw lead-supplied criteria; stripping/capping happens at render time
+        # in report_contract.render_acceptance_criteria_section.
+        self.acceptance_criteria = acceptance_criteria
 
         self._base_tools = _filter_tools(
             tools,
@@ -924,6 +932,20 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        # RFC #4651 PR3: every subagent — built-in or custom — gets the same
+        # report contract, so the citation / verifiable-handle requirements
+        # never depend on the config author remembering them. The citation
+        # clause only makes sense while receipts render, so it follows
+        # verification.receipts_enabled.
+        verification_cfg = getattr(resolved_app_config, "verification", None)
+        system_parts.append(build_report_contract_section(receipts_enabled=getattr(verification_cfg, "receipts_enabled", True)))
+        # Acceptance criteria ride the SystemMessage too — the task HumanMessage
+        # is classed as genuine user input and sanitized by
+        # InputSanitizationMiddleware, which would HTML-escape an
+        # <acceptance_criteria> block into untrusted-input framing.
+        criteria_section = render_acceptance_criteria_section(self.acceptance_criteria)
+        if criteria_section:
+            system_parts.append(criteria_section)
         if skills:
             if skill_setup.skill_names:
                 skills_section = get_skill_index_prompt_section(

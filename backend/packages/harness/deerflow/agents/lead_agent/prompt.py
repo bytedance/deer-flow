@@ -387,9 +387,9 @@ With a per-response limit of 1, delegate only for material specialist or context
         workflow = """1. Establish the cheapest credible direct-execution path.
 2. Include all negative signals in expected cost.
 3. Compare specialist or context-isolation benefit with all listed costs.
-4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch at most 1 call and stay within the remaining run allowance.
-6. Verify and synthesize the returned result against primary evidence."""
+6. Verify the result before synthesizing: the delegation ledger's citation line is execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."""
         examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
 - Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
@@ -416,9 +416,10 @@ A single subagent is justified only by material specialist or context-isolation 
         workflow = f"""1. Establish the cheapest credible direct-execution path.
 2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
 3. Compare expected benefit with all listed costs.
-4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
-6. Verify and synthesize returned results. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
+6. Verify returned results: ledger citation lines are execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims.
+7. Synthesize. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
         examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
