@@ -331,6 +331,35 @@ def test_lead_runtime_middlewares_pass_agent_skills_to_sandbox(
     }
 
 
+def test_lead_runtime_middlewares_can_delegate_skill_projection_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setitem(
+        sys.modules,
+        "deerflow.agents.middlewares.input_sanitization_middleware",
+        _module(
+            "deerflow.agents.middlewares.input_sanitization_middleware",
+            InputSanitizationMiddleware=object,
+            neutralize_untrusted_tags=lambda value: value,
+        ),
+    )
+    app_config = _make_app_config()
+    _stub_runtime_middleware_imports(monkeypatch)
+
+    middlewares = build_lead_runtime_middlewares(
+        app_config=app_config,
+        available_skills={"bootstrap"},
+        owns_agent_skill_projection=False,
+    )
+
+    sandbox_middleware = next(middleware for middleware in middlewares if getattr(middleware, "kwargs", {}).get("available_skills") == {"bootstrap"})
+    assert sandbox_middleware.kwargs == {
+        "lazy_init": True,
+        "available_skills": {"bootstrap"},
+        "owns_agent_skill_projection": False,
+    }
+
+
 def test_build_lead_runtime_middlewares_orders_thread_data_before_uploads():
     """ThreadDataMiddleware must run before UploadsMiddleware so the uploads
     directory is guaranteed to exist when UploadsMiddleware scans it under

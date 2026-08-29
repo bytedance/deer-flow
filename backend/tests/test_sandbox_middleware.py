@@ -224,6 +224,42 @@ def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
     assert provider.thread_ids == []
 
 
+def test_non_owner_skill_policy_preserves_lazy_init_without_projection_or_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SyncProvider()
+    middleware = SandboxMiddleware(
+        lazy_init=True,
+        available_skills={"bootstrap"},
+        owns_agent_skill_projection=False,
+    )
+    prepare_calls: list[tuple[str, str]] = []
+    original_prepare = middleware._prepare_agent_skill_projection
+
+    def _prepare(thread_id: str, *, user_id: str):
+        prepare_calls.append((thread_id, user_id))
+        return original_prepare(thread_id, user_id=user_id)
+
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", _prepare)
+    set_sandbox_provider(provider)
+    try:
+        result = middleware.before_agent(
+            {},
+            Runtime(
+                context={
+                    "thread_id": "thread-bootstrap",
+                    "user_id": "owner-bootstrap",
+                }
+            ),
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert prepare_calls == [("thread-bootstrap", "owner-bootstrap")]
+    assert provider.thread_ids == []
+
+
 def test_explicit_skill_policy_does_not_reuse_checkpointed_sandbox_after_auth_denial(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -486,6 +486,113 @@ def test_sync_agent_skills_rebuilds_managed_remote_tree_despite_matching_legacy_
     assert len(files.write_calls) == first_write_count * 2
 
 
+def test_sync_agent_skills_serializes_reset_and_upload_for_same_thread(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    projections: list[SkillProjectionPaths] = []
+    for name in ("policy-a", "policy-b"):
+        root = tmp_path / name
+        projection = SkillProjectionPaths(
+            public=root / "public",
+            custom=root / "custom",
+            legacy=root / "legacy",
+            integrations=root / "integrations",
+        )
+        for category in (
+            projection.public,
+            projection.custom,
+            projection.legacy,
+            projection.integrations,
+        ):
+            category.mkdir(parents=True)
+        projections.append(projection)
+
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    first_upload_started = threading.Event()
+    allow_first_upload_to_finish = threading.Event()
+    second_sync_started = threading.Event()
+    second_reset_started = threading.Event()
+    reset_count = 0
+    reset_count_lock = threading.Lock()
+
+    def reset_remote_tree(_command: str):
+        nonlocal reset_count
+        with reset_count_lock:
+            reset_count += 1
+            current_reset = reset_count
+        if current_reset == 2:
+            second_reset_started.set()
+        return SimpleNamespace(stdout="SKILLS_RESET_OK\n", stderr="", exit_code=0)
+
+    commands = FakeCommandsAPI([reset_remote_tree, reset_remote_tree])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    first_projection_root = projections[0].public.parent
+
+    def blocking_upload(_client, source, _destination, _read_only, *, budget):
+        del budget
+        if source.parent == first_projection_root and not first_upload_started.is_set():
+            first_upload_started.set()
+            assert allow_first_upload_to_finish.wait(timeout=5)
+
+    monkeypatch.setattr(provider, "_upload_tree", blocking_upload)
+    errors: list[BaseException] = []
+
+    def sync(
+        projection: SkillProjectionPaths,
+        *,
+        started: threading.Event | None = None,
+    ) -> None:
+        try:
+            if started is not None:
+                started.set()
+            provider.sync_agent_skills(
+                "sandbox-1",
+                thread_id="thread-1",
+                user_id="user-1",
+                projection=projection,
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first = threading.Thread(target=sync, args=(projections[0],))
+    second = threading.Thread(
+        target=sync,
+        args=(projections[1],),
+        kwargs={"started": second_sync_started},
+    )
+    first.start()
+    assert first_upload_started.wait(timeout=5)
+    second.start()
+    try:
+        assert second_sync_started.wait(timeout=5)
+        assert not second_reset_started.wait(timeout=0.2)
+    finally:
+        allow_first_upload_to_finish.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert second_reset_started.is_set()
+
+
 @pytest.mark.parametrize(
     "container_path",
     [

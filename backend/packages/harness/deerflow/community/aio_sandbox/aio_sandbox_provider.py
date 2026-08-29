@@ -37,6 +37,7 @@ from deerflow.community.warm_pool_lifecycle import (
 )
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
@@ -58,7 +59,7 @@ from .ownership import (
     make_sandbox_ownership_store,
     resolve_ownership_config,
 )
-from .remote_backend import RemoteSandboxBackend
+from .remote_backend import RemoteSandboxBackend, _normalize_skills_container_path
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
@@ -268,6 +269,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         idle_timeout = getattr(sandbox_config, "idle_timeout", None)
         replicas = getattr(sandbox_config, "replicas", None)
+        configured_skills_path = getattr(
+            getattr(config, "skills", None),
+            "container_path",
+            None,
+        )
+        if not isinstance(configured_skills_path, str):
+            configured_skills_path = DEFAULT_SKILLS_CONTAINER_PATH
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
@@ -286,6 +294,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # provisioner URL for dynamic pod management (e.g. http://provisioner:8002)
             "provisioner_url": getattr(sandbox_config, "provisioner_url", None) or "",
             "provisioner_api_key": getattr(sandbox_config, "provisioner_api_key", None) or "",
+            "skills_container_path": _normalize_skills_container_path(
+                configured_skills_path,
+            ),
         }
 
     @staticmethod
@@ -731,9 +742,25 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         return get_paths().thread_skills_view_dir(thread_id, user_id=user_id).exists()
 
     @staticmethod
-    def _policy_scoped_sandbox_id(thread_id: str, user_id: str) -> str:
-        """Return a domain-separated identity for a thread policy sandbox."""
-        seed = b"agent-skills-v1\0" + user_id.encode() + b"\0" + thread_id.encode()
+    def _policy_scoped_sandbox_id(
+        thread_id: str,
+        user_id: str,
+        skills_container_path: str,
+    ) -> str:
+        """Return a root-aware domain-separated identity for a policy sandbox."""
+        normalized_root = _normalize_skills_container_path(skills_container_path)
+        seed = b"agent-skills-v2\0" + user_id.encode() + b"\0" + thread_id.encode() + b"\0" + normalized_root.encode()
+        return hashlib.sha256(seed).hexdigest()[:16]
+
+    @staticmethod
+    def _custom_root_sandbox_id(
+        thread_id: str,
+        user_id: str,
+        skills_container_path: str,
+    ) -> str:
+        """Return an identity for a shared-view sandbox at a custom root."""
+        normalized_root = _normalize_skills_container_path(skills_container_path)
+        seed = b"skills-root-v1\0" + user_id.encode() + b"\0" + thread_id.encode() + b"\0" + normalized_root.encode()
         return hashlib.sha256(seed).hexdigest()[:16]
 
     def _assert_active_identity_available_locked(
@@ -771,12 +798,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _get_extra_mounts(self, thread_id: str | None, *, user_id: str | None = None) -> list[tuple[str, str, bool]]:
         """Collect all extra mounts for a sandbox (thread-specific + skills)."""
         mounts: list[tuple[str, str, bool]] = []
+        skills_container_path = self._configured_skills_container_path()
 
         if thread_id:
             mounts.extend(self._get_thread_mounts(thread_id, user_id=user_id))
             logger.info(f"Adding thread mounts for thread {thread_id}: {mounts}")
 
-        skills_mounts = self._get_skills_mounts(thread_id, user_id=user_id)
+        skills_mounts = self._get_skills_mounts(
+            thread_id,
+            user_id=user_id,
+            skills_container_path=skills_container_path,
+        )
         if skills_mounts:
             mounts.extend(skills_mounts)
             logger.info(f"Adding skills mounts: {skills_mounts}")
@@ -789,7 +821,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 effective_user_id,
             )
         )
-        user_skill_mounts = [] if thread_projection_active else self._get_user_skill_mounts(user_id=user_id)
+        user_skill_mounts = (
+            []
+            if thread_projection_active
+            else self._get_user_skill_mounts(
+                user_id=user_id,
+                skills_container_path=skills_container_path,
+            )
+        )
         if user_skill_mounts:
             mounts.extend(user_skill_mounts)
             logger.info(f"Adding user skill mounts: {user_skill_mounts}")
@@ -812,7 +851,22 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return None
         if not self._thread_skill_projection_active(thread_id, user_id):
             return None
-        return get_app_config().skills.container_path
+        return self._configured_skills_container_path()
+
+    def _configured_skills_container_path(self) -> str:
+        """Return the provider-startup skills root used by IDs and mounts."""
+        # A few mount-helper callers intentionally construct an uninitialized
+        # provider. Production instances always use the startup snapshot, while
+        # that narrow compatibility path loads the same validated value lazily.
+        config = getattr(self, "_config", None)
+        if not isinstance(config, dict):
+            config = self._load_config()
+        return _normalize_skills_container_path(
+            config.get(
+                "skills_container_path",
+                DEFAULT_SKILLS_CONTAINER_PATH,
+            )
+        )
 
     @staticmethod
     def _dedupe_mounts_by_container_path(mounts: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
@@ -863,6 +917,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         thread_id: str | None = None,
         *,
         user_id: str | None = None,
+        skills_container_path: str | None = None,
     ) -> list[tuple[str, str, bool]]:
         """Get skills directory mount configurations for three-way skills layout.
 
@@ -879,7 +934,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         mounts: list[tuple[str, str, bool]] = []
         try:
             config = get_app_config()
-            container_path = config.skills.container_path
+            container_path = _normalize_skills_container_path(skills_container_path or config.skills.container_path)
             effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
             paths = get_paths()
             host_base_dir = str(paths.host_base_dir)
@@ -963,7 +1018,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return None
 
     @staticmethod
-    def _get_user_skill_mounts(*, user_id: str | None = None) -> list[tuple[str, str, bool]]:
+    def _get_user_skill_mounts(
+        *,
+        user_id: str | None = None,
+        skills_container_path: str | None = None,
+    ) -> list[tuple[str, str, bool]]:
         """Mount enabled managed integration skills into AIO sandboxes.
 
         Per-user custom skills are already mounted by ``_get_skills_mounts``.
@@ -973,7 +1032,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         try:
             config = get_app_config()
             paths = get_paths()
-            skills_container_path = config.skills.container_path
+            resolved_skills_container_path = _normalize_skills_container_path(skills_container_path or config.skills.container_path)
             effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
             AioSandboxProvider._ensure_skills_projection(effective_user_id)
             return [
@@ -985,7 +1044,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         "skills_view",
                         "integrations",
                     ),
-                    f"{skills_container_path}/integrations",
+                    f"{resolved_skills_container_path}/integrations",
                     True,
                 ),
             ]
@@ -1334,10 +1393,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not thread_id:
             return str(uuid.uuid4())[:8]
         effective_user_id = self._effective_acquire_user_id(user_id)
+        skills_container_path = self._configured_skills_container_path()
         if self._thread_skill_projection_active(thread_id, effective_user_id):
             return self._policy_scoped_sandbox_id(
                 thread_id,
                 effective_user_id,
+                skills_container_path,
+            )
+        # Preserve the historic deterministic ID for the default root while
+        # preventing a custom-root Pod/container from being reused after the
+        # configured mount destination changes.
+        if skills_container_path != DEFAULT_SKILLS_CONTAINER_PATH:
+            return self._custom_root_sandbox_id(
+                thread_id,
+                effective_user_id,
+                skills_container_path,
             )
         return self._deterministic_sandbox_id(thread_id, effective_user_id)
 
@@ -1348,9 +1418,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)
-        policy_scoped_skills = self._thread_skill_projection_active(
-            thread_id,
-            effective_user_id,
+        root_scoped_identity = (
+            self._thread_skill_projection_active(
+                thread_id,
+                effective_user_id,
+            )
+            or self._configured_skills_container_path() != DEFAULT_SKILLS_CONTAINER_PATH
         )
         expected_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
         stale_id: str | None = None
@@ -1359,7 +1432,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return None
 
             existing_id = self._thread_sandboxes[key]
-            if policy_scoped_skills and existing_id != expected_id:
+            if root_scoped_identity and existing_id != expected_id:
                 stale_id = existing_id
             elif self._being_torn_down_locally(existing_id):
                 # A reaper thread in this process is stopping this container.
@@ -1374,7 +1447,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         if stale_id is not None:
             logger.info(
-                "Replacing sandbox %s with policy-scoped identity %s for user/thread %s/%s",
+                "Replacing sandbox %s with expected identity %s for user/thread %s/%s",
                 stale_id,
                 expected_id,
                 effective_user_id,
@@ -2073,6 +2146,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         create_kwargs = {}
         if config_mount_exclusion_root is not None:
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
+        if isinstance(self._backend, RemoteSandboxBackend):
+            create_kwargs["skills_container_path"] = self._configured_skills_container_path()
         info = self._backend.create(
             thread_id,
             sandbox_id,
@@ -2116,6 +2191,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         create_kwargs = {}
         if config_mount_exclusion_root is not None:
             create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
+        if isinstance(self._backend, RemoteSandboxBackend):
+            create_kwargs["skills_container_path"] = self._configured_skills_container_path()
         info = await asyncio.to_thread(
             self._backend.create,
             thread_id,

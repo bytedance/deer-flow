@@ -3,11 +3,14 @@
 import pytest
 
 
-def _thread_skill_mounts(provisioner_module):
+def _thread_skill_mounts(
+    provisioner_module,
+    skills_container_path="/mnt/skills",
+):
     return [
         provisioner_module.ExtraMount(
             host_path=f"/state/users/alice/threads/thread-1/skills_view/{category}",
-            container_path=f"/mnt/skills/{category}",
+            container_path=f"{skills_container_path}/{category}",
             read_only=True,
         )
         for category in ("public", "custom", "legacy", "integrations")
@@ -205,6 +208,35 @@ class TestBuildVolumes:
         names = {volume.name for volume in volumes}
         assert not {"skills-public", "skills-custom", "skills-legacy"} & names
         assert names == {"user-data", "extra-0", "extra-1", "extra-2", "extra-3"}
+
+    def test_custom_root_thread_mounts_replace_hostpath_skill_volumes(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        skills_root = "/custom-skills"
+
+        volumes = provisioner_module._build_volumes(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=_thread_skill_mounts(
+                provisioner_module,
+                skills_root,
+            ),
+            skills_container_path=skills_root,
+        )
+
+        names = {volume.name for volume in volumes}
+        assert not {"skills-public", "skills-custom", "skills-legacy"} & names
+        assert names == {
+            "user-data",
+            "extra-0",
+            "extra-1",
+            "extra-2",
+            "extra-3",
+        }
 
     def test_thread_skill_mounts_replace_skills_pvc_with_userdata_pvc_categories(
         self,
@@ -439,6 +471,76 @@ class TestBuildVolumeMounts:
         assert len(skill_mounts) == 4
         assert all(mount.name != "skills" for mount in mounts)
         assert {mount.sub_path for mount in skill_mounts} == {f"deer-flow/users/alice/threads/thread-1/skills_view/{category}" for category in ("public", "custom", "legacy", "integrations")}
+
+    @pytest.mark.parametrize("use_userdata_pvc", [False, True])
+    def test_custom_root_thread_skill_mounts_replace_every_default_path(
+        self,
+        provisioner_module,
+        use_userdata_pvc,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = "skills-pvc" if use_userdata_pvc else ""
+        provisioner_module.USERDATA_PVC_NAME = "userdata-pvc" if use_userdata_pvc else ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        skills_root = "/custom-skills"
+
+        mounts = provisioner_module._build_volume_mounts(
+            "thread-1",
+            user_id="alice",
+            extra_mounts=_thread_skill_mounts(
+                provisioner_module,
+                skills_root,
+            ),
+            skills_container_path=skills_root,
+        )
+
+        mount_paths = {mount.mount_path for mount in mounts}
+        assert not any(path.startswith("/mnt/skills") for path in mount_paths)
+        assert {f"{skills_root}/{category}" for category in ("public", "custom", "legacy", "integrations")} <= mount_paths
+
+    def test_custom_root_is_used_for_unrestricted_skills_mounts(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+
+        mounts = provisioner_module._build_volume_mounts(
+            "thread-1",
+            skills_container_path="/custom-skills",
+        )
+
+        assert {mount.mount_path for mount in mounts if mount.name.startswith("skills-")} == {
+            "/custom-skills/public",
+            "/custom-skills/custom",
+            "/custom-skills/legacy",
+        }
+
+    @pytest.mark.parametrize(
+        "skills_root",
+        [
+            "/",
+            "relative-skills",
+            "//custom-skills",
+            "/custom//skills",
+            "/custom/../skills",
+            "/mnt",
+            "/mnt/user-data/skills",
+            "/mnt/acp-workspace/skills",
+            "/mnt/integrations/lark-cli/skills",
+        ],
+    )
+    def test_rejects_unsafe_skills_container_roots(
+        self,
+        provisioner_module,
+        skills_root,
+    ):
+        with pytest.raises(provisioner_module.HTTPException) as exc_info:
+            provisioner_module._build_volume_mounts(
+                "thread-1",
+                skills_container_path=skills_root,
+            )
+
+        assert exc_info.value.status_code == 400
 
 
 # ── _build_pod integration ─────────────────────────────────────────────
@@ -739,6 +841,41 @@ class TestLarkCliBrokerSidecar:
         assert len(sidecars) == 1
         sidecar = sidecars[0]
         assert sidecar.image == "deer-flow/lark-cli-broker:v1.0.65"
+
+    def test_custom_skills_root_is_compatible_with_broker_credentials(
+        self,
+        provisioner_module,
+    ):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        skills_root = "/custom-skills"
+
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=[
+                *_thread_skill_mounts(
+                    provisioner_module,
+                    skills_root,
+                ),
+                *self._credential_mounts(provisioner_module),
+            ],
+            skills_container_path=skills_root,
+            provision_lark_cli_broker=True,
+        )
+
+        sandbox_mount_paths = {mount.mount_path for mount in pod.spec.containers[0].volume_mounts}
+        assert not any(path.startswith("/mnt/skills") for path in sandbox_mount_paths)
+        assert {f"{skills_root}/{category}" for category in ("public", "custom", "legacy", "integrations")} <= sandbox_mount_paths
+        sidecar = next(container for container in pod.spec.containers if container.name == "lark-cli-broker")
+        assert {mount.mount_path for mount in sidecar.volume_mounts} == {
+            provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH,
+            provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH,
+            provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH,
+        }
         assert sidecar.args == ["serve"]
         # Credentials mounted into the sidecar only.
         sidecar_mount_order = [m.mount_path for m in sidecar.volume_mounts]

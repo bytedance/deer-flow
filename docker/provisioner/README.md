@@ -20,12 +20,13 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 ### How It Works
 
-1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, and optional `user_id`.
+1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, optional `user_id`, and the configured `skills_container_path` (default: `/mnt/skills`).
 
 2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
    - HostPath volumes mounted for:
-     - `/mnt/skills/{public,custom,legacy}` → Read-only enabled-only skill projections
+     - `{skills_container_path}/{public,custom,legacy}` → Default read-only skill projections
+     - `{skills_container_path}/integrations` → Optional read-only managed-integration projection supplied by the Gateway
      - `/mnt/user-data` → Read-write access to thread-specific data
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes

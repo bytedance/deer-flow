@@ -322,6 +322,7 @@ def build_lead_runtime_middlewares(
     authorization_provider=None,
     deferred_setup: "DeferredToolSetup | None" = None,
     available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -334,6 +335,7 @@ def build_lead_runtime_middlewares(
         receipts_render_mode=app_config.verification.receipts_render_mode,
         authorization_provider=authorization_provider,
         available_skills=available_skills,
+        owns_agent_skill_projection=owns_agent_skill_projection,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 

@@ -53,7 +53,7 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
-- `skills.path` / `skills.container_path` - Host and container paths to skills directory
+- `skills.path` / `skills.container_path` - Host and container paths to skills directory. AIO snapshots the container path at provider startup; its local/remote backends and the Kubernetes provisioner require one canonical absolute non-root path outside reserved platform mounts, and custom roots participate in deterministic sandbox identity.
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)
 - `summarization` - Context summarization (enabled, trigger conditions, keep policy)

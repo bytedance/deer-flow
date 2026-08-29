@@ -1847,9 +1847,10 @@ class E2BSandboxProvider(SandboxProvider):
             f"if [ ! -e /mnt/acp-workspace ] || [ -L /mnt/acp-workspace ]; then "
             f"  sudo ln -sfn {shlex.quote(home_dir)}/acp-workspace /mnt/acp-workspace; "
             f"fi; "
-            # /mnt/skills is left alone here; the optional ``mounts`` config
-            # uploads its content via _apply_mounts and creates the directory
-            # on demand. We only ensure that /mnt itself is traversable.
+            # The configured skills root is left alone here; the optional
+            # ``mounts`` config uploads its content via _apply_mounts and
+            # creates the directory on demand. We only ensure that /mnt itself
+            # is traversable for the default layout.
             f"sudo chmod a+rx /mnt 2>/dev/null || true; "
             f"echo BOOTSTRAP_OK"
         )
@@ -1995,8 +1996,24 @@ class E2BSandboxProvider(SandboxProvider):
         user_id: str,
         projection: SkillProjectionPaths,
     ) -> None:
-        """Rebuild E2B's managed skills from the prepared thread projection."""
-        del thread_id, user_id  # Scope is already encoded in ``projection``.
+        """Atomically rebuild E2B's managed skills for one thread scope.
+
+        The remote reset and all four category uploads form one critical
+        section. Reuse the acquire/release lock for the same user/thread so a
+        concurrent policy cannot wipe or repopulate the sandbox mid-upload.
+        """
+        with self._get_thread_lock(thread_id, user_id):
+            self._sync_agent_skills_locked(
+                sandbox_id,
+                projection=projection,
+            )
+
+    def _sync_agent_skills_locked(
+        self,
+        sandbox_id: str,
+        *,
+        projection: SkillProjectionPaths,
+    ) -> None:
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
         if sandbox is None:

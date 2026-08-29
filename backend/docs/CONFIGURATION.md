@@ -752,6 +752,14 @@ skills:
   container_path: /mnt/skills
 ```
 
+For the AIO provider (including the Kubernetes provisioner),
+`skills.container_path` is captured when the provider starts and must be one
+canonical absolute, non-root POSIX path. Do not use redundant separators,
+`.`/`..`, or a path that contains or sits below DeerFlow's reserved mounts
+(`/mnt/user-data`, `/mnt/acp-workspace`, or `/mnt/integrations/lark-cli`).
+Restart the Gateway after changing it so sandbox identities and mounts use the
+same root.
+
 **How Skills Work**:
 - Skills are stored in `deer-flow/skills/{public,custom}/`
 - Each skill has a `SKILL.md` file with metadata
