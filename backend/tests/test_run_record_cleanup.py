@@ -323,7 +323,7 @@ async def test_shutdown_drains_runs_before_eviction_retries():
     live = await run_manager.create("thread-2")
     await run_manager.set_status(live.run_id, RunStatus.running)
 
-    async def failing_put(run_id, **payload):
+    async def failing_get(run_id, *, user_id=None):
         raise OSError("store unavailable")
 
     resist_cancellation = asyncio.Event()
@@ -336,7 +336,7 @@ async def test_shutdown_drains_runs_before_eviction_retries():
                 if resist_cancellation.is_set():
                     raise
 
-    store.put = failing_put
+    store.get = failing_get
     run_manager._retry_eviction_until_durable = resistant_retry  # type: ignore[method-assign]
     await run_manager.evict_finished_run(done.run_id)
     retry = run_manager._eviction_retry_tasks[done.run_id]
@@ -373,10 +373,10 @@ async def test_eviction_retry_lifecycle_is_deduplicated_and_shutdown_fenced():
     record = await run_manager.create("thread-1")
     await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
 
-    async def failing_put(run_id, **payload):
+    async def failing_get(run_id, *, user_id=None):
         raise OSError("store unavailable")
 
-    store.put = failing_put
+    store.get = failing_get
     await run_manager.evict_finished_run(record.run_id)
     retry = run_manager._eviction_retry_tasks[record.run_id]
     await run_manager.evict_finished_run(record.run_id)
@@ -452,6 +452,89 @@ async def test_eviction_drops_overlay_when_peer_wrote_conflicting_terminal():
 
     assert await run_manager._evict_run_record_if_durable(record.run_id) is True
     assert record.run_id not in run_manager._runs
+
+    row = await store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row.get("total_tokens") is None
+
+
+class _WriteTrackingStore(MemoryRunStore):
+    """Records every mutation attempt against the durable row."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[str] = []
+
+    async def put(self, run_id, **payload):
+        self.writes.append("put")
+        return await super().put(run_id, **payload)
+
+    async def update_status(self, run_id, status, **kwargs):
+        self.writes.append("update_status")
+        return await super().update_status(run_id, status, **kwargs)
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        self.writes.append("update_run_completion")
+        return await super().update_run_completion(run_id, status=status, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_eviction_never_overwrites_an_already_conflicting_terminal_row():
+    """A durable peer terminal outcome is authoritative: the local snapshot
+    is dropped without a single write to the row."""
+    store = _WriteTrackingStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    row = await store.get(record.run_id)
+    row["status"] = "error"
+    row["error"] = "taken over by peer"
+    store.writes.clear()
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert record.run_id not in run_manager._runs
+    assert store.writes == []
+
+    row = await store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row["error"] == "taken over by peer"
+    assert row.get("total_tokens") is None
+
+
+class _PeerTakeoverAfterFirstReadStore(_WriteTrackingStore):
+    """The eviction-time read still sees an active row; the peer
+    terminalizes it immediately afterwards."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._reads = 0
+
+    async def get(self, run_id, *, user_id=None):
+        self._reads += 1
+        if self._reads == 1:
+            snapshot = dict(await super().get(run_id, user_id=user_id))
+            row = self._runs[run_id]
+            row["status"] = "error"
+            row["error"] = "taken over by peer"
+            return snapshot
+        return await super().get(run_id, user_id=user_id)
+
+
+@pytest.mark.anyio
+async def test_eviction_detects_peer_takeover_between_read_and_repair():
+    """A peer terminalizing after the eviction-time read must not be
+    clobbered by the repair that follows it."""
+    store = _PeerTakeoverAfterFirstReadStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    store.writes.clear()
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert record.run_id not in run_manager._runs
+    assert store.writes == []
 
     row = await store.get(record.run_id)
     assert row["status"] == "error"

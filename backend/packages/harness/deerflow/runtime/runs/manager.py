@@ -2076,14 +2076,42 @@ class RunManager:
         return any(row.get(key) != value for key, value in cls._completion_payload(record).items())
 
     async def _repair_durable_run_state(self, run_id: str, record: RunRecord) -> bool:
-        """Rewrite the durable row from the memory snapshot, completion included.
+        """Converge the durable row to the memory snapshot, completion included.
 
-        ``put`` restores the structural snapshot; the completion fields ride
-        the same ``update_run_completion`` primitive the worker's best-effort
-        write uses, so no store signature change is needed.
+        An existing row is only advanced through the guarded primitives —
+        ``update_status`` / ``update_run_completion`` refuse a conflicting
+        terminal outcome — so a peer's authoritative result can never be
+        overwritten, even when it lands between the eviction-time read and
+        this repair. The unconditional ``put`` is reserved for a row that is
+        missing at repair time, where there is nothing to clobber.
         """
-        if not await self._persist_snapshot_to_store(run_id, self._store_put_payload(record)):
+        try:
+            row = await self._call_store_with_retry("eviction recheck", run_id, lambda: self._store.get(run_id))
+        except Exception:
+            logger.warning("Failed to re-read run %s during eviction repair", run_id, exc_info=True)
             return False
+        if row is None:
+            if not await self._persist_snapshot_to_store(run_id, self._store_put_payload(record)):
+                return False
+        elif row.get("status") in (RunStatus.pending.value, RunStatus.running.value):
+            # Active row: advance it conditionally. A ``False`` return means
+            # it terminalized concurrently; the completion guard below
+            # resolves the outcome either way.
+            try:
+                await self._call_store_with_retry(
+                    "eviction status repair",
+                    run_id,
+                    lambda: self._store.update_status(run_id, record.status.value, error=record.error, stop_reason=record.stop_reason),
+                )
+            except Exception:
+                logger.warning("Failed to advance run %s to a terminal status during eviction repair", run_id, exc_info=True)
+                return False
+        elif row.get("status") != record.status.value:
+            # A peer's terminal outcome is the durable authority; the local
+            # snapshot is stale. Drop it without republishing anything.
+            logger.warning("Run %s durably terminalized with a conflicting outcome; dropping the local snapshot", run_id)
+            await self._remove_run_record(run_id, expected=record)
+            return True
         completion = self._completion_payload(record)
         if not completion:
             return True
