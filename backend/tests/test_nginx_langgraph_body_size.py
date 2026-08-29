@@ -131,10 +131,20 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
-def test_skills_route_allows_archive_plus_multipart_framing(path):
+def test_skills_upload_route_allows_archive_plus_multipart_framing(path):
     """The 100 MiB file contract also needs room for multipart headers."""
     content = _read(path)
-    block = _extract_location_block(content, "/api/skills")
+    block = _extract_location_block(content, "= /api/skills/install/upload")
 
     assert "client_max_body_size 101M;" in block
     assert "proxy_request_buffering off;" in block
+
+
+@pytest.mark.parametrize("path", NGINX_CONFIGS)
+def test_skills_prefix_keeps_default_request_body_policy(path):
+    """Large bodies must be allowed only on the admin upload endpoint."""
+    content = _read(path)
+    block = _extract_location_block(content, "/api/skills")
+
+    assert "client_max_body_size" not in block
+    assert "proxy_request_buffering" not in block
