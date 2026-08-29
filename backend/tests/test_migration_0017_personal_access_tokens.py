@@ -1,4 +1,4 @@
-"""Migration tests for 0017_conversation_shares (#4548).
+"""Migration tests for 0017_personal_access_tokens (#4849).
 
 Runs the full alembic chain on an empty SQLite database (not
 ``create_all`` + stamp), then exercises the 0017 downgrade/upgrade cycle.
@@ -20,22 +20,19 @@ from deerflow.persistence.bootstrap import _MIGRATIONS_DIR
 pytestmark = pytest.mark.asyncio
 
 _SCRIPT_LOCATION = str(_MIGRATIONS_DIR)
-_REVISION = "0017_conversation_shares"
+_REVISION = "0017_personal_access_tokens"
 _PREVIOUS = "0016_subagent_batches"
 
 _EXPECTED_COLUMNS = {
     "id",
-    "thread_id",
-    "owner_user_id",
-    "token_hash",
-    "title",
-    "snapshot_version",
-    "snapshot_json",
-    "source_last_seq",
+    "user_id",
+    "name",
+    "token_digest",
+    "scopes",
     "expires_at",
-    "revoked_at",
+    "last_used_at",
     "created_at",
-    "updated_at",
+    "revoked_at",
 }
 
 
@@ -60,8 +57,8 @@ async def _inspect(engine, fn):
         return await conn.run_sync(fn)
 
 
-async def test_share_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
-    db_path = tmp_path / "share-migration.db"
+async def test_pat_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
+    db_path = tmp_path / "pat-migration.db"
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     cfg = _alembic_config(f"sqlite+aiosqlite:///{db_path}")
     try:
@@ -71,24 +68,26 @@ async def test_share_migration_upgrade_downgrade_cycle(tmp_path: Path) -> None:
         await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
 
         tables = await _inspect(engine, _table_names)
-        assert "conversation_shares" in tables
-        columns = await _inspect(engine, lambda conn: _column_names(conn, "conversation_shares"))
+        assert "personal_access_tokens" in tables
+        assert "alembic_version" in tables
+        columns = await _inspect(engine, lambda conn: _column_names(conn, "personal_access_tokens"))
         assert columns == _EXPECTED_COLUMNS
         indexes = await _inspect(
             engine,
-            lambda conn: {idx["name"]: idx for idx in sa.inspect(conn).get_indexes("conversation_shares")},
+            lambda conn: {idx["name"] for idx in sa.inspect(conn).get_indexes("personal_access_tokens")},
         )
-        # Token-hash lookup is the public hot path and must stay unique.
-        # (SQLite reports uniqueness as int 1; Postgres as bool.)
-        assert indexes["ix_conversation_shares_token_hash"]["unique"] in (True, 1)
-        assert "ix_conversation_shares_thread_id" in indexes
+        # Owner listing + digest lookups are the two hot paths.
+        assert "ix_personal_access_tokens_user_id" in indexes
+        assert "ix_personal_access_tokens_token_digest" in indexes
 
         # Downgrade to the previous revision drops exactly this table.
         await asyncio.to_thread(alembic_command.downgrade, cfg, _PREVIOUS)
-        assert "conversation_shares" not in await _inspect(engine, _table_names)
+        tables_after_down = await _inspect(engine, _table_names)
+        assert "personal_access_tokens" not in tables_after_down
 
         # Upgrade again recreates it (idempotent round trip).
         await asyncio.to_thread(alembic_command.upgrade, cfg, "head")
-        assert "conversation_shares" in await _inspect(engine, _table_names)
+        tables_after_up = await _inspect(engine, _table_names)
+        assert "personal_access_tokens" in tables_after_up
     finally:
         await engine.dispose()

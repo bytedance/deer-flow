@@ -1,12 +1,8 @@
 """conversation shares (#4548).
 
-Revision ID: 0017_conversation_shares
-Revises: 0016_subagent_batches
+Revision ID: 0018_conversation_shares
+Revises: 0017_personal_access_tokens
 Create Date: 2026-08-28
-
-Renumber to 0018 and rebase onto that revision if #5041 (PAT migration 0017)
-merges first — the design requires generating against the migration head at
-implementation time.
 """
 
 from __future__ import annotations
@@ -16,8 +12,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017_conversation_shares"
-down_revision: str | Sequence[str] | None = "0016_subagent_batches"
+revision: str = "0018_conversation_shares"
+down_revision: str | Sequence[str] | None = "0017_personal_access_tokens"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
