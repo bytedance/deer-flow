@@ -1,6 +1,7 @@
 """Task tool for delegating work to subagents."""
 
 import asyncio
+import concurrent.futures
 import logging
 import uuid
 from contextvars import ContextVar
@@ -27,6 +28,7 @@ from deerflow.subagents.executor import (
     cleanup_background_task,
     get_background_task_result,
     request_cancel_background_task,
+    run_on_isolated_subagent_loop,
 )
 from deerflow.subagents.status_contract import (
     SubagentStatusValue,
@@ -75,10 +77,11 @@ async def _finalize_interrupted_subagent(runtime: Runtime, execution_id: str, tr
 
     Wait (shielded, bounded by ``max_polls``) for the subagent to reach a
     terminal state so the final token usage snapshot is reported to the parent
-    RunJournal, then remove the registry entry — deferring removal only if it
-    never reached terminal. Doing this before re-raising (rather than via a
-    detached task) keeps the cleanup alive under synchronous tool invocation,
-    where ``asyncio.run()`` would cancel spawned tasks at teardown.
+    RunJournal, then remove the registry entry. Terminal results are removed
+    synchronously before re-raising; non-terminal ones defer removal to the
+    process-owned persistent subagent loop, which survives teardown of a
+    short-lived caller loop (``asyncio.run()`` cancels caller-loop tasks —
+    including any detached cleanup task — on exit).
     """
     terminal_result = None
     try:
@@ -113,7 +116,7 @@ async def _deferred_cleanup_subagent_task(execution_id: str, trace_id: str, max_
         cleanup_poll_count += 1
 
 
-def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, execution_id: str) -> None:
+def _log_cleanup_failure(cleanup_task: asyncio.Task[None] | concurrent.futures.Future, *, trace_id: str, execution_id: str) -> None:
     if cleanup_task.cancelled():
         return
 
@@ -122,7 +125,11 @@ def _log_cleanup_failure(cleanup_task: asyncio.Task[None], *, trace_id: str, exe
         logger.error(f"[trace={trace_id}] Deferred cleanup failed for execution {execution_id}: {exc}")
 
 
-_deferred_cleanup_tasks: set[asyncio.Task[None]] = set()
+# Strong references to scheduled deferred cleanups. The event loop only keeps
+# weak references to tasks, so an unreferenced cleanup could be garbage
+# collected mid-poll; entries hold either an asyncio task (caller-loop
+# fallback) or a concurrent future (persistent subagent loop).
+_deferred_cleanup_tasks: set[asyncio.Task[None] | concurrent.futures.Future] = set()
 
 
 def bind_task_tool(
@@ -154,13 +161,32 @@ def bind_task_tool(
     return task_tool.model_copy(update={"coroutine": bound_coroutine})
 
 
-def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> asyncio.Task[None]:
+def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> asyncio.Task[None] | concurrent.futures.Future:
+    """Schedule the deferred registry cleanup on the process-owned subagent loop.
+
+    The persistent loop outlives the poller's own event loop, so the cleanup
+    still runs when the poller exits under synchronous tool invocation, where
+    ``asyncio.run()`` cancels caller-loop tasks at teardown before a detached
+    ``asyncio.create_task`` could execute. If the persistent loop cannot be
+    obtained, fall back to the caller loop rather than raising out of an
+    unwind path that is already handling an error.
+    """
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled execution {execution_id}")
-    cleanup_task = asyncio.create_task(_deferred_cleanup_subagent_task(execution_id, trace_id, max_polls))
-    _deferred_cleanup_tasks.add(cleanup_task)
-    cleanup_task.add_done_callback(_deferred_cleanup_tasks.discard)
-    cleanup_task.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, execution_id=execution_id))
-    return cleanup_task
+    coro = _deferred_cleanup_subagent_task(execution_id, trace_id, max_polls)
+    try:
+        cleanup_handle = run_on_isolated_subagent_loop(coro)
+    except Exception:
+        # Unreachable in practice — the persistent loop backs the subagent
+        # execution itself, so it exists by the time a poller needs cleanup.
+        logger.warning(
+            f"[trace={trace_id}] Persistent subagent loop unavailable for deferred cleanup of {execution_id}; falling back to the caller loop",
+            exc_info=True,
+        )
+        cleanup_handle = asyncio.create_task(coro)
+    _deferred_cleanup_tasks.add(cleanup_handle)
+    cleanup_handle.add_done_callback(_deferred_cleanup_tasks.discard)
+    cleanup_handle.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, execution_id=execution_id))
+    return cleanup_handle
 
 
 def _find_usage_recorder(runtime: Any) -> Any | None:
@@ -757,10 +783,10 @@ async def task_tool(
     except Exception:
         # Unexpected poller failure (emit error, status-lookup bug, writer
         # failure, ...). Mirror the cancellation unwind: stop the subagent
-        # cooperatively, report its final usage, and remove the registry entry
-        # (or defer removal if it never reaches terminal) before re-raising —
-        # a detached cleanup task would not survive synchronous tool
-        # invocation, where asyncio.run() cancels spawned tasks at teardown.
+        # cooperatively, report its final usage, and remove the registry entry —
+        # synchronously when it already reached terminal, otherwise via
+        # deferred cleanup pinned to the process-owned subagent loop so it
+        # survives asyncio.run() teardown on the synchronous tool path.
         request_cancel_background_task(execution_id)
         await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
         raise

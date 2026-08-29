@@ -470,6 +470,18 @@ def _submit_to_isolated_loop_in_context(
     return context.run(_submit)
 
 
+def run_on_isolated_subagent_loop[T](coro: Coroutine[Any, Any, T]) -> Future[T]:
+    """Schedule a coroutine on the process-owned persistent subagent loop.
+
+    Unlike ``asyncio.create_task`` on the caller's loop, work submitted here
+    survives teardown of a short-lived caller loop — e.g. the ``asyncio.run()``
+    used by the synchronous tool wrapper cancels caller-loop tasks on exit —
+    so registry cleanup scheduled from a failing poller still runs after the
+    caller loop is gone.
+    """
+    return asyncio.run_coroutine_threadsafe(coro, _get_isolated_subagent_loop())
+
+
 def _copy_isolated_subagent_context() -> Context:
     """Copy ambient context without loop-bound parent graph callbacks.
 

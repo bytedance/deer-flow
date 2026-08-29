@@ -4,6 +4,8 @@ import asyncio
 import gc
 import importlib
 import inspect
+import threading
+import time
 import weakref
 from enum import Enum
 from types import SimpleNamespace
@@ -29,6 +31,8 @@ from deerflow.subagents.status_contract import (
 )
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
+# NOTE: conftest.py replaces deerflow.subagents.executor with a MagicMock, so the
+# executor-bound names inside task_tool are mocks; tests patch them explicitly.
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
@@ -1369,7 +1373,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
         def add_done_callback(self, _callback):
             return None
 
-    def fake_create_task(coro):
+    def fake_run_on_isolated_subagent_loop(coro):
         scheduled_cleanups.append(coro)
         coro.close()
         return DummyCleanupTask()
@@ -1389,7 +1393,7 @@ def test_cleanup_not_called_on_polling_safety_timeout(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
-    monkeypatch.setattr(task_tool_module.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", fake_run_on_isolated_subagent_loop)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
         task_tool_module,
@@ -1520,17 +1524,32 @@ def test_task_started_emit_failure_stops_subagent_reports_usage_and_cleans_up(mo
     assert cleanup_calls == ["tc-emit-fail"], "terminal subagent must be cleaned up synchronously"
 
 
-def test_unexpected_poller_error_reports_usage_and_defers_cleanup(monkeypatch):
-    """A generic exception inside the polling loop must mirror the
-    cancellation unwind: cooperative cancel, final usage reported, and —
-    because this subagent never reaches terminal — deferred cleanup
-    scheduled."""
+def test_unexpected_poller_error_deferred_cleanup_survives_sync_invocation(monkeypatch):
+    """Non-terminal fallback under synchronous tool invocation: the poller
+    dies while the subagent never reaches terminal within the bounded wait, so
+    removal is deferred — and the deferred cleanup must actually run after
+    ``asyncio.run()`` tears down the caller loop. It runs on a loop that
+    outlives the poller (the process-owned persistent subagent loop in
+    production; an equivalent long-lived loop here), never on a caller-loop
+    task, which teardown cancels. The unwind, scheduling wrapper, and cleanup
+    coroutine are the real production code paths."""
     config = _make_subagent_config()
-    cancel_calls: list[str] = []
-    schedule_calls: list[str] = []
     reported: list = []
-    running_result = _make_result(FakeSubagentStatus.RUNNING, ai_messages=["partial"])
+    cancel_calls: list[str] = []
+    cleanup_calls: list[str] = []
     emit_calls = 0
+    scheduled_handles: list = []
+    main_thread = threading.current_thread()
+    execution_id = "exec-sync-poller-death"
+    result = SimpleNamespace(
+        status=FakeSubagentStatus.RUNNING,
+        ai_messages=["partial"],
+        result=None,
+    )
+
+    persistent_loop = asyncio.new_event_loop()
+    loop_thread = threading.Thread(target=persistent_loop.run_forever, name="test-persistent-cleanup-loop", daemon=True)
+    loop_thread.start()
 
     async def fail_on_status_emit(event, *, writer=None):
         nonlocal emit_calls
@@ -1539,34 +1558,74 @@ def test_unexpected_poller_error_reports_usage_and_defers_cleanup(monkeypatch):
             raise RuntimeError("status emit boom")
         return None
 
+    def flip_terminal_off_caller_thread(queried_id):
+        # The poller, its bounded unwind wait, and the final snapshot all run
+        # on the caller thread (asyncio.run) and must keep seeing RUNNING so
+        # the deferred path is taken; once the deferred cleaner polls from the
+        # long-lived loop thread, the subagent reaches terminal.
+        if threading.current_thread() is not main_thread:
+            result.status = FakeSubagentStatus.COMPLETED
+        return result
+
+    def transport_to_persistent_loop(coro):
+        # Same primitive production uses via run_on_isolated_subagent_loop:
+        # pin the coroutine to a loop that outlives the caller's asyncio.run()
+        # loop instead of a caller-loop asyncio.create_task.
+        handle = asyncio.run_coroutine_threadsafe(coro, persistent_loop)
+        scheduled_handles.append(handle)
+        return handle
+
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(
         task_tool_module,
         "SubagentExecutor",
-        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
-    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: running_result)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", flip_terminal_off_caller_thread)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
     monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
-    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id: cancel_calls.append(execution_id))
-    monkeypatch.setattr(task_tool_module, "_schedule_deferred_subagent_cleanup", lambda execution_id, trace_id, max_polls: schedule_calls.append(execution_id))
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda runtime, result: reported.append(result))
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id_arg: cancel_calls.append(execution_id_arg))
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda execution_id_arg: cleanup_calls.append(execution_id_arg))
+    monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", transport_to_persistent_loop)
+    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda runtime, r: reported.append(r))
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
-    with pytest.raises(RuntimeError, match="status emit boom"):
-        _run_task_tool(
-            runtime=_make_runtime(),
-            description="test",
-            prompt="p",
-            subagent_type="general-purpose",
-            tool_call_id="tc-poll-fail",
-        )
+    try:
+        with pytest.raises(RuntimeError, match="status emit boom"):
+            _run_task_tool(
+                runtime=_make_runtime(),
+                description="test",
+                prompt="p",
+                subagent_type="general-purpose",
+                tool_call_id="tc-poll-fail-sync",
+            )
 
-    assert cancel_calls == ["tc-poll-fail"], "unexpected poller exit must cooperatively cancel the subagent"
-    assert reported == [running_result], "unexpected poller exit must still report the subagent's usage"
-    assert schedule_calls == ["tc-poll-fail"], "non-terminal subagent must get deferred cleanup"
+        # The caller loop is torn down by asyncio.run() at this point. The
+        # cooperative cancel already fired and the final usage was reported...
+        assert cancel_calls == [execution_id], "unexpected poller exit must cooperatively cancel the subagent"
+        assert reported == [result], "unexpected poller exit must still report the subagent's usage"
+
+        # ...and the deferred cleanup, pinned to the long-lived loop, removes
+        # the registry entry even though the caller loop that scheduled it is
+        # gone. A caller-loop asyncio.create_task would have been cancelled at
+        # teardown and this would time out.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not cleanup_calls:
+            time.sleep(0.05)
+        assert cleanup_calls == [execution_id], "deferred cleanup must run after caller-loop teardown"
+        assert result.status is FakeSubagentStatus.COMPLETED
+    finally:
+        for handle in scheduled_handles:
+            try:
+                handle.result(timeout=5)
+            except Exception:
+                pass
+            task_tool_module._deferred_cleanup_tasks.discard(handle)
+        persistent_loop.call_soon_threadsafe(persistent_loop.stop)
+        loop_thread.join(timeout=5)
+        persistent_loop.close()
 
 
 def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
@@ -1602,7 +1661,7 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
         def add_done_callback(self, callback):
             self.callback = callback
 
-    def fake_create_task(coro):
+    def fake_run_on_isolated_subagent_loop(coro):
         scheduled_cleanups.append(coro)
         coro.close()
         return DummyCleanupTask(coro)
@@ -1616,7 +1675,7 @@ def test_cancelled_cleanup_stops_after_timeout(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", cancel_on_first_sleep)
-    monkeypatch.setattr(task_tool_module.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", fake_run_on_isolated_subagent_loop)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", fake_report_subagent_usage)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(
@@ -2060,13 +2119,22 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
-    """Verify deferred cleanup task is retained in _deferred_cleanup_tasks and completes after GC."""
+    """Verify deferred cleanup is retained in _deferred_cleanup_tasks and completes after GC."""
     cleaned = []
     orig_sleep = asyncio.sleep
+
+    # Route the production transport onto this test's running loop so the
+    # scheduled coroutine actually executes; the retention and completion
+    # behavior under test is the real scheduling wrapper.
+    current_loop = asyncio.get_running_loop()
+
+    def transport_to_current_loop(coro):
+        return asyncio.run_coroutine_threadsafe(coro, current_loop)
 
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="ok"))
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleaned.append)
+    monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", transport_to_current_loop)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", lambda _: orig_sleep(0))
 
     task = task_tool_module._schedule_deferred_subagent_cleanup("exec-gc", "trace-gc", 5)
@@ -2083,7 +2151,12 @@ async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
     await orig_sleep(0.01)
 
     assert cleaned == ["exec-gc"]
-    assert weak_task() not in task_tool_module._deferred_cleanup_tasks
+    # The completion chain discards the handle once its done-callbacks run.
+    for _ in range(10):
+        if weak_task() not in task_tool_module._deferred_cleanup_tasks:
+            break
+        await orig_sleep(0.01)
+    task_tool_module._deferred_cleanup_tasks.discard(weak_task())
 
 
 def _receipt_fixture(rid: str = "r1", tool: str = "write_file", status: str = "success") -> dict:
