@@ -20,8 +20,11 @@ so links nobody can durably resolve cannot be minted.
   `user`/`assistant` roles, renderable text only — no run/thread/user
   identifiers, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the
-  page order only. Conversations over the 2000-message cap are **rejected with
-  413** (`ShareSnapshotTooLarge`) — a share promises the complete visible
+  page order only. Rows are sanitized per page, so the 2000 cap counts
+  **public messages**, not raw rows (tool output never consumes budget);
+  an independent 50k raw-scan bound stops unbounded walks of row-heavy
+  threads. Either bound rejecting yields **413**
+  (`ShareSnapshotTooLarge`) — a share promises the complete visible
   transcript, so it is never silently truncated.
 - `GET` lists management metadata (never token hashes); `DELETE /{share_id}`
   revokes immediately (scoped to thread + owner in the repository).
@@ -65,9 +68,12 @@ referrers, not log sinks):
   variant (`$masked_request`) for `/share/` and `/api/shares/` and log the
   `combined`-format `masked_access` format; the regression test evaluates the
   config's own regex, so a dropped or loosened mask fails CI. nginx
-  `error_log` messages embed the full request line and cannot be
-  format-masked, so the dedicated `^~` share locations raise their
-  `error_log` threshold to `crit` (pinned by test too).
+  `error_log` messages embed the full request line, severity does not redact
+  them (nginx trac #2193: crit-level failures still append the request
+  line), and the output cannot be format-masked — so the dedicated `^~`
+  share locations route `error_log` to `/dev/null`, a sink that cannot
+  retain the token (pinned by test too; share-route upstream diagnostics
+  are the accepted trade-off, the Gateway still logs its own side).
 
 Snapshot immutability: later messages/edits never modify an existing share;
 `source_last_seq` is audit-only and public rendering never re-reads the source.

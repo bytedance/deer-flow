@@ -108,6 +108,50 @@ async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
     assert any("refusing partial share" in record.message for record in caplog.records)
 
 
+async def test_tool_heavy_thread_does_not_hit_the_cap_early():
+    """The cap counts sanitized public messages, not raw rows: tool output
+    and hidden rows must not consume share budget (#4548 review)."""
+    tool_row = lambda seq: _row(seq, {"type": "tool", "content": '{"args": 1}'})  # noqa: E731
+    pages = [
+        [tool_row(seq) for seq in range(201, 401)] + [_row(200, {"type": "human", "content": "hi"})],
+        [tool_row(seq) for seq in range(1, 200)] + [_row(0, {"type": "human", "content": "hello"})],
+    ]
+    calls = {"n": 0}
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page, calls["n"] < len(pages)
+
+    with pytest.MonkeyPatch.context() as mp:
+        # A cap that the 400 raw tool rows would exceed, but the 2 public
+        # messages must not.
+        mp.setattr("app.gateway.shares.snapshot._SNAPSHOT_MAX_MESSAGES", 100)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert [m["content"] for m in snapshot["messages"]] == ["hello", "hi"]
+
+
+async def test_raw_scan_bound_stops_unbounded_walks():
+    """A thread with endless non-public rows is bounded by the raw-scan cap."""
+
+    def page(before_seq):
+        start = (before_seq or 10_000) - 200
+        return [_row(seq, {"type": "tool", "content": "x"}) for seq in range(start, start + 200)]
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+        return (page(before_seq), True)  # always more tool rows
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_SCANNED_ROWS", 500)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        with pytest.raises(ShareSnapshotTooLarge):
+            await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+
 async def test_snapshot_exactly_at_cap_with_no_more_rows_shares_completely():
     """At-cap scans with no older rows remaining are complete, not rejected.
 

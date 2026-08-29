@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 _SNAPSHOT_SCAN_PAGE_SIZE = 200
 _SNAPSHOT_MAX_MESSAGES = 2000
+# Independent safety bound on RAW scanned rows: a tool-heavy thread can carry
+# far more rows than public messages, and without this the backward scan
+# would walk an unbounded history while the public-message count stays under
+# the share cap.
+_SNAPSHOT_MAX_SCANNED_ROWS = 50_000
 
 
 class ShareSnapshotTooLarge(Exception):
@@ -40,19 +45,18 @@ async def build_share_snapshot(
     user_id: str | None,
 ) -> dict[str, Any]:
     """Freeze the visible transcript of *thread_id* into a public DTO."""
-    from app.gateway.routers.thread_runs import (
-        _is_hidden_or_control_message,
-        _message_text,
-        _message_type,
-        _scan_thread_message_page,
-    )
+    from app.gateway.routers.thread_runs import _scan_thread_message_page
 
     # ``_scan_thread_message_page`` pages backward (newest page first) and
-    # returns every page internally ascending by ``seq``; keep pages intact
-    # and flip only the page order at the end. Reversing the flattened rows
-    # instead would also invert each page (single-page threads came out
-    # newest-first).
+    # returns every page internally ascending by ``seq``. Rows are sanitized
+    # to public messages PER PAGE so the share cap counts what would
+    # actually be published (tool rows and hidden/control messages don't
+    # consume budget); page order flips only at the end so each page stays
+    # chronological. Two bounds: the public-message cap enforces the share
+    # contract, the raw-scan cap bounds work on row-heavy threads.
     pages: list[list[dict[str, Any]]] = []
+    public_messages = 0
+    scanned_rows = 0
     before_seq: int | None = None
     while True:
         rows, has_more = await _scan_thread_message_page(
@@ -64,49 +68,66 @@ async def build_share_snapshot(
         )
         if not rows:
             break
-        pages.append(rows)
+        scanned_rows += len(rows)
+        page_messages = [_public_message(row) for row in rows]
+        page_messages = [message for message in page_messages if message is not None]
+        if page_messages:
+            pages.append(page_messages)
+            public_messages += len(page_messages)
         if not has_more:
             break
-        scanned = sum(len(page) for page in pages)
-        if scanned >= _SNAPSHOT_MAX_MESSAGES:
+        if public_messages >= _SNAPSHOT_MAX_MESSAGES:
             # The share contract is the complete visible transcript; when the
             # cap bites with older rows remaining, refuse rather than publish
             # an apparently-complete share that silently omits them.
             logger.warning(
-                "Share snapshot for thread %s exceeded the %d-message cap; refusing partial share",
+                "Share snapshot for thread %s reached the %d public-message cap with older rows remaining; refusing partial share",
                 thread_id,
                 _SNAPSHOT_MAX_MESSAGES,
             )
-            raise ShareSnapshotTooLarge(thread_id, scanned, _SNAPSHOT_MAX_MESSAGES)
+            raise ShareSnapshotTooLarge(thread_id, public_messages, _SNAPSHOT_MAX_MESSAGES)
+        if scanned_rows >= _SNAPSHOT_MAX_SCANNED_ROWS:
+            logger.warning(
+                "Share snapshot for thread %s exceeded the %d raw-scan safety bound; refusing to walk further",
+                thread_id,
+                _SNAPSHOT_MAX_SCANNED_ROWS,
+            )
+            raise ShareSnapshotTooLarge(thread_id, scanned_rows, _SNAPSHOT_MAX_SCANNED_ROWS)
         before_seq = rows[0]["seq"]  # pages are ascending: row 0 is the oldest
     pages.reverse()
-    collected: list[dict[str, Any]] = [row for page in pages for row in page]
 
+    # Snapshot-local, monotonic ids: the public contract must not leak run-event
+    # ids or any store identifiers.
     messages: list[dict[str, Any]] = []
-    for row in collected:
-        content = row.get("content")
-        message_type = _message_type(content)
-        if message_type not in ("human", "ai"):
-            continue
-        if _is_hidden_or_control_message(content):
-            continue
-        text = _message_text(content)
-        if not text.strip():
-            continue
-        messages.append(
-            {
-                # Snapshot-local, monotonic id: the public contract must not
-                # leak run-event ids or any store identifiers.
-                "id": f"m{len(messages) + 1}",
-                "role": "user" if message_type == "human" else "assistant",
-                "content": text,
-            }
-        )
+    for page in pages:
+        for message in page:
+            message["id"] = f"m{len(messages) + 1}"
+            messages.append(message)
 
     logger.debug("Share snapshot for thread %s: %d visible messages", thread_id, len(messages))
     return {
         "version": 1,
         "messages": messages,
+    }
+
+
+def _public_message(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Map one scanned row to the strict public DTO, or None if not public."""
+    from app.gateway.routers.thread_runs import _is_hidden_or_control_message, _message_text, _message_type
+
+    content = row.get("content")
+    message_type = _message_type(content)
+    if message_type not in ("human", "ai"):
+        return None
+    if _is_hidden_or_control_message(content):
+        return None
+    text = _message_text(content)
+    if not text.strip():
+        return None
+    return {
+        "id": "",  # assigned chronologically after the page-order flip
+        "role": "user" if message_type == "human" else "assistant",
+        "content": text,
     }
 
 

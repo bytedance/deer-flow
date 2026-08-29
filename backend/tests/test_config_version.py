@@ -195,6 +195,29 @@ def _merge_missing(target: dict, source: dict) -> None:
             _merge_missing(target[key], value)
 
 
+def test_conversation_sharing_bumped_config_version():
+    """The example must ship conversation_sharing under a version > 36 so v36
+    configs receive the section via config-upgrade instead of staying silent."""
+    example = _load_repo_example()
+    assert example.get("config_version", 0) >= 37
+    assert example["conversation_sharing"]["enabled"] is False
+
+
+def test_config_upgrade_adds_conversation_sharing_preserving_user_values():
+    """A v36 user config gains the conversation_sharing defaults on upgrade."""
+    example = _load_repo_example()
+    user = {"config_version": 36, "models": {"fake": True}}
+
+    _merge_missing(user, example)
+    user["config_version"] = example["config_version"]
+
+    assert user["conversation_sharing"]["enabled"] is False
+    assert user["conversation_sharing"]["default_expiry_days"] == 30
+    # Existing user keys untouched.
+    assert user["models"]["fake"] is True
+    assert user["config_version"] == example["config_version"]
+
+
 def test_security_fail_closed_bumped_config_version():
     """The example must ship security_fail_closed under a version > 26 so v26 configs upgrade."""
     example = _load_repo_example()

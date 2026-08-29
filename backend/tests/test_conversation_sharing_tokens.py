@@ -67,3 +67,57 @@ def test_get_share_pepper_persists_generated_pepper_locally(monkeypatch, tmp_pat
     # Re-resolving after a cache reset reuses the persisted value.
     set_share_pepper(None)
     assert get_share_pepper() == first
+
+
+def test_concurrent_first_use_agrees_on_one_pepper(monkeypatch, tmp_path):
+    """Multi-worker cold start: O_EXCL winner/loser protocol — every worker
+    must cache the same pepper, not the candidate it generated itself."""
+    import threading
+
+    from app.gateway.shares.tokens import _load_or_create_pepper
+
+    base = tmp_path / "home"
+    monkeypatch.delenv("SHARE_TOKEN_PEPPER", raising=False)
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: type("P", (), {"base_dir": base})(),
+    )
+
+    barrier = threading.Barrier(8)
+    results: list[str] = []
+
+    def worker():
+        barrier.wait()  # maximize the window where all see the file absent
+        results.append(_load_or_create_pepper())
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(set(results)) == 1, f"workers cached different peppers: {set(results)}"
+    assert (base / ".share_token_pepper").read_text(encoding="utf-8").strip() == results[0]
+
+
+def test_crashed_creator_leaves_recoverable_failure(monkeypatch, tmp_path):
+    """An empty pepper file (creator died mid-write) fails loudly with
+    operator remediation instead of silently regenerating a second pepper."""
+    import pytest
+
+    from app.gateway.shares.tokens import _load_or_create_pepper
+
+    base = tmp_path / "home"
+    base.mkdir()
+    (base / ".share_token_pepper").write_text("", encoding="utf-8")
+    monkeypatch.delenv("SHARE_TOKEN_PEPPER", raising=False)
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: type("P", (), {"base_dir": base})(),
+    )
+    # Keep the failure fast instead of waiting out the full retry window.
+    monkeypatch.setattr("app.gateway.shares.tokens._PEPPER_READ_RETRIES", 2)
+    monkeypatch.setattr("app.gateway.shares.tokens._PEPPER_READ_RETRY_DELAY_SECONDS", 0.0)
+
+    with pytest.raises(RuntimeError, match="unreadable or empty"):
+        _load_or_create_pepper()

@@ -198,7 +198,7 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
         # too long to snapshot is rejected instead of silently truncated.
         raise HTTPException(
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail=f"This conversation has more than {exc.cap} visible messages and is too long to share",
+            detail="This conversation is too long to share",
         ) from exc
     if not snapshot["messages"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This conversation has no visible messages to share")

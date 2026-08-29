@@ -163,8 +163,11 @@ def _location_block(config_text: str, location: str) -> str:
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
 @pytest.mark.parametrize("location", ["/api/shares/", "/share/"])
 def test_nginx_share_locations_suppress_request_lines_in_error_log(config_path: Path, location: str) -> None:
-    """nginx error messages embed the full request line and error_log cannot
-    be format-masked, so share locations must raise the threshold to crit —
-    the level at or above which messages no longer carry request lines."""
+    """nginx error messages embed the full request line, severity does not
+    redact it (nginx trac #2193 documents crit-level failures that still
+    append the request line), and error_log cannot be format-masked — so the
+    share locations must route error_log to a non-retaining sink."""
     block = _location_block(config_path.read_text(encoding="utf-8"), location)
-    assert re.search(r"error_log\s+\S+\s+crit;", block), f"{config_path.name} {location}: error_log must be crit"
+    # Severity alone does not redact request lines (nginx trac #2193): the
+    # sink itself must be non-retaining.
+    assert re.search(r"error_log\s+/dev/null\s+crit;", block), f"{config_path.name} {location}: error_log must route to /dev/null"
