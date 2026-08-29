@@ -715,6 +715,7 @@ export interface Translations {
       skills: string;
       notification: string;
       about: string;
+      tokens: string;
     };
     memory: {
       title: string;
@@ -806,6 +807,51 @@ export interface Translations {
       description: string;
       adminRequired: string;
       empty: string;
+    };
+    tokens: {
+      title: string;
+      description: string;
+      createButton: string;
+      createTitle: string;
+      createDescription: string;
+      nameLabel: string;
+      namePlaceholder: string;
+      scopesLabel: string;
+      scopes: {
+        "threads:read": { name: string; description: string };
+        "threads:write": { name: string; description: string };
+        "threads:delete": { name: string; description: string };
+        "runs:create": { name: string; description: string };
+        "runs:read": { name: string; description: string };
+        "runs:cancel": { name: string; description: string };
+      };
+      expiryLabel: string;
+      expiryDays: string;
+      expiryNever: string;
+      createSubmit: string;
+      resultTitle: string;
+      resultDescription: string;
+      copy: string;
+      copied: string;
+      copyFailed: string;
+      done: string;
+      warning: string;
+      emptyTitle: string;
+      emptyDescription: string;
+      revokedBadge: string;
+      neverExpires: string;
+      expires: string;
+      created: string;
+      lastUsed: string;
+      neverUsed: string;
+      revoke: string;
+      revokeTitle: string;
+      revokeDescription: string;
+      revokeConfirm: string;
+      revoked: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      loadError: string;
     };
     subagents: {
       title: string;

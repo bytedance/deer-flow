@@ -5,6 +5,7 @@ import {
   CableIcon,
   InfoIcon,
   BrainIcon,
+  KeyRoundIcon,
   PaletteIcon,
   PlugZapIcon,
   SparklesIcon,
@@ -68,6 +69,10 @@ const MemorySettingsPage = dynamic(
     ),
   { loading: SettingsPageLoading },
 );
+const PatSettingsPage = dynamic(
+  () => import("./pat-settings-page").then((module) => module.PatSettingsPage),
+  { loading: SettingsPageLoading },
+);
 const NotificationSettingsPage = dynamic(
   () =>
     import("./notification-settings-page").then(
@@ -104,6 +109,7 @@ export type SettingsSection =
   | "channels"
   | "integrations"
   | "memory"
+  | "tokens"
   | "tools"
   | "subagents"
   | "skills"
@@ -160,6 +166,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
         label: t.settings.sections.memory,
         icon: BrainIcon,
       },
+      {
+        id: "tokens",
+        label: t.settings.sections.tokens,
+        icon: KeyRoundIcon,
+      },
       { id: "tools", label: t.settings.sections.tools, icon: WrenchIcon },
       {
         id: "subagents",
@@ -175,6 +186,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.channels,
       t.settings.sections.integrations,
       t.settings.sections.memory,
+      t.settings.sections.tokens,
       t.settings.sections.tools,
       t.settings.sections.subagents,
       t.settings.sections.skills,
@@ -227,6 +239,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "account" && <AccountSettingsPage />}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
               {activeSection === "memory" && <MemorySettingsPage />}
+              {activeSection === "tokens" && <PatSettingsPage />}
               {activeSection === "tools" && <ToolSettingsPage />}
               {activeSection === "subagents" && <SubagentSettingsPage />}
               {activeSection === "skills" && (
