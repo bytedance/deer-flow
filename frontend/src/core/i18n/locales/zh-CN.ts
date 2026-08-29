@@ -121,6 +121,8 @@ export const zhCN: Translations = {
     loadFullFile: "加载完整文件",
     loadingFullFile: "正在加载完整文件...",
     previewFailed: "无法预览此文件，但仍可下载原始文件。",
+    viewSource: "查看原始文件",
+    missingTarget: "该链接没有指明要展示哪个文件。",
   },
 
   // Citations

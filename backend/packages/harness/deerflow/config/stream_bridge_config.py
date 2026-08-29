@@ -20,6 +20,7 @@ class StreamBridgeConfig(BaseModel):
     )
     queue_maxsize: int = Field(
         default=256,
+        ge=1,
         description="Maximum number of events retained per run (memory bridge queue size / redis stream MAXLEN).",
     )
     max_connections: int | None = Field(
