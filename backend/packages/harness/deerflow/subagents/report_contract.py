@@ -13,10 +13,11 @@ This module owns the prompt-layer text that closes the adoption gap:
 - :func:`render_acceptance_criteria_section` — rendered by the executor into
   the subagent's ``SystemMessage`` when the lead attaches
   ``acceptance_criteria``. The criteria deliberately do NOT travel in the task
-  ``HumanMessage``: that message is classed as genuine user input and
-  sanitized by ``InputSanitizationMiddleware``, which would HTML-escape the
-  block into untrusted-input framing — the opposite of the authoritative
-  framing the feature is built on.
+  ``HumanMessage`` (that message is classed as genuine user input and framed
+  as untrusted input), but they are still model-supplied untrusted data, so
+  each criterion is neutralized via ``neutralize_untrusted_tags`` before it is
+  interpolated: a criterion cannot close the ``<acceptance_criteria>`` block
+  or open a framework authority tag.
 
 Both are pure functions over the single-owner citation format in
 ``tool_receipt.py`` so prompt text can never drift from the verifier.
@@ -25,8 +26,8 @@ Both are pure functions over the single-owner citation format in
 from __future__ import annotations
 
 #: Bounds for model-supplied acceptance criteria before they enter a subagent
-#: prompt. Criteria travel through the same trust boundary as the delegation
-#: prompt itself, so capping size — not content filtering — is the hygiene.
+#: prompt. Criteria are model-supplied (ultimately user-influenceable) data, so
+#: hygiene is twofold: neutralize framework/injection tags, then cap size.
 MAX_ACCEPTANCE_CRITERIA = 20
 MAX_CRITERION_CHARS = 500
 
@@ -81,18 +82,26 @@ def render_acceptance_criteria_section(acceptance_criteria: list[str] | None) ->
     """Render lead-supplied acceptance criteria for the subagent SystemMessage.
 
     Returns "" when there is nothing usable. Entries are stripped, empties
-    dropped, and the list/item sizes capped — the criteria are model-supplied
-    text crossing into another agent's context.
+    dropped, the list/item sizes capped, and each entry neutralized via
+    :func:`neutralize_untrusted_tags` before interpolation — the criteria are
+    model-supplied text crossing into another agent's context, so a criterion
+    that closes the ``<acceptance_criteria>`` block or opens a framework
+    authority tag must not gain system authority.
     """
     if not acceptance_criteria:
         return ""
+    # Lazy import: the executor package is imported in cycles with
+    # ``deerflow.agents``; resolving the sanitizer at call time keeps module
+    # init order-independent (same pattern as build_report_contract_section).
+    from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
+
     criteria: list[str] = []
     for criterion in acceptance_criteria:
         if not isinstance(criterion, str):
             continue
         cleaned = criterion.strip()[:MAX_CRITERION_CHARS].strip()
         if cleaned:
-            criteria.append(cleaned)
+            criteria.append(neutralize_untrusted_tags(cleaned))
         if len(criteria) >= MAX_ACCEPTANCE_CRITERIA:
             break
     if not criteria:
