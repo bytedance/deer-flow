@@ -21,7 +21,7 @@ export function ThreadTitle({
 }: ThreadTitleProps) {
   const { t } = useI18n();
   const { isNewThread } = useThreadChat();
-  const title = canonicalTitle ?? thread.values?.title;
+  const title = canonicalTitle?.length ? canonicalTitle : thread.values?.title;
 
   useEffect(() => {
     let _title = t.pages.untitled;

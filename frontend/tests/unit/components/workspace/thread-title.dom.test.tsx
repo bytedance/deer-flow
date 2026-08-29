@@ -59,3 +59,16 @@ test("falls back to the stream title when metadata is unavailable", () => {
   expect(container.textContent).toBe("Stream title");
   expect(document.title).toBe("Stream title - DeerFlow");
 });
+
+test("falls back to the stream title when metadata title is empty", () => {
+  const { container } = render(
+    <ThreadTitle
+      threadId="thread-1"
+      thread={makeThread("Stream title")}
+      canonicalTitle=""
+    />,
+  );
+
+  expect(container.textContent).toBe("Stream title");
+  expect(document.title).toBe("Stream title - DeerFlow");
+});
