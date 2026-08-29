@@ -116,13 +116,45 @@ _MAX_MOUNT_PASS_FILES = 2000
 # Deadline checks stop preflight work and new writes. Active SDK writes finish.
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
+# Recursive skill projection replacement must never target an operating-system
+# tree. The configured E2B home is handled separately: an isolated descendant
+# such as /home/user/skills is supported, while the home directory itself and
+# every ancestor remain protected.
+_E2B_PROTECTED_SYSTEM_TREES = frozenset(
+    PurePosixPath(path)
+    for path in (
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/lost+found",
+        "/media",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/snap",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+    )
+)
+
 
 def _mount_deadline_reason(deadline_seconds: int) -> str:
     return f"time budget {deadline_seconds}s"
 
 
 def _validate_skills_reset_root(container_path: str, *, home_dir: str) -> str:
-    """Return a canonical E2B skills root that is safe to replace recursively."""
+    """Return a canonical E2B root that is safe for recursive managed resets."""
     candidate = container_path.rstrip("/")
     if not candidate or not candidate.startswith("/") or candidate.startswith("//"):
         raise ValueError("The skills container path is not a safe E2B skills reset target: it must be an absolute non-root path")
@@ -137,12 +169,20 @@ def _validate_skills_reset_root(container_path: str, *, home_dir: str) -> str:
         PurePosixPath("/mnt/acp-workspace"),
     }
     normalized_home = posixpath.normpath(home_dir.rstrip("/") or DEFAULT_E2B_HOME_DIR)
+    home_root: PurePosixPath | None = None
     if normalized_home.startswith("/") and not normalized_home.startswith("//"):
-        protected_roots.add(PurePosixPath(normalized_home))
+        home_root = PurePosixPath(normalized_home)
+        protected_roots.add(home_root)
 
     for protected in protected_roots:
         if protected == root or protected.is_relative_to(root):
             raise ValueError(f"The skills container path is not a safe E2B skills reset target: {normalized!r} equals or contains protected path {str(protected)!r}")
+
+    is_isolated_home_subtree = home_root is not None and root != home_root and root.is_relative_to(home_root)
+    if not is_isolated_home_subtree:
+        for protected in _E2B_PROTECTED_SYSTEM_TREES:
+            if root == protected or root.is_relative_to(protected):
+                raise ValueError(f"The skills container path is not a safe E2B skills reset target: {normalized!r} is inside protected operating-system tree {str(protected)!r}")
     return normalized
 
 
@@ -1981,15 +2021,22 @@ class E2BSandboxProvider(SandboxProvider):
         if remote_signature == signature:
             return
 
-        quoted_root = shlex.quote(skills_root)
         category_paths = [
             f"{skills_root}/public",
             f"{skills_root}/custom",
             f"{skills_root}/legacy",
             f"{skills_root}/integrations",
         ]
+        quoted_root = shlex.quote(skills_root)
         quoted_categories = " ".join(shlex.quote(path) for path in category_paths)
-        reset_script = f'set -e; sudo rm -rf -- {quoted_root}; sudo mkdir -p -- {quoted_categories}; sudo chown -R "$(id -u):$(id -g)" -- {quoted_root}; echo SKILLS_RESET_OK'
+        quoted_managed_paths = " ".join(shlex.quote(path) for path in (*category_paths, marker_path))
+        reset_script = (
+            f"set -e; if [ -L {quoted_root} ]; then echo 'Refusing symlinked skills root' >&2; exit 2; fi; "
+            f"sudo rm -rf -- {quoted_managed_paths}; "
+            f"sudo mkdir -p -- {quoted_categories}; "
+            f'sudo chown "$(id -u):$(id -g)" -- {quoted_root} {quoted_categories}; '
+            "echo SKILLS_RESET_OK"
+        )
         result = sandbox.client.commands.run(reset_script)
         stdout = getattr(result, "stdout", "") or ""
         stderr = getattr(result, "stderr", "") or ""

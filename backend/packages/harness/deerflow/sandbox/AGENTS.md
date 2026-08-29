@@ -12,9 +12,14 @@
   New unrestricted sandboxes receive a one-shot upload from the enabled-only
   public, custom, legacy, and managed integration projections. For a thread
   with an explicit Agent policy, creation skips that shared upload; after
-  acquire, `sync_agent_skills` clears the remote skills root before strictly
-  uploading the signed thread projection. A remote signature avoids redundant
-  uploads and changes whenever policy or enabled source state changes.
+  acquire, `sync_agent_skills` clears only DeerFlow's four managed category
+  directories and signature before strictly uploading the signed thread
+  projection. It rejects non-canonical paths, protected mounts/homes, symlinked
+  roots, and standard operating-system trees before destructive work. A remote
+  signature avoids redundant uploads and changes whenever policy or enabled
+  source state changes. Delegated subagents are non-owners of the lead's thread
+  projection: they reuse that filesystem view and never rebuild it from their
+  discovery/activation policy.
   Acquire and release share an `AcquireSerializer` hold keyed by `(user_id, thread_id)`. The serializer does
   not cover remote IO. `burst_limit` adds capacity only for the `burst` policy.
   The `wait` policy fails the turn after `acquire_timeout`. The runtime does not

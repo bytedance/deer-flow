@@ -168,6 +168,7 @@ def _build_runtime_middlewares(
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
     available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -204,6 +205,7 @@ def _build_runtime_middlewares(
         SandboxMiddleware(
             lazy_init=lazy_init,
             available_skills=available_skills,
+            owns_agent_skill_projection=owns_agent_skill_projection,
         )
     )
 
@@ -369,6 +371,7 @@ def build_subagent_runtime_middlewares(
         receipts_render_mode="always",
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        owns_agent_skill_projection=False,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically

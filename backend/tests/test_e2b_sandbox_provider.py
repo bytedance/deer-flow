@@ -379,7 +379,7 @@ def test_policy_scoped_thread_skips_shared_projection_during_create(
     assert provider._skill_projection_mounts("user-1", "thread-1") == []
 
 
-def test_sync_agent_skills_replaces_remote_tree_and_caches_manifest_signature(
+def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_signature(
     monkeypatch,
     tmp_path,
 ):
@@ -420,13 +420,25 @@ def test_sync_agent_skills_replaces_remote_tree_and_caches_manifest_signature(
     files = FakeFilesAPI(
         {
             "/mnt/skills/public/excluded-skill/SKILL.md": b"excluded",
+            "/mnt/skills/unmanaged.txt": b"keep",
         }
     )
 
     def reset_remote_tree(command: str):
-        assert "sudo rm -rf -- /mnt/skills" in command
+        assert "sudo rm -rf -- /mnt/skills;" not in command
+        assert "sudo chown -R" not in command
+        assert "if [ -L /mnt/skills ]" in command
+        managed_paths = (
+            "/mnt/skills/public",
+            "/mnt/skills/custom",
+            "/mnt/skills/legacy",
+            "/mnt/skills/integrations",
+            "/mnt/skills/.deerflow-projection-signature",
+        )
+        for managed_path in managed_paths:
+            assert managed_path in command
         for path in list(files.store):
-            if path.startswith("/mnt/skills/"):
+            if any(path == managed_path or path.startswith(f"{managed_path}/") for managed_path in managed_paths):
                 files.store.pop(path)
         return SimpleNamespace(
             stdout="SKILLS_RESET_OK\n",
@@ -452,6 +464,7 @@ def test_sync_agent_skills_replaces_remote_tree_and_caches_manifest_signature(
 
     assert "/mnt/skills/public/excluded-skill/SKILL.md" not in files.store
     assert files.store["/mnt/skills/public/allowed-skill/SKILL.md"].startswith(b"---")
+    assert files.store["/mnt/skills/unmanaged.txt"] == b"keep"
     assert "/mnt/skills/.deerflow-projection-signature" in files.store
     first_command_count = len(commands.calls)
     first_write_count = len(files.write_calls)
@@ -481,6 +494,30 @@ def test_sync_agent_skills_replaces_remote_tree_and_caches_manifest_signature(
         "/mnt/acp-workspace",
         "/home",
         "/home/user",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/etc/deerflow-skills",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/lost+found",
+        "/media",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/snap",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/usr/local/deerflow-skills",
+        "/var",
+        "/var/lib/deerflow-skills",
     ],
 )
 def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
@@ -530,6 +567,7 @@ def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
         ("/mnt/skills/", "/mnt/skills"),
         ("/home/user/skills", "/home/user/skills"),
         ("/custom-skills", "/custom-skills"),
+        ("/custom/skills", "/custom/skills"),
     ],
 )
 def test_validate_skills_reset_root_accepts_isolated_directories(
@@ -539,6 +577,91 @@ def test_validate_skills_reset_root_accepts_isolated_directories(
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
 
     assert mod._validate_skills_reset_root(container_path, home_dir="/home/user") == expected
+
+
+@pytest.mark.parametrize(
+    ("home_dir", "container_path"),
+    [
+        ("/opt/e2b-home", "/opt/e2b-home/skills"),
+        ("/tmp/e2b-home", "/tmp/e2b-home/skills"),
+    ],
+)
+def test_validate_skills_reset_root_accepts_isolated_custom_home_subtree(
+    home_dir,
+    container_path,
+):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    assert (
+        mod._validate_skills_reset_root(
+            container_path,
+            home_dir=home_dir,
+        )
+        == container_path
+    )
+
+
+def test_sync_agent_skills_rejects_symlinked_remote_root_before_deleting(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    (root / ".projection-manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    def reject_symlinked_root(command: str):
+        assert "if [ -L /mnt/skills ]" in command
+        return SimpleNamespace(
+            stdout="",
+            stderr="Refusing symlinked skills root\n",
+            exit_code=2,
+        )
+
+    client = FakeClient(
+        sandbox_id="sandbox-1",
+        commands=FakeCommandsAPI([reject_symlinked_root]),
+    )
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_upload_tree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("upload must not start after a rejected reset")),
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to reset E2B skill projection"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert client.files.write_calls == []
 
 
 def test_sync_agent_skills_leaves_no_signature_after_upload_failure(

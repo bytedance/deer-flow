@@ -203,6 +203,20 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     assert policy_idx < durable_idx < date_idx == len(middlewares) - 2
 
 
+def test_subagent_runtime_sandbox_does_not_own_lead_skill_projection() -> None:
+    from deerflow.extensions.registry import ExtensionRegistry
+    from deerflow.sandbox.middleware import SandboxMiddleware
+
+    middlewares = build_subagent_runtime_middlewares(
+        app_config=_make_app_config(),
+        available_skills={"allowed"},
+        extensions=ExtensionRegistry().build(),
+    )
+
+    sandbox_middleware = next(middleware for middleware in middlewares if isinstance(middleware, SandboxMiddleware))
+    assert sandbox_middleware._owns_agent_skill_projection is False
+
+
 def test_tool_progress_middleware_is_outer_relative_to_error_handling(monkeypatch: pytest.MonkeyPatch):
     # ToolProgressMiddleware must have a lower index than ToolErrorHandlingMiddleware
     # so that the framework's "first in list = outermost" rule makes it outer.
@@ -313,6 +327,7 @@ def test_lead_runtime_middlewares_pass_agent_skills_to_sandbox(
     assert sandbox_middleware.kwargs == {
         "lazy_init": True,
         "available_skills": {"allowed-skill"},
+        "owns_agent_skill_projection": True,
     }
 
 

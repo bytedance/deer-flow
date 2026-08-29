@@ -46,20 +46,38 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     state_schema = SandboxMiddlewareState
 
-    def __init__(self, lazy_init: bool = True, *, available_skills: set[str] | None = None):
+    def __init__(
+        self,
+        lazy_init: bool = True,
+        *,
+        available_skills: set[str] | None = None,
+        owns_agent_skill_projection: bool = True,
+    ):
         """Initialize sandbox middleware.
 
         Args:
             lazy_init: If True, defer sandbox acquisition until first tool call.
                       If False, acquire sandbox eagerly in before_agent().
                       Default is True for optimal performance.
+            owns_agent_skill_projection: Whether this middleware may create or
+                rebuild the thread's physical skill projection. Delegated
+                subagents share the lead thread sandbox and must preserve the
+                lead-owned view instead of applying their discovery policy to it.
         """
         super().__init__()
         self._lazy_init = lazy_init
         self._available_skills = set(available_skills) if available_skills is not None else None
+        self._owns_agent_skill_projection = owns_agent_skill_projection
 
     def _prepare_agent_skill_projection(self, thread_id: str, *, user_id: str):
         """Build the run's physical skill view before any sandbox is reused."""
+        if not self._owns_agent_skill_projection:
+            # Subagents inherit the lead's thread id and sandbox state. Their
+            # skill lists scope discovery/activation only; rebuilding here
+            # would widen or narrow the shared filesystem for every concurrent
+            # agent using this sandbox.
+            return None
+
         from deerflow.config.paths import get_paths
 
         # Preserve the zero-copy shared view for ordinary threads. A thread

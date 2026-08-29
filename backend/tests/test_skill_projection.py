@@ -14,6 +14,7 @@ import pytest
 
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
+from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.skills.projection import (
     ensure_public_skill_projection,
     ensure_skill_projections,
@@ -393,6 +394,48 @@ def test_unrestricted_run_reuses_existing_thread_mount_with_full_enabled_view(pr
     assert (projected.public / "alpha" / "SKILL.md").is_file()
     assert (projected.public / "beta" / "SKILL.md").is_file()
     assert {category: getattr(projected, category).stat().st_ino for category in ("public", "custom", "legacy", "integrations")} == category_inodes
+
+
+def test_subagent_non_owner_preserves_restricted_lead_projection(
+    projection_env,
+    monkeypatch,
+) -> None:
+    env = projection_env
+    _write_skill(env.skills_root / "public", "allowed")
+    _write_skill(env.skills_root / "public", "omitted")
+    provider = SimpleNamespace(supports_agent_skill_isolation=True)
+    monkeypatch.setattr(
+        "deerflow.sandbox.middleware.get_sandbox_provider",
+        lambda: provider,
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: env.config)
+    monkeypatch.setattr(
+        "deerflow.skills.storage.get_or_new_user_skill_storage",
+        lambda *_args, **_kwargs: env.storage,
+    )
+
+    lead = SandboxMiddleware(available_skills={"allowed"})
+    projected = lead._prepare_agent_skill_projection(
+        "thread-delegation",
+        user_id="alice",
+    )
+    assert projected is not None
+    assert (projected.public / "allowed" / "SKILL.md").is_file()
+    assert not (projected.public / "omitted").exists()
+
+    subagent = SandboxMiddleware(
+        available_skills=None,
+        owns_agent_skill_projection=False,
+    )
+    assert (
+        subagent._prepare_agent_skill_projection(
+            "thread-delegation",
+            user_id="alice",
+        )
+        is None
+    )
+    assert (projected.public / "allowed" / "SKILL.md").is_file()
+    assert not (projected.public / "omitted").exists()
 
 
 def test_thread_projection_revokes_removed_skill_before_repopulation(projection_env, monkeypatch) -> None:
