@@ -24,6 +24,12 @@ _SHARE_TOKEN_LOG_PATTERN = re.compile(r"(?<![A-Za-z0-9_-])dfs_[A-Za-z0-9_-]+")
 _SHARE_TOKEN_REDACTION_MASK = "dfs_***"
 
 
+def _redact_share_tokens(value: str) -> str:
+    if "dfs_" not in value:
+        return value
+    return _SHARE_TOKEN_LOG_PATTERN.sub(_SHARE_TOKEN_REDACTION_MASK, value)
+
+
 class TraceContextFilter(logging.Filter):
     """Inject the current request trace id into every log record."""
 
@@ -41,11 +47,18 @@ class ShareTokenRedactionFilter(logging.Filter):
         try:
             message = record.getMessage()
         except (TypeError, ValueError):  # malformed %-args: leave the record alone
-            return True
-        if "dfs_" not in message:
-            return True
-        record.msg = _SHARE_TOKEN_LOG_PATTERN.sub(_SHARE_TOKEN_REDACTION_MASK, message)
-        record.args = None
+            pass
+        else:
+            redacted_message = _redact_share_tokens(message)
+            if redacted_message != message:
+                record.msg = redacted_message
+                record.args = None
+
+        if record.exc_info:
+            exception_text = record.exc_text or logging.Formatter().formatException(record.exc_info)
+            redacted_exception = _redact_share_tokens(exception_text)
+            if redacted_exception != exception_text:
+                record.exc_text = redacted_exception
         return True
 
 
@@ -65,7 +78,8 @@ class JsonTraceFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
+            exception_text = record.exc_text or self.formatException(record.exc_info)
+            payload["exc_info"] = _redact_share_tokens(exception_text)
         if record.stack_info:
             payload["stack_info"] = self.formatStack(record.stack_info)
         return json.dumps(payload, ensure_ascii=False)

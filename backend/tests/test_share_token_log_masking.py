@@ -8,13 +8,15 @@ included) and the nginx access-log masking in the shipped configs.
 
 from __future__ import annotations
 
+import io
+import json
 import logging
 import re
 from pathlib import Path
 
 import pytest
 
-from deerflow.logging_config import ShareTokenRedactionFilter, install_share_token_redaction
+from deerflow.logging_config import JsonTraceFormatter, ShareTokenRedactionFilter, install_share_token_redaction
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 NGINX_CONFIGS = (
@@ -54,6 +56,44 @@ def test_filter_masks_token_in_plain_message():
     record = _record(f"resolved share {_TOKEN} for thread-1")
     assert ShareTokenRedactionFilter().filter(record) is True
     assert record.getMessage() == "resolved share dfs_*** for thread-1"
+
+
+def test_filter_masks_token_in_standard_text_exception_traceback():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(ShareTokenRedactionFilter())
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger = logging.Logger("deerflow.share-redaction-test", level=logging.ERROR)
+    logger.addHandler(handler)
+
+    try:
+        raise RuntimeError(f"upstream URL /api/shares/{_TOKEN}")
+    except RuntimeError:
+        logger.exception("request failed")
+
+    rendered = stream.getvalue()
+    assert _TOKEN not in rendered
+    assert "RuntimeError: upstream URL /api/shares/dfs_***" in rendered
+
+
+def test_filter_masks_token_in_json_exception_traceback():
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.addFilter(ShareTokenRedactionFilter())
+    handler.setFormatter(JsonTraceFormatter())
+    logger = logging.Logger("deerflow.share-redaction-test", level=logging.ERROR)
+    logger.addHandler(handler)
+
+    try:
+        raise RuntimeError(f"upstream URL /api/shares/{_TOKEN}")
+    except RuntimeError:
+        logger.exception("request failed")
+
+    rendered = stream.getvalue()
+    payload = json.loads(rendered)
+    assert _TOKEN not in rendered
+    assert payload["message"] == "request failed"
+    assert "RuntimeError: upstream URL /api/shares/dfs_***" in payload["exc_info"]
 
 
 def test_filter_leaves_ordinary_records_untouched():
@@ -121,6 +161,40 @@ def _apply(pattern: re.Pattern[str], value: str, request_line: str) -> str:
     return re.sub(r"\$(\w+)", lambda m: match.group(m.group(1)), value)
 
 
+def _optional_map_from_conf(config_text: str, source: str, target: str) -> tuple[re.Pattern[str], str] | None:
+    map_block = re.search(rf"map \${re.escape(source)} \${re.escape(target)} \{{(.*?)\}}", config_text, re.DOTALL)
+    if map_block is None:
+        return None
+    entry = re.search(r'"(?P<regex>~[^"]+)"\s+(?P<value>\S+)', map_block.group(1))
+    assert entry, f"${target} map has no regex entry"
+    regex = entry.group("regex").replace("(?<", "(?P<")
+    regex = re.sub(r"^~\*?", "", regex)
+    return re.compile(regex, re.IGNORECASE), entry.group("value").rstrip(";")
+
+
+def _render_masked_access_log(config: Path, *, request_line: str, referer: str) -> str:
+    config_text = config.read_text(encoding="utf-8")
+    request_pattern, request_value = _masked_request_from_conf(config)
+    masked_request = _apply(request_pattern, request_value, request_line)
+    referer_map = _optional_map_from_conf(config_text, "http_referer", "masked_referer")
+    masked_referer = referer if referer_map is None else _apply(*referer_map, referer)
+
+    format_match = re.search(r"log_format\s+masked_access\s+'(?P<format>[^']+)';", config_text)
+    assert format_match, f"{config.name}: missing masked_access log format"
+    variables = {
+        "remote_addr": "127.0.0.1",
+        "remote_user": "-",
+        "time_local": "30/Aug/2026:12:00:00 +0800",
+        "masked_request": masked_request,
+        "status": "200",
+        "body_bytes_sent": "123",
+        "http_referer": referer,
+        "masked_referer": masked_referer,
+        "http_user_agent": "test-agent",
+    }
+    return re.sub(r"\$(\w+)", lambda match: variables[match.group(1)], format_match.group("format"))
+
+
 @pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
 def test_nginx_access_log_uses_masked_format(config_path: Path) -> None:
     config = config_path.read_text(encoding="utf-8")
@@ -144,6 +218,17 @@ def test_nginx_masks_share_tokens_in_access_log(config_path: Path) -> None:
     # Management routes carry no secret in the URL and stay readable.
     for untouched in ("POST /api/threads/thread-1/shares HTTP/1.1", "GET /api/threads/thread-1/runs/wait HTTP/1.1"):
         assert _apply(pattern, value, untouched) == untouched
+
+
+@pytest.mark.parametrize("config_path", NGINX_CONFIGS, ids=lambda path: path.name)
+def test_nginx_complete_access_log_masks_share_token_referer(config_path: Path) -> None:
+    rendered = _render_masked_access_log(
+        config_path,
+        request_line="GET /favicon.ico HTTP/1.1",
+        referer=f"https://deerflow.example/share/{_TOKEN}?tab=1",
+    )
+
+    assert rendered == ('127.0.0.1 - - [30/Aug/2026:12:00:00 +0800] "GET /favicon.ico HTTP/1.1" 200 123 "dfs_***" "test-agent"')
 
 
 def _location_block(config_text: str, location: str) -> str:
