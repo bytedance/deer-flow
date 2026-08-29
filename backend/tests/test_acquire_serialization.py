@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 
 class TestSyncMutualExclusion:
@@ -171,6 +172,22 @@ class TestAsyncContract:
 
         await asyncio.gather(*[worker() for _ in range(8)])
         assert max_active == 1
+
+    @pytest.mark.asyncio
+    async def test_run_on_executor_preserves_request_trace_context(self):
+        """run_on_executor must carry request ContextVars into the worker.
+
+        Regression test (#5089): raw ``loop.run_in_executor`` does not copy
+        contextvars, so without an explicit ``copy_context`` the worker thread
+        reads the trace id bound by ``request_trace_context()`` as unset.
+        """
+        serializer = AcquireSerializer()
+        try:
+            with request_trace_context("trace-5089"):
+                seen = await serializer.run_on_executor(get_current_trace_id)
+            assert seen == "trace-5089"
+        finally:
+            serializer.close()
 
 
 async def _hold_once(serializer, key):

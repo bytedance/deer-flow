@@ -14,12 +14,14 @@ cleanup does not depend on the cancelling event loop running a done callback.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import os
 import threading
 from collections.abc import AsyncIterator, Callable, Hashable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
+from functools import partial
 
 DEFAULT_MAX_WORKERS = min(32, (os.cpu_count() or 1) + 4)
 
@@ -117,6 +119,21 @@ class AcquireSerializer[KeyT: Hashable]:
         pre-serializer to_thread bridge semantics.
         """
         return self._executor
+
+    async def run_on_executor[**P, T](self, func: Callable[P, T], /, *args: P.args, **kwargs: P.kwargs) -> T:
+        """Run a blocking callable on the serializer's dedicated executor.
+
+        ``asyncio.to_thread`` copies ``ContextVar`` values automatically; raw
+        ``loop.run_in_executor`` does not. The providers whose ``acquire_async``
+        offloads the whole synchronous acquire here replaced the inherited
+        ``to_thread`` bridge, so copy the calling context explicitly: without
+        it, request-scoped ContextVars (e.g. the trace id bound by
+        ``request_trace_context``) read as unset inside the worker thread.
+        """
+        loop = asyncio.get_running_loop()
+        ctx = contextvars.copy_context()
+        call = partial(func, *args, **kwargs)
+        return await loop.run_in_executor(self._executor, ctx.run, call)
 
     @contextmanager
     def hold(self, key: KeyT) -> Iterator[None]:

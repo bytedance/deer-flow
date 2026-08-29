@@ -383,9 +383,8 @@ class BoxliteProvider(WarmPoolLifecycleMixin[BoxliteBox], SandboxProvider):
         completion and releases the hold itself, so a retry serializes
         behind it instead of overlapping the abandoned body.
         """
-        loop = asyncio.get_running_loop()
         acquire = partial(self.acquire, thread_id, user_id=user_id)
-        return await loop.run_in_executor(self._acquire_serializer.executor, acquire)
+        return await self._acquire_serializer.run_on_executor(acquire)
 
     def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str) -> str:
         with self._lock:

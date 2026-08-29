@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import atexit
 import ipaddress
 import logging
@@ -238,9 +237,8 @@ class OpenSandboxProvider(WarmPoolLifecycleMixin[OpenSandboxSandbox], SandboxPro
         completion and releases the hold itself, so a retry serializes
         behind it instead of overlapping the abandoned body.
         """
-        loop = asyncio.get_running_loop()
         acquire = partial(self.acquire, thread_id, user_id=user_id)
-        return await loop.run_in_executor(self._acquire_serializer.executor, acquire)
+        return await self._acquire_serializer.run_on_executor(acquire)
 
     def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str, *, thread_id: str, user_id: str | None) -> str:
         with self._lock:
