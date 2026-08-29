@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
@@ -603,7 +603,7 @@ def _ensure_no_masked_secrets(server: McpServerConfigResponse) -> None:
         if server.oauth.refresh_token == _MASKED_VALUE:
             reject("oauth refresh_token")
         for key, value in server.oauth.extra_token_params.items():
-            if _contains_masked_sensitive_extra_value(str(key), value):
+            if value == _MASKED_VALUE:
                 reject(f"oauth extra_token_params key '{key}'")
         for key, value in (server.oauth.model_extra or {}).items():
             if _contains_masked_sensitive_extra_value(str(key), value):
@@ -811,7 +811,10 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
     masked_headers = {k: _MASKED_VALUE for k in server.headers}
     masked_oauth = None
     if server.oauth is not None:
-        masked_extra_token_params = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else value for key, value in server.oauth.extra_token_params.items()}
+        # These values are arbitrary form fields sent directly to the token
+        # endpoint. Treat the whole map as credential-bearing instead of
+        # trying to recognize secrets from an open-ended key vocabulary.
+        masked_extra_token_params = {key: _MASKED_VALUE for key in server.oauth.extra_token_params}
         masked_oauth_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.oauth.model_extra or {}).items()}
         masked_oauth = server.oauth.model_copy(
             update={
@@ -909,7 +912,7 @@ def _merge_preserving_secrets(
         base_extra_token_params = base_oauth.extra_token_params if base_oauth is not None else {}
         merged_extra_token_params: dict[str, str] = {}
         for key, value in incoming_oauth.extra_token_params.items():
-            if value == _MASKED_VALUE and _is_sensitive_extra_key(key):
+            if value == _MASKED_VALUE:
                 if key not in base_extra_token_params:
                     raise HTTPException(
                         status_code=400,
@@ -1106,6 +1109,19 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
     return McpConfigResponse(mcp_servers=servers)
 
 
+def _validate_extensions_config_candidate(raw_data: dict) -> None:
+    """Reject a runtime-invalid candidate before it can replace the file."""
+    try:
+        ExtensionsConfig.model_validate(raw_data)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_input=False)
+        summary = "; ".join(f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}" for error in errors)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid MCP configuration: {summary}",
+        ) from exc
+
+
 def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     """Worker-thread body for :func:`update_mcp_configuration`.
 
@@ -1162,6 +1178,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
             raw_skills = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
         config_data["skills"] = raw_skills
 
+        _validate_extensions_config_candidate(config_data)
         atomic_write_extensions_config(config_path, config_data)
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
@@ -1278,6 +1295,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
             raw_servers[name] = incoming.model_dump()
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)
+        _validate_extensions_config_candidate(raw_data)
         atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
@@ -1305,6 +1323,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         _ensure_no_masked_secrets(merged)
         raw_servers[body.server_name] = merged.model_dump()
         raw_data["mcpServers"] = raw_servers
+        _validate_extensions_config_candidate(raw_data)
         atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("Updated MCP server: %s", body.server_name)
