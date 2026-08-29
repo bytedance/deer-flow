@@ -38,7 +38,13 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
     state_schema = MemoryMiddlewareState
 
-    def __init__(self, agent_name: str | None = None, *, memory_config: "MemoryConfig | None" = None):
+    def __init__(
+        self,
+        agent_name: str | None = None,
+        *,
+        agent_incarnation: str | None = None,
+        memory_config: "MemoryConfig | None" = None,
+    ):
         """Initialize the MemoryMiddleware.
 
         Args:
@@ -48,6 +54,7 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         """
         super().__init__()
         self._agent_name = agent_name
+        self._agent_incarnation = agent_incarnation
         self._memory_config = memory_config
 
     def _resolve_add_args(self, state: MemoryMiddlewareState, runtime: Runtime) -> tuple[str, list, str, str | None] | None:
@@ -99,13 +106,18 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # Hand raw messages to the manager; the backend filters to user + final-AI
         # turns, validates, detects correction/reinforcement, and enqueues.
-        get_memory_manager().add(
-            thread_id,
-            messages,
-            agent_name=self._agent_name,
-            user_id=user_id,
-            trace_id=trace_id,
-        )
+        manager = get_memory_manager()
+        if self._agent_incarnation is None:
+            manager.add(thread_id, messages, agent_name=self._agent_name, user_id=user_id, trace_id=trace_id)
+        else:
+            manager.add_for_incarnation(
+                thread_id,
+                messages,
+                agent_name=self._agent_name,
+                agent_incarnation=self._agent_incarnation,
+                user_id=user_id,
+                trace_id=trace_id,
+            )
 
         return None
 
@@ -117,11 +129,15 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
             return None
         thread_id, messages, user_id, trace_id = add_args
         manager = await asyncio.to_thread(get_memory_manager)
-        await manager.aadd(
-            thread_id,
-            messages,
-            agent_name=self._agent_name,
-            user_id=user_id,
-            trace_id=trace_id,
-        )
+        if self._agent_incarnation is None:
+            await manager.aadd(thread_id, messages, agent_name=self._agent_name, user_id=user_id, trace_id=trace_id)
+        else:
+            await manager.aadd_for_incarnation(
+                thread_id,
+                messages,
+                agent_name=self._agent_name,
+                agent_incarnation=self._agent_incarnation,
+                user_id=user_id,
+                trace_id=trace_id,
+            )
         return None

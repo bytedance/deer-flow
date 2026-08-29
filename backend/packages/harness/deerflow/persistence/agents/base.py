@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Hashable
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from deerflow.config.agents_config import AgentConfig
@@ -56,6 +58,14 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
 AgentDeleteOutcome = Literal["deleted", "legacy", "missing", "not-custom-agent"]
 
 
+@dataclass(frozen=True)
+class AgentSnapshot:
+    """One agent definition and its stable lifecycle identity."""
+
+    config: AgentConfig
+    incarnation: str
+
+
 class AgentExistsError(Exception):
     """Raised by :meth:`AgentStore.create` when ``(user_id, name)`` already exists."""
 
@@ -69,6 +79,20 @@ class AgentStore(abc.ABC):
         historical contract that ``routers/agents.py`` and ``update_agent`` rely
         on to surface a 404 / "does not exist" error.
         """
+
+    @abc.abstractmethod
+    def get_snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
+        """Return the config and incarnation from one storage snapshot."""
+
+    @abc.abstractmethod
+    def guard_incarnation(
+        self,
+        name: str,
+        incarnation: str,
+        *,
+        user_id: str | None = None,
+    ) -> AbstractContextManager[bool]:
+        """Lock this scope and report if ``incarnation`` is current."""
 
     @abc.abstractmethod
     def exists(self, name: str, *, user_id: str | None = None) -> bool:

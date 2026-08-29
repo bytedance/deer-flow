@@ -133,7 +133,14 @@ class DeerMem(MemoryManager):
         # so zero-config DeerMem (empty `model`) still extracts via the app default,
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
-        self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir, callbacks=self.callbacks)
+        self._updater = MemoryUpdater(
+            self._config,
+            self._storage,
+            self._llm,
+            prompts_dir=self._config.prompts_dir,
+            callbacks=self.callbacks,
+            incarnation_guard=getattr(self, "incarnation_guard", None),
+        )
         # Retrieval is derived data. The first search for a scope lazily
         # rebuilds it; Gateway warm-up performs the full rebuild off-loop.
         self._retrieval_lock = threading.RLock()
@@ -195,7 +202,12 @@ class DeerMem(MemoryManager):
         # hooks) so the field stays serializable and matches the README contract
         # ("host hooks arrive as from_config kwargs, NOT in backend_config") --
         # the hooks live in self._config, not the backend_config field.
-        instance = cls(backend_config=config_dict, mode=mode, callbacks=host_hooks.get("callbacks"))
+        instance = cls(
+            backend_config=config_dict,
+            mode=mode,
+            callbacks=host_hooks.get("callbacks"),
+            incarnation_guard=host_hooks.get("incarnation_guard"),
+        )
         instance.backend_config = dict(backend_config or {})
         return instance
 
@@ -206,6 +218,24 @@ class DeerMem(MemoryManager):
         messages: list[Any],
         *,
         agent_name: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        self.add_for_incarnation(
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
+
+    def add_for_incarnation(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        agent_incarnation: str | None = None,
         user_id: str | None = None,
         trace_id: str | None = None,
     ) -> None:
@@ -232,6 +262,7 @@ class DeerMem(MemoryManager):
                 thread_id=thread_id,
                 messages=filtered,
                 agent_name=resolved_agent,
+                agent_incarnation=agent_incarnation,
                 user_id=user_id,
                 trace_id=trace_id,
                 signals=signals,
@@ -247,6 +278,22 @@ class DeerMem(MemoryManager):
         messages: list[Any],
         *,
         agent_name: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        self.add_nowait_for_incarnation(
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            user_id=user_id,
+        )
+
+    def add_nowait_for_incarnation(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        agent_incarnation: str | None = None,
         user_id: str | None = None,
     ) -> None:
         """Filter, validate, detect signals, then enqueue for immediate flush.
@@ -268,6 +315,7 @@ class DeerMem(MemoryManager):
                 thread_id=thread_id,
                 messages=filtered,
                 agent_name=resolved_agent,
+                agent_incarnation=agent_incarnation,
                 user_id=user_id,
                 signals=signals,
             )

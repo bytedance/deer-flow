@@ -8,6 +8,7 @@ signature the GitHub registry keys its cache off.
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime
 from unittest import mock
 
@@ -149,6 +150,44 @@ def test_delete_reports_outcome(store):
     assert store.delete("gone", user_id="u1") == "missing"
     with pytest.raises(FileNotFoundError):
         store.get("gone", user_id="u1")
+
+
+def test_separate_store_instances_share_incarnation_fence(store):
+    peer = SqlAgentStore(store._url)
+    store.create("phoenix", {"name": "phoenix"}, "old", user_id="u1")
+    old = store.get_snapshot("phoenix", user_id="u1")
+
+    assert peer.delete("phoenix", user_id="u1") == "deleted"
+    peer.create("phoenix", {"name": "phoenix"}, "new", user_id="u1")
+    fresh = peer.get_snapshot("phoenix", user_id="u1")
+
+    assert fresh.incarnation != old.incarnation
+    with store.guard_incarnation("phoenix", old.incarnation, user_id="u1") as current:
+        assert current is False
+    with store.guard_incarnation("phoenix", fresh.incarnation, user_id="u1") as current:
+        assert current is True
+
+
+def test_sql_delete_waits_for_incarnation_guard(store):
+    store.create("guarded", {"name": "guarded"}, "soul", user_id="u1")
+    incarnation = store.get_snapshot("guarded", user_id="u1").incarnation
+    delete_started = threading.Event()
+    delete_finished = threading.Event()
+
+    def delete_agent() -> None:
+        delete_started.set()
+        store.delete("guarded", user_id="u1")
+        delete_finished.set()
+
+    with store.guard_incarnation("guarded", incarnation, user_id="u1") as current:
+        assert current is True
+        worker = threading.Thread(target=delete_agent)
+        worker.start()
+        assert delete_started.wait(timeout=1)
+        assert not delete_finished.wait(timeout=0.1)
+
+    worker.join(timeout=1)
+    assert delete_finished.is_set()
 
 
 def test_signature_changes_on_mutation(store):

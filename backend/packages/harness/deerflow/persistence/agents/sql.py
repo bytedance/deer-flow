@@ -18,10 +18,11 @@ import logging
 import shutil
 import threading
 import uuid
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 
-from sqlalchemy import Engine, create_engine, delete, event, select
+from sqlalchemy import Engine, create_engine, delete, event, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -30,6 +31,7 @@ from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
+    AgentSnapshot,
     AgentStore,
     parse_agent_config,
 )
@@ -45,6 +47,22 @@ logger = logging.getLogger(__name__)
 # listeners on — duplicate engines.
 _engines: dict[str, Engine] = {}
 _engines_lock = threading.Lock()
+_scope_locks: dict[tuple[str, str, str], threading.RLock] = {}
+_scope_locks_guard = threading.Lock()
+
+
+def _scope_lock(url: str, user_id: str, name: str) -> threading.RLock:
+    key = (url, user_id, name.lower())
+    with _scope_locks_guard:
+        return _scope_locks.setdefault(key, threading.RLock())
+
+
+def _lock_scope(session: Session, user_id: str, name: str) -> None:
+    """Lock one natural key across PostgreSQL workers for this transaction."""
+    if session.bind is not None and session.bind.dialect.name == "postgresql":
+        digest = hashlib.sha256(f"deerflow-agent:{user_id}:{name.lower()}".encode()).digest()
+        lock_key = int.from_bytes(digest[:8], byteorder="big", signed=True)
+        session.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": lock_key})
 
 
 def _build_engine(url: str) -> Engine:
@@ -100,6 +118,7 @@ def _config_document(config: dict) -> dict:
 
 class SqlAgentStore(AgentStore):
     def __init__(self, url: str) -> None:
+        self._url = url
         self._Session = get_sync_sessionmaker(url)
 
     def _row(self, session: Session, name: str, user_id: str) -> AgentRow | None:
@@ -107,12 +126,24 @@ class SqlAgentStore(AgentStore):
         return session.execute(stmt).scalar_one_or_none()
 
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
+        return self.get_snapshot(name, user_id=user_id).config
+
+    def get_snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)
         if row is None:
             raise FileNotFoundError(f"Agent config not found: {name} (user {effective_user})")
-        return parse_agent_config(row.config or {}, row.name)
+        return AgentSnapshot(config=parse_agent_config(row.config or {}, row.name), incarnation=row.id)
+
+    @contextmanager
+    def guard_incarnation(self, name: str, incarnation: str, *, user_id: str | None = None) -> Iterator[bool]:
+        effective_user = user_id or get_effective_user_id()
+        with _scope_lock(self._url, effective_user, name):
+            with self._Session.begin() as session:
+                _lock_scope(session, effective_user, name)
+                current = session.scalar(select(AgentRow.id).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()).with_for_update())
+                yield current == incarnation
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
         effective_user = user_id or get_effective_user_id()
@@ -152,45 +183,42 @@ class SqlAgentStore(AgentStore):
             created_at=now,
             updated_at=now,
         )
-        try:
-            with self._Session() as session:
-                session.add(row)
-                session.commit()
-        except IntegrityError as e:
-            # UNIQUE(user_id, name) turns the check-then-write race into a clean conflict.
-            raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
+        with _scope_lock(self._url, effective_user, name):
+            try:
+                with self._Session.begin() as session:
+                    _lock_scope(session, effective_user, name)
+                    session.add(row)
+            except IntegrityError as e:
+                raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
         effective_user = user_id or get_effective_user_id()
-        with self._Session() as session:
-            row = self._row(session, name, effective_user)
-            if row is not None:
-                self._apply_update(row, config, soul)
-                session.commit()
-                return
-            # Upsert: setup_agent and any first-time write land here. Two
-            # concurrent first-time updates (e.g. two setup_agent handshakes) can
-            # both see row is None and both insert; UNIQUE(user_id, name) rejects
-            # the loser. Re-fetch the winner's row and apply the update to it
-            # rather than letting a raw IntegrityError surface as a 500 — a true
-            # upsert, symmetric with create()'s conflict handling.
-            row = AgentRow(
-                id=uuid.uuid4().hex,
-                user_id=effective_user,
-                name=name.lower(),
-                config=_config_document(config or {}),
-                soul=soul or "",
-            )
-            session.add(row)
+        with _scope_lock(self._url, effective_user, name):
             try:
-                session.commit()
+                with self._Session.begin() as session:
+                    _lock_scope(session, effective_user, name)
+                    row = self._row(session, name, effective_user)
+                    if row is not None:
+                        self._apply_update(row, config, soul)
+                        return
+                    session.add(
+                        AgentRow(
+                            id=uuid.uuid4().hex,
+                            user_id=effective_user,
+                            name=name.lower(),
+                            config=_config_document(config or {}),
+                            soul=soul or "",
+                        )
+                    )
             except IntegrityError:
-                session.rollback()
-                existing = self._row(session, name, effective_user)
-                if existing is None:
-                    raise
-                self._apply_update(existing, config, soul)
-                session.commit()
+                # A stale pre-insert read can still race with a writer that does
+                # not use this store. Reapply the update to the winning row.
+                with self._Session.begin() as session:
+                    _lock_scope(session, effective_user, name)
+                    existing = self._row(session, name, effective_user)
+                    if existing is None:
+                        raise
+                    self._apply_update(existing, config, soul)
 
     @staticmethod
     def _apply_update(row: AgentRow, config: dict | None, soul: str | None) -> None:
@@ -212,18 +240,17 @@ class SqlAgentStore(AgentStore):
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         effective_user = user_id or get_effective_user_id()
-        with self._Session() as session:
-            result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
-            session.commit()
-            row_deleted = result.rowcount > 0
         agent_dir = get_paths().user_agent_dir(effective_user, name)
-        if row_deleted:
-            # The agent existed as a row; remove any co-located on-disk memory
-            # (deermem file backend) so it is not orphaned. Mirrors the file
-            # backend's rmtree, which bundles config + soul + memory.
-            if agent_dir.exists():
-                shutil.rmtree(agent_dir)
-            return "deleted"
+        with _scope_lock(self._url, effective_user, name):
+            with self._Session.begin() as session:
+                _lock_scope(session, effective_user, name)
+                result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
+                row_deleted = result.rowcount > 0
+                if row_deleted:
+                    # Keep the row transaction locked until co-located memory is gone.
+                    if agent_dir.exists():
+                        shutil.rmtree(agent_dir)
+                    return "deleted"
         # No agent row. A bare on-disk directory here holds only memory/facts
         # data (in db mode the config lives in the row, not on disk), so preserve
         # it rather than deleting a user's memory (#4279) — do not rmtree it.

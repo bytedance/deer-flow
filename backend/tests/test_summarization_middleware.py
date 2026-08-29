@@ -426,6 +426,27 @@ def test_memory_flush_hook_passes_runtime_user_id(monkeypatch: pytest.MonkeyPatc
     assert manager.add_nowait.call_args.kwargs["user_id"] == "alice"
 
 
+def test_memory_flush_hook_preserves_run_incarnation(monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = MagicMock()
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_config", lambda: MemoryConfig(enabled=True))
+    monkeypatch.setattr("deerflow.agents.memory.summarization_hook.get_memory_manager", lambda: manager)
+
+    memory_flush_hook(
+        SummarizationEvent(
+            thread_id="main",
+            messages_to_summarize=tuple(_messages()[:2]),
+            preserved_messages=tuple(_messages()[2:]),
+            agent_name="researcher",
+            runtime=_runtime(thread_id="main", agent_name="researcher", user_id="alice"),
+        ),
+        agent_incarnation="run-incarnation",
+    )
+
+    manager.add_nowait_for_incarnation.assert_called_once()
+    assert manager.add_nowait_for_incarnation.call_args.kwargs["agent_incarnation"] == "run-incarnation"
+    manager.add_nowait.assert_not_called()
+
+
 def test_stale_user_peer_is_compressed_not_rescued() -> None:
     """A stale untagged ``__user`` peer is no longer rescued — only the latest user message is.
 

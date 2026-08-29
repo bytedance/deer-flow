@@ -171,6 +171,9 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 
 Custom-agent deletion calls `AgentStore.inspect_delete()` before queue cancellation.
 Rejected deletes do not cancel memory work. Successful deletes cancel the exact scope first.
+Each custom-agent run captures the definition's durable incarnation before execution.
+Memory persistence checks that incarnation under the same lock used by delete and recreate.
+Process-local queue generations only reduce obsolete work. They do not provide the durable fence.
 
 ### Test-Driven Development (TDD) — MANDATORY
 

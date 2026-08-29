@@ -806,6 +806,7 @@ def create_summarization_middleware(
     skip_memory_flush: bool = False,
     run_model_name: str | None = None,
     extensions=None,
+    agent_incarnation: str | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
@@ -872,7 +873,10 @@ def create_summarization_middleware(
     if resolved_app_config.memory.enabled and not skip_memory_flush:
         from deerflow.agents.memory.summarization_hook import memory_flush_hook
 
-        hooks.append(memory_flush_hook)
+        if agent_incarnation is None:
+            hooks.append(memory_flush_hook)
+        else:
+            hooks.append(lambda event: memory_flush_hook(event, agent_incarnation=agent_incarnation))
 
     return DeerFlowSummarizationMiddleware(
         **kwargs,

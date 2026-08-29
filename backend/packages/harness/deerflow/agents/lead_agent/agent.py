@@ -315,6 +315,7 @@ def _create_summarization_middleware(
     app_config: AppConfig | None = None,
     run_model_name: str | None = None,
     extensions=None,
+    agent_incarnation: str | None = None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create and configure the summarization middleware from config.
 
@@ -322,11 +323,14 @@ def _create_summarization_middleware(
     ``model_name: null`` summarization and the explicit-summary-model fallback, so a
     custom agent's model is used instead of ``config.models[0]``.
     """
-    return create_summarization_middleware(
-        app_config=app_config,
-        run_model_name=run_model_name,
-        extensions=extensions,
-    )
+    kwargs = {
+        "app_config": app_config,
+        "run_model_name": run_model_name,
+        "extensions": extensions,
+    }
+    if agent_incarnation is not None:
+        kwargs["agent_incarnation"] = agent_incarnation
+    return create_summarization_middleware(**kwargs)
 
 
 def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
@@ -468,6 +472,7 @@ def build_middlewares(
     authorization_provider=None,
     extensions=None,
     subagent_execution_capacity: int | None = None,
+    agent_incarnation: str | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -563,6 +568,7 @@ def build_middlewares(
         app_config=resolved_app_config,
         run_model_name=model_name,
         extensions=resolved_extensions,
+        agent_incarnation=agent_incarnation,
     )
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
@@ -592,11 +598,17 @@ def build_middlewares(
         from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
 
         if backend_requires_passive_writes_in_tool_mode(resolved_app_config.memory.manager_class):
-            middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+            memory_kwargs = {"memory_config": resolved_app_config.memory}
+            if agent_incarnation is not None:
+                memory_kwargs["agent_incarnation"] = agent_incarnation
+            middlewares.append(MemoryMiddleware(agent_name=agent_name, **memory_kwargs))
     else:
         if resolved_app_config.memory.mode == "tool" and not resolved_app_config.memory.enabled:
             logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
-        middlewares.append(MemoryMiddleware(agent_name=agent_name, memory_config=resolved_app_config.memory))
+        memory_kwargs = {"memory_config": resolved_app_config.memory}
+        if agent_incarnation is not None:
+            memory_kwargs["agent_incarnation"] = agent_incarnation
+        middlewares.append(MemoryMiddleware(agent_name=agent_name, **memory_kwargs))
 
     # Add ViewImageMiddleware only if the current model supports vision.
     # Use the resolved runtime model_name from make_lead_agent to avoid stale config values.
@@ -892,7 +904,24 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     non_interactive = bool(cfg.get("non_interactive", False))
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    agent_incarnation = None
+    if not is_bootstrap:
+        if agent_name is None:
+            agent_config = None
+        else:
+            from deerflow.config.agents_config import load_agent_config as default_load_agent_config
+
+            if load_agent_config is not default_load_agent_config:
+                # Keep the established integration seam for custom graph builders.
+                agent_config = load_agent_config(agent_name, user_id=resolved_user_id)
+            else:
+                from deerflow.persistence.agents import get_agent_store
+
+                agent_snapshot = get_agent_store().get_snapshot(agent_name, user_id=resolved_user_id)
+                agent_config = agent_snapshot.config
+                agent_incarnation = agent_snapshot.incarnation
+    else:
+        agent_config = None
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
@@ -1031,6 +1060,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             user_id=resolved_user_id,
             authorization_provider=_authz_provider,
             subagent_execution_capacity=subagent_execution_capacity,
+            agent_incarnation=agent_incarnation,
         )
         system_prompt = apply_prompt_template(
             subagent_enabled=subagent_enabled,
@@ -1147,6 +1177,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         user_id=resolved_user_id,
         authorization_provider=_authz_provider,
         subagent_execution_capacity=subagent_execution_capacity,
+        agent_incarnation=agent_incarnation,
     )
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,

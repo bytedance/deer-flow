@@ -8,7 +8,7 @@ from deerflow.config.memory_config import get_memory_config
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 
-def memory_flush_hook(event: SummarizationEvent) -> None:
+def memory_flush_hook(event: SummarizationEvent, *, agent_incarnation: str | None = None) -> None:
     """Flush messages about to be summarized into the memory queue.
 
     Thin, backend-agnostic entry: only the ``enabled`` + ``thread_id`` gate
@@ -20,9 +20,14 @@ def memory_flush_hook(event: SummarizationEvent) -> None:
         return
 
     user_id = resolve_runtime_user_id(event.runtime)
-    get_memory_manager().add_nowait(
-        event.thread_id,
-        list(event.messages_to_summarize),
-        agent_name=event.agent_name,
-        user_id=user_id,
-    )
+    manager = get_memory_manager()
+    if agent_incarnation is None:
+        manager.add_nowait(event.thread_id, list(event.messages_to_summarize), agent_name=event.agent_name, user_id=user_id)
+    else:
+        manager.add_nowait_for_incarnation(
+            event.thread_id,
+            list(event.messages_to_summarize),
+            agent_name=event.agent_name,
+            agent_incarnation=agent_incarnation,
+            user_id=user_id,
+        )

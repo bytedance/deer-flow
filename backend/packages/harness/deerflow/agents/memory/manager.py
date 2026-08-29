@@ -146,6 +146,8 @@ class MemoryManager(BaseModel):
     # langfuse; None = no callbacks (direct construction / standalone). Backends
     # pass this to their LLM path and call ``on_memory_llm_call`` before invoke.
     callbacks: MemoryCallbacks | None = None
+    # The host supplies the durable custom-agent fence. Immediate backends can ignore it.
+    incarnation_guard: Any = Field(default=None, exclude=True)
 
     @field_validator("backend_config", mode="before")
     @classmethod
@@ -262,6 +264,33 @@ class MemoryManager(BaseModel):
         priority).
         """
         self.add(thread_id, messages, agent_name=agent_name, user_id=user_id)
+
+    def add_for_incarnation(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        agent_incarnation: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        """Queue an update with the agent identity captured for this run."""
+        del agent_incarnation
+        self.add(thread_id, messages, agent_name=agent_name, user_id=user_id, trace_id=trace_id)
+
+    def add_nowait_for_incarnation(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        agent_incarnation: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        """Queue an immediate update with the run's agent identity."""
+        del agent_incarnation
+        self.add_nowait(thread_id, messages, agent_name=agent_name, user_id=user_id)
 
     def search(
         self,
@@ -480,6 +509,25 @@ class MemoryManager(BaseModel):
         trace_id: str | None = None,
     ) -> None:
         return self.add(thread_id, messages, agent_name=agent_name, user_id=user_id, trace_id=trace_id)
+
+    async def aadd_for_incarnation(
+        self,
+        thread_id: str,
+        messages: list[Any],
+        *,
+        agent_name: str | None = None,
+        agent_incarnation: str | None = None,
+        user_id: str | None = None,
+        trace_id: str | None = None,
+    ) -> None:
+        return self.add_for_incarnation(
+            thread_id,
+            messages,
+            agent_name=agent_name,
+            agent_incarnation=agent_incarnation,
+            user_id=user_id,
+            trace_id=trace_id,
+        )
 
     async def aget_context(
         self,
@@ -855,11 +903,19 @@ def _collect_host_hooks() -> dict[str, Any]:
 
     return {
         "callbacks": LangfuseMemoryCallbacks(),
+        "incarnation_guard": _host_agent_incarnation_guard,
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
         "trace_context_manager": request_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
     }
+
+
+def _host_agent_incarnation_guard(agent_name: str, incarnation: str, user_id: str | None):
+    """Return the active agent store's durable write fence."""
+    from deerflow.persistence.agents import get_agent_store
+
+    return get_agent_store().guard_incarnation(agent_name, incarnation, user_id=user_id)
 
 
 # ── Singleton factory ─────────────────────────────────────────────────────

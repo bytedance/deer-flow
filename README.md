@@ -367,6 +367,8 @@ On Windows, run the local development flow from Git Bash. Native `cmd.exe` and P
    This copies the sample fixture into the default local runtime memory file so reviewers can immediately test `Settings > Memory`.
    See [backend/docs/MEMORY_SETTINGS_REVIEW.md](backend/docs/MEMORY_SETTINGS_REVIEW.md) for the shortest review flow.
 
+   Custom-agent memory writes retain the agent incarnation captured when the run starts. Deleting and recreating an agent invalidates older runs across Gateway workers when agent storage is shared.
+
 5. **Start services**:
    ```bash
    make dev

@@ -19,6 +19,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
@@ -385,3 +386,34 @@ def test_deer_mem_clear_all_cancels_pending_updates_for_every_agent_of_user(deer
     deermem.clear_memory(user_id="alice")
 
     assert [context.user_id for context in queue._items] == ["bob"]
+
+
+def test_deleted_agent_rejects_run_that_enqueues_after_delete(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+    from deerflow.persistence.agents.file import FileAgentStore
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    store.create("phoenix", {"name": "phoenix"}, "old", user_id="alice")
+    run_incarnation = store.get_snapshot("phoenix", user_id="alice").incarnation
+    manager = DeerMem(
+        backend_config={"storage_path": str(tmp_path), "debounce_seconds": 300},
+        incarnation_guard=lambda name, incarnation, user_id: store.guard_incarnation(name, incarnation, user_id=user_id),
+    )
+    response = MagicMock()
+    response.content = '{"user": {}, "history": {}, "newFacts": [{"content": "old run fact", "category": "context", "confidence": 0.9, "scope": "user", "durability": "durable", "authority": "descriptive"}], "factsToRemove": []}'
+    manager._updater._llm = MagicMock()
+    manager._updater._llm.invoke.return_value = response
+
+    assert store.delete("phoenix", user_id="alice") == "deleted"
+    manager.add_for_incarnation(
+        "old-run",
+        [HumanMessage(content="Remember this"), AIMessage(content="Understood")],
+        agent_name="phoenix",
+        agent_incarnation=run_incarnation,
+        user_id="alice",
+    )
+    manager._queue.flush()
+
+    assert not paths_module.get_paths().user_agent_dir("alice", "phoenix").exists()

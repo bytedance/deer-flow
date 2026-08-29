@@ -12,6 +12,8 @@ import re
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -774,10 +776,22 @@ def _message_identity(msg: Any) -> tuple[str, ...] | None:
     return ("content", msg_type, text)
 
 
+IncarnationGuard = Callable[[str, str, str | None], AbstractContextManager[bool]]
+
+
 class MemoryUpdater:
     """Updates memory using LLM based on conversation context."""
 
-    def __init__(self, config: DeerMemConfig, storage: MemoryStorage, llm: Any = None, *, prompts_dir: str | None = None, callbacks: Any = None):
+    def __init__(
+        self,
+        config: DeerMemConfig,
+        storage: MemoryStorage,
+        llm: Any = None,
+        *,
+        prompts_dir: str | None = None,
+        callbacks: Any = None,
+        incarnation_guard: IncarnationGuard | None = None,
+    ):
         """Initialize the memory updater with injected config + storage + llm (DI).
 
         Args:
@@ -796,6 +810,7 @@ class MemoryUpdater:
         self._llm = llm
         self._prompts_dir = prompts_dir
         self._callbacks = callbacks
+        self._incarnation_guard = incarnation_guard
         # Watermark: last-extracted message identity per (thread_id, user_id,
         # agent_name), held in memory so a restart re-extracts one batch. The
         # cache is a bounded LRU (config.watermark_max_keys) so a long-lived
@@ -1378,8 +1393,23 @@ class MemoryUpdater:
         *,
         metrics: dict[str, Any] | None = None,
         signals: frozenset[str] = frozenset(),
+        agent_incarnation: str | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
+        if agent_name is not None and agent_incarnation is not None and self._incarnation_guard is not None:
+            with self._incarnation_guard(agent_name, agent_incarnation, user_id) as current:
+                if not current:
+                    logger.info("Skipping memory persistence for stale agent incarnation (agent=%s user=%s)", agent_name, user_id)
+                    return False
+                return self._finalize_update(
+                    current_memory,
+                    response_content,
+                    thread_id,
+                    agent_name,
+                    user_id,
+                    metrics=metrics,
+                    signals=signals,
+                )
         update_data = _parse_memory_update_response(response_content)
         if metrics is not None:
             extracted = update_data.get("newFacts", [])
@@ -1480,6 +1510,7 @@ class MemoryUpdater:
         signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        agent_incarnation: str | None = None,
         *,
         bypass_watermark: bool = False,
     ) -> bool:
@@ -1499,6 +1530,7 @@ class MemoryUpdater:
             signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            agent_incarnation=agent_incarnation,
             bypass_watermark=bypass_watermark,
         )
 
@@ -1510,6 +1542,7 @@ class MemoryUpdater:
         signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        agent_incarnation: str | None = None,
         *,
         bypass_watermark: bool = False,
     ) -> bool:
@@ -1534,6 +1567,7 @@ class MemoryUpdater:
                     signals=signals,
                     user_id=user_id,
                     trace_id=trace_id,
+                    agent_incarnation=agent_incarnation,
                     bypass_watermark=bypass_watermark,
                 )
         return self._do_update_memory_sync_impl(
@@ -1543,6 +1577,7 @@ class MemoryUpdater:
             signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            agent_incarnation=agent_incarnation,
             bypass_watermark=bypass_watermark,
         )
 
@@ -1605,6 +1640,7 @@ class MemoryUpdater:
         signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        agent_incarnation: str | None = None,
         *,
         bypass_watermark: bool = False,
     ) -> bool:
@@ -1714,6 +1750,7 @@ class MemoryUpdater:
                 user_id=user_id,
                 metrics=metrics,
                 signals=frozenset(feed_signals),
+                agent_incarnation=agent_incarnation,
             )
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
@@ -1784,6 +1821,7 @@ class MemoryUpdater:
         signals: frozenset[str] = frozenset(),
         user_id: str | None = None,
         trace_id: str | None = None,
+        agent_incarnation: str | None = None,
         *,
         bypass_watermark: bool = False,
     ) -> bool:
@@ -1827,6 +1865,7 @@ class MemoryUpdater:
                     signals=signals,
                     user_id=user_id,
                     trace_id=trace_id,
+                    agent_incarnation=agent_incarnation,
                     bypass_watermark=bypass_watermark,
                 )
                 return future.result()
@@ -1841,6 +1880,7 @@ class MemoryUpdater:
             signals=signals,
             user_id=user_id,
             trace_id=trace_id,
+            agent_incarnation=agent_incarnation,
             bypass_watermark=bypass_watermark,
         )
 

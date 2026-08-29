@@ -14,10 +14,15 @@ tests target.
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 import shutil
 import tempfile
-from collections.abc import Hashable
+import threading
+import uuid
+from collections.abc import Hashable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -33,29 +38,91 @@ from deerflow.config.agents_config import (
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
+    AgentSnapshot,
     AgentStore,
     parse_agent_config,
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
 logger = logging.getLogger(__name__)
+_INCARNATION_FILENAME = ".incarnation"
+_scope_locks: dict[tuple[str, str], threading.RLock] = {}
+_scope_locks_guard = threading.Lock()
+
+
+def _thread_scope_lock(user_id: str, name: str) -> threading.RLock:
+    key = (user_id, name.lower())
+    with _scope_locks_guard:
+        return _scope_locks.setdefault(key, threading.RLock())
+
+
+@contextmanager
+def _agent_scope_lock(name: str, user_id: str) -> Iterator[None]:
+    """Serialize one file-backed agent scope across threads and workers."""
+    agent_dir = _ac.get_paths().user_agent_dir(user_id, name)
+    lock_path = agent_dir.parent.parent / ".agent-locks" / f"{name.lower()}.lock"
+    os.makedirs(lock_path.parent, exist_ok=True)
+    with _thread_scope_lock(user_id, name):
+        handle = open(lock_path, "a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                if lock_path.stat().st_size == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            yield
+        finally:
+            if os.name == "nt":
+                import msvcrt
+
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
 
 
 class FileAgentStore(AgentStore):
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
+        return self.get_snapshot(name, user_id=user_id).config
+
+    def get_snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
         name = validate_agent_name(name)
-        agent_dir = resolve_agent_dir(name, user_id=user_id)
-        config_file = agent_dir / "config.yaml"
-        if not agent_dir.exists():
-            raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
-        if not config_file.exists():
-            raise FileNotFoundError(f"Agent config not found: {config_file}")
-        try:
-            with open(config_file, encoding="utf-8") as f:
-                data: dict[str, Any] = yaml.safe_load(f) or {}
-        except yaml.YAMLError as e:
-            raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
-        return parse_agent_config(data, name)
+        effective_user = user_id or _ac.get_effective_user_id()
+        with _agent_scope_lock(name, effective_user):
+            agent_dir = resolve_agent_dir(name, user_id=effective_user)
+            config_file = agent_dir / "config.yaml"
+            if not agent_dir.exists():
+                raise FileNotFoundError(f"Agent directory not found: {agent_dir}")
+            if not config_file.exists():
+                raise FileNotFoundError(f"Agent config not found: {config_file}")
+            try:
+                with open(config_file, encoding="utf-8") as f:
+                    data: dict[str, Any] = yaml.safe_load(f) or {}
+            except yaml.YAMLError as e:
+                raise ValueError(f"Failed to parse agent config {config_file}: {e}") from e
+            return AgentSnapshot(
+                config=parse_agent_config(data, name),
+                incarnation=_read_or_create_incarnation(agent_dir, name=name, user_id=effective_user),
+            )
+
+    @contextmanager
+    def guard_incarnation(self, name: str, incarnation: str, *, user_id: str | None = None) -> Iterator[bool]:
+        name = validate_agent_name(name)
+        effective_user = user_id or _ac.get_effective_user_id()
+        with _agent_scope_lock(name, effective_user):
+            agent_dir = resolve_agent_dir(name, user_id=effective_user)
+            current = _read_or_create_incarnation(agent_dir, name=name, user_id=effective_user)
+            yield current == incarnation
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
         name = validate_agent_name(name)
@@ -121,41 +188,39 @@ class FileAgentStore(AgentStore):
         name = validate_agent_name(name)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
-        agent_dir = paths.user_agent_dir(effective_user, name)
-        # Refuse if a per-user directory OR a legacy shared directory already
-        # owns the name — the agents router's 409 semantics (a legacy agent must
-        # not be shadowed; a per-user dir may be memory-only but still blocks).
-        if agent_dir.exists() or paths.agent_dir(name).exists():
-            raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
-        try:
-            agent_dir.mkdir(parents=True, exist_ok=False)
-        except FileExistsError as e:
-            # A concurrent create passed the existence check above and reached
-            # mkdir first. Surface the router's 409 (via AgentExistsError) rather
-            # than a generic 500 — mirrors SqlAgentStore's IntegrityError path.
-            raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
-        try:
-            self._write(agent_dir, config, soul)
-        except Exception:
-            # The directory was newly created for this call; a failed write
-            # must not leave an empty/partial agent dir behind.
-            shutil.rmtree(agent_dir, ignore_errors=True)
-            raise
+        with _agent_scope_lock(name, effective_user):
+            agent_dir = paths.user_agent_dir(effective_user, name)
+            # Refuse if a per-user directory OR a legacy shared directory owns the name.
+            if agent_dir.exists() or paths.agent_dir(name).exists():
+                raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'")
+            try:
+                agent_dir.mkdir(parents=True, exist_ok=False)
+            except FileExistsError as e:
+                raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
+            try:
+                (agent_dir / _INCARNATION_FILENAME).write_text(uuid.uuid4().hex, encoding="utf-8")
+                self._write(agent_dir, config, soul)
+            except Exception:
+                shutil.rmtree(agent_dir, ignore_errors=True)
+                raise
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
         name = validate_agent_name(name)
         effective_user = user_id or _ac.get_effective_user_id()
-        agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
-        pre_existing = agent_dir.exists()
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            self._write(agent_dir, config, soul)
-        except Exception:
-            # Only clean up a directory this call created — never delete a
-            # pre-existing agent on a failed write.
-            if not pre_existing:
-                shutil.rmtree(agent_dir, ignore_errors=True)
-            raise
+        with _agent_scope_lock(name, effective_user):
+            agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
+            pre_existing = agent_dir.exists()
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                if not pre_existing:
+                    (agent_dir / _INCARNATION_FILENAME).write_text(uuid.uuid4().hex, encoding="utf-8")
+                else:
+                    _read_or_create_incarnation(agent_dir, name=name, user_id=effective_user)
+                self._write(agent_dir, config, soul)
+            except Exception:
+                if not pre_existing:
+                    shutil.rmtree(agent_dir, ignore_errors=True)
+                raise
 
     def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
         name = validate_agent_name(name)
@@ -174,16 +239,15 @@ class FileAgentStore(AgentStore):
         return "deleted"
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
-        outcome = self.inspect_delete(name, user_id=user_id)
-        if outcome != "deleted":
-            return outcome
         name = validate_agent_name(name)
         effective_user = user_id or _ac.get_effective_user_id()
-        agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
-        # rmtree removes config.yaml, SOUL.md and the co-located memory.json in
-        # one shot — the historical behaviour.
-        shutil.rmtree(agent_dir)
-        return "deleted"
+        with _agent_scope_lock(name, effective_user):
+            outcome = self.inspect_delete(name, user_id=effective_user)
+            if outcome != "deleted":
+                return outcome
+            agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
+            shutil.rmtree(agent_dir)
+            return "deleted"
 
     def signature(self) -> Hashable:
         sig: list[tuple[str, str, float]] = []
@@ -266,3 +330,22 @@ def _stage_temp(target: Path, text: str) -> Path:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, suffix=".tmp", delete=False) as f:
         f.write(text)
         return Path(f.name)
+
+
+def _read_or_create_incarnation(agent_dir: Path, *, name: str, user_id: str) -> str:
+    user_agent_dir = _ac.get_paths().user_agent_dir(user_id, name)
+    if agent_dir != user_agent_dir:
+        # Legacy shared definitions remain read-only. They cannot be deleted or
+        # recreated through AgentStore, so a stable path identity is sufficient.
+        digest = hashlib.sha256(str(agent_dir.resolve()).encode("utf-8")).hexdigest()
+        return f"legacy:{digest}"
+    marker = agent_dir / _INCARNATION_FILENAME
+    try:
+        incarnation = marker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        incarnation = ""
+    if incarnation:
+        return incarnation
+    incarnation = uuid.uuid4().hex
+    marker.write_text(incarnation, encoding="utf-8")
+    return incarnation

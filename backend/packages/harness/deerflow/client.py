@@ -282,6 +282,17 @@ class DeerFlowClient:
                 principal.is_internal,
                 copy.deepcopy(principal.attributes),
             )
+        effective_user_id = cfg.get("user_id") or get_effective_user_id()
+        agent_incarnation = None
+        if self._agent_name is not None:
+            from deerflow.persistence.agents import get_agent_store
+
+            try:
+                agent_incarnation = get_agent_store().get_snapshot(self._agent_name, user_id=effective_user_id).incarnation
+            except FileNotFoundError:
+                # Embedded callers can supply a logical agent name without a
+                # deletable custom-agent definition. Such runs need no fence.
+                agent_incarnation = None
         key = (
             cfg.get("model_name"),
             cfg.get("thinking_enabled"),
@@ -295,6 +306,8 @@ class DeerFlowClient:
             self._checkpoint_snapshot_frequency,
             authorization_identity,
         )
+        if agent_incarnation is not None:
+            key = (*key, agent_incarnation)
 
         if self._agent is not None and self._agent_config_key == key:
             return
@@ -366,8 +379,6 @@ class DeerFlowClient:
         )
         mcp_routing_hints_section = get_mcp_routing_hints_prompt_section(authorized_tools, deferred_names=deferred_setup.deferred_names)
 
-        effective_user_id = cfg.get("user_id") or get_effective_user_id()
-
         kwargs: dict[str, Any] = {
             # attach_tracing=False because ``stream()`` injects tracing
             # callbacks at the graph invocation root so a single embedded run
@@ -388,6 +399,7 @@ class DeerFlowClient:
                     user_id=effective_user_id,
                     authorization_provider=_authz_provider,
                     subagent_execution_capacity=subagent_execution_capacity,
+                    agent_incarnation=agent_incarnation,
                 ),
                 self._checkpoint_channel_mode,
                 self._checkpoint_snapshot_frequency,

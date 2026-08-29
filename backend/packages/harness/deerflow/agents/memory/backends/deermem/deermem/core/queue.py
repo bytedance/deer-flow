@@ -61,6 +61,7 @@ class ConversationContext:
     messages: list[Any]
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     agent_name: str | None = None
+    agent_incarnation: str | None = None
     user_id: str | None = None
     trace_id: str | None = None
     signals: frozenset[str] = field(default_factory=frozenset)
@@ -123,6 +124,7 @@ class MemoryUpdateQueue:
         thread_id: str,
         messages: list[Any],
         agent_name: str | None = None,
+        agent_incarnation: str | None = None,
         user_id: str | None = None,
         trace_id: str | None = None,
         signals: frozenset[str] | None = None,
@@ -147,6 +149,7 @@ class MemoryUpdateQueue:
                 thread_id=thread_id,
                 messages=messages,
                 agent_name=agent_name,
+                agent_incarnation=agent_incarnation,
                 user_id=user_id,
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
@@ -161,6 +164,7 @@ class MemoryUpdateQueue:
         thread_id: str,
         messages: list[Any],
         agent_name: str | None = None,
+        agent_incarnation: str | None = None,
         user_id: str | None = None,
         trace_id: str | None = None,
         signals: frozenset[str] | None = None,
@@ -171,6 +175,7 @@ class MemoryUpdateQueue:
                 thread_id=thread_id,
                 messages=messages,
                 agent_name=agent_name,
+                agent_incarnation=agent_incarnation,
                 user_id=user_id,
                 trace_id=trace_id,
                 signals=frozenset(signals) if signals else frozenset(),
@@ -186,6 +191,7 @@ class MemoryUpdateQueue:
         thread_id: str,
         messages: list[Any],
         agent_name: str | None,
+        agent_incarnation: str | None,
         user_id: str | None,
         trace_id: str | None,
         signals: frozenset[str],
@@ -218,6 +224,7 @@ class MemoryUpdateQueue:
             thread_id=thread_id,
             messages=messages,
             agent_name=agent_name,
+            agent_incarnation=agent_incarnation,
             user_id=user_id,
             trace_id=trace_id,
             signals=merged_signals,
@@ -295,15 +302,18 @@ class MemoryUpdateQueue:
                     continue
                 try:
                     logger.info("Updating memory for thread %s (trace_id=%s)", context.thread_id, context.trace_id)
-                    success = self._updater.update_memory(
-                        messages=context.messages,
-                        thread_id=context.thread_id,
-                        agent_name=context.agent_name,
-                        signals=context.signals,
-                        user_id=context.user_id,
-                        trace_id=context.trace_id,
-                        bypass_watermark=context.bypass_watermark,
-                    )
+                    update_kwargs = {
+                        "messages": context.messages,
+                        "thread_id": context.thread_id,
+                        "agent_name": context.agent_name,
+                        "signals": context.signals,
+                        "user_id": context.user_id,
+                        "trace_id": context.trace_id,
+                        "bypass_watermark": context.bypass_watermark,
+                    }
+                    if context.agent_incarnation is not None:
+                        update_kwargs["agent_incarnation"] = context.agent_incarnation
+                    success = self._updater.update_memory(**update_kwargs)
                     if success:
                         succeeded += 1
                         logger.info("Memory updated successfully for thread %s (trace_id=%s)", context.thread_id, context.trace_id)

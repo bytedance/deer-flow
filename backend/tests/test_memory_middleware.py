@@ -46,3 +46,22 @@ def test_after_agent_queues_memory_under_runtime_user(monkeypatch):
     assert call.kwargs["agent_name"] == "researcher"
     assert call.kwargs["user_id"] == "runtime-user"
     assert call.kwargs["trace_id"] is None
+
+
+def test_after_agent_preserves_run_incarnation_at_enqueue(monkeypatch):
+    manager = MagicMock()
+    monkeypatch.setattr(memory_middleware_module, "get_memory_manager", lambda: manager)
+    middleware = MemoryMiddleware(
+        agent_name="researcher",
+        agent_incarnation="run-incarnation",
+        memory_config=MemoryConfig(enabled=True),
+    )
+
+    middleware.after_agent(
+        {"messages": [HumanMessage(content="Remember this"), AIMessage(content="Understood")]},
+        Runtime(context={"thread_id": "thread-123", "user_id": "runtime-user"}),
+    )
+
+    manager.add_for_incarnation.assert_called_once()
+    assert manager.add_for_incarnation.call_args.kwargs["agent_incarnation"] == "run-incarnation"
+    manager.add.assert_not_called()

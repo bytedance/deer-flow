@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -224,6 +225,69 @@ def test_file_create_race_maps_file_exists_to_agent_exists(tmp_path, monkeypatch
     fs = FileAgentStore()
     with pytest.raises(AgentExistsError):
         fs.create("racy", {"name": "racy"}, "soul", user_id="u1")
+
+
+def test_file_recreated_agent_rejects_old_incarnation(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    first_worker = FileAgentStore()
+    second_worker = FileAgentStore()
+    first_worker.create("phoenix", {"name": "phoenix"}, "old", user_id="u1")
+    old = first_worker.get_snapshot("phoenix", user_id="u1")
+
+    assert second_worker.delete("phoenix", user_id="u1") == "deleted"
+    second_worker.create("phoenix", {"name": "phoenix"}, "new", user_id="u1")
+    fresh = second_worker.get_snapshot("phoenix", user_id="u1")
+
+    assert fresh.incarnation != old.incarnation
+    with first_worker.guard_incarnation("phoenix", old.incarnation, user_id="u1") as current:
+        assert current is False
+    with first_worker.guard_incarnation("phoenix", fresh.incarnation, user_id="u1") as current:
+        assert current is True
+
+
+def test_file_delete_waits_for_incarnation_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    store.create("guarded", {"name": "guarded"}, "soul", user_id="u1")
+    incarnation = store.get_snapshot("guarded", user_id="u1").incarnation
+    delete_started = threading.Event()
+    delete_finished = threading.Event()
+
+    def delete_agent() -> None:
+        delete_started.set()
+        store.delete("guarded", user_id="u1")
+        delete_finished.set()
+
+    with store.guard_incarnation("guarded", incarnation, user_id="u1") as current:
+        assert current is True
+        worker = threading.Thread(target=delete_agent)
+        worker.start()
+        assert delete_started.wait(timeout=1)
+        assert not delete_finished.wait(timeout=0.1)
+
+    worker.join(timeout=1)
+    assert delete_finished.is_set()
+
+
+def test_file_legacy_snapshot_does_not_write_incarnation_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    legacy_dir = paths_module.get_paths().agent_dir("legacy")
+    legacy_dir.mkdir(parents=True)
+    (legacy_dir / "config.yaml").write_text("name: legacy\n", encoding="utf-8")
+
+    snapshot = FileAgentStore().get_snapshot("legacy", user_id="u1")
+
+    assert snapshot.incarnation.startswith("legacy:")
+    assert not (legacy_dir / ".incarnation").exists()
 
 
 # -- graph-subprocess config resolution (db backend's core cross-process invariant) --
