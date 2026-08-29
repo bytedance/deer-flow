@@ -259,6 +259,12 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Eviction retry tasks are strongly referenced and deduplicated by
+        # run_id: the event loop only holds weak references to tasks, so an
+        # unreferenced sleeper could be garbage-collected mid-retry, and
+        # shutdown needs the full set to cancel them boundedly.
+        self._eviction_retry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._shutting_down = False
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -1939,11 +1945,48 @@ class RunManager:
         decides. The overlay is dropped once the row is terminal (or
         missing) and retained, read-only, until a peer terminalizes an
         active row.
+
+        Retry tasks are strongly referenced and deduplicated by ``run_id``,
+        and no new retry is spawned once shutdown has begun.
         """
         if await self._evict_run_record_if_durable(run_id):
             return
+        if self._shutting_down:
+            # The drain below cancels pending retries; a fresh sleeper here
+            # would outlive it. The record is retained — the backing store
+            # remains the source of truth for the next process.
+            logger.warning("Run record %s retained: durability unconfirmed at shutdown", run_id)
+            return
+        existing = self._eviction_retry_tasks.get(run_id)
+        if existing is not None and not existing.done():
+            return
         task = asyncio.create_task(self._retry_eviction_until_durable(run_id))
         task.set_name(f"deerflow-run-record-eviction-retry-{run_id}")
+        self._eviction_retry_tasks[run_id] = task
+        task.add_done_callback(lambda done, run_id=run_id: self._eviction_retry_done(run_id, done))
+
+    def _eviction_retry_done(self, run_id: str, task: asyncio.Task[None]) -> None:
+        """Drop the strong reference once the retry settles (or is cancelled)."""
+        if self._eviction_retry_tasks.get(run_id) is task:
+            self._eviction_retry_tasks.pop(run_id, None)
+        if not task.cancelled() and task.exception() is not None:
+            logger.error("Run-record eviction retry for %s crashed", run_id, exc_info=task.exception())
+
+    async def _stop_eviction_retries(self, *, timeout: float) -> None:
+        """Reject new eviction retry work and boundedly cancel pending ones."""
+        tasks = list(self._eviction_retry_tasks.values())
+        if not tasks:
+            return
+        for task in tasks:
+            task.cancel()
+        _, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+        if pending:
+            # A task may swallow the first CancelledError while unwinding a
+            # store call; re-issue it but keep the strong reference until the
+            # done callback observes completion.
+            for task in pending:
+                task.cancel()
+            logger.warning("Eviction retry shutdown exceeded %.1fs; %d task(s) still pending", timeout, len(pending))
 
     async def _evict_run_record_if_durable(self, run_id: str) -> bool:
         """Remove *run_id*'s record once its terminal state is durable.
@@ -2391,6 +2434,11 @@ class RunManager:
         """
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
+
+        # Fence eviction retries before the drain so a finalizing worker
+        # cannot spawn fresh retries after pending ones were cancelled.
+        self._shutting_down = True
+        await self._stop_eviction_retries(timeout=max(0.0, deadline - loop.time()))
 
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]

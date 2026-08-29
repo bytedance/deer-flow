@@ -281,3 +281,31 @@ async def test_fenced_worker_evicts_overlay_when_row_missing():
 
     assert await run_manager._evict_run_record_if_durable(record.run_id) is True
     assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_eviction_retry_lifecycle_is_deduplicated_and_shutdown_fenced():
+    """Retry tasks are deduplicated per run, cancelled at shutdown, and the
+    shutdown fence prevents a finalizing worker from spawning new ones."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    async def failing_put(run_id, **payload):
+        raise OSError("store unavailable")
+
+    store.put = failing_put
+    await run_manager.evict_finished_run(record.run_id)
+    retry = run_manager._eviction_retry_tasks[record.run_id]
+    await run_manager.evict_finished_run(record.run_id)
+    assert run_manager._eviction_retry_tasks[record.run_id] is retry
+
+    await run_manager.shutdown(timeout=1)
+    assert run_manager._eviction_retry_tasks == {}
+    assert retry.cancelled()
+
+    # Fenced: durability stays unconfirmed, but no new retry is spawned.
+    await run_manager.evict_finished_run(record.run_id)
+    assert run_manager._eviction_retry_tasks == {}
+    assert record.run_id in run_manager._runs
