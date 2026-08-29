@@ -169,6 +169,10 @@ export function MessageListItem({
     () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
     [isHuman, message],
   );
+  // `message` keeps its reference across streaming chunks for settled rows
+  // (stable group arrays), so the toolbar copy text is derived once per row
+  // instead of on every chunk (#5094).
+  const toolbarCopyData = useMemo(() => getMessageCopyData(message), [message]);
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
@@ -239,7 +243,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton clipboardData={getMessageCopyData(message)} />
+            <CopyButton clipboardData={toolbarCopyData} />
             {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
               <Tooltip content={t.common.editAndRerun}>
                 <Button
