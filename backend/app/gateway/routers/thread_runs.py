@@ -1024,6 +1024,15 @@ async def stream_existing_run(
     is present the run is cancelled first; the response then streams any
     remaining buffered events so the client observes a clean shutdown.
     """
+    if request.method == "GET" and action is not None:
+        # Cancel is a state change; CSRF middleware exempts GET, so a
+        # GET carrying an action would let a cross-site page cancel a
+        # session user's run via an img/script/navigation request. The
+        # documented contract is POST-only for cancel-then-stream.
+        raise HTTPException(
+            status_code=405,
+            detail="`action` is only supported on POST requests; GET is a read-only stream join",
+        )
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
