@@ -46,7 +46,7 @@ from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 from .aio_sandbox import AioSandbox
-from .backend import SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
+from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .ownership import (
     OwnershipBackendError,
@@ -2041,7 +2041,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         )
 
         # Wait for sandbox to be ready
-        if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
+        if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT):
             # The container is running but unowned: ownership is published by
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready
@@ -2076,7 +2076,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         )
 
         # Wait for sandbox to be ready without blocking the event loop.
-        if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=60):
+        if not await wait_for_sandbox_ready_async(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT):
             # The container is running but unowned: ownership is published by
             # ``_register_created_sandbox`` after this gate. Claim the teardown
             # lease before stopping it so a peer cannot adopt the not-yet-ready

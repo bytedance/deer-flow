@@ -177,6 +177,9 @@ class DelegationEntry(TypedDict):
     # turn_capped / loop_capped. The status stays completed/failed; this field
     # is the additive signal that distinguishes a capped run from a clean one.
     stop_reason: NotRequired[str]
+    # RFC #4651 PR2: parent-side citation-check verdict (advisory execution
+    # evidence), stamped at task write-back; absent on legacy history.
+    receipt_verdict: NotRequired[dict]
     created_at: str
 
 

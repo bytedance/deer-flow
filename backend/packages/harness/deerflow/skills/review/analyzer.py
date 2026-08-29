@@ -240,7 +240,7 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 severity="error",
                 path="SKILL.md",
                 message=str(exc),
-                remediation="Declare allowed-tools as a YAML list of non-empty strings.",
+                remediation="Declare allowed-tools as a space-separated string or YAML list of non-empty strings.",
             )
         )
 

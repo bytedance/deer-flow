@@ -1,11 +1,16 @@
 """partial postgres predicate for idx_users_oauth_identity.
 
-Revision ID: 0017_oauth_identity_pg_partial
-Revises: 0016_subagent_batches
+Revision ID: 0018_oauth_identity_pg_partial
+Revises: 0017_personal_access_tokens
 Create Date: 2026-08-29
 
 alembic_version.version_num is VARCHAR(32); revision ids in this chain must
 stay at or under that length or stamping/upgrading a database fails outright.
+
+Numbering note: originally generated as 0017 against the then-current main
+head (0016), same as 0017_personal_access_tokens (#5041). That one merged
+first and kept the slot per this package's own renumber-on-rebase
+convention, so this revision moved to 0018 and re-parented onto it.
 """
 
 from __future__ import annotations
@@ -15,8 +20,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0017_oauth_identity_pg_partial"
-down_revision: str | Sequence[str] | None = "0016_subagent_batches"
+revision: str = "0018_oauth_identity_pg_partial"
+down_revision: str | Sequence[str] | None = "0017_personal_access_tokens"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

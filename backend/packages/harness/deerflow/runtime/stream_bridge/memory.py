@@ -32,7 +32,7 @@ class MemoryStreamBridge(StreamBridge):
     """
 
     def __init__(self, *, queue_maxsize: int = 256) -> None:
-        self._maxsize = queue_maxsize
+        self._maxsize = max(1, queue_maxsize)
         self._streams: dict[str, _RunStream] = {}
         self._counters: dict[str, int] = {}
 
@@ -67,8 +67,8 @@ class MemoryStreamBridge(StreamBridge):
     def _make_gap(stream: _RunStream, requested_event_id: str | None) -> StreamGap:
         return StreamGap(
             requested_event_id=requested_event_id,
-            earliest_available_event_id=stream.events[0].id,
-            latest_available_event_id=stream.events[-1].id,
+            earliest_available_event_id=stream.events[0].id if stream.events else None,
+            latest_available_event_id=stream.events[-1].id if stream.events else None,
         )
 
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int | StreamGap:
@@ -85,7 +85,7 @@ class MemoryStreamBridge(StreamBridge):
         # watermark keep the legacy replay-from-earliest behavior.
         seq = self._parse_event_seq(last_event_id)
         if seq is not None:
-            if stream.events and seq < stream.start_offset:
+            if seq < stream.start_offset:
                 return self._make_gap(stream, last_event_id)
             local_index = seq - stream.start_offset
             if 0 <= local_index < len(stream.events) and stream.events[local_index].id == last_event_id:
