@@ -2082,6 +2082,34 @@ class TestCleanupBackgroundTask:
 
         return _patch_default_get_app_config(importlib.reload(executor))
 
+    def test_execute_async_removes_entry_when_submit_fails(self, executor_module, classes, base_config):
+        """A failed submit must not leave a PENDING entry nothing will ever poll.
+
+        The registry entry is created before the coroutine is submitted to the
+        isolated loop. When submission itself raises (e.g. the loop failed to
+        start), the caller sees the exception and never polls — and
+        ``cleanup_background_task`` refuses non-terminal entries — so the fix
+        must drop the entry on the submit-failure path.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="submit-failure-trace",
+        )
+
+        def failing_submit(_context, _coro_factory):
+            raise RuntimeError("isolated subagent event loop failed to start")
+
+        with patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=failing_submit):
+            with pytest.raises(RuntimeError, match="isolated subagent event loop"):
+                executor.execute_async("Task")
+
+        leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "submit-failure-trace"]
+        assert leftovers == []
+
     def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
         """Test that cleanup removes a COMPLETED task."""
         SubagentResult = classes["SubagentResult"]

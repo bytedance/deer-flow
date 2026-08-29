@@ -1367,7 +1367,18 @@ class SubagentExecutor:
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
 
-        execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
+        try:
+            execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
+        except Exception:
+            # Submitting can fail before any coroutine starts (e.g. the
+            # persistent loop failed to spin up). The caller then sees the
+            # exception and never polls this execution_id, and
+            # cleanup_background_task() refuses non-terminal entries — so the
+            # just-registered entry must be dropped here, not left as a
+            # PENDING zombie nothing will ever remove.
+            with _background_tasks_lock:
+                _background_tasks.pop(execution_id, None)
+            raise
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
