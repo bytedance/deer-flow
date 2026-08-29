@@ -52,7 +52,28 @@ _PAT_ROUTE_RULES: tuple[tuple[frozenset[str], re.Pattern[str]], ...] = (
     (frozenset({"GET", "PUT", "DELETE"}), re.compile(r"^/api/threads/[^/]+/goal$")),
     (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/state$")),
     (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/(compact|history|branches)$")),
-    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs(/.*)?$")),
+    # Runs subtree: enumerated per implemented subroute instead of a
+    # ``runs(/.*)?`` wildcard, so a route added under /runs is default-denied
+    # until explicitly listed — the same no-dead-methods precision the
+    # threads collection rule enforces. The ``{run_id}`` slot necessarily
+    # matches any single segment; the POST-only collection endpoints sharing
+    # that depth (stream, wait, regenerate, edit-regenerate) are excluded
+    # from the GET run-id rule so no unimplemented method is pre-authorized.
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs$")),
+    (
+        frozenset({"POST"}),
+        re.compile(r"^/api/threads/[^/]+/runs/(stream|wait|regenerate/prepare|edit-regenerate/prepare)$"),
+    ),
+    (
+        frozenset({"GET"}),
+        re.compile(r"^/api/threads/[^/]+/runs/(?!stream$|wait$|regenerate$|edit-regenerate$)[^/]+$"),
+    ),
+    (frozenset({"POST"}), re.compile(r"^/api/threads/[^/]+/runs/[^/]+/cancel$")),
+    (
+        frozenset({"GET"}),
+        re.compile(r"^/api/threads/[^/]+/runs/[^/]+/(join|messages|events|workspace-changes)$"),
+    ),
+    (frozenset({"GET", "POST"}), re.compile(r"^/api/threads/[^/]+/runs/[^/]+/stream$")),
     (frozenset({"POST"}), re.compile(r"^/api/runs/(stream|wait)$")),
     (frozenset({"GET"}), re.compile(r"^/api/runs/[^/]+/(messages|feedback)$")),
 )

@@ -482,6 +482,50 @@ def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
     assert is_pat_allowed_route("GET", "/api/threads") is False
 
 
+def test_pat_runs_policy_admits_exactly_the_mounted_routes():
+    """The runs subtree is enumerated, not wildcarded: every GET/POST route
+    the thread_runs router actually implements is admitted (derived from the
+    mounted router, not a hand-maintained list), routes in this router
+    outside the runs subtree stay denied, and representative unimplemented
+    neighbors — including the POST-only collection names on GET — are
+    default-denied. A new route under /runs fails here until explicitly
+    allowlisted; a removed one leaves a dead rule visible."""
+    from fastapi.routing import APIRoute
+
+    from app.gateway.auth.pat import is_pat_allowed_route
+    from app.gateway.routers.thread_runs import router
+
+    def concrete(path: str) -> str:
+        return path.replace("{thread_id}", "t1").replace("{run_id}", "r1")
+
+    for route in router.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        path = concrete(route.path)
+        under_runs = route.path.startswith("/api/threads/{thread_id}/runs")
+        for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
+            admitted = is_pat_allowed_route(method, path)
+            if under_runs:
+                assert admitted, f"{method} {path} is implemented but PAT-denied"
+            else:
+                # /messages, /messages/page, /token-usage sit outside the runs
+                # subtree and are PAT-denied pending the polling-surface
+                # decision — pinned here so widening it is a conscious edit.
+                assert not admitted, f"{method} {path} is outside the PAT policy"
+
+    for method, path in [
+        ("GET", "/api/threads/t1/runs/stream"),
+        ("GET", "/api/threads/t1/runs/wait"),
+        ("GET", "/api/threads/t1/runs/regenerate"),
+        ("GET", "/api/threads/t1/runs/edit-regenerate"),
+        ("POST", "/api/threads/t1/runs/r1/messages"),
+        ("DELETE", "/api/threads/t1/runs/r1"),
+        ("POST", "/api/threads/t1/runs/summary"),
+        ("GET", "/api/threads/t1/runs/r1/transfer"),
+    ]:
+        assert not is_pat_allowed_route(method, path), f"{method} {path} is not implemented and must stay denied"
+
+
 def test_pat_scopes_enforced_on_stateless_run_entry(client):
     """Follow-up to the review's P1-1: the stateless run entrypoints now
     carry @require_permission("runs", "create"), so a threads:read-only PAT

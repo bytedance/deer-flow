@@ -109,9 +109,14 @@ Revocation is immediate.
   thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
   (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE
   /api/threads/{thread_id}`, the thread `goal`/`state`/`compact`/`history`/
-  `branches` subroutes, `GET/POST /api/threads/{thread_id}/runs/*`
-  (run create/stream/wait/list/get/cancel/join; feedback read & submit), and
-  `POST /api/runs/stream|wait` plus `GET /api/runs/{run_id}/messages|feedback`.
+  `branches` subroutes, and exactly the implemented `/runs` subroutes
+  (`GET|POST /api/threads/{thread_id}/runs`, the POST-only `stream`, `wait`,
+  `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
+  `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
+  `join`/`messages`/`events`/`workspace-changes` (GET), and
+  `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
+  `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
+  denied until explicitly added to the policy.
   Every other authenticated route — memory, agents, models, MCP/skills
   config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
