@@ -1007,7 +1007,9 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        # Joins are read-only observation: the creator's cancel-on-disconnect
+        # policy must not fire because an observer closed their connection.
+        sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1082,7 +1084,12 @@ async def stream_existing_run(
             return Response(status_code=204 if completed else 202)
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        # Both methods of this handler are join surfaces: a POST carrying an
+        # action cancels explicitly above (already gated by
+        # require_cancel_permission_when_action), and an action-less join is
+        # read-only observation — the creator's cancel-on-disconnect policy
+        # must not fire because a joiner closed their connection.
+        sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

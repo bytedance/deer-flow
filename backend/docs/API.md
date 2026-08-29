@@ -99,6 +99,12 @@ Revocation is immediate.
 
 - A request carrying an `Authorization` header that fails validation gets a
   hard `401` — it never falls back to the session cookie.
+- **Cancel capability requires `runs:cancel` on every request dimension that
+  carries it**, not just the dedicated cancel route: `?action=interrupt|rollback`
+  on `POST /api/threads/{thread_id}/runs/{run_id}/stream` (action-less joins
+  stay at `runs:read`), and `multitask_strategy=interrupt|rollback` on run
+  creation (the default `reject` stays at `runs:create`). Joining a run's
+  stream is pure observation — an observer disconnecting never cancels the run.
 - **Route-level default-deny:** PAT requests are admitted only to the
   thread/run lifecycle routes the v1 scopes govern — `POST /api/threads`
   (create), `POST /api/threads/search` (list), `GET/PATCH/DELETE

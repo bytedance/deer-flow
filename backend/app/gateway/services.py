@@ -1589,12 +1589,22 @@ async def sse_consumer(
     record: RunRecord,
     request: Request,
     run_mgr: RunManager,
+    *,
+    apply_on_disconnect: bool = True,
 ):
     """Async generator that yields SSE frames from the bridge.
 
-    The ``finally`` block implements ``on_disconnect`` semantics:
+    The ``finally`` block implements ``on_disconnect`` semantics, but only for
+    the stream returned by the *creating* endpoint (``apply_on_disconnect=True``):
+
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
+
+    Join/observer streams pass ``apply_on_disconnect=False``: the creator's
+    cancel-on-disconnect policy expresses the creator's intent for their own
+    connection, and a read-only observer closing a join must not cancel the
+    run (a runs:read-only credential would otherwise cancel without
+    runs:cancel just by disconnecting).
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
@@ -1639,8 +1649,9 @@ async def sse_consumer(
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
-        # cancellation request. Only apply on_disconnect to locally-owned runs.
-        if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        # cancellation request. Only apply on_disconnect to locally-owned runs,
+        # and only on the creator's own stream — never on an observer join.
+        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
