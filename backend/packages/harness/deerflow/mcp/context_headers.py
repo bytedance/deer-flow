@@ -77,6 +77,25 @@ def _request_secrets(request: Any) -> dict[str, str]:
     return extract_request_secrets(getattr(runtime, "context", None))
 
 
+def _is_safe_header_value(value: str) -> bool:
+    """Return whether a request-scoped secret is safe to pass as an HTTP header.
+
+    Reject values that the HTTP transport may reject while echoing the original
+    bytes in its exception. Credential values should not contain control
+    characters or surrounding whitespace, and httpx encodes header strings as
+    Latin-1 before handing them to the HTTP protocol implementation.
+    """
+    if value != value.strip():
+        return False
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        return False
+    try:
+        value.encode("latin-1")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> Any | None:
     """Build a tool interceptor injecting per-request headers, or ``None``.
 
@@ -128,14 +147,32 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
         secrets = _request_secrets(request)
         resolved: dict[str, str] = {}
         missing: list[str] = []
+        invalid: list[str] = []
         for header_name, secret_key in context_headers.headers.items():
             # Empty string covers a caller-side `$ENV_VAR` that was unset: an
             # empty credential must fail closed rather than send an empty header.
             value = secrets.get(secret_key, "")
-            if value:
+            if value and _is_safe_header_value(value):
                 resolved[header_name] = value
+            elif value:
+                invalid.append(secret_key)
             else:
                 missing.append(secret_key)
+
+        if invalid:
+            invalid_keys = ", ".join(sorted(invalid))
+            logger.warning(
+                "Denied MCP tool call to server '%s': request-scoped credential(s) %s contain invalid HTTP header characters or surrounding whitespace",
+                request.server_name,
+                invalid_keys,
+            )
+            # Never include the invalid value itself. HTTP client/protocol
+            # exceptions may echo rejected header bytes, which would move a
+            # request-scoped secret into model-visible tool errors and traces.
+            raise ToolException(
+                f"MCP server '{request.server_name}' received invalid request-scoped credential(s) {invalid_keys}. "
+                "Remove control characters or surrounding whitespace from the configured secret value."
+            )
 
         if missing and context_headers.on_missing == "deny":
             missing_keys = ", ".join(sorted(missing))
