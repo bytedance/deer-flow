@@ -2144,9 +2144,10 @@ def _capture_executor_call(monkeypatch, **call_kwargs):
 
 
 def test_task_tool_forwards_acceptance_criteria_to_executor(monkeypatch):
-    """RFC #4651 PR3: criteria travel via the executor constructor into the
-    subagent's SystemMessage — never through the task text, which
-    InputSanitizationMiddleware would escape as untrusted user input."""
+    """RFC #4651 PR3: criteria travel via the executor constructor; the
+    executor appends them to the subagent's task HumanMessage as untrusted
+    data at state-build time. The delegated prompt itself stays free of
+    criteria so the tool never dictates the channel."""
     criteria = ["file:../outputs/report.md non-empty", "tests_passed:make test"]
 
     executor_kwargs, delegated_prompt = _capture_executor_call(monkeypatch, acceptance_criteria=criteria)

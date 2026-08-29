@@ -102,7 +102,8 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "tool_restrictions",
         # Subagent report-contract blocks (subagents/report_contract.py, RFC
         # #4651 PR3): injected by the executor into every subagent system
-        # prompt and by the task tool into delegated prompts. Forging them in
+        # prompt (the criteria pointer note carries no criterion values —
+        # those stay in the untrusted task message). Forging them in
         # untrusted input could impersonate the verification contract (e.g.
         # pre-declaring acceptance criteria as met).
         "report_contract",
