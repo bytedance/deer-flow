@@ -80,6 +80,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
     - [Long-Term Memory](#long-term-memory)
   - [Recommended Models](#recommended-models)
   - [Embedded Python Client](#embedded-python-client)
+  - [Conversation Sharing](#conversation-sharing)
   - [Scheduled Tasks](#scheduled-tasks)
   - [Terminal Workbench (TUI)](#terminal-workbench-tui)
   - [Documentation](#documentation)
@@ -1400,6 +1401,19 @@ client.clear_goal("thread-1")
 The HTTP Gateway accepts `values`, `messages-tuple`, `updates`, `debug`, `tasks`, `checkpoints`, and `custom` stream modes. Unsupported modes such as `messages` and `events`, unsupported non-default run options such as webhooks, delayed execution, or `multitask_strategy="enqueue"`, and undeclared SDK options such as checkpoint durability overrides return `422` before execution instead of being silently ignored or downgraded.
 
 All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
+
+## Conversation Sharing
+
+DeerFlow can freeze the visible transcript of an owned conversation into a
+revocable, read-only public snapshot. The feature is disabled by default and
+requires a SQL database; enable `conversation_sharing.enabled` in
+`config.yaml`. The bearer link is returned once, while only its HMAC digest is
+stored, and later conversation changes do not alter the snapshot.
+
+Single-host deployments can use the automatically generated local pepper.
+Multi-replica deployments must set the same `SHARE_TOKEN_PEPPER` environment
+value on every replica. See the [Gateway API documentation](backend/docs/API.md#conversation-sharing-4548)
+for create, list, revoke, expiry, and public-resolution endpoints.
 
 ## Scheduled Tasks
 

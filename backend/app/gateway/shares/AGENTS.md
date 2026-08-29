@@ -21,9 +21,12 @@ so links nobody can durably resolve cannot be minted.
   identifiers, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the
   page order only. Rows are sanitized per page, so the 2000 cap counts
-  **public messages**, not raw rows (tool output never consumes budget);
-  an independent 50k raw-scan bound stops unbounded walks of row-heavy
-  threads. Either bound rejecting yields **413**
+  **public messages**, not raw rows (tool output never consumes budget). At
+  exactly 2000 public messages the scan continues only to prove that no older
+  public message exists; older tool/hidden rows do not make a complete share
+  fail. An independent 50k raw-scan budget is consumed inside the canonical
+  pager, before its visibility filters, and uses one sentinel row to prove an
+  over-limit history without walking the remainder. Either bound rejecting yields **413**
   (`ShareSnapshotTooLarge`) — a share promises the complete visible
   transcript, so it is never silently truncated.
 - `GET` lists management metadata (never token hashes); `DELETE /{share_id}`
@@ -34,7 +37,9 @@ so links nobody can durably resolve cannot be minted.
 `dfs_` + urlsafe(32 CSPRNG bytes), returned exactly once. Only the HMAC-SHA-256
 `token_hash` is persisted (unique index, constant-time lookup). The pepper
 comes from `SHARE_TOKEN_PEPPER` or an auto-generated 0600 `.share_token_pepper`
-(the `AUTH_JWT_SECRET` lifecycle) — never a YAML field; pepper rotation
+(the `AUTH_JWT_SECRET` lifecycle) — never a YAML field. The generated file is
+accepted only at its complete 43-character length, and async share routes
+offload uncached file creation/read/retry to a worker thread. Pepper rotation
 invalidates every outstanding token.
 
 ## Public endpoint — the single auth-exempt route
@@ -60,14 +65,16 @@ Token-in-URL leakage has two repository-level controls (both pinned by
 referrers, not log sinks):
 
 - **Gateway logs** — `install_share_token_redaction()` (`deerflow/logging_config`,
-  called at app import and from `configure_logging`) masks `dfs_…` in every
-  rendered record: a filter on the root handlers, plus logger-level filters on
+  called at app import and from `configure_logging`) masks `dfs_…` in rendered
+  messages and exception tracebacks for both text and JSON output: a filter on
+  the root handlers, plus logger-level filters on
   `uvicorn.access` / `uvicorn` / `uvicorn.error`, whose tree terminates at
   `uvicorn`'s own handlers and never reaches root handlers.
-- **nginx access logs** — both shipped configs map the request line to a masked
-  variant (`$masked_request`) for `/share/` and `/api/shares/` and log the
-  `combined`-format `masked_access` format; the regression test evaluates the
-  config's own regex, so a dropped or loosened mask fails CI. nginx
+- **nginx access logs** — both shipped configs mask share tokens in the request
+  line (`$masked_request`) and in the client-controlled Referer
+  (`$masked_referer`) before writing the `combined`-format `masked_access`
+  record; the regression test renders the config's full log format, so a
+  dropped or loosened mask fails CI. nginx
   `error_log` messages embed the full request line, severity does not redact
   them (nginx trac #2193: crit-level failures still append the request
   line), and the output cannot be format-masked — so the dedicated `^~`
