@@ -35,6 +35,7 @@ from uuid import uuid4
 # rather than relying on the parent's cwd).
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.auth.models import User
@@ -96,11 +97,18 @@ def make_session_factory(backend: str, pg_url: str, pg_schema: str):
 async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float, known_emails: list[str], pg_url: str, pg_schema: str):
     t_conn0 = time.perf_counter()
     engine, sf = make_session_factory(backend, pg_url, pg_schema)
-    # force a real connection now (not lazy) so conn_time reflects the
-    # actual cost of a worker's first DB round-trip, same as a real
-    # Gateway worker would pay on its first request.
-    async with sf():
-        pass
+    # Force a real physical connection now (not lazy) so conn_time reflects
+    # the actual cost of a worker's first DB round-trip, same as a real
+    # Gateway worker would pay on its first request. Entering an empty
+    # AsyncSession does NOT check out a connection -- SQLAlchemy stays lazy
+    # until the first statement executes -- so this must run an actual
+    # lightweight query, not just `async with sf(): pass`, or the first
+    # timed op in the loop below silently absorbs connection-establishment
+    # cost instead of conn_time (a real distortion at 16 workers: those 16
+    # cold first-ops are 1% of a 1600-op sample and can skew the reported
+    # p99).
+    async with sf() as session:
+        await session.execute(text("SELECT 1"))
     conn_time = time.perf_counter() - t_conn0
     repo = SQLiteUserRepository(sf)
 
