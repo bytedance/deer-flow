@@ -146,3 +146,15 @@ PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
   /tmp/production-bench.jsonl
 ```
+
+### Terminal Run-Record Eviction (`RunManager.evict_finished_run`)
+
+Terminal runs evict their in-memory registry record event-driven: awaited at the tail of `run_agent`'s finally block (after durable terminal status, receipts, duration, stop observers, finalizing-barrier release, and the end frame), and from `fail_start_if_pending` and `_close_cancelled_admission`. The registry is bounded because each record retains the run's full `kwargs["input"]`; the RunStore stays the source of truth for run history, so post-eviction lookups hydrate from it.
+
+**Eviction confirms the full completion snapshot, not just the terminal status.** `update_run_completion()` is best-effort and may fail after the status write landed, so the row is checked for every completion value the record holds (`_completion_needs_repair`); a stale or active row is repaired via `_repair_durable_run_state` — structural `put` plus the completion fields riding the same `update_run_completion` primitive. An explicit `False` from that primitive is an unconfirmed repair: the record is retained for the bounded retry (`RUN_RECORD_EVICTION_RETRY_*`), unless the re-read shows a peer's *conflicting* terminal outcome, which is the durable authority and drops the overlay without republishing our snapshot.
+
+**Fenced records never repair the store.** After lease-ownership loss the local error snapshot is unauthorized — a peer reconciler owns durable terminalization — so an active row retains the overlay (read-only retries) and a missing row drops it.
+
+**Retry tasks are strongly referenced, deduplicated by `run_id`, and shutdown-fenced.** The event loop only holds weak task references; shutdown cancels them without waiting (a retry stuck in a store call must not eat the run-drain budget) and drains them only after the primary run drain. There is no eviction without a RunStore backing — no fallback for `get`/`list_by_thread`, and the registry is the only idempotency dedup in that mode.
+
+**Companion contracts:** idempotent-reuse hydrations of store rows are returned uncached (a cached active row owned by another worker would outlive the owner's completion and fence the thread via `local_inflight` forever), and the cancel path keeps interrupted runs idempotently cancellable (202) after eviction by recognizing the durable store row.
