@@ -2088,7 +2088,7 @@ class RunManager:
         if not completion:
             return True
         try:
-            await self._call_store_with_retry(
+            updated = await self._call_store_with_retry(
                 "eviction completion repair",
                 run_id,
                 lambda: self._store.update_run_completion(run_id, status=record.status.value, **completion),
@@ -2096,7 +2096,19 @@ class RunManager:
         except Exception:
             logger.warning("Failed to repair completion data for run %s during eviction", run_id, exc_info=True)
             return False
-        return True
+        if updated is not False:
+            return True
+        # ``False`` means the row is missing or holds a conflicting terminal
+        # outcome, so the completion write did not land. Re-read: a peer's
+        # terminal outcome is the durable authority and makes the overlay
+        # stale — drop it without republishing our snapshot. Anything else
+        # stays unconfirmed and the bounded eviction retry re-runs the repair.
+        row = await self._call_store_with_retry("eviction recheck", run_id, lambda: self._store.get(run_id))
+        if row is not None and row.get("status") not in (RunStatus.pending.value, RunStatus.running.value, record.status.value):
+            logger.warning("Run %s durably terminalized with a conflicting outcome during eviction repair; dropping the local snapshot", run_id)
+            await self._remove_run_record(run_id, expected=record)
+            return True
+        return False
 
     async def _retry_eviction_until_durable(self, run_id: str) -> None:
         for attempt in range(1, RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS + 1):

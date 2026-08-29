@@ -390,3 +390,69 @@ async def test_eviction_retry_lifecycle_is_deduplicated_and_shutdown_fenced():
     await run_manager.evict_finished_run(record.run_id)
     assert run_manager._eviction_retry_tasks == {}
     assert record.run_id in run_manager._runs
+
+
+class _CompletionRefusingStore(MemoryRunStore):
+    """``update_run_completion`` reports False without applying the write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refuse_completion = False
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        if self.refuse_completion:
+            return False
+        return await super().update_run_completion(run_id, status=status, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_eviction_retains_record_when_completion_repair_reports_failure():
+    """An explicit ``update_run_completion`` False is an unconfirmed repair:
+    the record — holding the only completion snapshot — is retained instead
+    of being dropped as if the write had landed."""
+    store = _CompletionRefusingStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    store.refuse_completion = True
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is False
+    assert record.run_id in run_manager._runs
+    assert (await store.get(record.run_id)).get("total_tokens") is None
+
+    store.refuse_completion = False
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert (await store.get(record.run_id))["total_tokens"] == 123
+    assert record.run_id not in run_manager._runs
+
+
+class _ConflictingTerminalStore(MemoryRunStore):
+    """A peer reconciler wins the race and terminalizes the row differently
+    between the repair's ``put`` and its completion write."""
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        run = self._runs.get(run_id)
+        if run is not None:
+            run["status"] = "error"
+            run["error"] = "taken over by peer"
+        return False
+
+
+@pytest.mark.anyio
+async def test_eviction_drops_overlay_when_peer_wrote_conflicting_terminal():
+    """When the recheck shows a peer's terminal outcome, that row is the
+    durable authority: the overlay is dropped without republishing our
+    snapshot or completion data over it."""
+    store = _ConflictingTerminalStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert record.run_id not in run_manager._runs
+
+    row = await store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row.get("total_tokens") is None
