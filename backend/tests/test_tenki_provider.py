@@ -941,3 +941,10 @@ def test_integration_real_sandbox(monkeypatch):
         assert box.read_file("/mnt/user-data/workspace/it.txt") == "tenki-e2e"
     finally:
         provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert TenkiSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    assert TenkiSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")

@@ -17,16 +17,19 @@ needed once this provider is selected.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
-import hashlib
 import logging
 import shlex
 import threading
 import time
 import uuid
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from deerflow.config import get_app_config
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -111,7 +114,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         gateway a hash collision would let one user reclaim another's parked
         sandbox. 64 bits, like community/e2b_sandbox, keeps that negligible.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
     # ── Provider lifecycle ───────────────────────────────────────────────
 
@@ -120,7 +123,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         self._sandboxes: dict[str, TenkiSandbox] = {}
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
         self._warm_pool: dict[str, tuple[TenkiSandbox, float]] = {}
-        self._acquire_locks: dict[str, threading.Lock] = {}
+        self._acquire_serializer: AcquireSerializer[str] = AcquireSerializer(thread_name_prefix="tenki-acquire-wait")
         self._idle_checker_stop = threading.Event()
         self._idle_checker_thread: threading.Thread | None = None
         self._shutdown_called = False
@@ -209,14 +212,6 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
     def _sandbox_name(cls, sandbox_id: str) -> str:
         return f"{_SANDBOX_NAME_PREFIX}{sandbox_id}"
 
-    def _lock_for_sandbox(self, sandbox_id: str) -> threading.Lock:
-        with self._lock:
-            lock = self._acquire_locks.get(sandbox_id)
-            if lock is None:
-                lock = threading.Lock()
-                self._acquire_locks[sandbox_id] = lock
-            return lock
-
     def _start_idle_checker(self) -> None:
         """Start idle cleanup when enabled; idle_timeout=0 keeps it disabled."""
         if self._config["idle_timeout"] <= 0:
@@ -257,24 +252,39 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
 
         key = self._thread_key(thread_id, user_id)
         sandbox_id = self._sandbox_id(thread_id, user_id or "")
-        acquire_lock = self._lock_for_sandbox(sandbox_id)
-        with acquire_lock:
-            with self._lock:
-                existing = self._thread_sandboxes.get(key)
-                if existing is not None and existing in self._sandboxes:
-                    return existing
+        with self._acquire_serializer.hold(sandbox_id):
+            return self._acquire_scope_locked(key, sandbox_id, thread_id=thread_id, user_id=user_id)
 
-            reclaimed = self._reclaim_warm_pool(sandbox_id)
-            if reclaimed is not None:
-                with self._lock:
-                    self._thread_sandboxes[key] = reclaimed
-                return reclaimed
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        """Acquire without blocking the event loop.
 
-            sandbox = self._create_sandbox(sandbox_id)
+        The entire synchronous acquire (serializer wait + body) runs on the
+        serializer's dedicated executor — never the default executor. A
+        cancelled awaiter abandons the worker thread, which runs to
+        completion and releases the hold itself, so a retry serializes
+        behind it instead of overlapping the abandoned body.
+        """
+        loop = asyncio.get_running_loop()
+        acquire = partial(self.acquire, thread_id, user_id=user_id)
+        return await loop.run_in_executor(self._acquire_serializer.executor, acquire)
+
+    def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str, *, thread_id: str, user_id: str | None) -> str:
+        with self._lock:
+            existing = self._thread_sandboxes.get(key)
+            if existing is not None and existing in self._sandboxes:
+                return existing
+
+        reclaimed = self._reclaim_warm_pool(sandbox_id)
+        if reclaimed is not None:
             with self._lock:
-                self._sandboxes[sandbox.id] = sandbox
-                self._thread_sandboxes[key] = sandbox.id
-            return sandbox.id
+                self._thread_sandboxes[key] = reclaimed
+            return reclaimed
+
+        sandbox = self._create_sandbox(sandbox_id)
+        with self._lock:
+            self._sandboxes[sandbox.id] = sandbox
+            self._thread_sandboxes[key] = sandbox.id
+        return sandbox.id
 
     def _create_sandbox(self, sandbox_id: str) -> TenkiSandbox:
         # Enforce replica soft cap: evict the oldest warm sandbox if active + warm
@@ -428,7 +438,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
                 self._warm_pool.setdefault(sandbox_id, (sandbox, now))
             self._sandboxes.clear()
             self._thread_sandboxes.clear()
-            self._acquire_locks.clear()
+            self._acquire_serializer.close()
 
     def shutdown(self) -> None:
         with self._lock:
@@ -444,7 +454,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
             self._sandboxes.clear()
             self._warm_pool.clear()
             self._thread_sandboxes.clear()
-            self._acquire_locks.clear()
+            self._acquire_serializer.close()
 
         for sandbox in active + warm:
             self._close_quietly(sandbox, context="shutdown")

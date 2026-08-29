@@ -873,7 +873,9 @@ def test_reset_parks_running_resources_for_later_cleanup(monkeypatch):
     assert provider._warm_pool[sid_active][0] is active_box
     assert provider._warm_pool[sid_warm][0] is warm_box
     assert provider._thread_boxes == {}
-    assert provider._acquire_locks == {}
+    with pytest.raises(RuntimeError, match="closed"):
+        with provider._acquire_serializer.hold("k"):
+            pass
     assert not active_box._closed
     assert not warm_box._closed
     assert not provider._shutdown_called
@@ -1226,3 +1228,21 @@ def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
     )
     assert not replacement.is_closed
     provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+def test_sandbox_id_none_user_quirk_pinned():
+    """BoxLite passes user_id through raw; None renders as the literal "None".
+
+    Quirk pinned per RFC #4741 §2.2 (its _thread_key uses "" instead, so the
+    two disagree). NOT fixed here — unifying the resolution is a separate
+    behavior-changing decision with its own follow-up issue.
+    """
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")

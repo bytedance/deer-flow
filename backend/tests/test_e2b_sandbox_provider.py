@@ -24,6 +24,7 @@ from deerflow.community.e2b_sandbox.capacity import (
 )
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -250,7 +251,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._lock = threading.Lock()
     provider._sandboxes = {}
     provider._thread_sandboxes = {}
-    provider._thread_locks = {}
+    provider._acquire_serializer = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
     provider._warm_pool = OrderedDict()
     provider._eviction_tombstones = set()
     provider._evictions_in_progress = set()
@@ -4112,3 +4113,10 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
     assert client.closed
     assert p._sandboxes == {}
     assert p._reserved_slots == 0
+
+
+def test_stable_seed_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    assert mod.E2BSandboxProvider._stable_seed("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
