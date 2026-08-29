@@ -458,6 +458,8 @@ export const enUS: Translations = {
       pause: "Pause",
       resume: "Resume",
       trigger: "Trigger now",
+      duplicate: "Duplicate",
+      duplicateTitleSuffix: " (Copy)",
       delete: "Delete",
     },
     deleteConfirm:
@@ -618,6 +620,8 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    outlineLabel: "Conversation outline",
+    outlineAttachmentFallback: "Image or file message",
   },
 
   // Chats
