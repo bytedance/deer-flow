@@ -31,14 +31,17 @@ The deterministic grader (`grading.py`), the resumable live QA runner (`qa.py`, 
 | Capacities | 5, 7, 9; QA capacity 7 |
 | Evaluation clock | `2026-08-13T00:00:00Z` |
 
-The CLI never downloads LongMemEval. Obtain the pinned file separately and expose its path locally:
+The CLI never downloads LongMemEval. The pinned file is `longmemeval_oracle.json` (about 15 MB) in the public, ungated Hugging Face dataset repository [`xiaowu0162/longmemeval-cleaned`](https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned); no account or token is needed. Download it once at the pinned revision and expose its path locally:
 
 ```bash
 export LONGMEMEVAL_ORACLE_PATH=/absolute/path/to/longmemeval_oracle.json
+curl -L -o "$LONGMEMEVAL_ORACLE_PATH" \
+  "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/98d7416c24c778c2fee6e6f3006e7a073259d48f/longmemeval_oracle.json"
 shasum -a 256 "$LONGMEMEVAL_ORACLE_PATH"
+# expected: 821a2034d219ab45846873dd14c14f12cfe7776e73527a483f9dac095d38620c
 ```
 
-The command rejects any file whose hash differs from the pinned value. The dataset itself and prepared text-bearing pools belong outside the repository or under ignored local directories.
+If `huggingface.co` is not reachable from your network, the same `/datasets/.../resolve/<revision>/...` path works through a Hugging Face mirror (for example, replace the host with `hf-mirror.com`), and `huggingface-cli download xiaowu0162/longmemeval-cleaned longmemeval_oracle.json --repo-type dataset --revision 98d7416c24c778c2fee6e6f3006e7a073259d48f` is equivalent. Whatever the source, every command rejects a file whose hash differs from the pinned value, so a wrong or modified download cannot pass silently. The dataset itself and prepared text-bearing pools belong outside the repository or under ignored local directories.
 
 ## Commands
 
