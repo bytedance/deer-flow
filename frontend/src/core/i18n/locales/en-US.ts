@@ -124,6 +124,8 @@ export const enUS: Translations = {
     loadingFullFile: "Loading full file...",
     previewFailed:
       "This file could not be previewed. You can still download it.",
+    viewSource: "View source",
+    missingTarget: "This link does not say which artifact to display.",
   },
 
   // Citations
