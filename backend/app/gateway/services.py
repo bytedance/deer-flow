@@ -1664,6 +1664,12 @@ async def wait_for_run_completion(
 ) -> bool:
     """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
 
+    Creator-side only, unlike ``sse_consumer``'s observer joins: every caller
+    must be the endpoint that created the run or a path reached only after an
+    explicit, permission-gated cancel. This helper intentionally keeps
+    applying the record's ``on_disconnect`` policy on disconnect — do not
+    wire it to observer surfaces.
+
     The non-streaming ``/wait`` endpoints used to ``await record.task``
     directly with no disconnect handling.  When the client (or an
     intermediate HTTP proxy) timed out during a long tool call such as

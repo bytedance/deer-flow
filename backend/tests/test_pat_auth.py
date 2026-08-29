@@ -606,6 +606,42 @@ def test_start_run_gates_mutating_strategies_at_the_choke_point():
     assert "multitask_strategy" in source
 
 
+def test_start_run_gate_denies_create_only_credential_behaviorally():
+    """Behavioral pin on the real start_run (the mirror route and source
+    anchor above prove wiring, but this drives the production choke point
+    itself): a create-only auth context gets 403 for a mutating strategy,
+    and the gate never misfires on "reject" — with no cancel permission at
+    all, the call proceeds past the gate (failing later on missing test
+    wiring, never with a permission 403)."""
+    from fastapi import HTTPException
+
+    from app.gateway.authz import AuthContext
+    from app.gateway.run_models import RunCreateRequest
+    from app.gateway.services import start_run
+
+    def _request(permissions):
+        return SimpleNamespace(state=SimpleNamespace(auth=AuthContext(user=SimpleNamespace(id="user-1"), permissions=permissions)))
+
+    async def _denied():
+        with pytest.raises(HTTPException) as exc:
+            await start_run(RunCreateRequest(multitask_strategy="interrupt"), "t1", _request(["runs:create"]))
+        return exc.value
+
+    exc = asyncio.run(_denied())
+    assert exc.status_code == 403
+    assert exc.detail == "Permission denied: runs:cancel"
+
+    async def _allowed_past_gate():
+        try:
+            await start_run(RunCreateRequest(), "t1", _request([]))
+        except HTTPException as gate_misfire:
+            pytest.fail(f"gate misfired on reject: {gate_misfire.status_code} {gate_misfire.detail}")
+        except Exception:
+            pass  # expected wiring failure past the gate — the gate let it through
+
+    asyncio.run(_allowed_past_gate())
+
+
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
     """DEER_FLOW_AUTH_DISABLED is an operator override of all authentication.
 
