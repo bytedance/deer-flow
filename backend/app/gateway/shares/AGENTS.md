@@ -72,8 +72,14 @@ referrers, not log sinks):
   them (nginx trac #2193: crit-level failures still append the request
   line), and the output cannot be format-masked — so the dedicated `^~`
   share locations route `error_log` to `/dev/null`, a sink that cannot
-  retain the token (pinned by test too; share-route upstream diagnostics
-  are the accepted trade-off, the Gateway still logs its own side).
+  retain the token (pinned by an exclusive test — the block's ONLY
+  error_log directive; share-route upstream diagnostics are the accepted
+  trade-off, the Gateway still logs its own side). Known residual: the
+  rare pre-location-selection error line (request line already parsed)
+  still reaches the parent `error_log`, which cannot be masked or routed
+  per-location — deployments that must close even that gap should scrub
+  `dfs_[A-Za-z0-9_-]+` in their nginx error-log pipeline, like any other
+  bearer-in-URL system.
 
 Snapshot immutability: later messages/edits never modify an existing share;
 `source_last_seq` is audit-only and public rendering never re-reads the source.

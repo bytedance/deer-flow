@@ -31,10 +31,10 @@ class ShareSnapshotTooLarge(Exception):
     silently dropping the oldest messages, creation must fail loudly.
     """
 
-    def __init__(self, thread_id: str, scanned_messages: int, cap: int):
-        super().__init__(f"thread {thread_id} exceeds the {cap}-message share snapshot cap")
+    def __init__(self, thread_id: str, hit: int, cap: int, *, limit_kind: str = "public-message"):
+        super().__init__(f"thread {thread_id} exceeds the {cap} {limit_kind} share snapshot cap")
         self.thread_id = thread_id
-        self.scanned_messages = scanned_messages
+        self.hit = hit
         self.cap = cap
 
 
@@ -92,7 +92,7 @@ async def build_share_snapshot(
                 thread_id,
                 _SNAPSHOT_MAX_SCANNED_ROWS,
             )
-            raise ShareSnapshotTooLarge(thread_id, scanned_rows, _SNAPSHOT_MAX_SCANNED_ROWS)
+            raise ShareSnapshotTooLarge(thread_id, scanned_rows, _SNAPSHOT_MAX_SCANNED_ROWS, limit_kind="raw-scan")
         before_seq = rows[0]["seq"]  # pages are ascending: row 0 is the oldest
     pages.reverse()
 

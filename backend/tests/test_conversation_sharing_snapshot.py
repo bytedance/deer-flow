@@ -104,7 +104,7 @@ async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
                 await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert excinfo.value.cap == 10
-    assert excinfo.value.scanned_messages == 10
+    assert excinfo.value.hit == 10
     assert any("refusing partial share" in record.message for record in caplog.records)
 
 

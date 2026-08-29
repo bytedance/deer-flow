@@ -169,5 +169,8 @@ def test_nginx_share_locations_suppress_request_lines_in_error_log(config_path: 
     share locations must route error_log to a non-retaining sink."""
     block = _location_block(config_path.read_text(encoding="utf-8"), location)
     # Severity alone does not redact request lines (nginx trac #2193): the
-    # sink itself must be non-retaining.
-    assert re.search(r"error_log\s+/dev/null\s+crit;", block), f"{config_path.name} {location}: error_log must route to /dev/null"
+    # sink itself must be non-retaining, and it must be the ONLY error_log
+    # directive in the block — nginx honors multiple error_log directives,
+    # so a second, retaining directive would reintroduce the leak.
+    directives = re.findall(r"error_log\s+([^;]+);", block)
+    assert directives == ["/dev/null crit"], f"{config_path.name} {location}: expected exactly one error_log to /dev/null crit, got {directives}"

@@ -65,9 +65,7 @@ def _load_or_create_pepper() -> str:
 
     try:
         if pepper_file.exists():
-            pepper = _read_pepper_file(pepper_file)
-            if pepper:
-                return pepper
+            return _read_pepper_file(pepper_file)
     except OSError as exc:
         raise RuntimeError(f"Failed to read share-token pepper from {pepper_file}. Set SHARE_TOKEN_PEPPER explicitly or fix DEER_FLOW_HOME/base directory permissions.") from exc
 
