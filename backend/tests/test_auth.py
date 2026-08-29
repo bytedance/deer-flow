@@ -425,6 +425,77 @@ def test_sqlite_round_trip_new_fields():
     asyncio.run(_run())
 
 
+# ── IntegrityError classification (OAuth conflict vs. everything else) ──────
+#
+# Regression coverage for a misclassification bug: create_user's
+# except IntegrityError handler used to substring-match "oauth" against
+# str(exc) (the SQLAlchemy wrapper), which always contains the failed
+# INSERT statement's full column list -- including oauth_provider/oauth_id
+# -- regardless of which constraint actually fired. Fixed to inspect
+# exc.orig (the driver exception) instead.
+
+
+def test_create_user_duplicate_primary_key_is_not_misreported_as_oauth(tmp_path):
+    """A duplicate `id` (primary-key violation, unrelated to OAuth) must not
+    be reported as "OAuth account already linked" -- the exact false
+    positive a substring check on str(exc) produces, since the wrapper's
+    text always names oauth_provider/oauth_id as INSERT columns."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            shared_id = uuid4()
+            first = User(id=shared_id, email="first@test.com", password_hash="h", system_role="user")
+            await repo.create_user(first)
+
+            # Same id, different email: an email-uniqueness collision is
+            # ruled out by construction (different email, and the pre-check
+            # would catch a real email dupe first anyway) -- this can only
+            # be the id primary-key constraint, never idx_users_oauth_identity.
+            duplicate_id = User(id=shared_id, email="second@test.com", password_hash="h", system_role="user")
+            with pytest.raises(ValueError) as exc_info:
+                await repo.create_user(duplicate_id)
+            assert "OAuth" not in str(exc_info.value), f"primary-key violation misreported as an OAuth conflict: {exc_info.value}"
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_create_user_real_oauth_conflict_still_reported_correctly(tmp_path):
+    """The actual case _is_oauth_identity_violation exists to detect: two
+    users sharing an (oauth_provider, oauth_id) pair must still raise the
+    OAuth-specific message, not just "any IntegrityError"."""
+    import asyncio
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            first = User(email="oauth-a@test.com", password_hash=None, system_role="user", oauth_provider="github", oauth_id="dup-123")
+            await repo.create_user(first)
+
+            duplicate = User(email="oauth-b@test.com", password_hash=None, system_role="user", oauth_provider="github", oauth_id="dup-123")
+            with pytest.raises(ValueError, match="OAuth account already linked"):
+                await repo.create_user(duplicate)
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
 def test_update_user_raises_when_row_concurrently_deleted(tmp_path):
     """Concurrent-delete during update_user must hard-fail, not silently no-op.
 

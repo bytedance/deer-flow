@@ -24,6 +24,37 @@ from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import UserRow
 
 
+def _is_oauth_identity_violation(exc: IntegrityError) -> bool:
+    """Distinguish the ``idx_users_oauth_identity`` (oauth_provider, oauth_id)
+    unique-index violation from any OTHER ``IntegrityError`` reaching this
+    commit (a duplicate primary key, or a duplicate-email race that slipped
+    past the pre-check above) by inspecting the DRIVER exception
+    (``exc.orig``), never the SQLAlchemy wrapper's ``str(exc)``.
+
+    ``str(exc)`` always embeds the full failed INSERT statement text, whose
+    column list names ``oauth_provider``/``oauth_id`` on every call
+    regardless of which constraint actually fired — a substring check on it
+    misclassifies every commit-time ``IntegrityError`` on this table as an
+    OAuth conflict. Reproduced directly on SQLite: inserting a different
+    email with an already-used ``id`` (a primary-key violation, nothing to
+    do with OAuth) raised "OAuth account already linked: None/None".
+
+    Postgres (asyncpg): the driver exception carries the violated
+    constraint's real name via ``constraint_name`` — compare against
+    ``idx_users_oauth_identity`` from ``deerflow.persistence.user.model``.
+    SQLite: the driver exposes no structured constraint name, only a
+    message naming the violated column(s) directly (``"UNIQUE constraint
+    failed: users.oauth_provider, users.oauth_id"``) — require BOTH oauth
+    column names present, not a bare "oauth" substring.
+    """
+    orig = exc.orig
+    constraint_name = getattr(orig, "constraint_name", None)
+    if constraint_name is not None:
+        return constraint_name == "idx_users_oauth_identity"
+    message = str(orig).lower()
+    return "oauth_provider" in message and "oauth_id" in message
+
+
 def _normalize_email(email: str) -> str:
     """Canonicalise an email address for storage and lookup.
 
@@ -105,18 +136,13 @@ class SQLiteUserRepository(UserRepository):
             except IntegrityError as exc:
                 await session.rollback()
                 # The email pre-check above already ruled out an email
-                # collision under normal (non-racing) conditions, so an
-                # IntegrityError reaching here is the OTHER unique
-                # constraint on this table -- idx_users_oauth_identity --
-                # firing instead, not email. Reporting it as "Email
-                # already registered" regardless was misleading: both
-                # backends' error text names the oauth columns
-                # ("UNIQUE constraint failed: users.oauth_provider,
-                # users.oauth_id" on SQLite; the index name plus a
-                # "Key (oauth_provider, oauth_id)=..." detail line on
-                # Postgres), so a substring check on "oauth" reliably
-                # tells the two cases apart on either backend.
-                if "oauth" in str(exc).lower():
+                # collision under normal (non-racing) conditions, so most
+                # IntegrityErrors reaching here are idx_users_oauth_identity
+                # firing instead -- but not all (see
+                # _is_oauth_identity_violation's own docstring for the
+                # reproduced counter-example). Inspect the actual violated
+                # constraint rather than assuming.
+                if _is_oauth_identity_violation(exc):
                     raise ValueError(f"OAuth account already linked: {user.oauth_provider}/{user.oauth_id}") from exc
                 raise ValueError(f"Email already registered: {user.email}") from exc
         return user
