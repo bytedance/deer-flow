@@ -102,6 +102,17 @@ def _make_pat_app(with_pat_repo: bool = True):
     async def stateless_run_stream(request: Request):
         return {"ok": True}
 
+    # Mirrors the real cancel-then-stream entrypoint (thread_runs.py
+    # stream_existing_run): runs:read at the decorator, plus the real
+    # conditional runs:cancel check the handler applies when `action` is set.
+    from app.gateway.routers.thread_runs import require_cancel_permission_when_action
+
+    @app.post("/api/threads/{thread_id}/runs/{run_id}/stream")
+    @require_permission("runs", "read")
+    async def cancel_then_stream(thread_id: str, run_id: str, request: Request, action: str | None = None):
+        require_cancel_permission_when_action(request, action)
+        return {"ok": True}
+
     return app
 
 
@@ -471,6 +482,50 @@ def test_pat_scopes_enforced_on_stateless_run_entry(client):
     client.cookies.clear()
     allowed = client.post("/api/runs/stream", headers={"Authorization": f"Bearer {create_scope['token']}"})
     assert allowed.status_code == 200
+
+
+def test_runs_read_only_pat_cannot_cancel_then_stream(client):
+    """Review follow-up: cancel-then-stream (`?action=interrupt|rollback`) must
+    require runs:cancel even though the route decorator gates at runs:read —
+    otherwise a read-only PAT bypasses the separate cancel scope."""
+    read_only = _create_pat(client, scopes=["runs:read"])
+    client.cookies.clear()
+
+    denied = client.post(
+        "/api/threads/t1/runs/run-1/stream?action=interrupt",
+        headers={"Authorization": f"Bearer {read_only['token']}"},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["detail"] == "Permission denied: runs:cancel"
+
+    # The same route without an action is a plain stream join: runs:read is
+    # sufficient there.
+    join = client.post(
+        "/api/threads/t1/runs/run-1/stream",
+        headers={"Authorization": f"Bearer {read_only['token']}"},
+    )
+    assert join.status_code == 200
+
+    cancel_scope = _create_pat(client, scopes=["runs:read", "runs:cancel"])
+    client.cookies.clear()
+    allowed = client.post(
+        "/api/threads/t1/runs/run-1/stream?action=rollback",
+        headers={"Authorization": f"Bearer {cancel_scope['token']}"},
+    )
+    assert allowed.status_code == 200
+
+    # Session callers keep the full permission set (with the CSRF pair their
+    # cookie-authenticated POST requires).
+    from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+
+    _session_cookie(client)
+    csrf = generate_csrf_token()
+    client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    session_allowed = client.post(
+        "/api/threads/t1/runs/run-1/stream?action=interrupt",
+        headers={CSRF_HEADER_NAME: csrf},
+    )
+    assert session_allowed.status_code == 200
 
 
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):

@@ -204,6 +204,22 @@ class ThreadTokenUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def require_cancel_permission_when_action(request: Request, action: str | None) -> None:
+    """Conditionally require ``runs:cancel`` for cancel-then-stream requests.
+
+    ``stream_existing_run`` is gated at ``runs:read`` so action-less stream
+    joins keep working with read-only credentials, but its ``action`` branch
+    cancels the run — a separate permission. A read-only PAT (or any read-only
+    credential) must not reach the cancel path, and decorators cannot express
+    query-parameter-conditional permissions, so the check lives here.
+    """
+    if action is None:
+        return
+    auth = getattr(request.state, "auth", None)
+    if auth is not None and not auth.has_permission("runs", "cancel"):
+        raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
+
+
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
     if record.status in (RunStatus.pending, RunStatus.running):
         return f"Run {run_id} is not active on this worker and cannot be cancelled"
@@ -1024,6 +1040,8 @@ async def stream_existing_run(
     is present the run is cancelled first; the response then streams any
     remaining buffered events so the client observes a clean shutdown.
     """
+    require_cancel_permission_when_action(request, action)
+
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
