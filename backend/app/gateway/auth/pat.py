@@ -12,6 +12,7 @@ permissions, never widen them.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import hmac
 import re
@@ -91,13 +92,32 @@ def is_pat_allowed_route(method: str, path: str) -> bool:
     return any(method in methods and pattern.match(normalized) for methods, pattern in _PAT_ROUTE_RULES)
 
 
+@functools.cache
+def _base62_width(byte_length: int) -> int:
+    """Digits sufficient for any *byte_length*-byte value (exact integer math)."""
+    width = 1
+    limit = 1 << (8 * byte_length)
+    while 62**width < limit:
+        width += 1
+    return width
+
+
 def _base62(data: bytes) -> str:
+    """Fixed-width big-endian base62 of *data*, ``0``-padded on the left.
+
+    ``int.from_bytes`` discards leading zero bytes, so an unpadded encoding
+    would be variable-length (and empty for all-zero input) — any draw below
+    62**39 would have produced a shorter-than-expected token. The fixed width
+    keeps every token body exactly ``_base62_width(len(data))`` characters
+    and makes the format test deterministic.
+    """
     value = int.from_bytes(data, "big")
     digits: list[str] = []
     while value:
         value, remainder = divmod(value, 62)
         digits.append(_BASE62_ALPHABET[remainder])
-    return "".join(reversed(digits))
+    body = "".join(reversed(digits))
+    return body.rjust(_base62_width(len(data)), "0")
 
 
 def generate_pat_token() -> str:

@@ -41,10 +41,21 @@ def test_generate_pat_token_format():
     token = generate_pat_token()
     assert token.startswith(PAT_TOKEN_PREFIX)
     body = token[len(PAT_TOKEN_PREFIX) :]
-    assert len(body) >= 40  # base62(32 bytes) ≈ 43 chars of entropy
+    assert len(body) == 43  # fixed width: 62^43 > 2^256 > 62^42
     assert body.isalnum()
     # Two draws must differ: CSPRNG, not a counter.
     assert token != generate_pat_token()
+
+
+def test_base62_pads_to_fixed_width_for_leading_zero_and_all_zero_input():
+    """``int.from_bytes`` discards leading zero bytes; the fixed-width pad
+    keeps the token body exactly 43 chars for every draw, including the
+    all-zero and single-leading-byte edges (review round 6, P3)."""
+    from app.gateway.auth.pat import PAT_RANDOM_BYTES, _base62
+
+    assert _base62(b"\x00" * PAT_RANDOM_BYTES) == "0" * 43
+    assert _base62(b"\x00" * (PAT_RANDOM_BYTES - 1) + b"\x01") == "0" * 42 + "1"
+    assert len(_base62(b"\xff" * PAT_RANDOM_BYTES)) == 43
 
 
 def test_pat_token_digest_is_deterministic_and_constant_time_comparable():
