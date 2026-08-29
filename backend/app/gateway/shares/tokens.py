@@ -32,6 +32,12 @@ _PEPPER_READ_RETRY_DELAY_SECONDS = 0.05
 _share_pepper: str | None = None
 
 
+# A generated pepper is urlsafe(32 bytes) = 43 chars; accept only reads that
+# are plausibly COMPLETE — a loser caching a partial mid-write prefix would
+# diverge from the winner even though both "succeeded".
+_PEPPER_MIN_LENGTH = 32
+
+
 def _read_pepper_file(pepper_file) -> str:
     """Read a pepper written by the O_EXCL winner, tolerating in-flight writes."""
     import time
@@ -39,7 +45,7 @@ def _read_pepper_file(pepper_file) -> str:
     for _ in range(_PEPPER_READ_RETRIES):
         try:
             pepper = pepper_file.read_text(encoding="utf-8").strip()
-            if pepper:
+            if len(pepper) >= _PEPPER_MIN_LENGTH:
                 return pepper
         except OSError:
             pass  # retried below; a hard failure surfaces after the loop
