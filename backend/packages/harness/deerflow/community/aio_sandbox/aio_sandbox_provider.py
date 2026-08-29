@@ -801,6 +801,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         return self._dedupe_mounts_by_container_path(mounts)
 
+    def _local_config_mount_exclusion_root(
+        self,
+        thread_id: str | None,
+        *,
+        user_id: str,
+    ) -> str | None:
+        """Return the skills subtree owned by a policy-scoped local sandbox."""
+        if not isinstance(self._backend, LocalContainerBackend) or not thread_id:
+            return None
+        if not self._thread_skill_projection_active(thread_id, user_id):
+            return None
+        return get_app_config().skills.container_path
+
     @staticmethod
     def _dedupe_mounts_by_container_path(mounts: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
         """Keep the first mount for each container path.
@@ -2045,6 +2058,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         extra_mounts = self._get_extra_mounts(thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = self._lark_integration_active(effective_user_id)
         provision_lark_cli_broker = self._lark_broker_active(effective_user_id)
+        config_mount_exclusion_root = self._local_config_mount_exclusion_root(
+            thread_id,
+            user_id=effective_user_id,
+        )
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -2053,6 +2070,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             evicted = self._evict_oldest_warm()
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
+        create_kwargs = {}
+        if config_mount_exclusion_root is not None:
+            create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         info = self._backend.create(
             thread_id,
             sandbox_id,
@@ -2060,6 +2080,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             user_id=effective_user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
             provision_lark_cli_broker=provision_lark_cli_broker,
+            **create_kwargs,
         )
 
         # Wait for sandbox to be ready
@@ -2079,6 +2100,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         extra_mounts = await asyncio.to_thread(self._get_extra_mounts, thread_id, user_id=effective_user_id)
         provision_lark_cli_runtime = await asyncio.to_thread(self._lark_integration_active, effective_user_id)
         provision_lark_cli_broker = await asyncio.to_thread(self._lark_broker_active, effective_user_id)
+        config_mount_exclusion_root = await asyncio.to_thread(
+            self._local_config_mount_exclusion_root,
+            thread_id,
+            user_id=effective_user_id,
+        )
 
         # Enforce replicas: only warm-pool containers count toward eviction budget.
         # Active sandboxes are in use by live threads and must not be forcibly stopped.
@@ -2087,6 +2113,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             evicted = await asyncio.to_thread(self._evict_oldest_warm)
             self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
+        create_kwargs = {}
+        if config_mount_exclusion_root is not None:
+            create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
         info = await asyncio.to_thread(
             self._backend.create,
             thread_id,
@@ -2095,6 +2124,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             user_id=effective_user_id,
             provision_lark_cli_runtime=provision_lark_cli_runtime,
             provision_lark_cli_broker=provision_lark_cli_broker,
+            **create_kwargs,
         )
 
         # Wait for sandbox to be ready without blocking the event loop.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -379,7 +380,7 @@ def test_policy_scoped_thread_skips_shared_projection_during_create(
     assert provider._skill_projection_mounts("user-1", "thread-1") == []
 
 
-def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_signature(
+def test_sync_agent_skills_rebuilds_managed_remote_tree_despite_matching_legacy_marker(
     monkeypatch,
     tmp_path,
 ):
@@ -401,7 +402,8 @@ def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_sign
     ):
         category.mkdir(parents=True, exist_ok=True)
     _write_skill(projection.public, "allowed-skill")
-    (root / ".projection-manifest.json").write_text(
+    manifest_path = root / ".projection-manifest.json"
+    manifest_path.write_text(
         json.dumps(
             {
                 "version": 1,
@@ -411,6 +413,7 @@ def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_sign
         ),
         encoding="utf-8",
     )
+    legacy_signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     monkeypatch.setattr(
         mod,
         "get_app_config",
@@ -420,6 +423,7 @@ def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_sign
     files = FakeFilesAPI(
         {
             "/mnt/skills/public/excluded-skill/SKILL.md": b"excluded",
+            "/mnt/skills/.deerflow-projection-signature": legacy_signature.encode(),
             "/mnt/skills/unmanaged.txt": b"keep",
         }
     )
@@ -446,7 +450,8 @@ def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_sign
             exit_code=0,
         )
 
-    commands = FakeCommandsAPI([reset_remote_tree])
+    chmod_ok = SimpleNamespace(stdout="", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([reset_remote_tree, chmod_ok, reset_remote_tree, chmod_ok])
     client = FakeClient(sandbox_id="sandbox-1", commands=commands, files=files)
     provider = _make_provider()
     provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
@@ -465,7 +470,8 @@ def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_sign
     assert "/mnt/skills/public/excluded-skill/SKILL.md" not in files.store
     assert files.store["/mnt/skills/public/allowed-skill/SKILL.md"].startswith(b"---")
     assert files.store["/mnt/skills/unmanaged.txt"] == b"keep"
-    assert "/mnt/skills/.deerflow-projection-signature" in files.store
+    assert "/mnt/skills/.deerflow-projection-signature" not in files.store
+    assert files.read_calls == []
     first_command_count = len(commands.calls)
     first_write_count = len(files.write_calls)
 
@@ -476,8 +482,8 @@ def test_sync_agent_skills_replaces_managed_remote_tree_and_caches_manifest_sign
         projection=projection,
     )
 
-    assert len(commands.calls) == first_command_count
-    assert len(files.write_calls) == first_write_count
+    assert len(commands.calls) == first_command_count * 2
+    assert len(files.write_calls) == first_write_count * 2
 
 
 @pytest.mark.parametrize(
@@ -622,7 +628,9 @@ def test_sync_agent_skills_rejects_symlinked_remote_root_before_deleting(
         projection.integrations,
     ):
         category.mkdir(parents=True, exist_ok=True)
-    (root / ".projection-manifest.json").write_text("{}", encoding="utf-8")
+    manifest_path = root / ".projection-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    legacy_signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     monkeypatch.setattr(
         mod,
         "get_app_config",
@@ -640,6 +648,11 @@ def test_sync_agent_skills_rejects_symlinked_remote_root_before_deleting(
     client = FakeClient(
         sandbox_id="sandbox-1",
         commands=FakeCommandsAPI([reject_symlinked_root]),
+        files=FakeFilesAPI(
+            {
+                "/mnt/skills/.deerflow-projection-signature": legacy_signature.encode(),
+            }
+        ),
     )
     provider = _make_provider()
     provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
@@ -661,6 +674,7 @@ def test_sync_agent_skills_rejects_symlinked_remote_root_before_deleting(
             projection=projection,
         )
 
+    assert client.files.read_calls == []
     assert client.files.write_calls == []
 
 

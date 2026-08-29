@@ -1995,7 +1995,7 @@ class E2BSandboxProvider(SandboxProvider):
         user_id: str,
         projection: SkillProjectionPaths,
     ) -> None:
-        """Replace E2B's uploaded skills with the prepared thread projection."""
+        """Rebuild E2B's managed skills from the prepared thread projection."""
         del thread_id, user_id  # Scope is already encoded in ``projection``.
         with self._lock:
             sandbox = self._sandboxes.get(sandbox_id)
@@ -2007,19 +2007,11 @@ class E2BSandboxProvider(SandboxProvider):
             home_dir=sandbox.home_dir,
         )
 
-        projection_root = projection.public.parent
-        manifest_path = projection_root / ".projection-manifest.json"
-        manifest = manifest_path.read_bytes()
-        signature = hashlib.sha256(manifest).hexdigest()
+        # A sandbox-visible marker cannot prove integrity: the sandbox user can
+        # modify the marker and replace category directories between turns.
+        # Rebuild on every policy sync so the no-follow root check and managed
+        # directory replacement always run before the sandbox is handed out.
         marker_path = f"{skills_root}/.deerflow-projection-signature"
-        try:
-            remote_signature = sandbox.client.files.read(marker_path)
-        except Exception:
-            remote_signature = None
-        if isinstance(remote_signature, bytes):
-            remote_signature = remote_signature.decode("utf-8", errors="replace")
-        if remote_signature == signature:
-            return
 
         category_paths = [
             f"{skills_root}/public",
@@ -2063,7 +2055,6 @@ class E2BSandboxProvider(SandboxProvider):
                 True,
                 budget=budget,
             )
-        sandbox.client.files.write(marker_path, signature.encode("utf-8"))
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")

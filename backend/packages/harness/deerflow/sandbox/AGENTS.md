@@ -15,9 +15,10 @@
   acquire, `sync_agent_skills` clears only DeerFlow's four managed category
   directories and signature before strictly uploading the signed thread
   projection. It rejects non-canonical paths, protected mounts/homes, symlinked
-  roots, and standard operating-system trees before destructive work. A remote
-  signature avoids redundant uploads and changes whenever policy or enabled
-  source state changes. Delegated subagents are non-owners of the lead's thread
+  roots, and standard operating-system trees before destructive work. E2B
+  rebuilds the managed categories on every policy sync; it deletes legacy
+  sandbox-visible signature markers instead of trusting them as proof that the
+  remote tree is intact. Delegated subagents are non-owners of the lead's thread
   projection: they reuse that filesystem view and never rebuild it from their
   discovery/activation policy.
   Acquire and release share an `AcquireSerializer` hold keyed by `(user_id, thread_id)`. The serializer does

@@ -339,6 +339,71 @@ def test_thread_skill_projection_uses_distinct_sandbox_identity(
     )
 
 
+def test_policy_scoped_create_excludes_local_config_mounts_below_skills_root(
+    tmp_path,
+    monkeypatch,
+):
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    paths = Paths(base_dir=tmp_path / "home")
+    paths.thread_skills_view_dir(
+        "thread-policy",
+        user_id="alice",
+    ).mkdir(parents=True)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: paths)
+    monkeypatch.setattr(
+        aio_mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    provider = _make_provider(tmp_path)
+    provider._config = {"replicas": 3}
+    provider._thread_locks = {}
+    provider._warm_pool = {}
+    provider._sandbox_infos = {}
+    provider._thread_sandboxes = {}
+    provider._last_activity = {}
+    provider._lock = aio_mod.threading.Lock()
+    captured: dict = {}
+
+    backend = object.__new__(aio_mod.LocalContainerBackend)
+
+    def _create(thread_id, sandbox_id, **kwargs):
+        captured.update(kwargs)
+        return aio_mod.SandboxInfo(
+            sandbox_id=sandbox_id,
+            sandbox_url="http://sandbox",
+        )
+
+    backend.create = _create
+    provider._backend = backend
+    monkeypatch.setattr(aio_mod, "wait_for_sandbox_ready", lambda *_a, **_k: True)
+    monkeypatch.setattr(provider, "_get_extra_mounts", lambda *_a, **_k: [])
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_lark_integration_active",
+        staticmethod(lambda user_id=None: False),
+    )
+    monkeypatch.setattr(
+        aio_mod.AioSandboxProvider,
+        "_lark_broker_active",
+        staticmethod(lambda user_id=None: False),
+    )
+    monkeypatch.setattr(
+        provider,
+        "_register_created_sandbox",
+        lambda *a, **k: "sandbox-policy",
+    )
+
+    provider._create_sandbox(
+        "thread-policy",
+        "sandbox-policy",
+        user_id="alice",
+    )
+
+    assert captured["config_mount_exclusion_root"] == "/mnt/skills"
+
+
 def test_join_host_path_preserves_windows_drive_letter_style():
     base = r"C:\Users\demo\deer-flow\backend\.deer-flow"
 
