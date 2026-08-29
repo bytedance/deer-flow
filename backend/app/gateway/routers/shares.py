@@ -26,7 +26,7 @@ from app.gateway.shares.snapshot import (
     build_share_snapshot,
     resolve_share_title,
 )
-from app.gateway.shares.tokens import generate_share_token, get_share_pepper, share_token_hash
+from app.gateway.shares.tokens import generate_share_token, get_share_pepper_async, share_token_hash
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -206,10 +206,11 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     title = (body.title or await resolve_share_title(thread_id, request=request)).strip()[:_TITLE_MAX_LENGTH]
     expires_at = _resolve_expiry(body)
     token = generate_share_token()
+    pepper = await get_share_pepper_async()
     record = await repo.create(
         thread_id=thread_id,
         owner_user_id=user_id,
-        token_hash=share_token_hash(token, get_share_pepper()),
+        token_hash=share_token_hash(token, pepper),
         title=title or "Shared conversation",
         snapshot_json=snapshot,
         snapshot_version=snapshot["version"],
@@ -278,7 +279,8 @@ async def get_public_share(share_token: str, request: Request, response: Respons
     if _public_resolve_throttled(get_client_ip(request)):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
-    record = await repo.get_active_by_token_hash(share_token_hash(share_token, get_share_pepper()))
+    pepper = await get_share_pepper_async()
+    record = await repo.get_active_by_token_hash(share_token_hash(share_token, pepper))
     if record is None:
         # Never log the token itself; hash-side failures stay generic.
         logger.debug("Share token did not resolve")

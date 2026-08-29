@@ -100,6 +100,28 @@ def test_concurrent_first_use_agrees_on_one_pepper(monkeypatch, tmp_path):
     assert (base / ".share_token_pepper").read_text(encoding="utf-8").strip() == results[0]
 
 
+def test_pepper_reader_waits_for_the_complete_generated_value(monkeypatch):
+    """A losing worker must not cache a 32-character mid-write prefix."""
+    from app.gateway.shares.tokens import _read_pepper_file
+
+    complete = "p" * 43
+
+    class SequencedPepperFile:
+        def __init__(self):
+            self.read_count = 0
+
+        def read_text(self, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            self.read_count += 1
+            return complete[:32] if self.read_count == 1 else complete
+
+    pepper_file = SequencedPepperFile()
+    monkeypatch.setattr("app.gateway.shares.tokens._PEPPER_READ_RETRY_DELAY_SECONDS", 0.0)
+
+    assert _read_pepper_file(pepper_file) == complete
+    assert pepper_file.read_count == 2
+
+
 def test_crashed_creator_leaves_recoverable_failure(monkeypatch, tmp_path):
     """An empty pepper file (creator died mid-write) fails loudly with
     operator remediation instead of silently regenerating a second pepper."""

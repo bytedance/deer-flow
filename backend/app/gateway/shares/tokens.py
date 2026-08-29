@@ -11,6 +11,7 @@ token never needs to be recovered).
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -32,10 +33,10 @@ _PEPPER_READ_RETRY_DELAY_SECONDS = 0.05
 _share_pepper: str | None = None
 
 
-# A generated pepper is urlsafe(32 bytes) = 43 chars; accept only reads that
-# are plausibly COMPLETE — a loser caching a partial mid-write prefix would
-# diverge from the winner even though both "succeeded".
-_PEPPER_MIN_LENGTH = 32
+# A generated pepper is urlsafe(32 bytes) = exactly 43 unpadded characters.
+# Accept only that complete value: a loser caching any shorter mid-write
+# prefix would diverge from the winner even though both "succeeded".
+_GENERATED_PEPPER_LENGTH = 43
 
 
 def _read_pepper_file(pepper_file) -> str:
@@ -45,7 +46,7 @@ def _read_pepper_file(pepper_file) -> str:
     for _ in range(_PEPPER_READ_RETRIES):
         try:
             pepper = pepper_file.read_text(encoding="utf-8").strip()
-            if len(pepper) >= _PEPPER_MIN_LENGTH:
+            if len(pepper) == _GENERATED_PEPPER_LENGTH:
                 return pepper
         except OSError:
             pass  # retried below; a hard failure surfaces after the loop
@@ -109,6 +110,13 @@ def get_share_pepper() -> str:
             logger.warning("⚠ SHARE_TOKEN_PEPPER is not set — using an auto-generated pepper persisted to .share_token_pepper. Existing share links survive restarts. For production, set SHARE_TOKEN_PEPPER in the environment.")
         _share_pepper = pepper
     return _share_pepper
+
+
+async def get_share_pepper_async() -> str:
+    """Return the process-wide pepper without blocking an event loop."""
+    if _share_pepper is not None:
+        return _share_pepper
+    return await asyncio.to_thread(get_share_pepper)
 
 
 def set_share_pepper(pepper: str | None) -> None:
