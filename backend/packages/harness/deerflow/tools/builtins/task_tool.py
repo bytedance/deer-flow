@@ -13,6 +13,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
@@ -232,6 +233,8 @@ def _task_result_command(
     stop_reason: SubagentStopReasonValue | None = None,
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
+    tool_receipts: list[dict] | None = None,
+    receipt_verdict: dict | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     return Command(
@@ -248,6 +251,8 @@ def _task_result_command(
                         stop_reason=stop_reason,
                         model_name=model_name,
                         token_usage=usage,
+                        tool_receipts=tool_receipts,
+                        receipt_verdict=receipt_verdict,
                     ),
                 )
             ]
@@ -555,6 +560,15 @@ async def task_tool(
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
                 # — the work survives on result_brief like a clean success.
+                # RFC #4651 PR2: cross-check the report's [rN] citations
+                # against the harvested receipts once, here — the only point
+                # holding the full (untruncated) report text. receipts=None
+                # means no harvest happened (receipts_enabled=false, or the
+                # run ended before streaming): skip, keeping disabled
+                # deployments exactly pre-PR2. An empty list is a real
+                # harvest (zero stamped calls) and still gets a verdict.
+                receipts = getattr(result, "tool_receipts", None)
+                receipt_verdict = verify_receipt_citations(result.result or "", receipts) if receipts is not None else None
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="completed",
@@ -562,6 +576,8 @@ async def task_tool(
                     stop_reason=result.stop_reason,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=receipts,
+                    receipt_verdict=receipt_verdict,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
@@ -587,6 +603,7 @@ async def task_tool(
                     stop_reason=result.stop_reason,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -608,6 +625,7 @@ async def task_tool(
                     error=result.error,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -629,6 +647,7 @@ async def task_tool(
                     error=result.error,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
 
             # Still running, wait before next poll
@@ -664,6 +683,7 @@ async def task_tool(
                     error=message,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.

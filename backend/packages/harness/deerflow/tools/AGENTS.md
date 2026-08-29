@@ -11,6 +11,7 @@
    - `update_agent` - Custom-agent-only: persist self-updates to the current agent's `SOUL.md` / `config.yaml` from inside a normal chat (partial update + atomic write). Bound when `agent_name` is set and `is_bootstrap=False`.
 4. **Subagent tool** (if enabled):
    - `task` - Delegate to subagent (description, prompt, subagent_type)
+     Polling safety timeouts carry the latest published tool receipts into the terminal task metadata before requesting background cancellation.
    - `batch_task`, `batch_status`, `cancel_batch` - Explicit durable batch submission/progress/cancellation. Added only while the startup SQL-backed batch submitter is installed; large results stay in the owner-scoped API/JSONL export rather than the lead context.
    - Direct `create_deerflow_agent` integrations receive cloned tools bound to their explicit `SubagentRuntime`. The bound `task` forwards that runtime's exact execution controller and optional caller-owned `AppConfig` into registry/model/tool resolution and `SubagentExecutor`; bound batch tools use the same config snapshot and resolve only that runtime's submitter before falling back to no other application's active worker. Keep the original tool name/schema unchanged so model contracts and user-tool deduplication remain stable.
 

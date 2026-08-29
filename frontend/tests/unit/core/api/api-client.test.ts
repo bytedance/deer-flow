@@ -450,6 +450,70 @@ test("recovers a gap emitted by the initial run stream", async () => {
   expect(recoveryHeaders[0]?.get("Last-Event-ID")).toBe("5-0");
 });
 
+test("recovers from stream replay gap with null retained bounds", async () => {
+  const sessionStorage = makeSessionStorage();
+  const gap = {
+    code: "stream_replay_gap",
+    run_id: "run-null-bounds",
+    requested_event_id: "1-0",
+    earliest_available_event_id: null,
+    latest_available_event_id: null,
+    recovery: "reload_durable_state",
+  };
+  let recoveryLastEventId: string | null = "sentinel";
+  const fetchFn = rs.fn(async (url: string | URL, init?: RequestInit) => {
+    const path = url.toString();
+    if (path.endsWith("/threads/thread-null/runs/stream")) {
+      return makeSSEResponse(`event: gap\ndata: ${JSON.stringify(gap)}\n\n`, {
+        "Content-Location": "/threads/thread-null/runs/run-null-bounds",
+      });
+    }
+    if (path.includes("/threads/thread-null/state")) {
+      return new Response(
+        JSON.stringify({
+          values: { messages: [{ type: "ai", content: "checkpoint" }] },
+        }),
+        { status: 200 },
+      );
+    }
+    if (path.includes("/runs/run-null-bounds/stream")) {
+      const headers = new Headers(init?.headers);
+      recoveryLastEventId = headers.get("Last-Event-ID");
+      return makeSSEResponse("event: end\ndata: null\n\n");
+    }
+    return new Response(JSON.stringify({ detail: "unexpected request" }), {
+      status: 500,
+    });
+  });
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  rs.stubGlobal("fetch", fetchFn);
+
+  const received: Array<{ id?: string; event: string; data: unknown }> = [];
+  for await (const entry of getAPIClient(true).runs.stream(
+    "thread-null",
+    "lead_agent",
+    { streamResumable: true },
+  )) {
+    received.push(entry);
+  }
+
+  expect(received).toEqual([
+    {
+      event: "custom",
+      data: { type: "stream_replay_gap", ...gap },
+    },
+    {
+      event: "values",
+      data: { messages: [{ type: "ai", content: "checkpoint" }] },
+    },
+    { event: "end", data: null },
+  ]);
+  expect(recoveryLastEventId).toBeNull();
+});
+
 test("clears reconnect metadata when an initial stream gap resume is inactive", async () => {
   const sessionStorage = makeSessionStorage();
   const gap = {
