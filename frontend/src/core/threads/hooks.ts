@@ -2819,53 +2819,10 @@ function mergeThreadTitle(thread: AgentThread, title: string): AgentThread {
   };
 }
 
-function setThreadMetadataInCaches(
+function setThreadInCaches(
   queryClient: QueryClient,
   threadId: string,
-  metadata: ThreadMetadataPatch,
-) {
-  queryClient.setQueriesData(
-    {
-      queryKey: ["threads", "search"],
-      exact: false,
-    },
-    (oldData: Array<AgentThread> | undefined) => {
-      if (!oldData) {
-        return oldData;
-      }
-      return oldData.map((thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadMetadata(thread, metadata)
-          : thread,
-      );
-    },
-  );
-  queryClient.setQueriesData(
-    {
-      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      exact: false,
-    },
-    (oldData: InfiniteData<AgentThread[]> | undefined) =>
-      mapInfiniteThreadsCache(oldData, (thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadMetadata(thread, metadata)
-          : thread,
-      ),
-  );
-  queryClient.setQueriesData(
-    {
-      queryKey: ["thread", "metadata", threadId],
-      exact: false,
-    },
-    (oldData: AgentThread | null | undefined) =>
-      oldData ? mergeThreadMetadata(oldData, metadata) : oldData,
-  );
-}
-
-export function setThreadTitleInCaches(
-  queryClient: QueryClient,
-  threadId: string,
-  title: string,
+  mapper: (thread: AgentThread) => AgentThread,
 ): void {
   queryClient.setQueriesData(
     {
@@ -2877,9 +2834,7 @@ export function setThreadTitleInCaches(
         return oldData;
       }
       return oldData.map((thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadTitle(thread, title)
-          : thread,
+        thread.thread_id === threadId ? mapper(thread) : thread,
       );
     },
   );
@@ -2890,9 +2845,7 @@ export function setThreadTitleInCaches(
     },
     (oldData: InfiniteData<AgentThread[]> | undefined) =>
       mapInfiniteThreadsCache(oldData, (thread) =>
-        thread.thread_id === threadId
-          ? mergeThreadTitle(thread, title)
-          : thread,
+        thread.thread_id === threadId ? mapper(thread) : thread,
       ),
   );
   queryClient.setQueriesData(
@@ -2901,7 +2854,27 @@ export function setThreadTitleInCaches(
       exact: false,
     },
     (oldData: AgentThread | null | undefined) =>
-      oldData ? mergeThreadTitle(oldData, title) : oldData,
+      oldData ? mapper(oldData) : oldData,
+  );
+}
+
+function setThreadMetadataInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  metadata: ThreadMetadataPatch,
+) {
+  setThreadInCaches(queryClient, threadId, (thread) =>
+    mergeThreadMetadata(thread, metadata),
+  );
+}
+
+export function setThreadTitleInCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  title: string,
+): void {
+  setThreadInCaches(queryClient, threadId, (thread) =>
+    mergeThreadTitle(thread, title),
   );
 }
 
