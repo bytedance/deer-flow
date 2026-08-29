@@ -25,9 +25,15 @@ import json
 import sys
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 from uuid import uuid4
 
-sys.path.insert(0, "/opt/deer-flow/backend")
+# scripts/benchmark/concurrency/worker.py -> backend/ is 3 levels up, same
+# derivation as run_concurrency_bench.py (which spawns this file as a
+# subprocess with cwd already set to BACKEND_DIR, but this file is also
+# runnable/importable on its own, so it derives its own sys.path entry
+# rather than relying on the parent's cwd).
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -36,23 +42,29 @@ from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from deerflow.config.database_config import DatabaseConfig
 
 
-def make_session_factory(backend: str, pg_url: str):
+def make_session_factory(backend: str, pg_url: str, pg_schema: str):
     """Build engine + session factory directly, without the Alembic
-    bootstrap dance -- caller guarantees the schema already exists."""
+    bootstrap dance -- caller guarantees the schema already exists.
+
+    pg_schema is the SAME disposable per-run schema the orchestrator's
+    seed_baseline() already bootstrapped -- never "public" -- so a worker
+    attaching directly lands in the right namespace instead of falling
+    back to whatever the connection's default search_path happens to be.
+    """
     if backend == "sqlite":
         cfg = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/bench_data")
         url = cfg.app_sqlalchemy_url
         engine = create_async_engine(url, connect_args={"timeout": 30})
     else:
-        cfg = DatabaseConfig(backend="postgres", postgres_url=pg_url, postgres_schema="public")
+        cfg = DatabaseConfig(backend="postgres", postgres_url=pg_url, postgres_schema=pg_schema)
         url = cfg.app_sqlalchemy_url
-        engine = create_async_engine(url, connect_args={"server_settings": {"search_path": "public"}})
+        engine = create_async_engine(url, connect_args={"server_settings": {"search_path": pg_schema}})
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float, known_emails: list[str], pg_url: str):
+async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float, known_emails: list[str], pg_url: str, pg_schema: str):
     t_conn0 = time.perf_counter()
-    engine, sf = make_session_factory(backend, pg_url)
+    engine, sf = make_session_factory(backend, pg_url, pg_schema)
     # force a real connection now (not lazy) so conn_time reflects the
     # actual cost of a worker's first DB round-trip, same as a real
     # Gateway worker would pay on its first request.
@@ -101,8 +113,9 @@ def main():
     read_ratio = float(sys.argv[4])
     known_emails = sys.argv[5].split(",")
     pg_url = sys.argv[6] if len(sys.argv) > 6 else ""
+    pg_schema = sys.argv[7] if len(sys.argv) > 7 else ""
 
-    out = asyncio.run(run_worker(backend, worker_id, n_ops, read_ratio, known_emails, pg_url))
+    out = asyncio.run(run_worker(backend, worker_id, n_ops, read_ratio, known_emails, pg_url, pg_schema))
     print(json.dumps(out))
 
 

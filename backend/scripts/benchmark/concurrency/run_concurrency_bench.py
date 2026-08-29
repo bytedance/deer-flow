@@ -32,14 +32,23 @@ from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-sys.path.insert(0, "/opt/deer-flow/backend")
+# scripts/benchmark/concurrency/run_concurrency_bench.py -> backend/ is 3
+# levels up (concurrency -> benchmark -> scripts -> backend). Derived from
+# this file's own location, not hard-coded, so the documented
+# `uv run python scripts/benchmark/concurrency/run_concurrency_bench.py`
+# command works from any checkout, not just one at a specific fixed path.
+BACKEND_DIR = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(BACKEND_DIR))
 
 WORKER_SCRIPT = Path(__file__).parent / "worker.py"
-UV_RUN = ["/opt/deer-flow/backend/.venv/bin/python3"]
-BACKEND_DIR = Path("/opt/deer-flow/backend")
+# The orchestrator itself is already running under the correct interpreter
+# (`uv run python ...`, per this file's own usage docstring above) -- reuse
+# it for workers instead of a second hard-coded venv path that silently
+# assumes deer-flow is checked out at /opt/deer-flow.
+PYTHON = [sys.executable]
 
 
-async def seed_baseline(backend: str, pg_url: str, n_users: int = 100) -> list[str]:
+async def seed_baseline(backend: str, pg_url: str, pg_schema: str, n_users: int = 100) -> list[str]:
     """Populate a known baseline BEFORE the concurrent run starts -- worker
     reads target these known emails (not ones the workers themselves are
     creating), so read and write paths don't depend on each other within
@@ -47,7 +56,7 @@ async def seed_baseline(backend: str, pg_url: str, n_users: int = 100) -> list[s
     from app.gateway.auth.models import User
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from deerflow.config.database_config import DatabaseConfig
-    from deerflow.persistence.engine import close_engine, get_engine, get_session_factory, init_engine_from_config
+    from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
     if backend == "sqlite":
         sqlite_dir = BACKEND_DIR / ".deer-flow" / "bench_data"
@@ -55,14 +64,25 @@ async def seed_baseline(backend: str, pg_url: str, n_users: int = 100) -> list[s
             shutil.rmtree(sqlite_dir)
         cfg = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/bench_data")
     else:
-        cfg = DatabaseConfig(backend="postgres", postgres_url=pg_url, postgres_schema="public")
+        # pg_schema is a unique, disposable schema for this benchmark run
+        # (see main()) -- never "public" or any schema a real deployment
+        # might already be using. init_engine_from_config creates it
+        # automatically and pins search_path to it, so every statement
+        # below (including the DELETE re-seed on repeat worker-count
+        # sweeps) is scoped to this run's own throwaway namespace.
+        cfg = DatabaseConfig(backend="postgres", postgres_url=pg_url, postgres_schema=pg_schema)
 
     await init_engine_from_config(cfg)
     sf = get_session_factory()
     repo = SQLiteUserRepository(sf)
     if backend == "postgres":
-        # clean prior run's rows so they don't accumulate across executions
+        # clean prior worker-count sweep's rows so they don't accumulate
+        # across iterations WITHIN this run -- safe here specifically
+        # because it's scoped (via search_path) to this run's own isolated
+        # schema, never a shared/production one.
         from sqlalchemy import text
+
+        from deerflow.persistence.engine import get_engine
 
         engine = get_engine()
         async with engine.begin() as conn:
@@ -77,12 +97,32 @@ async def seed_baseline(backend: str, pg_url: str, n_users: int = 100) -> list[s
     return emails
 
 
-def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: float, known_emails: list[str], pg_url: str):
+async def drop_isolated_schema(pg_url: str, pg_schema: str) -> None:
+    """Drop this run's disposable Postgres schema (and everything in it) once
+    every worker-count sweep has finished. Only ever targets the unique
+    per-run schema main() generated -- never "public" or a caller-supplied
+    name, so there's nothing here that can reach into a real deployment's
+    namespace even if --pg-url points at one."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from deerflow.config.database_config import DatabaseConfig
+
+    cfg = DatabaseConfig(backend="postgres", postgres_url=pg_url, postgres_schema=pg_schema)
+    engine = create_async_engine(cfg.app_sqlalchemy_url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text(f'DROP SCHEMA IF EXISTS "{pg_schema}" CASCADE'))
+    finally:
+        await engine.dispose()
+
+
+def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: float, known_emails: list[str], pg_url: str, pg_schema: str):
     emails_arg = ",".join(known_emails)
     procs = []
     t_start = time.perf_counter()
     for wid in range(n_workers):
-        cmd = UV_RUN + [str(WORKER_SCRIPT), backend, str(wid), str(ops_per_worker), str(read_ratio), emails_arg, pg_url]
+        cmd = PYTHON + [str(WORKER_SCRIPT), backend, str(wid), str(ops_per_worker), str(read_ratio), emails_arg, pg_url, pg_schema]
         p = subprocess.Popen(cmd, cwd=str(BACKEND_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         procs.append(p)
 
@@ -154,16 +194,28 @@ def main():
     worker_counts = [int(x) for x in args.workers.split(",")]
     all_summaries = []
 
-    for n_workers in worker_counts:
-        print(f"--- seeding baseline ({args.backend}, {args.baseline_users} users) ---", file=sys.stderr)
-        emails = asyncio.run(seed_baseline(args.backend, args.pg_url, args.baseline_users))
+    # One disposable schema for this ENTIRE invocation (reused across the
+    # worker-count sweep below, dropped once at the very end) -- --pg-url
+    # accepts an arbitrary database URL, so this must never touch "public"
+    # or any namespace a real deployment might be using. Unset for sqlite;
+    # seed_baseline/run_workers/worker.py ignore it on that backend.
+    pg_schema = f"bench_{uuid4().hex[:12]}" if args.backend == "postgres" else ""
 
-        print(f"--- running {n_workers} workers ({args.backend}, {args.ops_per_worker} ops/worker) ---", file=sys.stderr)
-        worker_outputs, wall_time = run_workers(args.backend, n_workers, args.ops_per_worker, args.read_ratio, emails, args.pg_url)
-        summary = summarize(worker_outputs, wall_time, n_workers, args.ops_per_worker)
-        summary["backend"] = args.backend
-        all_summaries.append(summary)
-        print(json.dumps(summary, indent=2), file=sys.stderr)
+    try:
+        for n_workers in worker_counts:
+            print(f"--- seeding baseline ({args.backend}, {args.baseline_users} users{f', schema={pg_schema}' if pg_schema else ''}) ---", file=sys.stderr)
+            emails = asyncio.run(seed_baseline(args.backend, args.pg_url, pg_schema, args.baseline_users))
+
+            print(f"--- running {n_workers} workers ({args.backend}, {args.ops_per_worker} ops/worker) ---", file=sys.stderr)
+            worker_outputs, wall_time = run_workers(args.backend, n_workers, args.ops_per_worker, args.read_ratio, emails, args.pg_url, pg_schema)
+            summary = summarize(worker_outputs, wall_time, n_workers, args.ops_per_worker)
+            summary["backend"] = args.backend
+            all_summaries.append(summary)
+            print(json.dumps(summary, indent=2), file=sys.stderr)
+    finally:
+        if pg_schema:
+            print(f"--- dropping isolated schema {pg_schema} ---", file=sys.stderr)
+            asyncio.run(drop_isolated_schema(args.pg_url, pg_schema))
 
     result = {"backend": args.backend, "read_ratio": args.read_ratio, "runs": all_summaries}
     output = json.dumps(result, indent=2)
