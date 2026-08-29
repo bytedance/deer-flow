@@ -38,6 +38,22 @@ logger = logging.getLogger(__name__)
 # eviction is retried with backoff before the record is given up on.
 RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS = 5
 RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS = 30.0
+# Completion fields mirrored onto RunRecord by update_run_completion. That
+# durable write is best-effort, so eviction confirms these are present in the
+# store before dropping the record that may hold the only copy.
+_COMPLETION_FIELDS = (
+    "total_input_tokens",
+    "total_output_tokens",
+    "total_tokens",
+    "llm_call_count",
+    "lead_agent_tokens",
+    "subagent_tokens",
+    "middleware_tokens",
+    "token_usage_by_model",
+    "message_count",
+    "last_ai_message",
+    "first_human_message",
+)
 
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
@@ -1972,13 +1988,17 @@ class RunManager:
         if not task.cancelled() and task.exception() is not None:
             logger.error("Run-record eviction retry for %s crashed", run_id, exc_info=task.exception())
 
-    async def _stop_eviction_retries(self, *, timeout: float) -> None:
-        """Reject new eviction retry work and boundedly cancel pending ones."""
+    def _cancel_eviction_retries(self) -> list[asyncio.Task[None]]:
+        """Cancel pending eviction retries without waiting for them."""
         tasks = list(self._eviction_retry_tasks.values())
-        if not tasks:
-            return
         for task in tasks:
             task.cancel()
+        return tasks
+
+    async def _drain_eviction_retries(self, tasks: list[asyncio.Task[None]], *, timeout: float) -> None:
+        """Bounded drain of already-cancelled retries; re-cancel stragglers."""
+        if not tasks:
+            return
         _, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
         if pending:
             # A task may swallow the first CancelledError while unwinding a
@@ -1986,7 +2006,7 @@ class RunManager:
             # done callback observes completion.
             for task in pending:
                 task.cancel()
-            logger.warning("Eviction retry shutdown exceeded %.1fs; %d task(s) still pending", timeout, len(pending))
+            logger.warning("Eviction retry drain exceeded %.1fs; %d task(s) still pending", timeout, len(pending))
 
     async def _evict_run_record_if_durable(self, run_id: str) -> bool:
         """Remove *run_id*'s record once its terminal state is durable.
@@ -2015,8 +2035,13 @@ class RunManager:
             return False
         if row is not None and row.get("status") not in (RunStatus.pending.value, RunStatus.running.value):
             # The durable row is terminal — any terminal outcome, including a
-            # peer takeover — so the store remains the source of truth and the
-            # in-memory copy can be dropped.
+            # peer takeover. For our own runs the completion write was
+            # best-effort and may have failed after the status write, so
+            # confirm the full completion snapshot is durable before dropping
+            # the record that may hold the only copy.
+            if not record.ownership_lost and self._completion_needs_repair(row, record):
+                if not await self._repair_durable_run_state(run_id, record):
+                    return False
             await self._remove_run_record(run_id, expected=record)
             return True
         if record.ownership_lost:
@@ -2033,12 +2058,45 @@ class RunManager:
                 return True
             return False
         # Row missing or still active: this record holds the only terminal
-        # snapshot, so repair the row from it before dropping the record.
-        repaired = await self._persist_snapshot_to_store(run_id, self._store_put_payload(record))
-        if repaired:
+        # snapshot, so repair the row from it — completion data included —
+        # before dropping the record.
+        if await self._repair_durable_run_state(run_id, record):
             await self._remove_run_record(run_id, expected=record)
             return True
         return False
+
+    @staticmethod
+    def _completion_payload(record: RunRecord) -> dict[str, Any]:
+        """Completion values worth confirming in the store (``None`` skipped)."""
+        return {key: getattr(record, key) for key in _COMPLETION_FIELDS if getattr(record, key) is not None}
+
+    @classmethod
+    def _completion_needs_repair(cls, row: dict[str, Any], record: RunRecord) -> bool:
+        """Does the durable row miss any completion value the record holds?"""
+        return any(row.get(key) != value for key, value in cls._completion_payload(record).items())
+
+    async def _repair_durable_run_state(self, run_id: str, record: RunRecord) -> bool:
+        """Rewrite the durable row from the memory snapshot, completion included.
+
+        ``put`` restores the structural snapshot; the completion fields ride
+        the same ``update_run_completion`` primitive the worker's best-effort
+        write uses, so no store signature change is needed.
+        """
+        if not await self._persist_snapshot_to_store(run_id, self._store_put_payload(record)):
+            return False
+        completion = self._completion_payload(record)
+        if not completion:
+            return True
+        try:
+            await self._call_store_with_retry(
+                "eviction completion repair",
+                run_id,
+                lambda: self._store.update_run_completion(run_id, status=record.status.value, **completion),
+            )
+        except Exception:
+            logger.warning("Failed to repair completion data for run %s during eviction", run_id, exc_info=True)
+            return False
+        return True
 
     async def _retry_eviction_until_durable(self, run_id: str) -> None:
         for attempt in range(1, RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS + 1):
@@ -2435,10 +2493,11 @@ class RunManager:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
 
-        # Fence eviction retries before the drain so a finalizing worker
-        # cannot spawn fresh retries after pending ones were cancelled.
+        # Fence eviction retries and cancel them without waiting: a retry
+        # stuck in a store call must not consume the run-drain budget — the
+        # bounded drain happens only after the primary run drain below.
         self._shutting_down = True
-        await self._stop_eviction_retries(timeout=max(0.0, deadline - loop.time()))
+        retry_tasks = self._cancel_eviction_retries()
 
         async with self._lock:
             inflight = [record for record in self._runs.values() if record.status in (RunStatus.pending, RunStatus.running) and record.task is not None and not record.task.done()]
@@ -2453,6 +2512,7 @@ class RunManager:
 
         if not inflight:
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+            await self._drain_eviction_retries(retry_tasks, timeout=max(0.0, deadline - loop.time()))
             return
 
         tasks = [record.task for record in inflight]
@@ -2505,6 +2565,7 @@ class RunManager:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+        await self._drain_eviction_retries(retry_tasks, timeout=max(0.0, deadline - loop.time()))
 
 
 class CancelOutcome(StrEnum):

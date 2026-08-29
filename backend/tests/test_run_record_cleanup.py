@@ -10,6 +10,8 @@ in the backing RunStore (repaired from the in-memory snapshot when the
 best-effort durable writes failed).
 """
 
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -281,6 +283,85 @@ async def test_fenced_worker_evicts_overlay_when_row_missing():
 
     assert await run_manager._evict_run_record_if_durable(record.run_id) is True
     assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_eviction_repairs_completion_data_when_status_only_durable():
+    """The completion write is best-effort: when only the terminal status
+    reached the store, eviction repairs the completion snapshot before
+    dropping the record that holds the only copy."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success)
+    record.total_tokens = 123
+    record.message_count = 4
+    record.last_ai_message = "done"
+    row = await store.get(record.run_id)
+    assert row["status"] == RunStatus.success.value
+    assert row.get("total_tokens", 0) == 0
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+
+    row = await store.get(record.run_id)
+    assert row["total_tokens"] == 123
+    assert row["message_count"] == 4
+    assert row["last_ai_message"] == "done"
+    assert record.run_id not in run_manager._runs
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated.total_tokens == 123
+
+
+@pytest.mark.anyio
+async def test_shutdown_drains_runs_before_eviction_retries():
+    """A cancellation-resistant eviction retry must not consume the run-drain
+    budget: runs are drained first, retries only afterwards."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    done = await run_manager.create("thread-1")
+    await run_manager.set_status(done.run_id, RunStatus.success, persist=False)
+    live = await run_manager.create("thread-2")
+    await run_manager.set_status(live.run_id, RunStatus.running)
+
+    async def failing_put(run_id, **payload):
+        raise OSError("store unavailable")
+
+    resist_cancellation = asyncio.Event()
+
+    async def resistant_retry(run_id):
+        while not resist_cancellation.is_set():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                if resist_cancellation.is_set():
+                    raise
+
+    store.put = failing_put
+    run_manager._retry_eviction_until_durable = resistant_retry  # type: ignore[method-assign]
+    await run_manager.evict_finished_run(done.run_id)
+    retry = run_manager._eviction_retry_tasks[done.run_id]
+    assert not retry.done()
+    await asyncio.sleep(0)  # start the retry so cancellation hits a running task
+
+    async def slow_run():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # bounded cleanup after cancellation
+            raise
+
+    live.task = asyncio.create_task(slow_run())
+    await asyncio.sleep(0)  # park the run in its sleep before shutdown signals it
+
+    await run_manager.shutdown(timeout=1.0)
+
+    # The run drained within the budget despite the resistant retry.
+    assert live.task.done()
+    assert not retry.done()  # still resistant, but fenced and re-cancelled
+    resist_cancellation.set()
+    retry.cancel()
+    await asyncio.gather(retry, return_exceptions=True)
+    assert run_manager._eviction_retry_tasks == {}
 
 
 @pytest.mark.anyio
