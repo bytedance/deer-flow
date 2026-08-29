@@ -95,6 +95,39 @@ class TestZeroCitationHeuristic:
         assert verdict["no_citation_claims"] is False
         assert verdict["citation_resolved"] is True
 
+    def test_common_completion_verbs_flagged(self):
+        """The original list missed the most common completion phrasings."""
+        for text in ["I fixed the bug and added tests.", "I tested the change successfully."]:
+            verdict = verify_receipt_citations(text, LEDGER)
+            assert verdict["no_citation_claims"] is True, text
+            assert verdict["citation_resolved"] is False, text
+
+    def test_chinese_action_claims_flagged(self):
+        """CJK reports have no word boundaries; common action verbs must match."""
+        verdict = verify_receipt_citations("我已经创建了文件并运行了测试。", LEDGER)
+        assert verdict["no_citation_claims"] is True
+        assert verdict["citation_resolved"] is False
+
+    def test_nontrivial_uncited_report_with_receipts_flagged(self):
+        """Safety net in any language: the run demonstrably executed tools
+        (receipts harvested), yet a paragraph-length report cites none of them."""
+        report = "The analysis is complete. " * 12  # 300 chars, no verbs, no paths
+        verdict = verify_receipt_citations(report, LEDGER)
+        assert verdict["cited"] == []
+        assert verdict["no_citation_claims"] is True
+
+    def test_short_claim_free_report_with_receipts_stays_vacuous_pass(self):
+        verdict = verify_receipt_citations("The answer is 42.", LEDGER)
+        assert verdict["no_citation_claims"] is False
+        assert verdict["citation_resolved"] is True
+
+    def test_claim_free_report_without_receipts_stays_vacuous_pass(self):
+        """No tools were stamped: nothing exists to cite against."""
+        report = "The analysis is complete. " * 12
+        verdict = verify_receipt_citations(report, [])
+        assert verdict["no_citation_claims"] is False
+        assert verdict["citation_resolved"] is True
+
     def test_verdict_shape_vocabulary(self):
         verdict = verify_receipt_citations("x [r1]", LEDGER)
         assert verdict["source"] == "receipt_citations"
