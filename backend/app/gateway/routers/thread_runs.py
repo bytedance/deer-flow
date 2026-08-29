@@ -1031,7 +1031,7 @@ async def stream_existing_run(
         # documented contract is POST-only for cancel-then-stream.
         raise HTTPException(
             status_code=405,
-            detail="`action` is only supported on POST requests; GET is a read-only stream join",
+            detail="`action` is only supported on POST requests",
         )
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
