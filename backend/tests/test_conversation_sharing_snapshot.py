@@ -40,7 +40,7 @@ async def test_snapshot_keeps_only_visible_human_and_ai_text():
         [_row(0, {"type": "ai", "content": "", "additional_kwargs": {"hide_from_ui": True}}), _row(1, {"type": "human", "content": "hello"})],
     ]
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
         assert before_seq in (None, 2)  # next cursor is the page's oldest seq
         return (pages[0] if before_seq is None else pages[1]), before_seq is None
 
@@ -64,7 +64,7 @@ async def test_snapshot_preserves_order_across_many_pages():
     ]
     calls = {"n": 0}
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
         page = pages[calls["n"]]
         calls["n"] += 1
         return page, calls["n"] < len(pages)
@@ -77,7 +77,7 @@ async def test_snapshot_preserves_order_across_many_pages():
 
 
 async def test_snapshot_skips_empty_text_messages():
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
         return ([_row(1, {"type": "human", "content": "   "})], False)
 
     with pytest.MonkeyPatch.context() as mp:
@@ -88,11 +88,17 @@ async def test_snapshot_skips_empty_text_messages():
 
 
 async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
-    """When the cap bites with older rows remaining, creation must fail loudly."""
-    page = [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in range(1, 11)]
+    """The first public message beyond the cap must fail loudly."""
+    pages = [
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in range(2, 12)],
+        [_row(1, {"type": "human", "content": "m1"})],
+    ]
+    calls = {"n": 0}
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
-        return (page, True)  # always more available
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page, calls["n"] < len(pages)
 
     from app.gateway.shares import snapshot as snapshot_module
 
@@ -104,8 +110,50 @@ async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
                 await build_share_snapshot("thread-1", request=object(), user_id="user-1")
 
     assert excinfo.value.cap == 10
-    assert excinfo.value.hit == 10
+    assert excinfo.value.hit == 11
     assert any("refusing partial share" in record.message for record in caplog.records)
+
+
+async def test_snapshot_rejects_when_terminal_page_pushes_public_count_over_cap():
+    """A mixed terminal page may cross the cap even when no older page exists."""
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in range(1, 5)], False
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 3)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        with pytest.raises(ShareSnapshotTooLarge) as excinfo:
+            await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert excinfo.value.cap == 3
+    assert excinfo.value.hit == 4
+
+
+async def test_snapshot_at_cap_scans_older_non_public_page_before_deciding():
+    """Canonical ``has_more`` can mean only older non-public rows remain."""
+    pages = [
+        [_row(seq, {"type": "human", "content": f"m{seq}"}) for seq in range(2, 5)],
+        [_row(1, {"type": "tool", "content": "tool-only"})],
+    ]
+    calls = {"n": 0}
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        page = pages[calls["n"]]
+        calls["n"] += 1
+        return page, calls["n"] < len(pages)
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_MESSAGES", 3)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert calls["n"] == 2
+    assert [message["content"] for message in snapshot["messages"]] == ["m2", "m3", "m4"]
 
 
 async def test_tool_heavy_thread_does_not_hit_the_cap_early():
@@ -118,7 +166,7 @@ async def test_tool_heavy_thread_does_not_hit_the_cap_early():
     ]
     calls = {"n": 0}
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
         page = pages[calls["n"]]
         calls["n"] += 1
         return page, calls["n"] < len(pages)
@@ -133,23 +181,60 @@ async def test_tool_heavy_thread_does_not_hit_the_cap_early():
     assert [m["content"] for m in snapshot["messages"]] == ["hello", "hi"]
 
 
-async def test_raw_scan_bound_stops_unbounded_walks():
-    """A thread with endless non-public rows is bounded by the raw-scan cap."""
+async def test_raw_scan_bound_counts_rows_consumed_inside_canonical_pager():
+    """Rows filtered inside the canonical pager still consume raw budget."""
 
-    def page(before_seq):
-        start = (before_seq or 10_000) - 200
-        return [_row(seq, {"type": "tool", "content": "x"}) for seq in range(start, start + 200)]
+    class FakeEventStore:
+        def __init__(self):
+            self.rows = [
+                {
+                    "seq": seq,
+                    "run_id": "hidden-run",
+                    "content": {"type": "human", "content": f"hidden-{seq}"},
+                    "metadata": {},
+                }
+                for seq in range(1, 6)
+            ]
+            self.raw_rows_returned = 0
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
-        return (page(before_seq), True)  # always more tool rows
+        async def list_messages(self, thread_id, *, limit, before_seq=None, after_seq=None, user_id=None):
+            assert after_seq is None
+            eligible = [row for row in self.rows if before_seq is None or row["seq"] < before_seq]
+            page = eligible[-limit:]
+            self.raw_rows_returned += len(page)
+            return page
 
+    class FakeRunManager:
+        async def list_successful_regenerate_sources(self, thread_id, *, user_id):
+            return {"hidden-run"}
+
+        async def list_edit_replay_visibility(self, thread_id, *, user_id):
+            return SimpleNamespace(hidden_source_run_ids=set(), hidden_attempt_run_ids=set())
+
+    from app.gateway.routers import thread_runs
     from app.gateway.shares import snapshot as snapshot_module
 
+    event_store = FakeEventStore()
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                run_event_store=event_store,
+                run_manager=FakeRunManager(),
+            )
+        )
+    )
+
     with pytest.MonkeyPatch.context() as mp:
-        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_SCANNED_ROWS", 500)
-        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
-        with pytest.raises(ShareSnapshotTooLarge):
-            await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_SCANNED_ROWS", 3)
+        mp.setattr(thread_runs, "THREAD_MESSAGE_PAGE_SCAN_BATCH", 2)
+        with pytest.raises(ShareSnapshotTooLarge) as excinfo:
+            await build_share_snapshot("thread-1", request=request, user_id="user-1")
+
+    assert excinfo.value.cap == 3
+    assert excinfo.value.hit == 4
+    # One sentinel row beyond the cap proves that older raw history exists;
+    # the lower-level scan must stop there instead of walking all five rows.
+    assert event_store.raw_rows_returned == 4
 
 
 async def test_snapshot_exactly_at_cap_with_no_more_rows_shares_completely():
@@ -167,7 +252,7 @@ async def test_snapshot_exactly_at_cap_with_no_more_rows_shares_completely():
     ]
     calls = {"n": 0}
 
-    async def fake_scan(thread_id, *, limit, before_seq, request, user_id):
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
         page = pages[calls["n"]]
         calls["n"] += 1
         return page, calls["n"] < len(pages)

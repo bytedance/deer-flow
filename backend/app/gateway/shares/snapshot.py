@@ -45,7 +45,11 @@ async def build_share_snapshot(
     user_id: str | None,
 ) -> dict[str, Any]:
     """Freeze the visible transcript of *thread_id* into a public DTO."""
-    from app.gateway.routers.thread_runs import _scan_thread_message_page
+    from app.gateway.routers.thread_runs import (
+        _RawMessageScanBudget,
+        _RawMessageScanLimitExceeded,
+        _scan_thread_message_page,
+    )
 
     # ``_scan_thread_message_page`` pages backward (newest page first) and
     # returns every page internally ascending by ``seq``. Rows are sanitized
@@ -56,43 +60,50 @@ async def build_share_snapshot(
     # contract, the raw-scan cap bounds work on row-heavy threads.
     pages: list[list[dict[str, Any]]] = []
     public_messages = 0
-    scanned_rows = 0
+    raw_scan_budget = _RawMessageScanBudget(_SNAPSHOT_MAX_SCANNED_ROWS)
     before_seq: int | None = None
     while True:
-        rows, has_more = await _scan_thread_message_page(
-            thread_id,
-            limit=_SNAPSHOT_SCAN_PAGE_SIZE,
-            before_seq=before_seq,
-            request=request,
-            user_id=user_id,
-        )
-        if not rows:
-            break
-        scanned_rows += len(rows)
-        page_messages = [_public_message(row) for row in rows]
-        page_messages = [message for message in page_messages if message is not None]
-        if page_messages:
-            pages.append(page_messages)
-            public_messages += len(page_messages)
-        if not has_more:
-            break
-        if public_messages >= _SNAPSHOT_MAX_MESSAGES:
-            # The share contract is the complete visible transcript; when the
-            # cap bites with older rows remaining, refuse rather than publish
-            # an apparently-complete share that silently omits them.
-            logger.warning(
-                "Share snapshot for thread %s reached the %d public-message cap with older rows remaining; refusing partial share",
+        try:
+            rows, has_more = await _scan_thread_message_page(
                 thread_id,
-                _SNAPSHOT_MAX_MESSAGES,
+                limit=_SNAPSHOT_SCAN_PAGE_SIZE,
+                before_seq=before_seq,
+                request=request,
+                user_id=user_id,
+                raw_scan_budget=raw_scan_budget,
             )
-            raise ShareSnapshotTooLarge(thread_id, public_messages, _SNAPSHOT_MAX_MESSAGES)
-        if scanned_rows >= _SNAPSHOT_MAX_SCANNED_ROWS:
+        except _RawMessageScanLimitExceeded as exc:
             logger.warning(
                 "Share snapshot for thread %s exceeded the %d raw-scan safety bound; refusing to walk further",
                 thread_id,
                 _SNAPSHOT_MAX_SCANNED_ROWS,
             )
-            raise ShareSnapshotTooLarge(thread_id, scanned_rows, _SNAPSHOT_MAX_SCANNED_ROWS, limit_kind="raw-scan")
+            raise ShareSnapshotTooLarge(
+                thread_id,
+                exc.scanned_rows,
+                _SNAPSHOT_MAX_SCANNED_ROWS,
+                limit_kind="raw-scan",
+            ) from exc
+        if not rows:
+            break
+        page_messages = [_public_message(row) for row in rows]
+        page_messages = [message for message in page_messages if message is not None]
+        if page_messages:
+            pages.append(page_messages)
+            public_messages += len(page_messages)
+        if public_messages > _SNAPSHOT_MAX_MESSAGES:
+            # ``has_more`` describes canonical page-eligible rows, not public
+            # messages. Reject only after observing the first public message
+            # beyond the cap; at exactly the cap we must keep scanning in case
+            # all remaining rows are tool/hidden content.
+            logger.warning(
+                "Share snapshot for thread %s exceeded the %d public-message cap; refusing partial share",
+                thread_id,
+                _SNAPSHOT_MAX_MESSAGES,
+            )
+            raise ShareSnapshotTooLarge(thread_id, public_messages, _SNAPSHOT_MAX_MESSAGES)
+        if not has_more:
+            break
         before_seq = rows[0]["seq"]  # pages are ascending: row 0 is the oldest
     pages.reverse()
 
