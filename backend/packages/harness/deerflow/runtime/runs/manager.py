@@ -1932,6 +1932,13 @@ class RunManager:
         bounded background retry takes over. Without a backing store there is
         no fallback for ``get``/``list_by_thread`` and the registry is the
         only idempotency dedup, so nothing is evicted in that mode.
+
+        A fenced record (``ownership_lost``) never repairs the store: once
+        the lease was lost the local terminal snapshot is unauthorized — a
+        peer reconciler owns durable terminalization — so the durable row
+        decides. The overlay is dropped once the row is terminal (or
+        missing) and retained, read-only, until a peer terminalizes an
+        active row.
         """
         if await self._evict_run_record_if_durable(run_id):
             return
@@ -1969,6 +1976,19 @@ class RunManager:
             # in-memory copy can be dropped.
             await self._remove_run_record(run_id, expected=record)
             return True
+        if record.ownership_lost:
+            # This worker was fenced from durable finalization: the local
+            # error snapshot is not an authorized terminal outcome, and a
+            # peer reconciler owns terminalizing the row. Repairing the row
+            # from a fenced snapshot would bypass the owner/CAS guards and
+            # release the durable active-thread fence prematurely. A missing
+            # row has no peer left to terminalize it, so the overlay can be
+            # dropped; an active row stays authoritative and the record is
+            # retained for read-only retries until the peer terminalizes.
+            if row is None:
+                await self._remove_run_record(run_id, expected=record)
+                return True
+            return False
         # Row missing or still active: this record holds the only terminal
         # snapshot, so repair the row from it before dropping the record.
         repaired = await self._persist_snapshot_to_store(run_id, self._store_put_payload(record))

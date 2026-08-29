@@ -219,3 +219,65 @@ async def test_cancel_stays_idempotent_after_record_eviction():
     assert record.run_id not in run_manager._runs
 
     assert await run_manager.cancel(record.run_id) == CancelOutcome.cancelled
+
+
+@pytest.mark.anyio
+async def test_fenced_worker_never_repairs_store_on_eviction():
+    """Multi-worker regression: a worker that lost lease ownership reaches
+    the eviction tail while the durable row is still active — its fenced
+    local error snapshot must never be published over the peer's row."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+
+    # A peer takes over the lease: the durable row stays active but flips to
+    # the peer's ownership.
+    row = await store.get(record.run_id)
+    row["owner_worker_id"] = "worker-b"
+    row["lease_expires_at"] = "2999-01-01T00:00:00+00:00"
+
+    # The stalled worker is fenced: local error rewrite only, no store write.
+    assert await run_manager._mark_ownership_lost(record, reason="lease expired") is True
+    assert record.status is RunStatus.error
+    assert record.ownership_lost is True
+    assert (await store.get(record.run_id))["status"] == RunStatus.running.value
+
+    puts: list[dict] = []
+    original_put = store.put
+
+    async def counting_put(run_id, **payload):
+        puts.append(payload)
+        return await original_put(run_id, **payload)
+
+    store.put = counting_put
+
+    # Eviction with the row still active: no store write, record retained.
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is False
+    assert puts == []
+    assert record.run_id in run_manager._runs
+    assert (await store.get(record.run_id))["status"] == RunStatus.running.value
+    assert (await store.get(record.run_id))["owner_worker_id"] == "worker-b"
+
+    # The peer terminalizes the row; the next eviction is read-only and drops
+    # the fenced overlay.
+    row["status"] = RunStatus.success.value
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert puts == []
+    assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_fenced_worker_evicts_overlay_when_row_missing():
+    """A fenced record whose store row disappeared (no peer will ever
+    terminalize it) drops its overlay instead of lingering in the registry."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+    assert await run_manager._mark_ownership_lost(record, reason="lease expired") is True
+
+    await store.delete(record.run_id)
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert record.run_id not in run_manager._runs
