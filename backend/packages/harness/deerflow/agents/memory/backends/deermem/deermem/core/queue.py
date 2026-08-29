@@ -117,7 +117,7 @@ class MemoryUpdateQueue:
         # Entries only appear for scopes actually cancelled — small tuples +
         # ints, bounded by distinct deleted/cleared scopes per process lifetime.
         self._generation_clock = 0
-        self._scope_generations: dict[tuple[object, object], int] = {}
+        self._scope_generations: dict[tuple[object, object, object], int] = {}
 
     def add(
         self,
@@ -205,7 +205,7 @@ class MemoryUpdateQueue:
         # the next turn may not re-feed if the user stops. Both are processed
         # independently instead.
         existing = next(
-            (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark),
+            (c for c in self._items if queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.agent_incarnation == agent_incarnation and c.bypass_watermark == bypass_watermark),
             None,
         )
         # Backpressure: once depth reaches the cap, reject NEW non-signal normal
@@ -229,10 +229,10 @@ class MemoryUpdateQueue:
             trace_id=trace_id,
             signals=merged_signals,
             bypass_watermark=bypass_watermark,
-            generation=self._generation_for_locked(agent_name, user_id),
+            generation=self._generation_for_locked(agent_name, user_id, agent_incarnation),
         )
         if existing is not None:
-            self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
+            self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.agent_incarnation == agent_incarnation and c.bypass_watermark == bypass_watermark)]
         self._items.append(context)
         return context
 
@@ -296,7 +296,7 @@ class MemoryUpdateQueue:
                 # This happens for batch items snapshotted before a
                 # cancel_by_agent/cancel_by_user ran; fresh enqueues carry the
                 # current epoch, so recreated-scope work is safe.
-                if context.generation != self._current_generation(context.agent_name, context.user_id):
+                if context.generation != self._current_generation(context.agent_name, context.user_id, context.agent_incarnation):
                     stale += 1
                     logger.info("Skipping stale memory update for thread %s (agent=%s user=%s)", context.thread_id, context.agent_name, context.user_id)
                     continue
@@ -463,7 +463,13 @@ class MemoryUpdateQueue:
     # Invariant: a queued memory update may run only if no newer cancellation
     # epoch covers its scope.
 
-    def cancel_by_agent(self, agent_name: str, *, user_id: str | None = None) -> int:
+    def cancel_by_agent(
+        self,
+        agent_name: str,
+        *,
+        user_id: str | None = None,
+        agent_incarnation: str | None = None,
+    ) -> int:
         """Drop pending updates for one agent scope; return the removed count.
 
         Agent deletion and scoped memory clearing call this so a debounce Timer
@@ -481,8 +487,8 @@ class MemoryUpdateQueue:
         normally (#5037).
         """
         with self._lock:
-            self._next_cancellation_epoch_locked((agent_name, user_id))
-            remaining = [context for context in self._items if not (context.agent_name == agent_name and context.user_id == user_id)]
+            self._next_cancellation_epoch_locked((agent_name, user_id, agent_incarnation if agent_incarnation is not None else _ANY))
+            remaining = [context for context in self._items if not (context.agent_name == agent_name and context.user_id == user_id and (agent_incarnation is None or context.agent_incarnation == agent_incarnation))]
             removed = len(self._items) - len(remaining)
             self._items = remaining
         if removed:
@@ -497,7 +503,7 @@ class MemoryUpdateQueue:
         dropped too — not just the reserved default bucket (#5037 Finding 2).
         """
         with self._lock:
-            self._next_cancellation_epoch_locked((_ANY, user_id))
+            self._next_cancellation_epoch_locked((_ANY, user_id, _ANY))
             remaining = [context for context in self._items if context.user_id != user_id]
             removed = len(self._items) - len(remaining)
             self._items = remaining
@@ -505,23 +511,39 @@ class MemoryUpdateQueue:
             logger.info("Cancelled %d pending memory update(s) for user %s", removed, user_id)
         return removed
 
-    def _current_generation(self, agent_name: str | None, user_id: str | None) -> int:
-        """Effective generation for ``(agent_name, user_id)`` right now."""
+    def _current_generation(
+        self,
+        agent_name: str | None,
+        user_id: str | None,
+        agent_incarnation: str | None = None,
+    ) -> int:
+        """Effective generation for one agent incarnation right now."""
         with self._lock:
-            return self._generation_for_locked(agent_name, user_id)
+            return self._generation_for_locked(agent_name, user_id, agent_incarnation)
 
-    def _generation_for_locked(self, agent_name: str | None, user_id: str | None) -> int:
-        """Current generation epoch for ``(agent_name, user_id)``; lock held.
+    def _generation_for_locked(
+        self,
+        agent_name: str | None,
+        user_id: str | None,
+        agent_incarnation: str | None = None,
+    ) -> int:
+        """Current generation for one incarnation; lock held.
 
         The effective epoch is the max over the exact key and any wildcard
         that covers it. Epochs come from one shared clock, so they are
         globally comparable — a later broader cancel always outdates earlier
         narrower work.
         """
-        candidates = ((agent_name, user_id), (agent_name, _ANY), (_ANY, user_id), (_ANY, _ANY))
+        candidates = (
+            (agent_name, user_id, agent_incarnation),
+            (agent_name, user_id, _ANY),
+            (agent_name, _ANY, _ANY),
+            (_ANY, user_id, _ANY),
+            (_ANY, _ANY, _ANY),
+        )
         return max(self._scope_generations.get(key, 0) for key in candidates)
 
-    def _next_cancellation_epoch_locked(self, key: tuple[object, object]) -> None:
+    def _next_cancellation_epoch_locked(self, key: tuple[object, object, object]) -> None:
         """Assign the next process-wide cancellation epoch to ``key``; lock held."""
         self._generation_clock += 1
         self._scope_generations[key] = self._generation_clock

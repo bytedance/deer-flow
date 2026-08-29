@@ -237,7 +237,7 @@ def test_file_recreated_agent_rejects_old_incarnation(tmp_path, monkeypatch):
     first_worker.create("phoenix", {"name": "phoenix"}, "old", user_id="u1")
     old = first_worker.get_snapshot("phoenix", user_id="u1")
 
-    assert second_worker.delete("phoenix", user_id="u1") == "deleted"
+    assert second_worker.delete_if_incarnation("phoenix", old.incarnation, user_id="u1") == "deleted"
     second_worker.create("phoenix", {"name": "phoenix"}, "new", user_id="u1")
     fresh = second_worker.get_snapshot("phoenix", user_id="u1")
 
@@ -246,6 +246,37 @@ def test_file_recreated_agent_rejects_old_incarnation(tmp_path, monkeypatch):
         assert current is False
     with first_worker.guard_incarnation("phoenix", fresh.incarnation, user_id="u1") as current:
         assert current is True
+
+
+def test_file_conditional_delete_rejects_recreated_agent(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    first_worker = FileAgentStore()
+    second_worker = FileAgentStore()
+    first_worker.create("phoenix", {"name": "phoenix"}, "old", user_id="u1")
+    inspection = first_worker.inspect_delete("phoenix", user_id="u1")
+
+    assert second_worker.delete_if_incarnation("phoenix", inspection.incarnation, user_id="u1") == "deleted"
+    second_worker.create("phoenix", {"name": "phoenix"}, "new", user_id="u1")
+
+    assert first_worker.delete_if_incarnation("phoenix", inspection.incarnation, user_id="u1") == "incarnation-mismatch"
+    assert first_worker.get_soul("phoenix", user_id="u1") == "new"
+
+
+def test_file_guard_missing_agent_returns_false_without_creating_marker(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
+    from deerflow.config import paths as paths_module
+
+    monkeypatch.setattr(paths_module, "_paths", None)
+    store = FileAgentStore()
+    agent_dir = paths_module.get_paths().user_agent_dir("u1", "missing")
+
+    with store.guard_incarnation("missing", "old", user_id="u1") as current:
+        assert current is False
+
+    assert not agent_dir.exists()
 
 
 def test_file_delete_waits_for_incarnation_guard(tmp_path, monkeypatch):
@@ -261,7 +292,7 @@ def test_file_delete_waits_for_incarnation_guard(tmp_path, monkeypatch):
 
     def delete_agent() -> None:
         delete_started.set()
-        store.delete("guarded", user_id="u1")
+        store.delete_if_incarnation("guarded", incarnation, user_id="u1")
         delete_finished.set()
 
     with store.guard_incarnation("guarded", incarnation, user_id="u1") as current:

@@ -36,7 +36,9 @@ from deerflow.config.agents_config import (
     validate_agent_name,
 )
 from deerflow.persistence.agents.base import (
+    AgentDeleteInspection,
     AgentDeleteOutcome,
+    AgentDeleteResult,
     AgentExistsError,
     AgentSnapshot,
     AgentStore,
@@ -121,7 +123,7 @@ class FileAgentStore(AgentStore):
         effective_user = user_id or _ac.get_effective_user_id()
         with _agent_scope_lock(name, effective_user):
             agent_dir = resolve_agent_dir(name, user_id=effective_user)
-            current = _read_or_create_incarnation(agent_dir, name=name, user_id=effective_user)
+            current = _read_incarnation(agent_dir, name=name, user_id=effective_user)
             yield current == incarnation
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
@@ -222,30 +224,39 @@ class FileAgentStore(AgentStore):
                     shutil.rmtree(agent_dir, ignore_errors=True)
                 raise
 
-    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteInspection:
         name = validate_agent_name(name)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
-        agent_dir = paths.user_agent_dir(effective_user, name)
-        if not agent_dir.exists():
-            # A legacy shared-layout agent is intentionally left in place (the
-            # write path never targets it); report it distinctly.
-            return "legacy" if paths.agent_dir(name).exists() else "missing"
-        if not (agent_dir / "config.yaml").is_file():
-            # The directory holds memory/facts data but is not a custom agent
-            # (no config.yaml) — preserve it rather than deleting a user's memory
-            # (#4279). rmtree below would otherwise take the whole tree.
-            return "not-custom-agent"
-        return "deleted"
+        with _agent_scope_lock(name, effective_user):
+            agent_dir = paths.user_agent_dir(effective_user, name)
+            if not agent_dir.exists():
+                outcome: AgentDeleteOutcome = "legacy" if paths.agent_dir(name).exists() else "missing"
+                return AgentDeleteInspection(outcome)
+            if not (agent_dir / "config.yaml").is_file():
+                return AgentDeleteInspection("not-custom-agent")
+            incarnation = _read_or_create_incarnation(agent_dir, name=name, user_id=effective_user)
+            return AgentDeleteInspection("deleted", incarnation)
 
-    def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+    def delete_if_incarnation(
+        self,
+        name: str,
+        expected_incarnation: str,
+        *,
+        user_id: str | None = None,
+    ) -> AgentDeleteResult:
         name = validate_agent_name(name)
         effective_user = user_id or _ac.get_effective_user_id()
         with _agent_scope_lock(name, effective_user):
-            outcome = self.inspect_delete(name, user_id=effective_user)
-            if outcome != "deleted":
-                return outcome
-            agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
+            paths = _ac.get_paths()
+            agent_dir = paths.user_agent_dir(effective_user, name)
+            if not agent_dir.exists():
+                return "legacy" if paths.agent_dir(name).exists() else "missing"
+            if not (agent_dir / "config.yaml").is_file():
+                return "not-custom-agent"
+            current = _read_incarnation(agent_dir, name=name, user_id=effective_user)
+            if current != expected_incarnation:
+                return "incarnation-mismatch"
             shutil.rmtree(agent_dir)
             return "deleted"
 
@@ -333,19 +344,27 @@ def _stage_temp(target: Path, text: str) -> Path:
 
 
 def _read_or_create_incarnation(agent_dir: Path, *, name: str, user_id: str) -> str:
+    incarnation = _read_incarnation(agent_dir, name=name, user_id=user_id)
+    if incarnation:
+        return incarnation
+    incarnation = uuid.uuid4().hex
+    (agent_dir / _INCARNATION_FILENAME).write_text(incarnation, encoding="utf-8")
+    return incarnation
+
+
+def _read_incarnation(agent_dir: Path, *, name: str, user_id: str) -> str | None:
+    """Read lifecycle identity without creating directories or markers."""
     user_agent_dir = _ac.get_paths().user_agent_dir(user_id, name)
     if agent_dir != user_agent_dir:
-        # Legacy shared definitions remain read-only. They cannot be deleted or
-        # recreated through AgentStore, so a stable path identity is sufficient.
+        if not (agent_dir / "config.yaml").is_file():
+            return None
         digest = hashlib.sha256(str(agent_dir.resolve()).encode("utf-8")).hexdigest()
         return f"legacy:{digest}"
+    if not agent_dir.is_dir() or not (agent_dir / "config.yaml").is_file():
+        return None
     marker = agent_dir / _INCARNATION_FILENAME
     try:
         incarnation = marker.read_text(encoding="utf-8").strip()
     except FileNotFoundError:
-        incarnation = ""
-    if incarnation:
-        return incarnation
-    incarnation = uuid.uuid4().hex
-    marker.write_text(incarnation, encoding="utf-8")
-    return incarnation
+        return None
+    return incarnation or None

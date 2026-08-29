@@ -580,36 +580,44 @@ async def delete_agent(name: str) -> None:
     store = get_agent_store()
 
     try:
-        outcome = await asyncio.to_thread(store.inspect_delete, name, user_id=user_id)
+        inspection = await asyncio.to_thread(store.inspect_delete, name, user_id=user_id)
     except Exception as e:
         logger.error(f"Failed to inspect agent '{name}' for deletion: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to inspect agent deletion: {str(e)}")
 
-    _raise_for_delete_outcome(name, outcome)
-
-    # Advance the scope's cancellation epoch BEFORE deleting (#5037): cancel
-    # buffered extraction work first so a debounce timer racing the rmtree
-    # cannot fire an extraction against the removed scope and resurrect its
-    # directory (#3364). The queue's epoch check also stops batch items a
-    # worker already snapshotted before this cancel ran. Ordering cost: a rare
-    # failed delete after this point only loses that scope's debounced
-    # extractions.
-    try:
-        manager = await asyncio.to_thread(get_memory_manager)
-        cancelled = await asyncio.to_thread(manager.cancel_by_agent, name, user_id=user_id)
-    except Exception:
-        logger.warning("Could not cancel pending memory updates for deleted agent '%s'", name, exc_info=True)
-        cancelled = 0
-    if cancelled:
-        logger.info("Cancelled %d pending memory update(s) before deleting agent '%s'", cancelled, name)
+    _raise_for_delete_outcome(name, inspection.outcome)
+    if inspection.incarnation is None:
+        raise HTTPException(status_code=409, detail=f"Agent '{name}' changed during deletion. Retry the request.")
 
     try:
-        # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
+        outcome = await asyncio.to_thread(
+            store.delete_if_incarnation,
+            name,
+            inspection.incarnation,
+            user_id=user_id,
+        )
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
 
+    if outcome == "incarnation-mismatch":
+        raise HTTPException(status_code=409, detail=f"Agent '{name}' changed during deletion. Retry the request.")
     _raise_for_delete_outcome(name, outcome)
+
+    # Correctness comes from conditional deletion and the durable write fence.
+    # This process-local cancellation only removes obsolete work early.
+    try:
+        manager = await asyncio.to_thread(get_memory_manager)
+        cancelled = await asyncio.to_thread(
+            manager.cancel_by_agent,
+            name,
+            user_id=user_id,
+            agent_incarnation=inspection.incarnation,
+        )
+    except Exception:
+        logger.warning("Could not cancel pending memory updates for deleted agent '%s'", name, exc_info=True)
+        cancelled = 0
+    if cancelled:
+        logger.info("Cancelled %d pending memory update(s) after deleting agent '%s'", cancelled, name)
 
     logger.info(f"Deleted agent '{name}'")

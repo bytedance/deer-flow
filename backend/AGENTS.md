@@ -169,8 +169,10 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 
 ## Development Workflow
 
-Custom-agent deletion calls `AgentStore.inspect_delete()` before queue cancellation.
-Rejected deletes do not cancel memory work. Successful deletes cancel the exact scope first.
+Custom-agent deletion captures `AgentDeleteInspection.incarnation` during preflight.
+It then calls `AgentStore.delete_if_incarnation()` under the store scope lock.
+An incarnation mismatch returns HTTP 409 and preserves the recreated agent.
+Only a successful conditional delete cancels process-local memory work for that incarnation.
 Each custom-agent run captures the definition's durable incarnation before execution.
 Memory persistence checks that incarnation under the same lock used by delete and recreate.
 Process-local queue generations only reduce obsolete work. They do not provide the durable fence.

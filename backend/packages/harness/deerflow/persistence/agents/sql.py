@@ -29,7 +29,8 @@ from sqlalchemy.orm import Session, sessionmaker
 from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
-    AgentDeleteOutcome,
+    AgentDeleteInspection,
+    AgentDeleteResult,
     AgentExistsError,
     AgentSnapshot,
     AgentStore,
@@ -227,27 +228,34 @@ class SqlAgentStore(AgentStore):
         if soul is not None:
             row.soul = soul
 
-    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteInspection:
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row_id = session.scalar(select(AgentRow.id).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
         if row_id is not None:
-            return "deleted"
+            return AgentDeleteInspection("deleted", row_id)
         agent_dir = get_paths().user_agent_dir(effective_user, name)
         if agent_dir.exists():
-            return "not-custom-agent"
-        return "missing"
+            return AgentDeleteInspection("not-custom-agent")
+        return AgentDeleteInspection("missing")
 
-    def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
+    def delete_if_incarnation(
+        self,
+        name: str,
+        expected_incarnation: str,
+        *,
+        user_id: str | None = None,
+    ) -> AgentDeleteResult:
         effective_user = user_id or get_effective_user_id()
         agent_dir = get_paths().user_agent_dir(effective_user, name)
         with _scope_lock(self._url, effective_user, name):
             with self._Session.begin() as session:
                 _lock_scope(session, effective_user, name)
-                result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))
-                row_deleted = result.rowcount > 0
-                if row_deleted:
-                    # Keep the row transaction locked until co-located memory is gone.
+                current = session.scalar(select(AgentRow.id).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()).with_for_update())
+                if current is not None and current != expected_incarnation:
+                    return "incarnation-mismatch"
+                if current == expected_incarnation:
+                    session.execute(delete(AgentRow).where(AgentRow.id == expected_incarnation))
                     if agent_dir.exists():
                         shutil.rmtree(agent_dir)
                     return "deleted"

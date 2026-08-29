@@ -841,12 +841,12 @@ class TestAgentsAPI:
                 events.append("inspect")
                 return real_store.inspect_delete(agent_name, user_id=user_id)
 
-            def delete(self, agent_name, *, user_id=None):
+            def delete_if_incarnation(self, agent_name, expected_incarnation, *, user_id=None):
                 events.append("delete")
-                return real_store.delete(agent_name, user_id=user_id)
+                return real_store.delete_if_incarnation(agent_name, expected_incarnation, user_id=user_id)
 
         class _RecordingManager:
-            def cancel_by_agent(self, agent_name, *, user_id=None):
+            def cancel_by_agent(self, agent_name, *, user_id=None, agent_incarnation=None):
                 events.append("cancel")
                 return 2
 
@@ -856,14 +856,45 @@ class TestAgentsAPI:
         response = agent_client.delete("/api/agents/cancel-me")
 
         assert response.status_code == 204
-        assert events == ["inspect", "cancel", "delete"]
+        assert events == ["inspect", "delete", "cancel"]
+
+    def test_delete_agent_aba_rejects_recreated_agent_without_cancelling_new_work(self, agent_client, monkeypatch):
+        agent_client.post("/api/agents", json={"name": "phoenix", "soul": "old"})
+        import app.gateway.routers.agents as agents_router
+
+        real_store = agents_router.get_agent_store()
+        calls: list[tuple[str, str | None]] = []
+
+        class _RacingStore:
+            def inspect_delete(self, agent_name, *, user_id=None):
+                return real_store.inspect_delete(agent_name, user_id=user_id)
+
+            def delete_if_incarnation(self, agent_name, expected_incarnation, *, user_id=None):
+                assert real_store.delete_if_incarnation(agent_name, expected_incarnation, user_id=user_id) == "deleted"
+                real_store.create(agent_name, {"name": agent_name}, "new", user_id=user_id)
+                return real_store.delete_if_incarnation(agent_name, expected_incarnation, user_id=user_id)
+
+        class _RecordingManager:
+            def cancel_by_agent(self, agent_name, *, user_id=None, agent_incarnation=None):
+                calls.append((agent_name, agent_incarnation))
+                return 1
+
+        monkeypatch.setattr(agents_router, "get_agent_store", lambda: _RacingStore())
+        monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _RecordingManager())
+
+        response = agent_client.delete("/api/agents/phoenix")
+
+        assert response.status_code == 409
+        assert "changed during deletion" in response.json()["detail"]
+        assert real_store.get_soul("phoenix", user_id="test-user-autouse") == "new"
+        assert calls == []
 
     def test_delete_agent_survives_memory_cancel_failure(self, agent_client, monkeypatch):
         """Memory cleanup is best-effort: a broken manager must not fail deletion."""
         agent_client.post("/api/agents", json={"name": "flaky-cancel", "soul": "bye"})
 
         class _BrokenManager:
-            def cancel_by_agent(self, agent_name, *, user_id=None):
+            def cancel_by_agent(self, agent_name, *, user_id=None, agent_incarnation=None):
                 raise RuntimeError("memory backend down")
 
         monkeypatch.setattr("app.gateway.routers.agents.get_memory_manager", lambda: _BrokenManager())

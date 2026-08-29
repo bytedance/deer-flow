@@ -144,10 +144,11 @@ def test_user_isolation(store):
 
 def test_delete_reports_outcome(store):
     store.create("gone", {"name": "gone"}, "s", user_id="u1")
-    assert store.inspect_delete("gone", user_id="u1") == "deleted"
-    assert store.delete("gone", user_id="u1") == "deleted"
-    assert store.inspect_delete("gone", user_id="u1") == "missing"
-    assert store.delete("gone", user_id="u1") == "missing"
+    inspection = store.inspect_delete("gone", user_id="u1")
+    assert inspection.outcome == "deleted"
+    assert inspection.incarnation is not None
+    assert store.delete_if_incarnation("gone", inspection.incarnation, user_id="u1") == "deleted"
+    assert store.inspect_delete("gone", user_id="u1").outcome == "missing"
     with pytest.raises(FileNotFoundError):
         store.get("gone", user_id="u1")
 
@@ -157,7 +158,7 @@ def test_separate_store_instances_share_incarnation_fence(store):
     store.create("phoenix", {"name": "phoenix"}, "old", user_id="u1")
     old = store.get_snapshot("phoenix", user_id="u1")
 
-    assert peer.delete("phoenix", user_id="u1") == "deleted"
+    assert peer.delete_if_incarnation("phoenix", old.incarnation, user_id="u1") == "deleted"
     peer.create("phoenix", {"name": "phoenix"}, "new", user_id="u1")
     fresh = peer.get_snapshot("phoenix", user_id="u1")
 
@@ -176,7 +177,7 @@ def test_sql_delete_waits_for_incarnation_guard(store):
 
     def delete_agent() -> None:
         delete_started.set()
-        store.delete("guarded", user_id="u1")
+        store.delete_if_incarnation("guarded", incarnation, user_id="u1")
         delete_finished.set()
 
     with store.guard_incarnation("guarded", incarnation, user_id="u1") as current:
@@ -188,6 +189,18 @@ def test_sql_delete_waits_for_incarnation_guard(store):
 
     worker.join(timeout=1)
     assert delete_finished.is_set()
+
+
+def test_sql_conditional_delete_rejects_recreated_agent(store):
+    peer = SqlAgentStore(store._url)
+    store.create("phoenix", {"name": "phoenix"}, "old", user_id="u1")
+    inspection = store.inspect_delete("phoenix", user_id="u1")
+
+    assert peer.delete_if_incarnation("phoenix", inspection.incarnation, user_id="u1") == "deleted"
+    peer.create("phoenix", {"name": "phoenix"}, "new", user_id="u1")
+
+    assert store.delete_if_incarnation("phoenix", inspection.incarnation, user_id="u1") == "incarnation-mismatch"
+    assert store.get_soul("phoenix", user_id="u1") == "new"
 
 
 def test_signature_changes_on_mutation(store):
@@ -282,8 +295,7 @@ def test_delete_preserves_memory_only_dir_when_no_row(store, tmp_path, monkeypat
     fact = facts_dir / "fact_keep.md"
     fact.write_text("memory data", encoding="utf-8")
 
-    assert store.inspect_delete("ghost", user_id="u1") == "not-custom-agent"
-    assert store.delete("ghost", user_id="u1") == "not-custom-agent"
+    assert store.inspect_delete("ghost", user_id="u1").outcome == "not-custom-agent"
     assert fact.read_text(encoding="utf-8") == "memory data"
 
 
@@ -302,5 +314,6 @@ def test_delete_removes_memory_dir_when_row_exists(store, tmp_path, monkeypatch)
     mem_dir.mkdir(parents=True, exist_ok=True)
     (mem_dir / "memory.json").write_text("{}", encoding="utf-8")
 
-    assert store.delete("real", user_id="u1") == "deleted"
+    incarnation = store.get_snapshot("real", user_id="u1").incarnation
+    assert store.delete_if_incarnation("real", incarnation, user_id="u1") == "deleted"
     assert not mem_dir.exists()

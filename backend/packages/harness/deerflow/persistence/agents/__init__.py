@@ -11,7 +11,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from deerflow.persistence.agents.base import (
+    AgentDeleteInspection,
     AgentDeleteOutcome,
+    AgentDeleteResult,
     AgentExistsError,
     AgentSnapshot,
     AgentStore,
@@ -24,6 +26,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "AgentDeleteOutcome",
+    "AgentDeleteInspection",
+    "AgentDeleteResult",
     "AgentExistsError",
     "AgentRow",
     "AgentSnapshot",

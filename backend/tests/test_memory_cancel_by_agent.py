@@ -65,6 +65,19 @@ def test_cancel_by_agent_user_scope_filters_matching_owner_only() -> None:
     assert [context.user_id for context in queue._items] == ["bob"]
 
 
+def test_cancel_by_agent_incarnation_preserves_recreated_agent_work() -> None:
+    queue = _queue()
+    queue._items = [
+        ConversationContext(thread_id="old", messages=["old"], agent_name="phoenix", agent_incarnation="a1", user_id="alice"),
+        ConversationContext(thread_id="new", messages=["new"], agent_name="phoenix", agent_incarnation="a2", user_id="alice"),
+    ]
+
+    assert queue.cancel_by_agent("phoenix", user_id="alice", agent_incarnation="a1") == 1
+
+    assert [(context.thread_id, context.agent_incarnation) for context in queue._items] == [("new", "a2")]
+    assert queue._items[0].generation == queue._current_generation("phoenix", "alice", "a2")
+
+
 def test_cancel_by_agent_returns_zero_without_matches() -> None:
     queue = _queue()
     queue._items = [ConversationContext(thread_id="t1", messages=["a"], agent_name="agent-b")]
@@ -361,6 +374,17 @@ def test_deer_mem_cancel_by_agent_normalizes_name_and_delegates(deermem) -> None
     assert [context.agent_name for context in queue._items] == ["agent-b"]
 
 
+def test_deer_mem_cancel_by_agent_forwards_incarnation(deermem) -> None:
+    queue = deermem._queue
+    queue._items = [
+        ConversationContext(thread_id="old", messages=["old"], agent_name="agent-a", agent_incarnation="a1"),
+        ConversationContext(thread_id="new", messages=["new"], agent_name="agent-a", agent_incarnation="a2"),
+    ]
+
+    assert deermem.cancel_by_agent("Agent-A", agent_incarnation="a1") == 1
+    assert [context.agent_incarnation for context in queue._items] == ["a2"]
+
+
 def test_deer_mem_clear_memory_cancels_pending_same_scope_first(deermem) -> None:
     queue = deermem._queue
     queue._items = [
@@ -406,7 +430,7 @@ def test_deleted_agent_rejects_run_that_enqueues_after_delete(tmp_path, monkeypa
     manager._updater._llm = MagicMock()
     manager._updater._llm.invoke.return_value = response
 
-    assert store.delete("phoenix", user_id="alice") == "deleted"
+    assert store.delete_if_incarnation("phoenix", run_incarnation, user_id="alice") == "deleted"
     manager.add_for_incarnation(
         "old-run",
         [HumanMessage(content="Remember this"), AIMessage(content="Understood")],

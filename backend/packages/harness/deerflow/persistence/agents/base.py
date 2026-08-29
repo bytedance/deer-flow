@@ -56,6 +56,15 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
 # not a custom agent (no config.yaml), so it is preserved rather than deleting a
 # user's memory ("not-custom-agent", #4279).
 AgentDeleteOutcome = Literal["deleted", "legacy", "missing", "not-custom-agent"]
+AgentDeleteResult = Literal["deleted", "legacy", "missing", "not-custom-agent", "incarnation-mismatch"]
+
+
+@dataclass(frozen=True)
+class AgentDeleteInspection:
+    """Delete preflight result with the identity seen during inspection."""
+
+    outcome: AgentDeleteOutcome
+    incarnation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -141,12 +150,18 @@ class AgentStore(abc.ABC):
         """
 
     @abc.abstractmethod
-    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
-        """Return the expected delete outcome without changing storage."""
+    def inspect_delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteInspection:
+        """Return the delete outcome and current incarnation."""
 
     @abc.abstractmethod
-    def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
-        """Delete an agent and its co-located memory, returning the outcome."""
+    def delete_if_incarnation(
+        self,
+        name: str,
+        expected_incarnation: str,
+        *,
+        user_id: str | None = None,
+    ) -> AgentDeleteResult:
+        """Delete only when the current incarnation matches the preflight."""
 
     @abc.abstractmethod
     def signature(self) -> Hashable:

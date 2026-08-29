@@ -534,13 +534,23 @@ class DeerMem(MemoryManager):
             memory_data = _call_backend(lambda: self._updater.clear_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
         return _compat_document(memory_data)
 
-    def cancel_by_agent(self, agent_name: str | None = None, *, user_id: str | None = None) -> int:
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+        agent_incarnation: str | None = None,
+    ) -> int:
         """Drop this scope's still-debouncing extraction updates (#3364).
 
         Public agent identifiers are canonicalized exactly like ``add`` /
         ``clear_memory``. Returns the number of dropped contexts.
         """
-        return self._queue.cancel_by_agent(_resolve_agent_name(agent_name), user_id=user_id)
+        return self._queue.cancel_by_agent(
+            _resolve_agent_name(agent_name),
+            user_id=user_id,
+            agent_incarnation=agent_incarnation,
+        )
 
     def cancel_by_user(self, user_id: str | None = None) -> int:
         """Drop every buffered extraction update owned by ``user_id``."""
