@@ -253,7 +253,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         key = self._thread_key(thread_id, user_id)
         sandbox_id = self._sandbox_id(thread_id, user_id or "")
         with self._acquire_serializer.hold(sandbox_id):
-            return self._acquire_scope_locked(key, sandbox_id, thread_id=thread_id, user_id=user_id)
+            return self._acquire_scope_locked(key, sandbox_id)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire without blocking the event loop.
@@ -268,7 +268,7 @@ class TenkiSandboxProvider(WarmPoolLifecycleMixin[TenkiSandbox], SandboxProvider
         acquire = partial(self.acquire, thread_id, user_id=user_id)
         return await loop.run_in_executor(self._acquire_serializer.executor, acquire)
 
-    def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str, *, thread_id: str, user_id: str | None) -> str:
+    def _acquire_scope_locked(self, key: tuple[str, str], sandbox_id: str) -> str:
         with self._lock:
             existing = self._thread_sandboxes.get(key)
             if existing is not None and existing in self._sandboxes:

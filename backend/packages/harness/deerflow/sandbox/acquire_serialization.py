@@ -150,7 +150,10 @@ class AcquireSerializer[KeyT: Hashable]:
                 # close() cancelled the queued wait via executor shutdown, not
                 # the caller: check in exactly once (no done callback — the
                 # cancelled future is already done) and report the documented
-                # closure error instead of a spurious CancelledError.
+                # closure error instead of a spurious CancelledError. The
+                # `cancelling() == 0` guard assumes this await is the task's
+                # only pending cancellation (no stale count left by an outer
+                # swallowed CancelledError).
                 acquire.cancel_queued()
                 raise RuntimeError("AcquireSerializer is closed") from None
             if acquire_future.cancelled():
@@ -158,9 +161,12 @@ class AcquireSerializer[KeyT: Hashable]:
             else:
                 acquire.abandon()
             raise
-        if not acquired:  # pragma: no cover - threading.Lock.acquire(True) does not return False
-            self._checkin(key, entry)
-            raise RuntimeError("Failed to acquire serializer lock")
+        # run() returns False only when the worker observed _abandoned, and
+        # abandon() is called solely from the except handler above, which
+        # always re-raises — so a normal completion implies the lock is held.
+        # If this were reachable, the worker would already have checked in;
+        # an extra _checkin here would underflow the refcount, so assert.
+        assert acquired, "acquire worker returned without holding the lock"
         try:
             yield
         finally:
