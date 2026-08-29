@@ -32,8 +32,9 @@ Install the optional SDK before selecting this provider:
 pip install "deerflow-harness[tenki]"
 ```
 
-The `tenki-sandbox` package is an optional DeerFlow harness extra, not part of
-the default install. Get an API key from <https://tenki.cloud/docs/sandbox/sdk>.
+The `tenki` package (which provides the `tenki_sandbox` module) is an optional
+DeerFlow harness extra, not part of the default install. Get an API key from
+<https://tenki.cloud/docs/sandbox/sdk>.
 
 ## Design
 
@@ -92,6 +93,6 @@ sandboxes left by a previous gateway process) and a preview-URL surface.
 Verified end-to-end against live Tenki sandboxes: provider resolution →
 `execute_command` → full file-op surface (`read`/`write`/`update`/`download`,
 `list_dir`/`glob`/`grep`) → warm-pool reclaim → terminate, plus the
-`/mnt/user-data` sudo symlink. Unit tests run in CI without `tenki-sandbox`
+`/mnt/user-data` sudo symlink. Unit tests run in CI without `tenki`
 installed; `test_integration_real_sandbox` exercises a real microVM when
 `TENKI_API_KEY` is set.

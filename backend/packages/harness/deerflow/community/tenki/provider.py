@@ -11,7 +11,7 @@ appear under ``sandbox:`` in ``config.yaml`` even though they are not declared o
 the model — see this package's ``__init__`` docstring for the full set.
 
 The Tenki SDK is imported lazily (``_import_client``) so the harness — and every
-other provider — installs without ``tenki-sandbox``; the dependency is only
+other provider — installs without ``tenki``; the dependency is only
 needed once this provider is selected.
 """
 
@@ -89,7 +89,7 @@ def _import_client() -> type[Client]:
     try:
         from tenki_sandbox import Client
     except ImportError as e:  # pragma: no cover - depends on the optional dependency
-        raise ImportError("TenkiSandboxProvider requires the optional 'tenki-sandbox' dependency. Install it with: pip install 'deerflow-harness[tenki]' or pip install tenki-sandbox.") from e
+        raise ImportError("TenkiSandboxProvider requires the optional 'tenki' dependency (it provides the tenki_sandbox module). Install it with: pip install 'deerflow-harness[tenki]' or pip install tenki.") from e
     return Client
 
 

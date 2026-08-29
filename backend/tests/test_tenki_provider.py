@@ -1,6 +1,6 @@
 """Unit tests for the Tenki community sandbox provider.
 
-These run in CI without ``tenki-sandbox`` installed: they cover the lazy-import
+These run in CI without ``tenki`` installed: they cover the lazy-import
 error path, provider lifecycle, path-safety guards, the native ``fs`` file
 round-trip, warm-pool mechanics, and scope resolution — none of which need a live
 sandbox. A single opt-in integration test (``test_integration_real_sandbox``)
