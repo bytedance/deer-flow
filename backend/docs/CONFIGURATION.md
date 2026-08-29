@@ -291,6 +291,37 @@ tool_groups:
   - name: bash         # Shell command execution
 ```
 
+### Conversation Sharing (Backend API Groundwork)
+
+Conversation sharing is an opt-in backend/API feature. It requires a SQL
+database (`sqlite` or `postgres`); the memory backend cannot persist links.
+The current frontend does not yet include a Share dialog or the public
+`/share/{token}` page. API clients can use the management endpoints and
+`GET /api/shares/{share_token}` described in
+[API.md](API.md#conversation-sharing-4548).
+
+```yaml
+conversation_sharing:
+  enabled: false
+  default_expiry_days: 30
+  allow_no_expiry: false
+```
+
+- `enabled` is `false` by default. When disabled, owner management calls are
+  rejected and anonymous resolution returns the same generic `404` as an
+  unknown token.
+- `default_expiry_days` is the operator default when a create request omits an
+  expiry. It accepts `1..365`; the planned Share dialog choices are 1, 7, and
+  30 days.
+- `allow_no_expiry` permits the explicit `never_expires` create option. It is
+  off by default.
+- The HMAC pepper is deliberately not stored in YAML. Set
+  `SHARE_TOKEN_PEPPER` in the environment; a single-host install may fall back
+  to the generated 0600 `.share_token_pepper` file under `DEER_FLOW_HOME`.
+  Every replica must use the same pepper, so multi-replica deployments should
+  provide one shared environment/secret-store value instead of generating a
+  per-host file.
+
 ### Scheduler
 
 The scheduled-task MVP adds a scheduler section to `config.yaml`:
@@ -816,6 +847,7 @@ models:
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
+- `SHARE_TOKEN_PEPPER` - Dedicated HMAC secret for conversation-share tokens; use the same value on every Gateway replica that shares the database
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
 

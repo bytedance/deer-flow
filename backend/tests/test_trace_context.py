@@ -54,6 +54,14 @@ class TestNormalizeTraceIdRejectsUnsafeInput:
     def test_rejects_over_max_length(self) -> None:
         assert normalize_trace_id("a" * (_MAX_TRACE_ID_LENGTH + 1)) is None
 
+    def test_rejects_conversation_share_bearer_tokens(self) -> None:
+        """Inbound trace metadata must not become a log/analytics bypass."""
+        assert normalize_trace_id("dfs_A9z-_0123456789abcdefghijklmnopqrstuv") is None
+
+    @pytest.mark.parametrize("token", [f"dfs_{'A' * 43}", f"%64%66%73%5F{'A' * 43}"])
+    def test_rejects_prefixed_full_conversation_share_bearer_token(self, token: str) -> None:
+        assert normalize_trace_id(f"x{token}") is None
+
     @pytest.mark.parametrize(
         "value",
         [

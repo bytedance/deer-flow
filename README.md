@@ -1404,16 +1404,18 @@ All dict-returning methods are validated against Gateway Pydantic response model
 
 ## Conversation Sharing
 
-DeerFlow can freeze the visible transcript of an owned conversation into a
-revocable, read-only public snapshot. The feature is disabled by default and
-requires a SQL database; enable `conversation_sharing.enabled` in
-`config.yaml`. The bearer link is returned once, while only its HMAC digest is
-stored, and later conversation changes do not alter the snapshot.
+The current implementation provides **backend API groundwork only** for
+revocable, read-only conversation snapshots. It is disabled by default,
+requires a SQL database, and does not yet include the Share dialog or the
+public `/share/{token}` frontend page. The returned `share_url` reserves that
+future page path; API clients can resolve the token today through
+`GET /api/shares/{share_token}`.
 
-Single-host deployments can use the automatically generated local pepper.
-Multi-replica deployments must set the same `SHARE_TOKEN_PEPPER` environment
-value on every replica. See the [Gateway API documentation](backend/docs/API.md#conversation-sharing-4548)
-for create, list, revoke, expiry, and public-resolution endpoints.
+Operators enable it with `conversation_sharing.enabled` in `config.yaml`.
+Multi-replica deployments must give every replica the same
+`SHARE_TOKEN_PEPPER`; see the
+[Gateway API documentation](backend/docs/API.md#conversation-sharing-4548)
+for the current create, list, revoke, and resolve contracts.
 
 ## Scheduled Tasks
 

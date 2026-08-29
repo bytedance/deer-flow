@@ -428,7 +428,19 @@ GET /api/models/{model_name}
 
 ### Conversation Sharing (#4548)
 
-Read-only public sharing of a conversation snapshot. Requires `conversation_sharing.enabled` in `config.yaml` (off by default) and a SQL database backend. The share-token pepper is environment-backed (`SHARE_TOKEN_PEPPER`); a 0600-persisted secret is generated locally when absent. Multi-replica deployments (Kubernetes/Helm, or multiple containers without a shared `DEER_FLOW_HOME` volume) must set `SHARE_TOKEN_PEPPER` explicitly — otherwise each replica auto-generates its own pepper and resolves only the tokens it minted.
+This section documents the current **backend API groundwork** for read-only
+conversation snapshots. This phase does not ship the frontend Share dialog or
+an HTML page at `/share/{token}`. The create response reserves that path in its
+`share_url`, but it is not directly openable in the current frontend; the
+verifiable anonymous endpoint today is `GET /api/shares/{share_token}`.
+
+The API requires `conversation_sharing.enabled` in `config.yaml` (off by
+default) and a SQL database backend. The share-token pepper is
+environment-backed (`SHARE_TOKEN_PEPPER`); a 0600-persisted secret is generated
+locally when absent. Multi-replica deployments (Kubernetes/Helm, or multiple
+containers without a shared `DEER_FLOW_HOME` volume) must set
+`SHARE_TOKEN_PEPPER` explicitly — otherwise each replica auto-generates its own
+pepper and resolves only the tokens it minted.
 
 Owner endpoints (authenticated, strict row ownership — the thread must exist and be owned by the caller; legacy `user_id=NULL` threads cannot be shared):
 
@@ -462,7 +474,11 @@ Content-Type: application/json
 }
 ```
 
-`share_url` carries the raw token and is returned **exactly once**; only an HMAC-SHA-256 digest is stored. The snapshot is frozen at creation — later messages or edits never modify an existing share.
+`share_url` carries the raw token and is returned **exactly once**; only an
+HMAC-SHA-256 digest is stored. In this backend-only phase, extract its token for
+`GET /api/shares/{share_token}`; `/share/{token}` is reserved for the Phase 2
+public page. The snapshot is frozen at creation — later messages or edits never
+modify an existing share.
 
 #### List / Revoke
 

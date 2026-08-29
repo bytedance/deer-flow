@@ -11,7 +11,12 @@ the hidden/control filter is applied again on top.
 from __future__ import annotations
 
 import logging
+import re
+from collections.abc import Mapping
 from typing import Any
+from urllib.parse import unquote
+
+from deerflow.utils.llm_text import strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +27,14 @@ _SNAPSHOT_MAX_MESSAGES = 2000
 # would walk an unbounded history while the public-message count stays under
 # the share cap.
 _SNAPSHOT_MAX_SCANNED_ROWS = 50_000
+_FENCED_CODE_RE = re.compile(
+    r"^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]{0,3}(?P=fence)[ \t]*(?:\n|$)",
+    re.MULTILINE | re.DOTALL,
+)
+_INLINE_CODE_RE = re.compile(r"(?P<ticks>`+).*?(?P=ticks)", re.DOTALL)
+_MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
+_REFERENCE_RE = re.compile(r"(?:https?://|/|%[0-9A-Fa-f]{2}|mnt/user-data)[^\s<>\"]+", re.IGNORECASE)
+_PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
 
 
 class ShareSnapshotTooLarge(Exception):
@@ -31,7 +44,7 @@ class ShareSnapshotTooLarge(Exception):
     silently dropping the oldest messages, creation must fail loudly.
     """
 
-    def __init__(self, thread_id: str, hit: int, cap: int, *, limit_kind: str = "public-message"):
+    def __init__(self, thread_id: str, hit: int, cap: int, *, limit_kind: str = "public-message") -> None:
         super().__init__(f"thread {thread_id} exceeds the {cap} {limit_kind} share snapshot cap")
         self.thread_id = thread_id
         self.hit = hit
@@ -124,7 +137,7 @@ async def build_share_snapshot(
 
 def _public_message(row: dict[str, Any]) -> dict[str, Any] | None:
     """Map one scanned row to the strict public DTO, or None if not public."""
-    from app.gateway.routers.thread_runs import _is_hidden_or_control_message, _message_text, _message_type
+    from app.gateway.routers.thread_runs import _is_hidden_or_control_message, _message_type
 
     content = row.get("content")
     message_type = _message_type(content)
@@ -132,7 +145,10 @@ def _public_message(row: dict[str, Any]) -> dict[str, Any] | None:
         return None
     if _is_hidden_or_control_message(content):
         return None
-    text = _message_text(content)
+    text = _strict_public_text(content)
+    if message_type == "ai":
+        text = _strip_think_blocks_outside_markdown_code(text)
+    text = _neutralize_private_references(text)
     if not text.strip():
         return None
     return {
@@ -140,6 +156,98 @@ def _public_message(row: dict[str, Any]) -> dict[str, Any] | None:
         "role": "user" if message_type == "human" else "assistant",
         "content": text,
     }
+
+
+def _strict_public_text(message: Any) -> str:
+    """Extract only explicit renderable text, never reasoning/tool blocks."""
+    raw_content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", None)
+    if isinstance(raw_content, str):
+        return raw_content
+    if isinstance(raw_content, list):
+        parts: list[str] = []
+        for block in raw_content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, Mapping) and block.get("type") in {"text", "output_text"}:
+                text = block.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(part for part in parts if part)
+    if isinstance(raw_content, Mapping) and raw_content.get("type") in {"text", "output_text"}:
+        text = raw_content.get("text")
+        return text if isinstance(text, str) else ""
+    return ""
+
+
+def _strip_think_blocks_outside_markdown_code(text: str) -> str:
+    """Remove model reasoning while preserving literal tags in code examples."""
+    protected: list[str] = []
+    marker_prefix = "\x00deerflow-share-code-"
+    while marker_prefix in text:
+        marker_prefix += "_"
+
+    def protect(match: re.Match[str]) -> str:
+        marker = f"{marker_prefix}{len(protected)}\x00"
+        protected.append(match.group(0))
+        return marker
+
+    without_fences = _FENCED_CODE_RE.sub(protect, text)
+    without_code = _INLINE_CODE_RE.sub(protect, without_fences)
+    stripped = strip_think_blocks(without_code)
+    for index, code in enumerate(protected):
+        stripped = stripped.replace(f"{marker_prefix}{index}\x00", code)
+    return stripped
+
+
+def _decoded_reference(value: str) -> str:
+    """Decode a bounded number of URL-encoding layers for classification."""
+    decoded = value
+    for _ in range(3):
+        candidate = unquote(decoded)
+        if candidate == decoded:
+            break
+        decoded = candidate
+    return decoded.replace("\\", "/")
+
+
+def _is_private_reference(value: str) -> bool:
+    decoded = _decoded_reference(value).lower()
+    return "/mnt/user-data" in decoded or decoded.startswith("mnt/user-data") or re.search(r"/api/threads/[^/\s?#]+/(?:artifacts|uploads)(?:[/\s?#]|$)", decoded) is not None
+
+
+def _neutralize_private_references(text: str) -> str:
+    """Remove owner-only artifact paths from an otherwise public transcript."""
+
+    def replace_markdown(match: re.Match[str]) -> str:
+        target = match.group("target").strip()
+        # A Markdown destination may carry an optional quoted title. The path
+        # is always the first whitespace-delimited token.
+        destination = target.split(maxsplit=1)[0]
+        if not _is_private_reference(destination):
+            return match.group(0)
+        label = match.group("label").strip()
+        return f"{label} {_PRIVATE_REFERENCE_MARKER}".strip()
+
+    def replace_raw(match: re.Match[str]) -> str:
+        reference = match.group(0)
+        return _PRIVATE_REFERENCE_MARKER if _is_private_reference(reference) else reference
+
+    without_private_links = _MARKDOWN_LINK_RE.sub(replace_markdown, text)
+    return _REFERENCE_RE.sub(replace_raw, without_private_links)
+
+
+def sanitize_share_title(
+    value: object,
+    *,
+    fallback: str = "Shared conversation",
+    max_length: int = 512,
+) -> str:
+    """Return a bounded public title with owner-only references removed."""
+    raw_title = str(value).strip() if value is not None else ""
+    title = _neutralize_private_references(raw_title).strip()
+    if not title:
+        title = _neutralize_private_references(str(fallback)).strip()
+    return (title or "Shared conversation")[:max_length]
 
 
 async def resolve_share_title(thread_id: str, *, request: Any, fallback: str = "Shared conversation") -> str:
@@ -150,6 +258,8 @@ async def resolve_share_title(thread_id: str, *, request: Any, fallback: str = "
         meta = await get_thread_store(request).get(thread_id)
     except Exception:
         logger.warning("Could not read thread meta for share title of %s", thread_id, exc_info=True)
-        return fallback
-    title = (meta or {}).get("title") if isinstance(meta, dict) else None
-    return str(title).strip()[:512] if title and str(title).strip() else fallback
+        return sanitize_share_title(None, fallback=fallback)
+    title = None
+    if isinstance(meta, Mapping):
+        title = meta.get("display_name") or meta.get("title")
+    return sanitize_share_title(title, fallback=fallback)

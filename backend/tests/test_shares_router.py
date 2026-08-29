@@ -158,6 +158,43 @@ def test_create_returns_show_once_url_and_persists_only_hash(tmp_path):
     assert body["created_at"] == str(row["created_at"])
 
 
+def test_custom_title_private_artifact_reference_is_neutralized_before_persistence(tmp_path):
+    private_title = "/api/threads/thread-secret/artifacts/mnt/user-data/outputs/report.pdf"
+    with _client(tmp_path) as (client, repo):
+        with patch.object(shares_router, "build_share_snapshot", AsyncMock(return_value=_SNAPSHOT)):
+            response = _create(client, payload={"title": private_title})
+
+        body = response.json()
+        row = asyncio.run(repo.get(body["share_id"]))
+        token = body["share_url"].split("/share/")[-1]
+        public = client.get(f"/api/shares/{token}").json()
+
+    assert response.status_code == 201
+    assert body["title"] == "[private artifact omitted]"
+    assert row["title"] == "[private artifact omitted]"
+    assert public["title"] == "[private artifact omitted]"
+
+
+def test_public_resolution_defensively_neutralizes_private_title_from_storage(tmp_path):
+    private_title = "/api/threads/thread-secret/artifacts/mnt/user-data/outputs/report.pdf"
+    token = "dfs_legacy-private-title"
+    with _client(tmp_path) as (client, repo):
+        asyncio.run(
+            repo.create(
+                thread_id=THREAD_A,
+                owner_user_id=str(USER_A.id),
+                token_hash=_hash(token),
+                title=private_title,
+                snapshot_json=_SNAPSHOT,
+            )
+        )
+
+        response = client.get(f"/api/shares/{token}")
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "[private artifact omitted]"
+
+
 def test_operator_default_expiry_is_honored_without_coercion(tmp_path):
     """A configured default outside {1,7,30} must be used as-is, not coerced."""
     with _client(tmp_path, default_expiry_days=14) as (client, repo):
@@ -256,6 +293,8 @@ def test_public_get_is_exempt_from_auth_middleware(tmp_path):
     finally:
         reset_app_config()
     assert response.status_code == 404  # route verdict, not middleware 401
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
 
 
 # ── The sharpest edges: auth-disabled mode and null-owner threads ─────────

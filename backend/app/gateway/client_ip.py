@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import logging
 import os
-from ipaddress import ip_address, ip_network
+from ipaddress import IPv4Network, IPv6Network, ip_address, ip_network
 
 from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
 
 
-def trusted_proxies() -> list:
+def trusted_proxies() -> list[IPv4Network | IPv6Network]:
     """Parse ``AUTH_TRUSTED_PROXIES`` env var into a list of ip_network objects.
 
     Comma-separated CIDR or single-IP entries. Empty / unset = no proxy is
@@ -28,7 +28,7 @@ def trusted_proxies() -> list:
     raw = os.getenv("AUTH_TRUSTED_PROXIES", "").strip()
     if not raw:
         return []
-    nets = []
+    nets: list[IPv4Network | IPv6Network] = []
     for entry in raw.split(","):
         entry = entry.strip()
         if not entry:

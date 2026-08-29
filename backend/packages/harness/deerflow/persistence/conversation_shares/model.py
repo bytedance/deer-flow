@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import JSON, BigInteger, DateTime, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
@@ -31,7 +32,7 @@ class ConversationShareRow(Base):
     # at render time; built through the allowlisted snapshot contract, never
     # a raw serialization of LangGraph messages or run-event rows.
     snapshot_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    snapshot_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    snapshot_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     # Audit/debug boundary of the source thread at snapshot time. Public
     # rendering must never re-read the source thread with it.
     source_last_seq: Mapped[int | None] = mapped_column(BigInteger, nullable=True)

@@ -62,7 +62,7 @@ THREAD_MESSAGE_LEGACY_SCAN_BATCH = 201
 class _RawMessageScanLimitExceeded(RuntimeError):
     """Raised after one sentinel row proves a raw message scan is oversized."""
 
-    def __init__(self, scanned_rows: int, limit: int):
+    def __init__(self, scanned_rows: int, limit: int) -> None:
         super().__init__(f"raw message scan exceeded its {limit}-row limit")
         self.scanned_rows = scanned_rows
         self.limit = limit

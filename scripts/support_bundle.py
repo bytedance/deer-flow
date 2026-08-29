@@ -49,17 +49,45 @@ SECRET_KEY_RE = re.compile(
 # strings (DATABASE_URL, REDIS_URL, ...) are deliberately not in this set -- their
 # embedded credentials are already stripped in place by URL_USERINFO_RE, which
 # preserves the host/port/db-name diagnostic value instead of blanking the field.
-NO_FLAG_CREDENTIAL_KEY_NAMES = frozenset({"gh_pat", "github_pat", "redis_auth", "rediscli_auth", "pgservicefile"})
+NO_FLAG_CREDENTIAL_KEY_NAMES = frozenset(
+    {"gh_pat", "github_pat", "redis_auth", "rediscli_auth", "pgservicefile"}
+)
 ENV_KEY_RE = re.compile(r"(?i)^env$")
 VAR_REFERENCE_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
-ENV_SECRET_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$")
-YAML_SECRET_RE = re.compile(r"(?im)^(\s*[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)[\w.-]*\s*:\s*)(.+)$")
+ENV_SECRET_RE = re.compile(
+    r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$"
+)
+YAML_SECRET_RE = re.compile(
+    r"(?im)^(\s*[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)[\w.-]*\s*:\s*)(.+)$"
+)
 BEARER_RE = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
+# Conversation-share URLs carry the bearer credential in their path. Keep this
+# byte-identical to the application log filter (pinned by a parity test): full
+# 43-character tokens are caught even without a left boundary, while short
+# fragments require one so names such as ``backup_dfs_2024.txt`` stay useful.
+SHARE_TOKEN_RE = re.compile(
+    r"(?:"
+    r"(?P<full>(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5[fF])"
+    r"(?=(?:(?:[A-Za-z0-9_-]|%[0-9A-Fa-f]{2})){43})"
+    r"(?:[A-Za-z0-9_-]|%[0-9A-Fa-f]{2})+)"
+    r"|"
+    r"(?P<boundary>^|[^A-Za-z0-9_-]|%[0-9A-Fa-f]{2})"
+    r"(?P<fragment>(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5[fF])"
+    r"(?:[A-Za-z0-9_-]|%[0-9A-Fa-f]{2})+)"
+    r")",
+    re.IGNORECASE,
+)
 URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
-URL_QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|credential)[\w.-]*=)([^&\s#]+)")
-CLI_INLINE_SECRET_RE = re.compile(r"(?i)(--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*=)(\S+)")
-SECRET_FLAG_RE = re.compile(r"(?i)^--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*$")
+URL_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&][\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|credential)[\w.-]*=)([^&\s#]+)"
+)
+CLI_INLINE_SECRET_RE = re.compile(
+    r"(?i)(--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*=)(\S+)"
+)
+SECRET_FLAG_RE = re.compile(
+    r"(?i)^--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*$"
+)
 HEADER_KEY_RE = re.compile(r"(?i)header")
 POSIX_HOME_RE = re.compile(r"(?<![\w.-])(/Users|/home)/([^/\s:]+)")
 WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
@@ -68,7 +96,9 @@ WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
 # Kept as a local copy because this script must run even in environments
 # where the backend venv is broken.
 SAFE_THREAD_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-DOCTOR_STATUS_RE = re.compile(r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE)
+DOCTOR_STATUS_RE = re.compile(
+    r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE
+)
 ATTENTION_SIGNAL_NAMES = {
     "doctor_failed",
     "config_missing",
@@ -85,7 +115,9 @@ ATTENTION_SIGNAL_NAMES = {
 def _redact_yaml_secret_match(match: re.Match[str]) -> str:
     prefix = match.group(1)
     value = match.group(2)
-    if "authorization" in prefix.lower() and value.lstrip().lower().startswith("bearer "):
+    if "authorization" in prefix.lower() and value.lstrip().lower().startswith(
+        "bearer "
+    ):
         return prefix + BEARER_RE.sub(r"\1<redacted>", value)
     return prefix + "<redacted>"
 
@@ -100,6 +132,9 @@ def redact_text(text: str) -> str:
     text = ENV_SECRET_RE.sub(r"\1<redacted>", text)
     text = YAML_SECRET_RE.sub(_redact_yaml_secret_match, text)
     text = BEARER_RE.sub(r"\1<redacted>", text)
+    text = SHARE_TOKEN_RE.sub(
+        lambda match: f"{match.group('boundary') or ''}dfs_***", text
+    )
     return OPENAI_KEY_RE.sub("sk-<redacted>", text)
 
 
@@ -109,7 +144,9 @@ def _redact_secret_flag_list(items: list[Any]) -> list[Any]:
     mask_next = False
     for item in items:
         if mask_next:
-            redacted.append("<redacted>" if isinstance(item, str) else redact_data(item))
+            redacted.append(
+                "<redacted>" if isinstance(item, str) else redact_data(item)
+            )
             mask_next = False
             continue
         if isinstance(item, str) and SECRET_FLAG_RE.fullmatch(item):
@@ -135,7 +172,10 @@ def redact_data(value: Any) -> Any:
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
             key_str = str(key)
-            if SECRET_KEY_RE.search(key_str) or key_str.lower() in NO_FLAG_CREDENTIAL_KEY_NAMES:
+            if (
+                SECRET_KEY_RE.search(key_str)
+                or key_str.lower() in NO_FLAG_CREDENTIAL_KEY_NAMES
+            ):
                 redacted[key] = "<redacted>"
             elif ENV_KEY_RE.fullmatch(key_str) and isinstance(item, dict):
                 redacted[key] = {k: _redact_env_value(v) for k, v in item.items()}
@@ -148,6 +188,29 @@ def redact_data(value: Any) -> Any:
         return _redact_secret_flag_list(value)
     if isinstance(value, tuple):
         return _redact_secret_flag_list(list(value))
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def _redact_text_values(value: Any) -> Any:
+    """Redact JSON string leaves and keys, disambiguating key collisions."""
+    if isinstance(value, dict):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            candidate = redact_text(key) if isinstance(key, str) else key
+            if candidate in redacted:
+                base = str(candidate)
+                suffix = 2
+                while f"{base}#{suffix}" in redacted:
+                    suffix += 1
+                candidate = f"{base}#{suffix}"
+            redacted[candidate] = _redact_text_values(item)
+        return redacted
+    if isinstance(value, list):
+        return [_redact_text_values(item) for item in value]
+    if isinstance(value, tuple):
+        return [_redact_text_values(item) for item in value]
     if isinstance(value, str):
         return redact_text(value)
     return value
@@ -243,15 +306,29 @@ def collect_git_summary(project_root: Path) -> dict[str, Any]:
     commands = {
         "branch": ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         "head": ["git", "rev-parse", "HEAD"],
-        "upstream": ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        "upstream": [
+            "git",
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{u}",
+        ],
         "status_short": ["git", "status", "--short", "--branch"],
         "diff_stat": ["git", "diff", "--stat"],
     }
-    return {name: _run_command(command, cwd=project_root) for name, command in commands.items()}
+    return {
+        name: _run_command(command, cwd=project_root)
+        for name, command in commands.items()
+    }
 
 
 def _validate_thread_id(thread_id: str) -> None:
-    if not thread_id or thread_id in {".", ".."} or ".." in thread_id or not SAFE_THREAD_ID_RE.fullmatch(thread_id):
+    if (
+        not thread_id
+        or thread_id in {".", ".."}
+        or ".." in thread_id
+        or not SAFE_THREAD_ID_RE.fullmatch(thread_id)
+    ):
         raise ValueError(f"Invalid thread_id: {thread_id!r}")
 
 
@@ -261,9 +338,16 @@ def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path
         project_root / ".deer-flow" / "threads" / thread_id / "user-data",
         project_root / "backend" / ".deer-flow" / "threads" / thread_id / "user-data",
     ]
-    for base in (project_root / ".deer-flow" / "users", project_root / "backend" / ".deer-flow" / "users"):
+    for base in (
+        project_root / ".deer-flow" / "users",
+        project_root / "backend" / ".deer-flow" / "users",
+    ):
         if base.exists():
-            candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
+            candidates.extend(
+                user_dir / "threads" / thread_id / "user-data"
+                for user_dir in base.iterdir()
+                if user_dir.is_dir()
+            )
     return candidates
 
 
@@ -280,7 +364,9 @@ def _file_manifest(root: Path, *, max_files: int = 500) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         if len(entries) >= max_files:
-            entries.append({"path": "<truncated>", "reason": f"file limit {max_files} reached"})
+            entries.append(
+                {"path": "<truncated>", "reason": f"file limit {max_files} reached"}
+            )
             break
         try:
             stat = path.stat()
@@ -317,14 +403,21 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
     return {
         "thread_id": thread_id,
         "found": False,
-        "checked_layouts": [_display_path(path, project_root) for path in _candidate_thread_data_dirs(project_root, thread_id)],
+        "checked_layouts": [
+            _display_path(path, project_root)
+            for path in _candidate_thread_data_dirs(project_root, thread_id)
+        ],
     }
 
 
 def collect_doctor_output(project_root: Path) -> dict[str, Any]:
     backend_dir = project_root / "backend"
     cwd = backend_dir if backend_dir.exists() else project_root
-    return _run_command([sys.executable, str(project_root / "scripts" / "doctor.py")], cwd=cwd, timeout_s=60)
+    return _run_command(
+        [sys.executable, str(project_root / "scripts" / "doctor.py")],
+        cwd=cwd,
+        timeout_s=60,
+    )
 
 
 def _command_output(command: dict[str, Any] | None) -> str | None:
@@ -339,8 +432,12 @@ def _command_output(command: dict[str, Any] | None) -> str | None:
 
 def _environment_versions(environment: dict[str, Any]) -> dict[str, str | None]:
     platform_info = environment.get("platform", {})
-    python_version = platform_info.get("python") if isinstance(platform_info, dict) else None
-    versions: dict[str, str | None] = {"python": python_version if isinstance(python_version, str) else None}
+    python_version = (
+        platform_info.get("python") if isinstance(platform_info, dict) else None
+    )
+    versions: dict[str, str | None] = {
+        "python": python_version if isinstance(python_version, str) else None
+    }
     for command in environment.get("commands", []):
         if isinstance(command, dict) and isinstance(command.get("name"), str):
             versions[command["name"]] = _command_output(command)
@@ -362,7 +459,15 @@ def _git_stdout(git_summary: dict[str, Any], key: str) -> str | None:
 def _doctor_counts(doctor: dict[str, Any] | None) -> tuple[int | None, int | None]:
     if not doctor:
         return (None, None)
-    output = "\n".join(value for value in (_command_output(doctor), doctor.get("stdout"), doctor.get("stderr")) if isinstance(value, str))
+    output = "\n".join(
+        value
+        for value in (
+            _command_output(doctor),
+            doctor.get("stdout"),
+            doctor.get("stderr"),
+        )
+        if isinstance(value, str)
+    )
     match = DOCTOR_STATUS_RE.search(output)
     if not match:
         return (None, None)
@@ -394,7 +499,13 @@ def _config_summary(config_summary: Any) -> dict[str, Any]:
         "config_version": config_summary.get("config_version"),
         "error": config_summary.get("error"),
         "models": len(models) if isinstance(models, list) else 0,
-        "tools": sorted(str(tool.get("name")) for tool in tools if isinstance(tool, dict) and tool.get("name")) if isinstance(tools, list) else [],
+        "tools": sorted(
+            str(tool.get("name"))
+            for tool in tools
+            if isinstance(tool, dict) and tool.get("name")
+        )
+        if isinstance(tools, list)
+        else [],
         "channels": _enabled_mapping_keys(channels),
     }
 
@@ -420,9 +531,18 @@ def _dirty_worktree(status_short: str | None) -> bool:
 
 
 def _status_from_signals(signals: dict[str, bool]) -> str:
-    if signals["config_missing"] or signals["config_error"] or signals["models_missing"] or signals["extensions_config_error"]:
+    if (
+        signals["config_missing"]
+        or signals["config_error"]
+        or signals["models_missing"]
+        or signals["extensions_config_error"]
+    ):
         return "needs_user_setup"
-    if signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"]:
+    if (
+        signals["node_missing"]
+        or signals["node_version_too_old"]
+        or signals["nginx_missing"]
+    ):
         return "environment_mismatch"
     if not signals["doctor_included"]:
         return "insufficient_evidence"
@@ -432,53 +552,92 @@ def _status_from_signals(signals: dict[str, bool]) -> str:
 
 
 def _active_signal_names(signals: dict[str, bool]) -> list[str]:
-    return [name for name, enabled in signals.items() if enabled and name in ATTENTION_SIGNAL_NAMES]
+    return [
+        name
+        for name, enabled in signals.items()
+        if enabled and name in ATTENTION_SIGNAL_NAMES
+    ]
 
 
 def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     steps: list[str] = []
     if status == "needs_user_setup":
-        steps.append("Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`.")
+        steps.append(
+            "Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`."
+        )
     if signals["node_missing"] or signals["node_version_too_old"]:
-        steps.append("Ask the reporter to install Node.js 22+ before treating this as an application bug.")
+        steps.append(
+            "Ask the reporter to install Node.js 22+ before treating this as an application bug."
+        )
     if signals["config_missing"] or signals["models_missing"]:
-        steps.append("Do not triage model/runtime behavior until `config.yaml` exists and at least one model is configured.")
+        steps.append(
+            "Do not triage model/runtime behavior until `config.yaml` exists and at least one model is configured."
+        )
     if signals["config_error"]:
-        steps.append("Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`.")
+        steps.append(
+            "Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`."
+        )
     if signals["extensions_config_error"]:
-        steps.append("Ask the reporter to fix `extensions_config.json` syntax before triaging MCP/skill behavior.")
+        steps.append(
+            "Ask the reporter to fix `extensions_config.json` syntax before triaging MCP/skill behavior."
+        )
     if signals["doctor_failed"] and status == "likely_runtime_issue":
-        steps.append("Use `doctor.json` plus the reproduction steps in the issue body to identify the failing subsystem.")
+        steps.append(
+            "Use `doctor.json` plus the reproduction steps in the issue body to identify the failing subsystem."
+        )
     if signals["thread_summary_included"]:
-        steps.append("Use `thread-summary.json` to inspect workspace/upload/output file shape; raw file contents are intentionally absent.")
+        steps.append(
+            "Use `thread-summary.json` to inspect workspace/upload/output file shape; raw file contents are intentionally absent."
+        )
     if not steps:
-        steps.append("Use the issue reproduction steps and evidence JSON files to continue triage.")
+        steps.append(
+            "Use the issue reproduction steps and evidence JSON files to continue triage."
+        )
     return steps
 
 
 def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     steps: list[str] = []
     if status == "needs_user_setup":
-        steps.append("Run `make setup`, then rerun `make doctor` and `make support-bundle` before filing the issue if the problem changes.")
+        steps.append(
+            "Run `make setup`, then rerun `make doctor` and `make support-bundle` before filing the issue if the problem changes."
+        )
     if signals["node_missing"] or signals["node_version_too_old"]:
         steps.append("Install Node.js 22+ and rerun `make doctor`.")
     if signals["config_missing"] or signals["models_missing"]:
-        steps.append("Create or repair `config.yaml` with `make setup`; model/runtime issues cannot be triaged until at least one model is configured.")
+        steps.append(
+            "Create or repair `config.yaml` with `make setup`; model/runtime issues cannot be triaged until at least one model is configured."
+        )
     if signals["config_error"]:
         steps.append("Fix `config.yaml` syntax or regenerate it with `make setup`.")
     if signals["doctor_failed"] and status == "likely_runtime_issue":
-        steps.append("Paste the generated issue summary into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle.")
+        steps.append(
+            "Paste the generated issue summary into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle."
+        )
     if not steps:
-        steps.append("Paste the generated issue summary into the GitHub issue if the issue still reproduces. Attach the zip if a maintainer asks for the evidence bundle.")
+        steps.append(
+            "Paste the generated issue summary into the GitHub issue if the issue still reproduces. Attach the zip if a maintainer asks for the evidence bundle."
+        )
     return steps
 
 
-def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> list[dict[str, str]]:
+def _evidence_files(
+    *, include_doctor: bool, include_thread_summary: bool
+) -> list[dict[str, str]]:
     files = [
         ("README.md", "Human-readable entrypoint for the support bundle."),
-        ("issue-summary.md", "Markdown summary intended to be pasted into a GitHub issue."),
-        ("ai-issue-draft.md", "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts."),
-        ("triage.json", "Stable machine-readable summary for AI or script-assisted triage."),
+        (
+            "issue-summary.md",
+            "Markdown summary intended to be pasted into a GitHub issue.",
+        ),
+        (
+            "ai-issue-draft.md",
+            "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts.",
+        ),
+        (
+            "triage.json",
+            "Stable machine-readable summary for AI or script-assisted triage.",
+        ),
         ("manifest.json", "Bundle schema, generation time, and privacy declaration."),
         ("environment.json", "OS, Python, and toolchain version probes."),
         ("config-summary.json", "Redacted config.yaml structure."),
@@ -486,7 +645,12 @@ def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> li
         ("git.json", "Branch, commit, upstream, status, and diff-stat metadata."),
     ]
     if include_thread_summary:
-        files.append(("thread-summary.json", "Optional thread workspace/upload/output file manifests only."))
+        files.append(
+            (
+                "thread-summary.json",
+                "Optional thread workspace/upload/output file manifests only.",
+            )
+        )
     if include_doctor:
         files.append(("doctor.json", "Redacted make doctor output."))
     return [{"path": path, "description": description} for path, description in files]
@@ -514,12 +678,16 @@ def build_triage_report(
         "doctor_failed": bool(doctor and not doctor.get("ok")),
         "config_missing": config.get("present") is False,
         "config_error": bool(config.get("error")),
-        "models_missing": bool(config.get("present") is True and config.get("models") == 0),
+        "models_missing": bool(
+            config.get("present") is True and config.get("models") == 0
+        ),
         "extensions_config_missing": extensions.get("present") is False,
         "extensions_config_error": bool(extensions.get("error")),
-        "node_missing": versions.get("node") is not None and "not found" in versions["node"].lower(),
+        "node_missing": versions.get("node") is not None
+        and "not found" in versions["node"].lower(),
         "node_version_too_old": node_major is not None and node_major < 22,
-        "nginx_missing": versions.get("nginx") is not None and "not found" in versions["nginx"].lower(),
+        "nginx_missing": versions.get("nginx") is not None
+        and "not found" in versions["nginx"].lower(),
         "dirty_worktree": _dirty_worktree(status_short),
         "thread_summary_included": thread_summary is not None,
         "thread_summary_found": bool(thread_summary and thread_summary.get("found")),
@@ -554,7 +722,10 @@ def build_triage_report(
         },
         "reporter_next_steps": _reporter_next_steps(status, signals),
         "maintainer_next_steps": _maintainer_next_steps(status, signals),
-        "evidence_files": _evidence_files(include_doctor=doctor is not None, include_thread_summary=thread_summary is not None),
+        "evidence_files": _evidence_files(
+            include_doctor=doctor is not None,
+            include_thread_summary=thread_summary is not None,
+        ),
         "privacy": manifest["privacy"],
     }
 
@@ -587,7 +758,12 @@ def render_issue_summary(triage: dict[str, Any]) -> str:
         _markdown_list(triage["maintainer_next_steps"]),
         "",
         "### Evidence files in the attached zip",
-        _markdown_list([f"`{item['path']}` - {item['description']}" for item in triage["evidence_files"]]),
+        _markdown_list(
+            [
+                f"`{item['path']}` - {item['description']}"
+                for item in triage["evidence_files"]
+            ]
+        ),
         "",
         "Privacy: this bundle excludes `.env`, raw conversation messages, and user file contents.",
         "",
@@ -607,14 +783,25 @@ def _os_label(platform_info: dict[str, Any]) -> str:
 
 
 def _platform_details(platform_info: dict[str, Any]) -> str:
-    details = [platform_info.get("machine"), platform_info.get("system"), platform_info.get("release")]
+    details = [
+        platform_info.get("machine"),
+        platform_info.get("system"),
+        platform_info.get("release"),
+    ]
     return ", ".join(str(item) for item in details if item) or "_No response_"
 
 
 def _draft_affected_areas(triage: dict[str, Any]) -> list[str]:
     signals = triage["signals"]
     areas: list[str] = []
-    if signals["config_missing"] or signals["config_error"] or signals["models_missing"] or signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"]:
+    if (
+        signals["config_missing"]
+        or signals["config_error"]
+        or signals["models_missing"]
+        or signals["node_missing"]
+        or signals["node_version_too_old"]
+        or signals["nginx_missing"]
+    ):
         areas.append("Config / setup (make, config.yaml, env)")
     if signals["extensions_config_error"]:
         areas.extend(["MCP", "Skills"])
@@ -623,7 +810,9 @@ def _draft_affected_areas(triage: dict[str, Any]) -> list[str]:
     return areas
 
 
-def _doctor_excerpt(doctor: dict[str, Any] | None, *, max_lines: int = 80, max_chars: int = 12000) -> str:
+def _doctor_excerpt(
+    doctor: dict[str, Any] | None, *, max_lines: int = 80, max_chars: int = 12000
+) -> str:
     output = _command_output(doctor) if doctor else None
     if not output:
         return "<REQUIRED: paste key log lines. Do not invent if unknown.>"
@@ -642,7 +831,9 @@ def _doctor_excerpt(doctor: dict[str, Any] | None, *, max_lines: int = 80, max_c
     return excerpt
 
 
-def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: dict[str, Any] | None) -> str:
+def render_ai_issue_draft(
+    triage: dict[str, Any], issue_summary: str, doctor: dict[str, Any] | None
+) -> str:
     """Render a GitHub issue body scaffold for AI-assisted reporters."""
     versions = triage["versions"]
     git = triage["git"]
@@ -773,7 +964,12 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
         "",
         "## Files",
         "",
-        _markdown_list([f"`{item['path']}` - {item['description']}" for item in triage["evidence_files"]]),
+        _markdown_list(
+            [
+                f"`{item['path']}` - {item['description']}"
+                for item in triage["evidence_files"]
+            ]
+        ),
         "",
         "## Privacy",
         "",
@@ -787,15 +983,23 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
 
 def _default_out_path(project_root: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    return project_root / ".deer-flow" / "support-bundles" / f"deer-flow-support-bundle-{timestamp}.zip"
+    return (
+        project_root
+        / ".deer-flow"
+        / "support-bundles"
+        / f"deer-flow-support-bundle-{timestamp}.zip"
+    )
 
 
 def _write_json(zf: zipfile.ZipFile, name: str, data: Any) -> None:
-    zf.writestr(f"{name}.json", json.dumps(data, indent=2, sort_keys=True) + "\n")
+    zf.writestr(
+        f"{name}.json",
+        json.dumps(_redact_text_values(data), indent=2, sort_keys=True) + "\n",
+    )
 
 
 def _write_text(zf: zipfile.ZipFile, name: str, text: str) -> None:
-    zf.writestr(name, text)
+    zf.writestr(name, redact_text(text))
 
 
 def _issue_summary_sidecar_path(out_path: Path) -> Path:
@@ -818,7 +1022,9 @@ def create_support_bundle(
     """Create a redacted support bundle and return the zip path."""
     project_root = project_root.resolve()
     config_path = (config_path or project_root / "config.yaml").resolve()
-    extensions_config_path = (extensions_config_path or project_root / "extensions_config.json").resolve()
+    extensions_config_path = (
+        extensions_config_path or project_root / "extensions_config.json"
+    ).resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if thread_id:
@@ -844,7 +1050,9 @@ def create_support_bundle(
     config_summary = collect_config_summary(config_path)
     extensions_summary = collect_extensions_summary(extensions_config_path)
     git_summary = collect_git_summary(project_root)
-    thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
+    thread_summary = (
+        collect_thread_summary(project_root, thread_id) if thread_id else None
+    )
     doctor = collect_doctor_output(project_root) if include_doctor else None
     triage = build_triage_report(
         manifest=manifest,
@@ -873,20 +1081,39 @@ def create_support_bundle(
         if doctor is not None:
             _write_json(zf, "doctor", doctor)
 
-    _issue_summary_sidecar_path(out_path).write_text(issue_summary, encoding="utf-8")
-    _issue_draft_sidecar_path(out_path).write_text(issue_draft, encoding="utf-8")
+    _issue_summary_sidecar_path(out_path).write_text(
+        redact_text(issue_summary), encoding="utf-8"
+    )
+    _issue_draft_sidecar_path(out_path).write_text(
+        redact_text(issue_draft), encoding="utf-8"
+    )
     return out_path
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parents[1]
-    parser.add_argument("--project-root", type=Path, default=repo_root, help="DeerFlow project root")
+    parser.add_argument(
+        "--project-root", type=Path, default=repo_root, help="DeerFlow project root"
+    )
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
-    parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
-    parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
+    parser.add_argument(
+        "--extensions-config",
+        type=Path,
+        default=None,
+        help="Path to extensions_config.json",
+    )
+    parser.add_argument(
+        "--thread-id",
+        default=None,
+        help="Optional thread id to include file manifests for",
+    )
     parser.add_argument("--out", type=Path, default=None, help="Output zip path")
-    parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
+    parser.add_argument(
+        "--include-doctor",
+        action="store_true",
+        help="Include redacted make doctor output",
+    )
     return parser.parse_args(argv)
 
 
@@ -913,8 +1140,12 @@ def main(argv: list[str] | None = None) -> int:
     for step in triage["reporter_next_steps"]:
         print(f"- {step}")
     print("If you still file an issue, paste the issue summary.")
-    print("If an AI assistant files the issue, start from the issue draft and replace every REQUIRED placeholder.")
-    print("Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough.")
+    print(
+        "If an AI assistant files the issue, start from the issue draft and replace every REQUIRED placeholder."
+    )
+    print(
+        "Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough."
+    )
     print("Maintainers or AI triage tools should read triage.json first.")
     return 0
 

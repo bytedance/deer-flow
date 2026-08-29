@@ -87,6 +87,93 @@ async def test_snapshot_skips_empty_text_messages():
     assert snapshot["messages"] == []
 
 
+async def test_snapshot_excludes_reasoning_and_tool_content_blocks():
+    pages = [
+        [
+            _row(
+                1,
+                {
+                    "type": "ai",
+                    "content": [
+                        {"type": "thinking", "text": "private chain of thought"},
+                        {"type": "reasoning", "text": "private reasoning"},
+                        {"type": "tool_call", "text": "private tool args", "args": {"secret": True}},
+                        {"type": "text", "text": "public answer"},
+                        {"type": "output_text", "text": "public follow-up"},
+                    ],
+                },
+            ),
+            _row(2, {"type": "ai", "content": {"type": "thinking", "text": "top-level private thought"}}),
+            _row(3, {"type": "ai", "content": "<think>inline private thought</think>visible answer"}),
+        ]
+    ]
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return pages[0], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert snapshot["messages"] == [
+        {"id": "m1", "role": "assistant", "content": "public answer\npublic follow-up"},
+        {"id": "m2", "role": "assistant", "content": "visible answer"},
+    ]
+    serialized = str(snapshot)
+    assert "private" not in serialized
+
+
+async def test_snapshot_preserves_literal_think_tags_inside_markdown_code():
+    visible = "\n".join(
+        [
+            "Use `<think>text</think>` markers.",
+            "```xml",
+            "<think>literal fenced example</think>",
+            "```",
+            "<think>private reasoning</think>Visible answer.",
+        ]
+    )
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": visible})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    content = snapshot["messages"][0]["content"]
+    assert "`<think>text</think>`" in content
+    assert "<think>literal fenced example</think>" in content
+    assert "private reasoning" not in content
+    assert "Visible answer." in content
+
+
+async def test_snapshot_neutralizes_private_artifact_paths_and_urls():
+    private_text = "\n".join(
+        [
+            "![private image](/mnt/user-data/outputs/secret.svg)",
+            "[download](/api/threads/thread-secret/artifacts/mnt/user-data/outputs/report.pdf)",
+            "raw path: /mnt/user-data/uploads/private.csv",
+            "[encoded](%2Fapi%2Fthreads%2Fthread-secret%2Fartifacts%2Fmnt%2Fuser-data%2Foutputs%2Fencoded.pdf)",
+            "[public source](https://example.com/report)",
+        ]
+    )
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": private_text})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    content = snapshot["messages"][0]["content"]
+    assert "/mnt/user-data" not in content
+    assert "thread-secret" not in content
+    assert "%2Fapi%2Fthreads" not in content
+    assert "[private artifact omitted]" in content
+    assert "[public source](https://example.com/report)" in content
+
+
 async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
     """The first public message beyond the cap must fail loudly."""
     pages = [
@@ -281,3 +368,39 @@ async def test_resolve_share_title_uses_thread_meta_with_fallback():
     assert await resolve_share_title("thread-1", request=request) == "Project sync"
     request_empty = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(thread_store=_Empty())))
     assert await resolve_share_title("thread-1", request=request_empty) == "Shared conversation"
+
+
+async def test_resolve_share_title_reads_real_thread_meta_display_name():
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    user = SimpleNamespace(id="user-1")
+    store = MemoryThreadMetaStore(InMemoryStore())
+    await store.create("thread-1", user_id=user.id, display_name="Real conversation title")
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(thread_store=store)))
+
+    context_token = set_current_user(user)
+    try:
+        title = await resolve_share_title("thread-1", request=request)
+    finally:
+        reset_current_user(context_token)
+
+    assert title == "Real conversation title"
+
+
+async def test_resolve_share_title_neutralizes_private_artifact_reference():
+    private_title = "/api/threads/thread-secret/artifacts/mnt/user-data/outputs/report.pdf"
+
+    class _Store:
+        async def get(self, thread_id):
+            return {"display_name": private_title}
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(thread_store=_Store())))
+
+    title = await resolve_share_title("thread-1", request=request)
+
+    assert "thread-secret" not in title
+    assert "/mnt/user-data" not in title
+    assert title == "[private artifact omitted]"

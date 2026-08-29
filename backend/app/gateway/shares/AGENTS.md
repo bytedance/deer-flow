@@ -4,6 +4,8 @@ Read-only public sharing of conversation snapshots (#4548, design of record).
 Gated on `conversation_sharing.enabled` (off by default) and a SQL database —
 memory-only backends fail management routes with 503 and public reads with 404,
 so links nobody can durably resolve cannot be minted.
+This phase is backend/API groundwork only: the Share dialog and the HTML
+`/share/{token}` page remain Phase 2 frontend work.
 
 ## Owner endpoints — `threads:read` + owner_check
 
@@ -17,7 +19,13 @@ so links nobody can durably resolve cannot be minted.
 - The snapshot is frozen at creation through `_scan_thread_message_page` with
   the hidden/control filter re-applied (allowlisted `ask_clarification` replies
   can be persisted), converted to a strict-allowlist DTO: snapshot-local ids,
-  `user`/`assistant` roles, renderable text only — no run/thread/user
+  `user`/`assistant` roles, renderable text only. Structured content admits
+  only bare strings and explicit `text` / `output_text` blocks; reasoning,
+  thinking, and tool-call blocks are ignored, and inline assistant `<think>`
+  sections are stripped outside Markdown code examples. Owner-only
+  `/mnt/user-data` and thread artifact/upload references (including encoded
+  forms) are replaced with a public omission marker in both messages and
+  titles (at create time and again on public read) — no run/thread/user
   identifiers, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the
   page order only. Rows are sanitized per page, so the 2000 cap counts
@@ -35,7 +43,7 @@ so links nobody can durably resolve cannot be minted.
 ## Token storage (`tokens.py`)
 
 `dfs_` + urlsafe(32 CSPRNG bytes), returned exactly once. Only the HMAC-SHA-256
-`token_hash` is persisted (unique index, constant-time lookup). The pepper
+`token_hash` is persisted (unique indexed equality lookup). The pepper
 comes from `SHARE_TOKEN_PEPPER` or an auto-generated 0600 `.share_token_pepper`
 (the `AUTH_JWT_SECRET` lifecycle) — never a YAML field. The generated file is
 accepted only at its complete 43-character length, and async share routes
@@ -48,33 +56,45 @@ invalidates every outstanding token.
 middleware exemption is prefix-based, so two contract tests pin that nothing
 non-GET may mount under `/api/shares/`). Properties: per-request
 expiry/revocation checks with indistinguishable 404s for unknown/revoked/
-expired; per-IP resolve throttle (in-memory, per-worker — a courtesy control,
+expired; all success and known 404 paths carry `Referrer-Policy: no-referrer`
+and `Cache-Control: no-store` through response or exception headers; per-IP
+resolve throttle (in-memory, per-worker — a courtesy control,
 the token is 256-bit unguessable; the bucket key uses the deployment-wide
 trusted-proxy model from `app.gateway.client_ip`, shared with the login
 limiter — behind the shipped nginx, deployments must set
 `AUTH_TRUSTED_PROXIES` to the proxy network or every anonymous visitor shares
-the proxy's single bucket); `Referrer-Policy: no-referrer` +
-`Cache-Control: no-store` (the bearer-URL response must never survive in a
-browser/proxy cache past revocation); and zero thread-state access — explicit
-share records are the only gate in every mode, including auth-disabled. A
-regression test patches `get_thread_store` to raise, proving the public path
-never consults thread access under any principal.
+the proxy's single bucket); and zero thread-state access — explicit share
+records are the only gate in every mode, including auth-disabled. The
+bearer-URL response must never survive in a browser/proxy cache past
+revocation. The
+API response's `Referrer-Policy` is defense in depth only: it does not establish
+the document policy for the Phase 2 frontend `/share/{token}` page, which must
+set its own `no-referrer` policy and avoid third-party resources. A regression
+test patches `get_thread_store` to raise, proving the public path never consults
+thread access under any principal.
 
-Token-in-URL leakage has two repository-level controls (both pinned by
-`tests/test_share_token_log_masking.py`; `Referrer-Policy` only covers browser
-referrers, not log sinks):
+Token-in-URL leakage also has repository-level log and diagnostic controls
+(`Referrer-Policy` does not protect those sinks):
 
 - **Gateway logs** — `install_share_token_redaction()` (`deerflow/logging_config`,
   called at app import and from `configure_logging`) masks `dfs_…` in rendered
-  messages and exception tracebacks for both text and JSON output: a filter on
-  the root handlers, plus logger-level filters on
-  `uvicorn.access` / `uvicorn` / `uvicorn.error`, whose tree terminates at
-  `uvicorn`'s own handlers and never reaches root handlers.
+  messages and exception tracebacks for both text and JSON output: filters on
+  the root handlers, the known `uvicorn.access` / `uvicorn` / `uvicorn.error`
+  loggers, and their current handlers. Handler-level coverage is required for
+  descendants such as `uvicorn.asgi` because Python does not apply ancestor
+  logger filters to propagated records. The filter preserves Uvicorn's
+  five-value access-log tuple for `AccessFormatter`; the canonical redaction
+  primitive also rejects `dfs_…` values during trace-id normalization so
+  structured logs and tracing metadata cannot bypass message redaction.
 - **nginx access logs** — both shipped configs mask share tokens in the request
-  line (`$masked_request`) and in the client-controlled Referer
-  (`$masked_referer`) before writing the `combined`-format `masked_access`
-  record; the regression test renders the config's full log format, so a
-  dropped or loosened mask fails CI. nginx
+  line (`$masked_request`) by classifying the normalized `$uri` and then
+  emitting a constant route label; a raw-request fallback also catches tokens
+  in query strings. The client-controlled Referer is masked in
+  `$masked_referer` before writing the `combined`-format `masked_access`
+  record; User-Agent and Basic-auth remote-user fields have equivalent masks.
+  The matchers recognize literal and percent-encoded tokens. The regression
+  test renders the config's full log format, so a dropped or loosened mask
+  fails CI. nginx
   `error_log` messages embed the full request line, severity does not redact
   them (nginx trac #2193: crit-level failures still append the request
   line), and the output cannot be format-masked — so the dedicated `^~`
@@ -87,6 +107,10 @@ referrers, not log sinks):
   per-location — deployments that must close even that gap should scrub
   `dfs_[A-Za-z0-9_-]+` in their nginx error-log pipeline, like any other
   bearer-in-URL system.
+- **Support bundles** — `scripts/support_bundle.py` keeps a parity-tested copy
+  of the canonical token regex. Its final JSON/text archive writers and
+  Markdown sidecar writers apply redaction as a last-line guarantee, in
+  addition to collection-time masking.
 
 Snapshot immutability: later messages/edits never modify an existing share;
 `source_last_seq` is audit-only and public rendering never re-reads the source.

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -25,8 +26,11 @@ from app.gateway.shares.snapshot import (
     ShareSnapshotTooLarge,
     build_share_snapshot,
     resolve_share_title,
+    sanitize_share_title,
 )
 from app.gateway.shares.tokens import generate_share_token, get_share_pepper_async, share_token_hash
+from deerflow.config.conversation_sharing_config import ConversationSharingConfig
+from deerflow.persistence.conversation_shares.sql import ConversationShareRepository
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -47,6 +51,19 @@ _PUBLIC_RESOLVE_WINDOW_SECONDS = 60.0
 _PUBLIC_RESOLVE_MAX_PER_WINDOW = 60
 _PUBLIC_RESOLVE_TRACKER_MAX_IPS = 4096
 _public_resolve_hits: dict[str, list[float]] = {}
+_PUBLIC_RESPONSE_HEADERS = {
+    "Referrer-Policy": "no-referrer",
+    "Cache-Control": "no-store",
+}
+
+
+def _public_not_found() -> HTTPException:
+    """Return the indistinguishable public 404 with non-cacheable headers."""
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Not found",
+        headers=dict(_PUBLIC_RESPONSE_HEADERS),
+    )
 
 
 def _public_resolve_throttled(client_ip: str | None) -> bool:
@@ -81,11 +98,11 @@ def _prune_resolve_tracker(now: float) -> None:
         del _public_resolve_hits[longest_idle]
 
 
-def _sharing_config():
+def _sharing_config() -> ConversationSharingConfig:
     return get_config().conversation_sharing
 
 
-def _share_repo(request: Request):
+def _share_repo(request: Request) -> ConversationShareRepository:
     repo = getattr(request.app.state, "share_repo", None)
     if repo is None:
         # Memory-only persistence: links minted here could never be resolved
@@ -129,7 +146,7 @@ class PublicShareResponse(BaseModel):
     snapshot: dict[str, Any]
 
 
-def _resolve_expiry(body: ShareCreateRequest):
+def _resolve_expiry(body: ShareCreateRequest) -> datetime | None:
     config = _sharing_config()
     if body.never_expires:
         if body.expires_in_days is not None:
@@ -145,8 +162,6 @@ def _resolve_expiry(body: ShareCreateRequest):
         days = config.default_expiry_days
     elif days not in _EXPIRY_CHOICES_DAYS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"expires_in_days must be one of {list(_EXPIRY_CHOICES_DAYS)}")
-    from datetime import UTC, datetime, timedelta
-
     return datetime.now(UTC) + timedelta(days=days)
 
 
@@ -167,7 +182,7 @@ def _summary(record: dict[str, Any]) -> ShareSummaryResponse:
     responses={status.HTTP_413_CONTENT_TOO_LARGE: {"description": "Conversation exceeds the share message cap and cannot be shared"}},
 )
 @require_permission("threads", "read", owner_check=True)
-async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateRequest):
+async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateRequest) -> ShareCreatedResponse:
     """Create a read-only snapshot share for a thread the caller owns.
 
     The raw share URL is returned exactly once; only its HMAC digest is
@@ -203,7 +218,10 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     if not snapshot["messages"]:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This conversation has no visible messages to share")
 
-    title = (body.title or await resolve_share_title(thread_id, request=request)).strip()[:_TITLE_MAX_LENGTH]
+    title = sanitize_share_title(
+        body.title or await resolve_share_title(thread_id, request=request),
+        max_length=_TITLE_MAX_LENGTH,
+    )
     expires_at = _resolve_expiry(body)
     token = generate_share_token()
     pepper = await get_share_pepper_async()
@@ -229,7 +247,7 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
 
 @router.get("/threads/{thread_id}/shares", response_model=list[ShareSummaryResponse])
 @require_permission("threads", "read", owner_check=True)
-async def list_shares(thread_id: ThreadId, request: Request):
+async def list_shares(thread_id: ThreadId, request: Request) -> list[ShareSummaryResponse]:
     """List the caller's shares for a thread. Never returns token hashes.
 
     Read-side owner_check stays permissive by design (matches every other
@@ -245,7 +263,7 @@ async def list_shares(thread_id: ThreadId, request: Request):
 
 @router.delete("/threads/{thread_id}/shares/{share_id}", status_code=status.HTTP_204_NO_CONTENT)
 @require_permission("threads", "read", owner_check=True)
-async def revoke_share(thread_id: ThreadId, share_id: str, request: Request):
+async def revoke_share(thread_id: ThreadId, share_id: str, request: Request) -> None:
     """Revoke one of the caller's shares. Effective on the next public request."""
     _require_enabled()
     user_id = await get_current_user(request)
@@ -256,7 +274,7 @@ async def revoke_share(thread_id: ThreadId, share_id: str, request: Request):
 
 
 @router.get("/shares/{share_token}", response_model=PublicShareResponse)
-async def get_public_share(share_token: str, request: Request, response: Response):
+async def get_public_share(share_token: str, request: Request, response: Response) -> PublicShareResponse:
     """Resolve a bearer share token into its public snapshot DTO.
 
     Deliberately unauthenticated (the token *is* the credential). Returns
@@ -264,30 +282,28 @@ async def get_public_share(share_token: str, request: Request, response: Respons
     revoked links, and expired links. Reads only the dedicated share record;
     never touches thread state or history under any synthetic principal.
     """
-    # The token rides in the URL path, so leakage must be blunted on every
-    # transport surface: a strict referrer policy keeps the URL out of
-    # Referer on any link the rendered page follows, and no-store keeps the
-    # bearer-URL response out of browser/proxy caches so a revoked or
-    # expired share stops being served the moment the server rejects it.
-    response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Cache-Control"] = "no-store"
+    # The token rides in the URL path, so this API response is no-store and
+    # carries the strictest referrer policy as defense in depth. This header
+    # does not establish the policy of the follow-up frontend `/share/` page;
+    # that document must set its own no-referrer policy when Phase 2 lands.
+    response.headers.update(_PUBLIC_RESPONSE_HEADERS)
     if not _sharing_config().enabled:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise _public_not_found()
     repo = getattr(request.app.state, "share_repo", None)
     if repo is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise _public_not_found()
     if _public_resolve_throttled(get_client_ip(request)):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise _public_not_found()
 
     pepper = await get_share_pepper_async()
     record = await repo.get_active_by_token_hash(share_token_hash(share_token, pepper))
     if record is None:
         # Never log the token itself; hash-side failures stay generic.
         logger.debug("Share token did not resolve")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+        raise _public_not_found()
     snapshot = record.get("snapshot_json") or {}
     return PublicShareResponse(
-        title=str(record["title"]),
+        title=sanitize_share_title(record["title"]),
         snapshot_version=int(record.get("snapshot_version") or 1),
         snapshot=snapshot,
     )

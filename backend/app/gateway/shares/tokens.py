@@ -17,6 +17,7 @@ import hmac
 import logging
 import os
 import secrets
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ _share_pepper: str | None = None
 _GENERATED_PEPPER_LENGTH = 43
 
 
-def _read_pepper_file(pepper_file) -> str:
+def _read_pepper_file(pepper_file: Path) -> str:
     """Read a pepper written by the O_EXCL winner, tolerating in-flight writes."""
     import time
 
