@@ -16,7 +16,10 @@ is enabled for that server, except under an explicit ``on_missing:
 Fail-closed by default: an unmapped user (including the anonymous
 ``DEFAULT_USER_ID`` fallback), or a mapped credential whose ``$ENV_VAR``
 reference resolved to an empty string, gets an actionable ``ToolException``
-instead of another user's credential or the discovery credential.
+instead of another user's credential or the discovery credential. A resolved
+credential containing characters that are illegal in an HTTP header is
+denied the same way — before the transport can reject the header with an
+error that quotes the credential back into the model-visible tool error.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from typing import Any
 from langchain_core.tools import ToolException
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpUserScopedAuthConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import apply_header_overrides, header_spellings, is_valid_header_value
 from deerflow.runtime.user_context import resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
@@ -114,6 +117,23 @@ def build_user_scoped_auth_interceptor(extensions_config: ExtensionsConfig) -> A
             # surfacing it leaks nothing across users.
             raise ToolException(
                 f"No credential is configured for your account (user id '{user_id}') on MCP server '{request.server_name}'. Ask the operator to add this exact id to that server's user_auth.users map (or set its environment variable)."
+            )
+
+        if not is_valid_header_value(credential):
+            logger.warning(
+                "Denied MCP tool call to server '%s': the user-scoped credential for user '%s' contains characters that are illegal in an HTTP header",
+                request.server_name,
+                user_id,
+            )
+            # The transport rejects an illegal header value with an error that
+            # quotes it, so the message names only the user id and server —
+            # never the credential — to keep it out of the model-visible tool
+            # error. Denies regardless of on_missing: a malformed credential
+            # can never be sent.
+            raise ToolException(
+                f"The credential configured for your account (user id '{user_id}') on MCP server "
+                f"'{request.server_name}' contains characters that are illegal in an HTTP header "
+                "(for example a line break) and cannot be sent. Ask the operator to fix the configured value."
             )
 
         updated_headers = apply_header_overrides(

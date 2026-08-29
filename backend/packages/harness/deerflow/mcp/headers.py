@@ -18,7 +18,25 @@ the static entry instead of duplicating it.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
+
+# h11's field-value grammar: visible ASCII plus obs-text, with horizontal tab
+# as the only permitted control character. Anything else makes httpx raise a
+# LocalProtocolError whose message echoes the full value — unacceptable for a
+# credential, so interceptors validate with this before injecting one.
+_HEADER_VALUE_RE = re.compile(r"[\t\x20-\x7e\x80-\xff]*")
+
+
+def is_valid_header_value(value: str) -> bool:
+    """Return whether ``value`` can be placed in an HTTP header as-is.
+
+    Rejects CR, LF and every other character outside h11's field-value
+    grammar, so a caller that checks this first never triggers the transport
+    error that would quote the value back. ``fullmatch`` matters: ``$`` would
+    accept a trailing newline.
+    """
+    return _HEADER_VALUE_RE.fullmatch(value) is not None
 
 
 def header_spellings(names: Iterable[str] | None) -> dict[str, str]:

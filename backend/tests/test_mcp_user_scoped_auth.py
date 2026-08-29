@@ -104,6 +104,26 @@ def test_empty_resolved_credential_is_denied():
         asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), AsyncMock()))
 
 
+def test_credential_with_illegal_header_characters_is_denied_without_calling_handler():
+    """A credential carrying a line break must fail closed before the transport
+    rejects the header with an error that quotes the value (#5065)."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1\n"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException, match="illegal in an HTTP header"):
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), handler))
+    handler.assert_not_awaited()
+
+
+def test_illegal_credential_deny_message_does_not_leak_the_credential():
+    credential = "Bearer super-secret-value\r\nX-Injected: 1"
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": credential}))
+    with pytest.raises(ToolException) as excinfo:
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), AsyncMock()))
+    message = str(excinfo.value)
+    assert "super-secret-value" not in message
+    assert "X-Injected" not in message
+
+
 def test_on_missing_passthrough_keeps_static_headers():
     interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}, on_missing="passthrough"))
     request = _request(headers={"Authorization": "Bearer discovery-token"}, runtime=_runtime_for_user("stranger"))

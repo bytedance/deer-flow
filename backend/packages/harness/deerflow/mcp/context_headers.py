@@ -27,6 +27,9 @@ Fail-closed by default: a mapped key that is absent from the request secrets
 falling back to the server's static discovery credential, which in a
 multi-tenant deployment would send one tenant's request under another
 tenant's authority. ``on_missing: "passthrough"`` is the explicit opt-out.
+A resolved value containing characters that are illegal in an HTTP header is
+denied the same way — before the transport can reject the header with an
+error that quotes the credential back into the model-visible tool error.
 """
 
 from __future__ import annotations
@@ -37,7 +40,7 @@ from typing import Any
 from langchain_core.tools import ToolException
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpContextHeadersConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import apply_header_overrides, header_spellings, is_valid_header_value
 from deerflow.runtime.secret_context import extract_request_secrets
 
 logger = logging.getLogger(__name__)
@@ -128,14 +131,17 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
         secrets = _request_secrets(request)
         resolved: dict[str, str] = {}
         missing: list[str] = []
+        invalid: list[str] = []
         for header_name, secret_key in context_headers.headers.items():
             # Empty string covers a caller-side `$ENV_VAR` that was unset: an
             # empty credential must fail closed rather than send an empty header.
             value = secrets.get(secret_key, "")
-            if value:
+            if not value:
+                missing.append(secret_key)
+            elif is_valid_header_value(value):
                 resolved[header_name] = value
             else:
-                missing.append(secret_key)
+                invalid.append(secret_key)
 
         if missing and context_headers.on_missing == "deny":
             missing_keys = ", ".join(sorted(missing))
@@ -148,6 +154,24 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
             # the config file, so this leaks nothing the operator has not written
             # down, while telling the caller exactly what to send.
             raise ToolException(f"MCP server '{request.server_name}' needs request-scoped credential(s) {missing_keys}. Send them in config.context.secrets, or set this server's headers_from_context.on_missing to 'passthrough'.")
+
+        if invalid:
+            invalid_keys = ", ".join(sorted(invalid))
+            logger.warning(
+                "Denied MCP tool call to server '%s': request-scoped secret(s) %s contain characters that are illegal in an HTTP header",
+                request.server_name,
+                invalid_keys,
+            )
+            # Name only the keys: the transport rejects an illegal header value
+            # with an error that quotes it, so a message carrying the value
+            # would leak the credential into the model-visible tool error —
+            # the leak this guard exists to close. Denies regardless of
+            # on_missing: a malformed credential can never be sent.
+            raise ToolException(
+                f"MCP server '{request.server_name}' cannot send request-scoped credential(s) {invalid_keys}: "
+                "the value contains characters that are illegal in an HTTP header (for example a line break) "
+                "and is deliberately not shown here. Fix the value in config.context.secrets."
+            )
 
         if not resolved:
             return await handler(request)

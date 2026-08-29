@@ -330,6 +330,35 @@ def test_deny_message_does_not_leak_other_secret_values():
     assert "super-secret-value" not in str(excinfo.value)
 
 
+def test_secret_with_illegal_header_characters_is_denied_without_calling_handler():
+    """A credential carrying a line break must fail closed before the transport
+    rejects the header with an error that quotes the value (#5065)."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException, match="tenant_token"):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="Bearer token\n")), handler))
+    handler.assert_not_awaited()
+
+
+def test_illegal_value_deny_message_does_not_leak_the_secret():
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    secret = "Bearer super-secret-value\r\nX-Injected: 1"
+    with pytest.raises(ToolException) as excinfo:
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=secret)), AsyncMock()))
+    message = str(excinfo.value)
+    assert "super-secret-value" not in message
+    assert "X-Injected" not in message
+
+
+def test_illegal_value_is_denied_even_under_passthrough():
+    """on_missing governs absent secrets only: a malformed credential can never be sent."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}, on_missing="passthrough"))
+    handler = AsyncMock()
+    with pytest.raises(ToolException):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="Bearer token\n")), handler))
+    handler.assert_not_awaited()
+
+
 def test_on_missing_passthrough_keeps_static_headers():
     interceptor = build_context_headers_interceptor(_config(headers={"Authorization": "tenant_token"}, on_missing="passthrough"))
     request = _request(headers={"Authorization": "Bearer discovery-token"}, runtime=_runtime_with_secrets())

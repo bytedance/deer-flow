@@ -15,7 +15,7 @@ from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from pydantic import ValidationError
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpUserScopedAuthConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import apply_header_overrides, header_spellings, is_valid_header_value
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
 from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
 
@@ -200,3 +200,28 @@ async def test_durable_task_call_sends_one_authorization_header():
         )
 
     assert opened == {"authorization": "Bearer oauth-token"}
+
+
+# ---------------------------------------------------------------------------
+# is_valid_header_value
+# ---------------------------------------------------------------------------
+
+
+def test_valid_header_values_pass():
+    assert is_valid_header_value("Bearer tenant-scoped-token")
+    assert is_valid_header_value("")
+    assert is_valid_header_value("value\twith\ttabs")
+    # obs-text (0x80-0xff) is part of the RFC 9110 field-value grammar.
+    assert is_valid_header_value("caf\xe9")
+
+
+def test_illegal_header_values_are_rejected():
+    # The trailing-newline credential from #5065, plus every character class
+    # httpx/h11 rejects, so none of them can trigger the transport error that
+    # quotes the value back.
+    assert not is_valid_header_value("Bearer token\n")
+    assert not is_valid_header_value("Bearer token\r")
+    assert not is_valid_header_value("Bearer token\r\nX-Injected: 1")
+    assert not is_valid_header_value("Bearer\0token")
+    assert not is_valid_header_value("Bearer\x0btoken")
+    assert not is_valid_header_value("Bearer\x7ftoken")
