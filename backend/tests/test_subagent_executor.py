@@ -2110,6 +2110,65 @@ class TestCleanupBackgroundTask:
         leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "submit-failure-trace"]
         assert leftovers == []
 
+    def test_execute_async_registers_nothing_when_context_copy_fails(self, executor_module, classes, base_config):
+        """A context-copy failure must not leave a PENDING entry either.
+
+        ``_copy_isolated_subagent_context`` (callback-manager copy or
+        loop-bound handler filtering) can raise before the coroutine is ever
+        submitted. The registry entry must not exist at that point yet —
+        the caller gets no execution_id to poll, and
+        ``cleanup_background_task`` refuses non-terminal entries, so a
+        registration before the copy would strand the same permanent
+        PENDING entry the submit-failure path already guards against.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="context-copy-failure-trace",
+        )
+
+        def failing_context_copy():
+            raise RuntimeError("callback manager copy failed")
+
+        with patch.object(executor_module, "_copy_isolated_subagent_context", side_effect=failing_context_copy):
+            with pytest.raises(RuntimeError, match="callback manager copy"):
+                executor.execute_async("Task")
+
+        leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "context-copy-failure-trace"]
+        assert leftovers == []
+
+    def test_submit_helper_skips_coroutine_creation_when_loop_startup_fails(self, executor_module):
+        """Loop-startup failure must not strand an unscheduled coroutine.
+
+        Exercises the real ``_submit_to_isolated_loop_in_context`` (only the
+        loop getter is patched) rather than mocking the whole helper: the
+        loop must be resolved before the coroutine is created. If the
+        coroutine factory ran first, the created coroutine would be neither
+        scheduled nor closed — ``RuntimeWarning: coroutine ... was never
+        awaited`` — retaining its captures until collection.
+        """
+        factory_calls = []
+
+        def coro_factory():
+            factory_calls.append("created")
+
+            async def never_scheduled():  # pragma: no cover - must not run
+                return None
+
+            return never_scheduled()
+
+        def failing_loop():
+            raise RuntimeError("Timed out starting isolated subagent event loop")
+
+        with patch.object(executor_module, "_get_isolated_subagent_loop", side_effect=failing_loop):
+            with pytest.raises(RuntimeError, match="Timed out starting"):
+                executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
+
+        assert factory_calls == []
+
     def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
         """Test that cleanup removes a COMPLETED task."""
         SubagentResult = classes["SubagentResult"]

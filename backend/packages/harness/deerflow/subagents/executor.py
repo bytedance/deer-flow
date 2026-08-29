@@ -366,13 +366,21 @@ def _submit_to_isolated_loop_in_context(
     context: Context,
     coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
 ) -> Future[SubagentResult]:
-    """Submit a coroutine to the isolated loop while preserving ContextVar state."""
-    return context.run(
-        lambda: asyncio.run_coroutine_threadsafe(
-            coro_factory(),
-            _get_isolated_subagent_loop(),
-        )
-    )
+    """Submit a coroutine to the isolated loop while preserving ContextVar state.
+
+    The loop must be resolved before the coroutine is created: as direct
+    ``run_coroutine_threadsafe(coro_factory(), ...)`` arguments, Python
+    evaluates the coroutine first, so a loop-startup failure would strand a
+    created-but-never-scheduled coroutine (``RuntimeWarning: coroutine ...
+    was never awaited``) holding its captures until collection.
+    """
+
+    def _submit() -> Future[SubagentResult]:
+        loop = _get_isolated_subagent_loop()
+        coroutine = coro_factory()
+        return asyncio.run_coroutine_threadsafe(coroutine, loop)
+
+    return context.run(_submit)
 
 
 def _copy_isolated_subagent_context() -> Context:
@@ -1340,10 +1348,15 @@ class SubagentExecutor:
             self.config.timeout_seconds,
         )
 
+        # Copy the parent context before registering: context copying can
+        # itself fail (callback-manager copy or loop-bound handler filtering),
+        # and a failure after registration would strand a PENDING entry —
+        # the caller never receives an execution_id to poll, and
+        # cleanup_background_task() refuses non-terminal entries.
+        parent_context = _copy_isolated_subagent_context()
+
         with _background_tasks_lock:
             _background_tasks[execution_id] = result
-
-        parent_context = _copy_isolated_subagent_context()
 
         async def run_with_timeout() -> SubagentResult:
             try:
