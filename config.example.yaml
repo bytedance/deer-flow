@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 36
+config_version: 37
 
 # ============================================================================
 # Logging
@@ -2330,13 +2330,13 @@ run_ownership:
 #
 # stream_bridge:
 #   type: memory                 # single-process only
-#   queue_maxsize: 256           # data events retained per run. A reconnect
+#   queue_maxsize: 256           # data events retained per run (min: 1). A reconnect
 #                                # older than this window receives SSE `gap`.
 #
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
+#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN, min: 1).
 #                                # Older valid cursors receive SSE `gap`.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
