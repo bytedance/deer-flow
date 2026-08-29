@@ -23,7 +23,7 @@ from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -211,13 +211,11 @@ def require_cancel_permission_when_action(request: Request, action: str | None) 
     joins keep working with read-only credentials, but its ``action`` branch
     cancels the run — a separate permission. A read-only PAT (or any read-only
     credential) must not reach the cancel path, and decorators cannot express
-    query-parameter-conditional permissions, so the check lives here.
+    query-parameter-conditional permissions, so the check lives here. See
+    ``authz.require_cancel_permission_if`` — the shared primitive for every
+    request dimension that carries cancel capability.
     """
-    if action is None:
-        return
-    auth = getattr(request.state, "auth", None)
-    if auth is not None and not auth.has_permission("runs", "cancel"):
-        raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
+    require_cancel_permission_if(request, action is not None)
 
 
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:

@@ -118,6 +118,28 @@ def get_auth_context(request: Request) -> AuthContext | None:
     return getattr(request.state, "auth", None)
 
 
+def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
+    """Require ``runs:cancel`` when a request carries cancel capability.
+
+    Cancel capability reaches the run lifecycle through more than the dedicated
+    cancel route: ``?action=interrupt|rollback`` on the join-stream entry and
+    ``multitask_strategy=interrupt|rollback`` on run creation both terminate an
+    already-active run. A credential whose scopes omit ``runs:cancel`` (e.g. a
+    create- or read-only PAT) must not reach any of those paths, and
+    decorators cannot express query- or body-parameter-conditional
+    permissions, so callers apply this check where the capability is known.
+
+    ``request.state.auth`` may be absent in middleware-less compositions
+    (unit-test stubs, auth-disabled startup); the shipped Gateway always
+    stamps it via ``AuthMiddleware`` before handlers run.
+    """
+    if not can_cancel:
+        return
+    auth = getattr(request.state, "auth", None)
+    if auth is not None and not auth.has_permission("runs", "cancel"):
+        raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
+
+
 _ALL_PERMISSIONS: list[str] = [
     Permissions.THREADS_READ,
     Permissions.THREADS_WRITE,

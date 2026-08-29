@@ -20,8 +20,10 @@ from starlette.testclient import TestClient
 import deerflow.persistence.models  # noqa: F401  (register every table)
 from app.gateway.auth_disabled import AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
 from app.gateway.auth_middleware import AuthMiddleware
+from app.gateway.authz import require_cancel_permission_if
 from app.gateway.csrf_middleware import CSRFMiddleware
 from app.gateway.routers.auth import router as auth_router
+from app.gateway.run_models import RunCreateRequest
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.persistence.base import Base
 from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
@@ -111,6 +113,17 @@ def _make_pat_app(with_pat_repo: bool = True):
     @require_permission("runs", "read")
     async def cancel_then_stream(thread_id: str, run_id: str, request: Request, action: str | None = None):
         require_cancel_permission_when_action(request, action)
+        return {"ok": True}
+
+    # Mirrors the real run-creation entrypoints (thread_runs.py / runs.py):
+    # runs:create at the decorator, plus the cancel-capability gate that
+    # start_run applies to mutating multitask strategies. RunCreateRequest is
+    # imported at module level — FastAPI resolves body annotations against
+    # module globals under postponed annotation evaluation.
+    @app.post("/api/threads/{thread_id}/runs")
+    @require_permission("runs", "create")
+    async def create_run(thread_id: str, body: RunCreateRequest, request: Request):
+        require_cancel_permission_if(request, body.multitask_strategy != "reject")
         return {"ok": True}
 
     return app
@@ -526,6 +539,71 @@ def test_runs_read_only_pat_cannot_cancel_then_stream(client):
         headers={CSRF_HEADER_NAME: csrf},
     )
     assert session_allowed.status_code == 200
+
+
+def test_runs_create_only_pat_cannot_use_mutating_multitask_strategy(client):
+    """Review round 5, P1-a: interrupt/rollback multitask strategies terminate
+    an already-active run — runs:cancel capability, not runs:create — so a
+    create-only PAT must be denied; "reject" (the default) stays within
+    runs:create and must keep working."""
+    create_only = _create_pat(client, scopes=["runs:create"])
+    client.cookies.clear()
+
+    for strategy in ("interrupt", "rollback"):
+        denied = client.post(
+            "/api/threads/t1/runs",
+            headers={"Authorization": f"Bearer {create_only['token']}"},
+            json={"multitask_strategy": strategy},
+        )
+        assert denied.status_code == 403, denied.text
+        assert denied.json()["detail"] == "Permission denied: runs:cancel"
+
+    # "reject" — explicitly and as the omitted default — does not touch
+    # existing runs and stays available to a create-only credential.
+    for body in ({"multitask_strategy": "reject"}, {}):
+        allowed = client.post(
+            "/api/threads/t1/runs",
+            headers={"Authorization": f"Bearer {create_only['token']}"},
+            json=body,
+        )
+        assert allowed.status_code == 200
+
+    cancel_scope = _create_pat(client, scopes=["runs:create", "runs:cancel"])
+    client.cookies.clear()
+    privileged = client.post(
+        "/api/threads/t1/runs",
+        headers={"Authorization": f"Bearer {cancel_scope['token']}"},
+        json={"multitask_strategy": "interrupt"},
+    )
+    assert privileged.status_code == 200
+
+    # Session callers keep the full permission set (with the CSRF pair their
+    # cookie-authenticated POST requires).
+    from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, CSRF_HEADER_NAME, generate_csrf_token
+
+    _session_cookie(client)
+    csrf = generate_csrf_token()
+    client.cookies.set(CSRF_COOKIE_NAME, csrf)
+    session_allowed = client.post(
+        "/api/threads/t1/runs",
+        headers={CSRF_HEADER_NAME: csrf},
+        json={"multitask_strategy": "interrupt"},
+    )
+    assert session_allowed.status_code == 200
+
+
+def test_start_run_gates_mutating_strategies_at_the_choke_point():
+    """The strategy gate lives inside start_run itself — the single choke point
+    every run-creation path (all five HTTP entrypoints plus internal
+    launchers) flows through — so no entry point can bypass it. Mirrored
+    routes prove the middleware path; this anchor proves the choke point."""
+    import inspect
+
+    from app.gateway.services import start_run
+
+    source = inspect.getsource(start_run)
+    assert "require_cancel_permission_if" in source
+    assert "multitask_strategy" in source
 
 
 def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
