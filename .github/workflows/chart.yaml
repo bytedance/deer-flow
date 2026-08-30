@@ -50,9 +50,9 @@ jobs:
       - name: Validate sandbox Service-type gating
         run: bash scripts/check_chart_sandbox_service.sh
 
-      # ingress-nginx defaults to a 1 MiB request body. Keep the rendered
-      # Ingress large enough for the Gateway's 100 MiB .skill upload contract.
-      - name: Validate skill upload ingress size
+      # Keep the rendered Ingress aligned with the Gateway's .skill upload
+      # size, streaming, and long-running validation requirements.
+      - name: Validate skill upload ingress policy
         run: bash scripts/check_chart_skill_upload_size.sh
 
       # The chart's `config:` block embeds a config_version that must not fall

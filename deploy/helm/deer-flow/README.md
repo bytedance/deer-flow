@@ -119,10 +119,12 @@ secrets:
   # add channel tokens, search keys, etc. as needed
 ```
 
-The default ingress annotation permits a 100 MiB local `.skill` archive plus
-multipart framing. If you replace `ingress.annotations`, preserve an equivalent
-request-body limit for your ingress controller or local skill uploads may be
-rejected before they reach DeerFlow.
+The default ingress annotations permit a 100 MiB local `.skill` archive plus
+multipart framing, stream request bodies without ingress buffering, and allow
+up to 600 seconds for validation. If you replace `ingress.annotations`,
+preserve equivalent size, streaming, and response-timeout settings for your
+ingress controller or local skill uploads may fail before DeerFlow completes
+the installation.
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
 they resolve from the `secrets` map):

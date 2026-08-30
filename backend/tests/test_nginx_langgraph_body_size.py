@@ -132,12 +132,13 @@ def test_uploads_route_still_has_its_own_body_size_settings(path):
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
 def test_skills_upload_route_allows_archive_plus_multipart_framing(path):
-    """The 100 MiB file contract also needs room for multipart headers."""
+    """The upload route must stream archives and allow slow validation."""
     content = _read(path)
     block = _extract_location_block(content, "= /api/skills/install/upload")
 
     assert "client_max_body_size 101M;" in block
     assert "proxy_request_buffering off;" in block
+    assert "proxy_read_timeout 600s;" in block
 
 
 @pytest.mark.parametrize("path", NGINX_CONFIGS)
