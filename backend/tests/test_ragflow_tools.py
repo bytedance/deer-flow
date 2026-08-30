@@ -703,12 +703,15 @@ async def test_explicitly_empty_dataset_allowlist_fails_closed(monkeypatch: pyte
     assert fake.retrieve_calls == []
 
 
-def test_agent_exposes_only_query_on_single_search_tool() -> None:
-    assert not hasattr(ragflow_tools, "list_knowledge_bases_tool")
-    assert not hasattr(ragflow_tools, "list_knowledge_bases")
+def test_agent_exposes_search_and_name_listing_tools() -> None:
+    assert hasattr(ragflow_tools, "list_knowledge_bases_tool")
+    assert hasattr(ragflow_tools, "list_knowledge_bases")
     assert ragflow_tools.knowledge_search_tool.name == "knowledge_search"
     assert ragflow_tools.knowledge_search_tool.coroutine is not None
     assert set(ragflow_tools.knowledge_search_tool.tool_call_schema.model_fields) == {"query"}
+    assert ragflow_tools.list_knowledge_bases_tool.name == "list_knowledge_bases"
+    assert ragflow_tools.list_knowledge_bases_tool.coroutine is not None
+    assert not ragflow_tools.list_knowledge_bases_tool.tool_call_schema.model_fields
 
 
 def test_tool_assembly_hides_bound_dataset_ids_without_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
