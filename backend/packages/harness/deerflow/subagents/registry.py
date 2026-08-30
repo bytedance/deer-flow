@@ -124,13 +124,22 @@ def _build_agent_store_subagent_config(
         return None
     agent, soul = record
     system_prompt = (soul.strip() or None) if isinstance(soul, str) else None
+    # P2 fix: non-interactive tools are not safe in the subagent chain because
+    # SubagentExecutor lacks ClarificationMiddleware; ask_clarification would
+    # return a placeholder instead of reaching the user, and present_files is
+    # a lead-only tool. Deny these unconditionally for store-backed subagents.
+    _non_interactive_tool_denylist = ["task", "ask_clarification", "present_files"]
+
     return SubagentConfig(
         name=name,
         description=agent.description or "",
         system_prompt=system_prompt,
         tools=_expand_tool_groups(agent.tool_groups, app_config=app_config),
+        disallowed_tools=_non_interactive_tool_denylist,
         skills=agent.skills,
         model=agent.model or "inherit",
+        thinking_enabled=agent.thinking_enabled,
+        reasoning_effort=agent.reasoning_effort,
     )
 
 

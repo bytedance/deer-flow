@@ -583,6 +583,26 @@ class SubagentExecutor:
         app_config = self.app_config or get_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
+
+        # Enforce model authorization — prevents a user from bypassing model:use
+        # restrictions by naming a restricted model on a custom agent and dispatching
+        # it as a subagent. (P1 fix: bridges lead-agent auth check into subagent path)
+        if getattr(app_config, "authorization", None) is not None and app_config.authorization.enabled is True:
+            from deerflow.agents.lead_agent.agent import _authorize_model_name
+
+            _authz_context: dict[str, Any] = {
+                "user_role": self.user_role,
+                "oauth_provider": self.oauth_provider,
+                "oauth_id": self.oauth_id,
+                "is_internal": self.is_internal,
+                "authz_attributes": dict(self.authz_attributes),
+            }
+            self.model_name = _authorize_model_name(
+                self.model_name,
+                context=_authz_context,
+                app_config=app_config,
+            )
+
         model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
