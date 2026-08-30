@@ -165,14 +165,19 @@ export function MessageListItem({
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
-  const editableText = useMemo(
-    () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
-    [isHuman, message],
+  // One derivation serves both editing and the toolbar, and only runs when
+  // either consumer can use it: assistant rows never render this toolbar
+  // (the sole call site passes showCopyButton only for non-assistant rows)
+  // and the toolbar stays unrendered while loading — matching the guard the
+  // pre-memo call sat behind instead of deriving for every settled row.
+  const copyData = useMemo(
+    () =>
+      isHuman || (!isLoading && showCopyButton)
+        ? (getMessageCopyData(message) ?? "")
+        : "",
+    [isHuman, isLoading, showCopyButton, message],
   );
-  // `message` keeps its reference across streaming chunks for settled rows
-  // (stable group arrays), so the toolbar copy text is derived once per row
-  // instead of on every chunk (#5094).
-  const toolbarCopyData = useMemo(() => getMessageCopyData(message), [message]);
+  const editableText = isHuman ? copyData : "";
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
@@ -243,7 +248,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton clipboardData={toolbarCopyData} />
+            <CopyButton clipboardData={copyData} />
             {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
               <Tooltip content={t.common.editAndRerun}>
                 <Button
