@@ -164,15 +164,43 @@ def _set_session_cookie(response: Response, token: str, request: Request, *, rem
 #
 # **Limitation**: with multi-worker deployments (e.g., gunicorn -w N), each
 # worker maintains its own lockout table, so an attacker effectively gets
-# N × _MAX_LOGIN_ATTEMPTS guesses before being locked out everywhere. For
+# N × max_login_attempts guesses before being locked out everywhere. For
 # production multi-worker setups, replace this with a shared store (Redis,
 # database-backed counter) to enforce a true per-IP limit.
+#
+# The policy values are operator-configurable via auth.local.max_login_attempts /
+# auth.local.lockout_seconds (read live per call, matching _local_registration_enabled,
+# so a config reload applies to the next login without a Gateway restart).
+# These constants are only the fallback when no config.yaml exists at all.
 
-_MAX_LOGIN_ATTEMPTS = 5
-_LOCKOUT_SECONDS = 300  # 5 minutes
+_DEFAULT_MAX_LOGIN_ATTEMPTS = 5
+_DEFAULT_LOCKOUT_SECONDS = 300  # 5 minutes
 
 # ip → (fail_count, lock_until_timestamp)
 _login_attempts: dict[str, tuple[int, float]] = {}
+
+
+def _login_throttle_policy() -> tuple[int, float]:
+    """(max_login_attempts, lockout_seconds) from auth.local config, read live.
+
+    Only ``FileNotFoundError`` falls back to the built-in defaults, matching
+    ``_local_registration_enabled``: ``config.yaml`` is absent in bare-app
+    contexts that never load it (tests build the gateway without one), and the
+    throttle must keep its pre-config-era behavior there. A malformed config
+    propagates instead — like every other config consumer, and so an operator
+    who tightened the policy never silently gets the more permissive defaults.
+
+    Callers on request paths resolve this at most once per helper invocation;
+    ``get_app_config`` re-hashes the config file on every call, and the login
+    endpoint is unauthenticated.
+    """
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        local = get_app_config().auth.local
+        return local.max_login_attempts, local.lockout_seconds
+    except FileNotFoundError:
+        return _DEFAULT_MAX_LOGIN_ATTEMPTS, _DEFAULT_LOCKOUT_SECONDS
 
 
 def _trusted_proxies() -> list:
@@ -237,12 +265,19 @@ def _get_client_ip(request: Request) -> str:
 
 
 def _check_rate_limit(ip: str) -> None:
-    """Raise 429 if the IP is currently locked out."""
+    """Raise 429 if the IP is currently locked out.
+
+    The record lookup comes before policy resolution on purpose: a clean IP
+    (no failed attempts recorded — the overwhelming majority of logins) must
+    not pay a config read, and ``get_app_config`` re-hashes config.yaml on
+    every call while this endpoint is unauthenticated.
+    """
     record = _login_attempts.get(ip)
     if record is None:
         return
+    max_attempts, _ = _login_throttle_policy()
     fail_count, lock_until = record
-    if fail_count >= _MAX_LOGIN_ATTEMPTS:
+    if fail_count >= max_attempts:
         if time.time() < lock_until:
             raise HTTPException(
                 status_code=429,
@@ -256,10 +291,11 @@ _MAX_TRACKED_IPS = 10000
 
 def _record_login_failure(ip: str) -> None:
     """Record a failed login attempt for the given IP."""
+    max_attempts, lockout_seconds = _login_throttle_policy()
     # Evict expired lockouts when dict grows too large
     if len(_login_attempts) >= _MAX_TRACKED_IPS:
         now = time.time()
-        expired = [k for k, (c, t) in _login_attempts.items() if c >= _MAX_LOGIN_ATTEMPTS and now >= t]
+        expired = [k for k, (c, t) in _login_attempts.items() if c >= max_attempts and now >= t]
         for k in expired:
             del _login_attempts[k]
         # If still too large, evict cheapest-to-lose half: below-threshold
@@ -274,7 +310,7 @@ def _record_login_failure(ip: str) -> None:
         _login_attempts[ip] = (1, 0.0)
     else:
         new_count = record[0] + 1
-        lock_until = time.time() + _LOCKOUT_SECONDS if new_count >= _MAX_LOGIN_ATTEMPTS else 0.0
+        lock_until = time.time() + lockout_seconds if new_count >= max_attempts else 0.0
         _login_attempts[ip] = (new_count, lock_until)
 
 

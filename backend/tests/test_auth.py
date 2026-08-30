@@ -1,5 +1,6 @@
 """Tests for authentication module: JWT, password hashing, AuthContext, and authz decorators."""
 
+import time
 from datetime import timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -913,6 +914,145 @@ def test_rate_limiter_resets_on_success():
         _record_login_failure(ip)
     _record_login_success(ip)
     _check_rate_limit(ip)  # Should not raise
+
+
+def test_rate_limiter_honors_configured_attempts_and_lockout():
+    """auth.local.max_login_attempts / lockout_seconds drive the throttle policy."""
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    _login_attempts.clear()
+    set_app_config(
+        AppConfig(
+            sandbox=SandboxConfig(use="test"),
+            auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=2, lockout_seconds=60.0)),
+        )
+    )
+    try:
+        ip = "10.0.0.3"
+        _record_login_failure(ip)
+        _check_rate_limit(ip)  # 1 failure < 2: allowed
+        _record_login_failure(ip)
+        with pytest.raises(HTTPException) as exc_info:
+            _check_rate_limit(ip)
+        assert exc_info.value.status_code == 429
+        # The lockout window comes from lockout_seconds, not the 300s default.
+        _, lock_until = _login_attempts[ip]
+        assert 30.0 < lock_until - time.time() <= 60.0
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+def test_rate_limiter_uses_defaults_when_config_unavailable(monkeypatch):
+    """An absent config.yaml falls back to the built-in (5 attempts / 300s) policy.
+
+    Mirrors ``_local_registration_enabled``: only FileNotFoundError is caught.
+    A malformed config must NOT silently change the throttle policy — pinned
+    to propagate by the test below.
+    """
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _missing():
+        raise FileNotFoundError("no config.yaml")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _missing)
+    assert auth_router._login_throttle_policy() == (5, 300)
+
+
+def test_rate_limiter_malformed_config_propagates(monkeypatch):
+    """A malformed config.yaml fails loudly instead of fail-opening the throttle.
+
+    Every other config consumer 500s on a validation failure; silently
+    substituting the (possibly more permissive) defaults here would diverge —
+    an operator who set max_login_attempts=2 must never silently get 5.
+    """
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _malformed():
+        raise ValueError("config validation error")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _malformed)
+    with pytest.raises(ValueError, match="config validation error"):
+        auth_router._login_throttle_policy()
+
+
+def test_rate_limiter_clean_ip_skips_config_read(monkeypatch):
+    """A clean IP pays zero config reads: the record-None early return must
+    come before policy resolution (get_app_config re-hashes config.yaml on
+    every call, and login_local is an unauthenticated async endpoint)."""
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _must_not_load():
+        raise AssertionError("config must not be read for a clean IP")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _must_not_load)
+    auth_router._login_attempts.clear()
+    auth_router._check_rate_limit("192.0.2.7")  # returns quietly → no config read
+
+
+def test_rate_limiter_policy_change_semantics():
+    """Pin the emergent semantics of a live-read policy under config reload.
+
+    Raising max_login_attempts mid-lockout immediately unblocks IPs whose
+    fail_count falls below the new threshold — that is the issue #5108 use
+    case (shared-egress-IP office unblocked by raising the limit, no restart).
+    Lowering the threshold clears in-flight below-threshold counters once
+    (fail_count >= new max but lock_until == 0.0 hits the expired branch);
+    subsequent failures accumulate under the new, stricter policy.
+    """
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(max_attempts: int) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=max_attempts, lockout_seconds=60.0)),
+            )
+        )
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.4"
+        _set_policy(2)
+        for _ in range(2):
+            _record_login_failure(ip)
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)  # locked under the old policy
+
+        _set_policy(5)  # operator raises the ceiling mid-lockout
+        _check_rate_limit(ip)  # immediately allowed: 2 < 5, no restart needed
+
+        _set_policy(1)
+        for _ in range(2):
+            _record_login_failure(ip)
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)  # strict policy locks at the very next failure
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+def test_local_auth_throttle_config_validation():
+    """Throttle knobs reject degenerate operator values at config load."""
+    import pydantic
+
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    with pytest.raises(pydantic.ValidationError):
+        LocalAuthConfig(max_login_attempts=0)
+    with pytest.raises(pydantic.ValidationError):
+        LocalAuthConfig(lockout_seconds=0)
+    with pytest.raises(pydantic.ValidationError):
+        LocalAuthConfig(lockout_seconds=float("inf"))
 
 
 # ── Client IP extraction ─────────────────────────────────────────────────

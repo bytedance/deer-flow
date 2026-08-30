@@ -79,6 +79,23 @@ class LocalAuthConfig(BaseModel):
             "does not apply to local registration."
         ),
     )
+    max_login_attempts: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "Failed login attempts allowed from one client IP before it is locked out of "
+            "POST /api/v1/auth/login/local. Defaults preserve the historical hardcoded policy. "
+            "Raise it when many users share an egress IP (corporate proxy / NAT); lower it for "
+            "stricter posture. The counter is per-Gateway-worker (in-process), so effective "
+            "attempts in multi-worker deployments scale with worker count."
+        ),
+    )
+    lockout_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        allow_inf_nan=False,
+        description=("Seconds an IP stays locked out after reaching auth.local.max_login_attempts. Defaults preserve the historical hardcoded policy (5 minutes)."),
+    )
 
 
 class AuthAppConfig(BaseModel):
