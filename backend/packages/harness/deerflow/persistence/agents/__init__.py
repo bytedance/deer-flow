@@ -61,10 +61,13 @@ def make_agent_store(config: AppConfig) -> AgentStore:
 def get_agent_store() -> AgentStore:
     """Return the store for the current process's configuration.
 
-    Defaults to the file backend when no app config can be resolved — the free
-    functions in ``agents_config`` must keep working in lightweight contexts
-    (CLI, tests, tools) that never load a full ``config.yaml``. Only an
-    explicit ``agent_storage.backend: db`` diverges from the file default.
+    Defaults to the file backend only when search mode cannot find the main app
+    config — the free functions in ``agents_config`` must keep working in
+    lightweight contexts (CLI, tests, tools) that never load a full
+    ``config.yaml``. A missing explicit ``DEER_FLOW_CONFIG_PATH`` or a missing
+    nested config is an operator error and propagates instead of falling back.
+    Only an explicit ``agent_storage.backend: db`` diverges from the file
+    default once configuration resolves successfully.
 
     Cross-process invariant (the ``db`` backend's whole point): the per-run
     agent build runs in the **graph subprocess**, a different process from the

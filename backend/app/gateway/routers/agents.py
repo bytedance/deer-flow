@@ -19,7 +19,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentExistsError, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -568,7 +568,7 @@ async def delete_agent(name: str) -> None:
     user_id = get_effective_user_id()
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        def _delete_agent():
+        def _delete_agent() -> AgentDeleteOutcome:
             return get_agent_store().delete(name, user_id=user_id)
 
         outcome = await asyncio.to_thread(_delete_agent)
