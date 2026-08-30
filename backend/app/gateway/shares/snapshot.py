@@ -33,7 +33,10 @@ _FENCED_CODE_RE = re.compile(
 )
 _INLINE_CODE_RE = re.compile(r"(?P<ticks>`+).*?(?P=ticks)", re.DOTALL)
 _MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
-_REFERENCE_RE = re.compile(r"(?:https?://|/|%[0-9A-Fa-f]{2}|mnt/user-data)[^\s<>\"]+", re.IGNORECASE)
+_REFERENCE_RE = re.compile(
+    r"(?:https?://|/|%[0-9A-Fa-f]{2}|mnt(?=[\\/]|%[0-9A-Fa-f]{2}))[^\s<>\"]+",
+    re.IGNORECASE,
+)
 _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
 
 
@@ -199,6 +202,42 @@ def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     return stripped
 
 
+def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize escape and backslash separators for classification.
+
+    Returns the normalized text plus, for every normalized character, the
+    ``(first, last)`` original index it was produced from, so a match found in
+    the normalized text can be cut out of the original — escaped bytes must
+    never survive into the public output. A run of backslashes before a ``/``
+    collapses into that single ``/`` (JSON ``\\/`` escapes at any depth);
+    remaining backslashes are treated as Windows-style separators.
+    """
+    normalized: list[str] = []
+    spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if char == "\\":
+            run_end = i
+            while run_end < n and text[run_end] == "\\":
+                run_end += 1
+            if run_end < n and text[run_end] == "/":
+                normalized.append("/")
+                spans.append((i, run_end))
+                i = run_end + 1
+                continue
+            for backslash in range(i, run_end):
+                normalized.append("/")
+                spans.append((backslash, backslash))
+            i = run_end
+            continue
+        normalized.append(char)
+        spans.append((i, i))
+        i += 1
+    return "".join(normalized), spans
+
+
 def _decoded_reference(value: str) -> str:
     """Decode a bounded number of URL-encoding layers for classification."""
     decoded = value
@@ -207,7 +246,8 @@ def _decoded_reference(value: str) -> str:
         if candidate == decoded:
             break
         decoded = candidate
-    return decoded.replace("\\", "/")
+    normalized, _ = _collapse_separators_with_offsets(decoded)
+    return normalized
 
 
 def _is_private_reference(value: str) -> bool:
@@ -216,24 +256,55 @@ def _is_private_reference(value: str) -> bool:
 
 
 def _neutralize_private_references(text: str) -> str:
-    """Remove owner-only artifact paths from an otherwise public transcript."""
+    """Remove owner-only artifact paths from an otherwise public transcript.
 
-    def replace_markdown(match: re.Match[str]) -> str:
+    Classification runs on the separator-normalized shadow of the text (JSON
+    ``\\/`` escapes, encoded or raw), while replacements are applied to the
+    original text: normalized matching is what catches escaped private
+    references, but public content must keep its exact original bytes.
+    """
+    normalized, spans = _collapse_separators_with_offsets(text)
+
+    def original_span(start: int, end: int) -> tuple[int, int]:
+        return spans[start][0], spans[end - 1][1] + 1
+
+    edits: list[tuple[int, int, str]] = []
+
+    def replace_markdown(match: re.Match[str]) -> None:
         target = match.group("target").strip()
         # A Markdown destination may carry an optional quoted title. The path
         # is always the first whitespace-delimited token.
-        destination = target.split(maxsplit=1)[0]
+        destination = target.split(maxsplit=1)[0] if target else ""
         if not _is_private_reference(destination):
-            return match.group(0)
+            return
         label = match.group("label").strip()
-        return f"{label} {_PRIVATE_REFERENCE_MARKER}".strip()
+        begin, stop = original_span(match.start(), match.end())
+        edits.append((begin, stop, f"{label} {_PRIVATE_REFERENCE_MARKER}".strip()))
 
-    def replace_raw(match: re.Match[str]) -> str:
-        reference = match.group(0)
-        return _PRIVATE_REFERENCE_MARKER if _is_private_reference(reference) else reference
+    def replace_raw(match: re.Match[str]) -> None:
+        if not _is_private_reference(match.group(0)):
+            return
+        begin, stop = original_span(match.start(), match.end())
+        edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
 
-    without_private_links = _MARKDOWN_LINK_RE.sub(replace_markdown, text)
-    return _REFERENCE_RE.sub(replace_raw, without_private_links)
+    for match in _MARKDOWN_LINK_RE.finditer(normalized):
+        replace_markdown(match)
+    for match in _REFERENCE_RE.finditer(normalized):
+        replace_raw(match)
+
+    # Markdown links take precedence over raw references overlapping them,
+    # matching the sequential regex passes this replaced.
+    edits.sort(key=lambda edit: edit[0])
+    parts: list[str] = []
+    cursor = 0
+    for begin, stop, replacement in edits:
+        if begin < cursor:
+            continue
+        parts.append(text[cursor:begin])
+        parts.append(replacement)
+        cursor = stop
+    parts.append(text[cursor:])
+    return "".join(parts)
 
 
 def sanitize_share_title(

@@ -23,8 +23,11 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   only bare strings and explicit `text` / `output_text` blocks; reasoning,
   thinking, and tool-call blocks are ignored, and inline assistant `<think>`
   sections are stripped outside Markdown code examples. Owner-only
-  `/mnt/user-data` and thread artifact/upload references (including encoded
-  forms) are replaced with a public omission marker in both messages and
+  `/mnt/user-data` and thread artifact/upload references (including
+  percent-encoded and JSON-escaped separator forms — classification runs on a
+  separator-normalized shadow of the text, while the original bytes are what
+  get replaced, so public content is emitted unchanged) are replaced with a
+  public omission marker in both messages and
   titles (at create time and again on public read) — no run/thread/user
   identifiers, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the

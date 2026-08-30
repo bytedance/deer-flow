@@ -21,8 +21,10 @@ import pytest
 
 from app.gateway.shares.snapshot import (
     ShareSnapshotTooLarge,
+    _neutralize_private_references,
     build_share_snapshot,
     resolve_share_title,
+    sanitize_share_title,
 )
 
 pytestmark = pytest.mark.anyio
@@ -172,6 +174,83 @@ async def test_snapshot_neutralizes_private_artifact_paths_and_urls():
     assert "%2Fapi%2Fthreads" not in content
     assert "[private artifact omitted]" in content
     assert "[public source](https://example.com/report)" in content
+
+
+async def test_snapshot_neutralizes_json_escaped_private_references():
+    """JSON-escaped separators (``\\/``) must normalize before classification.
+
+    P1 review finding: classification saw doubled separators (``/api//threads//``)
+    after the backslash-to-slash swap and matched no private pattern, exposing
+    the thread id and the owner-only artifact path.
+    """
+    private_text = "artifact: \\/api\\/threads\\/thread-secret\\/artifacts\\/mnt\\/user-data\\/report.pdf [encoded](%5C%2Fapi%5C%2Fthreads%5C%2Fthread-secret%5C%2Fartifacts%5C%2Freport.pdf) public stays verbatim: \\/api\\/v1\\/status"
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": private_text})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    content = snapshot["messages"][0]["content"]
+    assert "thread-secret" not in content
+    assert "/mnt/user-data" not in content
+    assert "%5C%2Fapi" not in content
+    assert "[private artifact omitted]" in content
+    # otherwise-public escaped content keeps its exact form
+    assert "\\/api\\/v1\\/status" in content
+
+
+async def test_neutralize_json_escaped_references():
+    neutralize = _neutralize_private_references
+    # raw JSON-escaped absolute references (reviewer's example) and the
+    # relative form with no leading separator
+    assert neutralize("\\/api\\/threads\\/thread-secret\\/artifacts\\/mnt\\/user-data\\/report.pdf") == "[private artifact omitted]"
+    assert neutralize("\\/mnt\\/user-data\\/report.pdf") == "[private artifact omitted]"
+    assert neutralize("mnt\\/user-data\\/report.pdf") == "[private artifact omitted]"
+
+
+async def test_neutralize_multiply_encoded_json_escapes():
+    neutralize = _neutralize_private_references
+    # percent-encoded escape sequences (one and two layers)
+    assert neutralize("%5C%2Fapi%5C%2Fthreads%5C%2Fthread-secret%5C%2Fartifacts%5C%2Freport.pdf") == "[private artifact omitted]"
+    assert neutralize("%255C%252Fapi%255C%252Fthreads%255C%252Fthread-secret%255C%252Fartifacts%255C%252Freport.pdf") == "[private artifact omitted]"
+    # double JSON-escaping: the slash escape's backslash is itself escaped
+    assert neutralize("\\\\/api\\\\/threads\\\\/thread-secret\\\\/artifacts\\\\/report.pdf") == "[private artifact omitted]"
+    # relative forms with encoded separators must classify from the "mnt"
+    # prefix, not from the first percent unit
+    assert neutralize("mnt%5C%2Fuser-data%2Freport.pdf") == "[private artifact omitted]"
+    assert neutralize("mnt%255C%252Fuser-data%252Freport.pdf") == "[private artifact omitted]"
+
+
+async def test_neutralize_backslash_separators():
+    neutralize = _neutralize_private_references
+    assert neutralize("\\api\\threads\\thread-secret\\artifacts\\report.pdf") == "[private artifact omitted]"
+    assert neutralize("mnt\\user-data\\report.pdf") == "[private artifact omitted]"
+
+
+async def test_neutralize_preserves_public_content_with_separators():
+    neutralize = _neutralize_private_references
+    # normalization exists only for classification; public text is emitted
+    # byte-for-byte, including escapes and backslashes
+    assert neutralize("\\/api\\/v1\\/status") == "\\/api\\/v1\\/status"
+    assert neutralize("regex \\s+ and latex \\section stay") == "regex \\s+ and latex \\section stay"
+    assert neutralize("C:\\Users\\name\\file.txt") == "C:\\Users\\name\\file.txt"
+    assert neutralize("docs at https://example.com/threads-guide/metadata") == ("docs at https://example.com/threads-guide/metadata")
+
+
+async def test_neutralize_markdown_link_with_json_escaped_target():
+    neutralize = _neutralize_private_references
+    assert neutralize("[report](\\/api\\/threads\\/thread-secret\\/artifacts\\/f.pdf)") == "report [private artifact omitted]"
+    assert neutralize("![img](\\/mnt\\/user-data\\\\/secret.svg)") == "img [private artifact omitted]"
+    # a match ending on a collapsed separator must not leave stray bytes
+    assert neutralize("see \\/mnt\\/user-data\\/ next") == "see [private artifact omitted] next"
+
+
+async def test_sanitize_share_title_neutralizes_json_escaped_reference():
+    title = sanitize_share_title("Report: \\/mnt\\/user-data\\/secret.csv")
+    assert "user-data" not in title
+    assert "secret.csv" not in title
 
 
 async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
