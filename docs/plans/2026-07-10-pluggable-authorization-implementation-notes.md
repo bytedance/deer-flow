@@ -403,6 +403,41 @@ Phase 1 最低验证要求：
   effective-permissions 展示；management route 的 provider 迁移；
   feishu/dingtalk 文件同步路径的 sandbox gate（身份传递机制待定）。
 
+### 2026-08-27 — Phase 3 / PR #5006 组合调用单次决策与异步阻塞收口
+
+- **背景：** review 在默认启用的 `ReadBeforeWriteMiddleware` 组合路径复现了一次工具
+  调用产生两次 provider 决策：读工具在 tool body 后重新读取以写 mark，写工具在
+  tool body 前读取以检查 gate。异步路径还在 event loop 上同步加载配置并解析 provider。
+- **决策（调用作用域）：** `sandbox_authorization_scope` / async counterpart 用 task-local
+  `ContextVar` 覆盖完整的组合工具调用，而不只覆盖 offload 的同步 tool body。读写 gate、
+  tool body 和 mark stamping 共用一次实时授权决策；下一个独立工具调用仍重新授权。
+- **决策（deny 语义）：** `ReadBeforeWriteMiddleware` 在作用域入口把
+  `SandboxAuthorizationError` 转成标准 error `ToolMessage`，并在 `_check_write_gate` 与
+  `_attach_read_mark` 中显式重新抛出该异常，禁止通用 fail-open 分支吞掉授权拒绝。
+- **决策（event-loop 边界）：** async config 加载通过 `safe_app_config_async()` offload；
+  `_resolve_authorization_inputs()` 也在线程中执行，避免每次复用 sandbox 时在 event loop
+  上 stat/hash 配置文件或 import/构造自定义 provider。只有 provider 的 `aauthorize()`
+  在异步调用路径上直接 await。
+- **证据：** `tests/test_sandbox_authorization.py` 新增 sync/async `read_file` 与
+  `write_file` 组合覆盖，断言每次调用恰好一个 provider 决策并验证 deny 不被 fail-open；
+  `tests/blocking_io/test_sandbox_authorization.py` 用真实阻塞文件探针固定配置与 provider
+  解析均不在 event loop 上执行。
+- **兼容性：** `authorization.enabled: false` 仍为 no-op；未启用
+  `ReadBeforeWriteMiddleware` 的普通 sandbox 工具继续在各自调用入口重新授权；同步与异步
+  deny 均保持工具级错误而非 run 级异常。
+
+#### PR #5006 review 补充：异步 provider 的构造线程
+
+- 自定义 provider 的模块发现可能触发阻塞 import，但 provider 构造函数也可能创建
+  asyncio loop-affine 客户端。`runtime.py` 因此把解析拆成两阶段：
+  `resolve_authorization_provider_spec()` 在线程池完成 class-path 发现，
+  `construct_authorization_provider()` 在调用方事件循环构造并校验实例。
+- 同步 `resolve_authorization_provider()` 继续组合这两个阶段，保持原有调用契约与错误语义。
+  async sandbox gate 的发现和构造任一失败仍统一遵循 `fail_closed` / `fail_open`。
+- 回归覆盖同时固定两个边界：阻塞文件探针证明 config hash 与 class discovery 不占用
+  event loop；loop-affine provider 在 `__init__` 调用 `asyncio.get_running_loop()` 并在
+  `aauthorize()` 验证仍是同一个 loop。
+
 ### 新记录模板
 
 ```markdown
