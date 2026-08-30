@@ -214,10 +214,10 @@ repaired, and the server is also absent from Settings > Tools.
 `PUT /api/mcp/config` is a full replacement. If a client sends the result of
 GET back through PUT, the omitted invalid server is removed from
 `extensions_config.json`, including its stored `env`, `headers`, OAuth client
-secret, and OAuth refresh token. The visible-server switches in Settings >
-Tools use PATCH and do not perform that replacement, but any settings or API
-flow that submits a GET-derived full replacement has the same removal
-behavior.
+secret, OAuth refresh token, and per-user credential values in
+`user_auth.users`. The visible-server switches in Settings > Tools use PATCH
+and do not perform that replacement, but any settings or API flow that submits
+a GET-derived full replacement has the same removal behavior.
 
 Before repair, preserve a backup of `extensions_config.json` that still
 contains the server's secret fields. To repair through PUT, re-supply the

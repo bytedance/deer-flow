@@ -560,6 +560,9 @@ async def test_get_put_round_trip_removes_omitted_invalid_legacy_server(tmp_path
                             "client_secret": "legacy-client-secret",
                             "refresh_token": "legacy-refresh-token",
                         },
+                        "user_auth": {
+                            "users": {"user-1": "Bearer legacy-user-secret"},
+                        },
                         "session_init_timeout": 0,
                     },
                     "healthy": {
@@ -572,6 +575,9 @@ async def test_get_put_round_trip_removes_omitted_invalid_legacy_server(tmp_path
                             "client_id": "healthy-client",
                             "client_secret": "healthy-client-secret",
                             "refresh_token": "healthy-refresh-token",
+                        },
+                        "user_auth": {
+                            "users": {"user-1": "Bearer healthy-user-secret"},
                         },
                     },
                 },
@@ -602,6 +608,7 @@ async def test_get_put_round_trip_removes_omitted_invalid_legacy_server(tmp_path
     assert get_response.json()["mcp_servers"]["healthy"]["headers"] == {"Authorization": "***"}
     assert get_response.json()["mcp_servers"]["healthy"]["oauth"]["client_secret"] is None
     assert get_response.json()["mcp_servers"]["healthy"]["oauth"]["refresh_token"] is None
+    assert get_response.json()["mcp_servers"]["healthy"]["user_auth"]["users"] == {"user-1": "***"}
 
     assert put_response.status_code == 200
     assert set(put_response.json()["mcp_servers"]) == {"healthy"}
@@ -614,6 +621,7 @@ async def test_get_put_round_trip_removes_omitted_invalid_legacy_server(tmp_path
     assert persisted["mcpServers"]["healthy"]["headers"] == {"Authorization": "Bearer healthy-header-secret"}
     assert persisted["mcpServers"]["healthy"]["oauth"]["client_secret"] == "healthy-client-secret"
     assert persisted["mcpServers"]["healthy"]["oauth"]["refresh_token"] == "healthy-refresh-token"
+    assert persisted["mcpServers"]["healthy"]["user_auth"]["users"] == {"user-1": "Bearer healthy-user-secret"}
     assert persisted["skills"] == {"research": {"enabled": False}}
     assert persisted["mcpInterceptors"] == ["example.interceptor:Interceptor"]
 
