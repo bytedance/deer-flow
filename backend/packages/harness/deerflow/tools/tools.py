@@ -109,12 +109,7 @@ def get_available_tools(
         # configuration: an explicit RAGFlow entry carrying its own endpoint
         # and credentials remains opt-in even when the newer global switch is
         # absent/false. Bare example entries remain hidden until enabled.
-        tool_configs = [
-            tool
-            for tool in tool_configs
-            if tool.group != "knowledge"
-            or bool(set(getattr(tool, "model_extra", {}) or {}) & {"base_url", "api_key", "datasets"})
-        ]
+        tool_configs = [tool for tool in tool_configs if tool.group != "knowledge" or bool(set(getattr(tool, "model_extra", {}) or {}) & {"base_url", "api_key", "datasets"})]
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_allowed(config):
