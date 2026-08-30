@@ -234,6 +234,30 @@ def test_mask_local_paths_compiled_patterns_are_cached() -> None:
     assert first is second  # cache hit -> identical object, not rebuilt
 
 
+def test_mask_local_paths_cache_does_not_retain_per_thread_sources() -> None:
+    """Unique thread paths must not become process-lifetime regex-cache keys."""
+    _compiled_mask_patterns.cache_clear()
+
+    with (
+        patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+        patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/srv/deer-flow/skills"),
+        patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=None),
+    ):
+        for index in range(32):
+            root = f"/tmp/deer-flow/threads/thread-{index}/user-data"
+            thread_data = {
+                "workspace_path": f"{root}/workspace",
+                "uploads_path": f"{root}/uploads",
+                "outputs_path": f"{root}/outputs",
+            }
+            masked = mask_local_paths_in_output(f"created {root}/workspace/result.txt", thread_data)
+            assert masked == "created /mnt/user-data/workspace/result.txt"
+
+    cache_info = _compiled_mask_patterns.cache_info()
+    assert cache_info.currsize == 1
+    assert cache_info.misses == 1
+
+
 def test_mask_local_paths_stable_across_repeated_and_batched_calls() -> None:
     """Masking is identical whether applied once or repeatedly (per-match path)."""
     output = "a /tmp/deer-flow/threads/t1/user-data/workspace/x.txt and /tmp/deer-flow/threads/t1/user-data/outputs/y.log"
