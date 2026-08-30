@@ -9,7 +9,9 @@ import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
+import { BrowserTrigger } from "@/components/workspace/browser-view";
 import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
 import {
@@ -25,12 +27,15 @@ import {
   SidecarProvider,
   SidecarTrigger,
 } from "@/components/workspace/sidecar";
+import { ThreadBackgroundTasks } from "@/components/workspace/thread-background-tasks";
+import { ThreadSubagentBatches } from "@/components/workspace/thread-subagent-batches";
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { Tooltip } from "@/components/workspace/tooltip";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { useAgent } from "@/core/agents";
+import { useBrowserControlEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -47,7 +52,10 @@ import {
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
-import { threadTokenUsageToTokenUsage } from "@/core/threads/token-usage";
+import {
+  selectContextUsage,
+  threadTokenUsageToTokenUsage,
+} from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
@@ -70,16 +78,18 @@ export default function AgentChatPage() {
   const [isWelcomeMode, setIsWelcomeMode] = useState(isNewThread);
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
+  const { enabled: browserControlEnabled } = useBrowserControlEnabled();
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
     isNewThread || isMock ? undefined : threadId,
-    { enabled: tokenUsageEnabled && !isMock },
+    { enabled: !isMock },
   );
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isNewThread && !isMock,
     isMock,
   });
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
+  const contextUsage = selectContextUsage(threadTokenUsage.data);
 
   const { showNotification } = useNotification();
 
@@ -92,6 +102,7 @@ export default function AgentChatPage() {
     pendingUsageMessages,
     sendMessage,
     regenerateMessage,
+    editAndRegenerateMessage,
     isUploading,
     isHistoryLoading,
     hasMoreHistory,
@@ -209,11 +220,21 @@ export default function AgentChatPage() {
       regenerateMessage(threadId, messageId, supersededMessageIds),
     [regenerateMessage, threadId],
   );
+  const handleEditAndRegenerate = useCallback(
+    (messageId: string, replacementText: string) =>
+      editAndRegenerateMessage(threadId, messageId, replacementText),
+    [editAndRegenerateMessage, threadId],
+  );
 
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
+  const agentBrowserEnabled =
+    agent !== null &&
+    (agent.tool_groups == null || agent.tool_groups.includes("browser"));
+  const browserEnabled =
+    !isNewThread && !isMock && browserControlEnabled && agentBrowserEnabled;
   const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
@@ -234,7 +255,7 @@ export default function AgentChatPage() {
         context={{ ...settings.context, agent_name }}
         isMock={isMock}
       >
-        <ChatBox threadId={threadId}>
+        <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
           <div className="relative flex size-full min-h-0 justify-between">
             <header
               className={cn(
@@ -257,6 +278,16 @@ export default function AgentChatPage() {
                 <ThreadTitle threadId={threadId} thread={thread} />
               </div>
               <div className="flex shrink-0 items-center sm:mr-4">
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadBackgroundTasks threadId={threadId} />
+                  )}
+                {!isNewThread &&
+                  !isMock &&
+                  env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
+                    <ThreadSubagentBatches threadId={threadId} />
+                  )}
                 <Tooltip content={t.agents.newChat}>
                   <Button
                     className="px-2 sm:px-3"
@@ -270,18 +301,24 @@ export default function AgentChatPage() {
                     <span className="hidden sm:inline">{t.agents.newChat}</span>
                   </Button>
                 </Tooltip>
-                <TokenUsageIndicator
-                  threadId={isNewThread ? undefined : threadId}
-                  backendUsage={backendTokenUsage}
-                  enabled={tokenUsageEnabled}
-                  messages={thread.messages}
-                  pendingMessages={pendingUsageMessages}
-                  preferences={localSettings.tokenUsage}
-                  onPreferencesChange={(preferences) =>
-                    setLocalSettings("tokenUsage", preferences)
-                  }
-                />
+                {tokenUsageEnabled ? (
+                  <TokenUsageIndicator
+                    threadId={isNewThread ? undefined : threadId}
+                    backendUsage={backendTokenUsage}
+                    contextUsage={contextUsage}
+                    enabled={tokenUsageEnabled}
+                    messages={thread.messages}
+                    pendingMessages={pendingUsageMessages}
+                    preferences={localSettings.tokenUsage}
+                    onPreferencesChange={(preferences) =>
+                      setLocalSettings("tokenUsage", preferences)
+                    }
+                  />
+                ) : (
+                  <ContextUsageBadge contextUsage={contextUsage} />
+                )}
                 <SidecarTrigger />
+                {browserEnabled && <BrowserTrigger />}
                 <ExportTrigger threadId={threadId} />
                 <ArtifactTrigger />
               </div>
@@ -294,6 +331,7 @@ export default function AgentChatPage() {
                   testId="main-message-list"
                   threadId={threadId}
                   thread={thread}
+                  enableConversationOutline
                   paddingBottom={MESSAGE_LIST_DEFAULT_PADDING_BOTTOM}
                   hasMoreHistory={hasMoreHistory}
                   loadMoreHistory={loadMoreHistory}
@@ -307,6 +345,16 @@ export default function AgentChatPage() {
                     !thread.isLoading
                   }
                   onRegenerateMessage={handleRegenerate}
+                  canEdit={
+                    !isNewThread &&
+                    !isMock &&
+                    env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" &&
+                    !isUploading &&
+                    !thread.isLoading &&
+                    !hasGoal &&
+                    !hasOpenHumanInputCard
+                  }
+                  onEditAndRegenerateMessage={handleEditAndRegenerate}
                   onSubmitHumanInput={
                     isMock || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
                       ? undefined
@@ -385,7 +433,6 @@ export default function AgentChatPage() {
                     disabled={
                       env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
                       isUploading ||
-                      hasOpenHumanInputCard ||
                       (!isNewThread && isHistoryLoading)
                     }
                     onContextChange={(context) =>

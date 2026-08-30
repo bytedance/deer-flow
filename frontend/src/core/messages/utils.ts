@@ -33,12 +33,25 @@ const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "todo_completion_reminder",
 ]);
 
-export function getMessageGroups(messages: Message[]): MessageGroup[] {
+export function getMessageGroups(
+  messages: Message[],
+  { isCurrentTurnLoading = false }: { isCurrentTurnLoading?: boolean } = {},
+): MessageGroup[] {
   if (messages.length === 0) {
     return [];
   }
 
   const groups: MessageGroup[] = [];
+  let currentTurnStartIndex = -1;
+  if (isCurrentTurnLoading) {
+    for (let index = messages.length - 1; index >= 0; index--) {
+      const message = messages[index];
+      if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+        currentTurnStartIndex = index;
+        break;
+      }
+    }
+  }
 
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
@@ -55,7 +68,7 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
     return null;
   }
 
-  for (const message of messages) {
+  for (const [messageIndex, message] of messages.entries()) {
     if (isHiddenFromUIMessage(message)) {
       continue;
     }
@@ -127,8 +140,20 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       // panel above the bubble paints the identical reasoning a second time
       // (#3868). Intermediate reasoning (no content) and tool-calling steps
       // still belong in the processing group.
+      // A content-only message is not necessarily the final answer while its
+      // turn is still streaming: providers can append tool-call chunks to the
+      // same message later. Keep that unresolved message in the processing
+      // group so its visible text does not jump from an assistant bubble into
+      // the steps panel when the tool call arrives (#4304).
+      const isUnresolvedAssistantText =
+        currentTurnStartIndex >= 0 &&
+        messageIndex > currentTurnStartIndex &&
+        hasContent(message) &&
+        !hasToolCalls(message);
       const becomesAssistantBubble =
-        hasContent(message) && !hasToolCalls(message);
+        hasContent(message) &&
+        !hasToolCalls(message) &&
+        !isUnresolvedAssistantText;
 
       if (hasPresentFiles(message)) {
         groups.push({
@@ -144,7 +169,9 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
         });
       } else if (
         !becomesAssistantBubble &&
-        (hasReasoning(message) || hasToolCalls(message))
+        (hasReasoning(message) ||
+          hasToolCalls(message) ||
+          isUnresolvedAssistantText)
       ) {
         const lastGroup = groups[groups.length - 1];
         // Accumulate consecutive intermediate AI messages into one processing group.
@@ -205,6 +232,89 @@ export function getBranchableAssistantGroupIds(
   return branchableGroupIds;
 }
 
+export type EditableTurn = {
+  humanMessage: Message;
+};
+
+function isTerminalAssistantTextMessage(message: Message | undefined): boolean {
+  return (
+    message?.type === "ai" &&
+    Boolean(extractTextFromMessage(message).trim()) &&
+    !hasToolCalls(message)
+  );
+}
+
+export function getLatestEditableTurn(
+  groups: MessageGroup[],
+  isCurrentTurnLoading: boolean,
+): EditableTurn | null {
+  if (isCurrentTurnLoading) {
+    return null;
+  }
+
+  let candidate: EditableTurn | null = null;
+  let currentHumanGroup: MessageGroup | null = null;
+  let currentTurnGroups: MessageGroup[] = [];
+  let lastAIGroup: MessageGroup | null = null;
+
+  const completeTurn = () => {
+    if (!currentHumanGroup) {
+      currentTurnGroups = [];
+      lastAIGroup = null;
+      return;
+    }
+
+    const humanMessage = currentHumanGroup?.messages.find(
+      (message) => message.type === "human" && message.id,
+    );
+    let assistantMessage: Message | undefined;
+    for (let i = (lastAIGroup?.messages.length ?? 0) - 1; i >= 0; i -= 1) {
+      const message = lastAIGroup?.messages[i];
+      if (message?.type === "ai" && message.id) {
+        assistantMessage = message;
+        break;
+      }
+    }
+
+    if (
+      currentHumanGroup &&
+      lastAIGroup?.type === "assistant" &&
+      humanMessage &&
+      isTerminalAssistantTextMessage(assistantMessage)
+    ) {
+      candidate = {
+        humanMessage,
+      };
+    } else {
+      candidate = null;
+    }
+
+    currentHumanGroup = null;
+    currentTurnGroups = [];
+    lastAIGroup = null;
+  };
+
+  for (const group of groups) {
+    if (group.type === "human") {
+      completeTurn();
+      currentHumanGroup = group;
+      currentTurnGroups = [group];
+      continue;
+    }
+
+    if (currentHumanGroup) {
+      currentTurnGroups.push(group);
+    }
+
+    if (group.messages.some((message) => message.type === "ai")) {
+      lastAIGroup = group;
+    }
+  }
+
+  completeTurn();
+  return candidate;
+}
+
 export function groupMessages<T>(
   messages: Message[],
   mapper: (group: MessageGroup) => T,
@@ -253,15 +363,74 @@ type MessageMetadataLookup = (
   index: number,
 ) => { streamMetadata?: Record<string, unknown> } | undefined;
 
+export type StreamMetadataSnapshot = {
+  ids: ReadonlyMap<string, Record<string, unknown>>;
+  messages: ReadonlyMap<Message, Record<string, unknown>>;
+};
+
 export type StreamingMessageLookup = {
   ids: ReadonlySet<string>;
   messages: ReadonlySet<Message>;
 };
 
+export function areStreamMetadataSnapshotsEqual(
+  left: StreamMetadataSnapshot,
+  right: StreamMetadataSnapshot,
+) {
+  if (
+    left.ids.size !== right.ids.size ||
+    left.messages.size !== right.messages.size
+  ) {
+    return false;
+  }
+
+  for (const [id, metadata] of left.ids) {
+    if (right.ids.get(id) !== metadata) {
+      return false;
+    }
+  }
+  for (const [message, metadata] of left.messages) {
+    if (right.messages.get(message) !== metadata) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function getStreamMetadataSnapshot(
+  messages: Message[],
+  getMessagesMetadata?: MessageMetadataLookup,
+): StreamMetadataSnapshot {
+  const metadataById = new Map<string, Record<string, unknown>>();
+  const metadataByMessage = new Map<Message, Record<string, unknown>>();
+
+  messages.forEach((message, index) => {
+    const streamMetadata = getMessagesMetadata?.(
+      message,
+      index,
+    )?.streamMetadata;
+    if (!streamMetadata) {
+      return;
+    }
+
+    if (typeof message.id === "string" && message.id.length > 0) {
+      metadataById.set(message.id, streamMetadata);
+    } else {
+      metadataByMessage.set(message, streamMetadata);
+    }
+  });
+
+  return {
+    ids: metadataById,
+    messages: metadataByMessage,
+  };
+}
+
 export function getStreamingMessageLookup(
   messages: Message[],
   isStreaming: boolean,
   getMessagesMetadata?: MessageMetadataLookup,
+  settledMetadata?: StreamMetadataSnapshot,
 ): StreamingMessageLookup {
   const streamingMessageIds = new Set<string>();
   const streamingMessages = new Set<Message>();
@@ -274,12 +443,25 @@ export function getStreamingMessageLookup(
   }
 
   messages.forEach((message, index) => {
-    if (!getMessagesMetadata?.(message, index)?.streamMetadata) {
+    const streamMetadata = getMessagesMetadata?.(
+      message,
+      index,
+    )?.streamMetadata;
+    if (!streamMetadata) {
       return;
     }
 
     if (typeof message.id === "string" && message.id.length > 0) {
+      // MessageTupleManager retains metadata until the whole stream instance is
+      // cleared. A later run therefore exposes the completed turn's metadata
+      // again. Only an unchanged metadata object is stale: a new object for the
+      // same message id means that message received another stream event.
+      if (settledMetadata?.ids.get(message.id) === streamMetadata) {
+        return;
+      }
       streamingMessageIds.add(message.id);
+    } else if (settledMetadata?.messages.get(message) === streamMetadata) {
+      return;
     }
     streamingMessages.add(message);
   });
@@ -321,8 +503,13 @@ export function getAssistantTurnCopyData(
       .reverse()
       .filter((message) => message.type === "ai")
       .map((message) => {
+        // extractContentFromMessage never returns null, so fall back to
+        // reasoning on empty text (same rule as getMessageCopyData) —
+        // otherwise a reasoning-only turn loses its copy button entirely.
         const content = extractContentFromMessage(message);
-        return content ?? extractReasoningContentFromMessage(message) ?? "";
+        return content.length > 0
+          ? content
+          : (extractReasoningContentFromMessage(message) ?? "");
       })
       .find((content) => content.length > 0) ?? null
   );
@@ -373,14 +560,23 @@ function splitInlineReasoning(content: string): InlineReasoningSplit {
   const reasoningParts: string[] = [];
 
   // First pass: strip every fully closed `<think>...</think>` pair and
-  // collect its body as reasoning.
-  let cleaned = content.replace(THINK_TAG_RE, (_, reasoning: string) => {
-    const normalized = reasoning.trim();
-    if (normalized) {
-      reasoningParts.push(normalized);
-    }
-    return "";
-  });
+  // collect its body as reasoning. A pair whose opener sits right after a
+  // backtick is the model talking about the tag literally inside markdown
+  // inline code (same guard as the streaming pass below) — leave it in the
+  // rendered content instead of hollowing out the code span.
+  let cleaned = content.replace(
+    THINK_TAG_RE,
+    (match: string, reasoning: string, offset: number) => {
+      if (content[offset - 1] === "`") {
+        return match;
+      }
+      const normalized = reasoning.trim();
+      if (normalized) {
+        reasoningParts.push(normalized);
+      }
+      return "";
+    },
+  );
 
   // Streaming-safe pass: a `<think>` opener whose `</think>` has not arrived
   // yet means the rest of the chunk is reasoning in flight. Route it into the
@@ -735,7 +931,11 @@ export function parseUploadedFiles(content: string): FileInMessage[] {
 
   // Parse file list
   // Format: - filename (size)\n  Path: /path/to/file
-  const fileRegex = /- ([^\n(]+)\s*\(([^)]+)\)\s*\n\s*Path:\s*([^\n]+)/g;
+  // The filename itself may contain parentheses (e.g. "photo (1).png"), so
+  // the size group is anchored on the trailing "(<number> <unit>)" pair the
+  // backend emits instead of stopping the filename at the first "(".
+  const fileRegex =
+    /- (.+)\s*\(([\d.]+\s*(?:B|KB|MB|GB|TB))\)\s*\n\s*Path:\s*([^\n]+)/gi;
   const files: FileInMessage[] = [];
   let fileMatch;
 

@@ -458,3 +458,80 @@ class TestRenderDelegationLedger:
         assert "task 10" in out
         assert "task 0" not in out
         assert "omitted from this model view" in out
+
+
+def _verdict(*, resolved=("r1",), failed=(), unknown=(), no_claims=False):
+    return {
+        "source": "receipt_citations",
+        "requirement": "cited_ids_in_execution_record",
+        "citation_resolved": not failed and not unknown and not no_claims,
+        "cited": [*resolved, *failed, *unknown],
+        "resolved": list(resolved),
+        "failed": [{"id": rid, "reason": "receipt status=error"} for rid in failed],
+        "unknown": list(unknown),
+        "no_citation_claims": no_claims,
+    }
+
+
+def _completed_task_message(tool_call_id: str, verdict: dict | None) -> ToolMessage:
+    from deerflow.subagents.status_contract import make_subagent_additional_kwargs
+
+    receipts = [
+        {
+            "id": "r1",
+            "tool_call_id": "tc-1",
+            "tool_name": "write_file",
+            "status": "success",
+            "args_sha256": "a" * 16,
+            "output_sha256": "b" * 16,
+            "output_bytes": 10,
+            "created_at": "2026-08-24T00:00:00+00:00",
+        }
+    ]
+    return ToolMessage(
+        content="Task Succeeded. Result: done [r1]",
+        tool_call_id=tool_call_id,
+        name="task",
+        additional_kwargs=make_subagent_additional_kwargs("completed", result="done [r1]", tool_receipts=receipts, receipt_verdict=verdict),
+    )
+
+
+class TestReceiptVerdictRendering:
+    def test_entry_carries_verdict_and_renders_counts(self):
+        messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", _verdict())]
+        entries = extract_delegations(messages)
+        assert entries[0]["receipt_verdict"]["citation_resolved"] is True
+
+        rendered = render_delegation_ledger(entries)
+        assert "citations: 1 resolved — execution evidence only, does not validate claim correctness" in rendered
+
+    def test_renders_failed_and_unknown_counts(self):
+        verdict = _verdict(resolved=("r1",), failed=("r2",), unknown=("r9",))
+        messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", verdict)]
+        rendered = render_delegation_ledger(extract_delegations(messages))
+        assert "citations: 1 resolved, 1 failed, 1 unknown" in rendered
+
+    def test_renders_unverified_for_uncited_action_claims(self):
+        verdict = _verdict(resolved=(), no_claims=True)
+        verdict["citation_resolved"] = False
+        messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", verdict)]
+        rendered = render_delegation_ledger(extract_delegations(messages))
+        assert "citations: UNVERIFIED — action claims without receipt citations" in rendered
+
+    def test_legacy_messages_without_verdict_render_unchanged(self):
+        messages = [_ai_task_call("c1", "write report"), _completed_task_message("c1", None)]
+        entries = extract_delegations(messages)
+        assert "receipt_verdict" not in entries[0]
+        rendered = render_delegation_ledger(entries)
+        assert "citations:" not in rendered
+
+    def test_malformed_persisted_verdict_is_ignored(self):
+        entry = {
+            **_entry("c1", "completed", description="write report"),
+            "receipt_verdict": {"citation_resolved": True},
+        }
+
+        rendered = render_delegation_ledger([entry])
+
+        assert "write report" in rendered
+        assert "citations:" not in rendered

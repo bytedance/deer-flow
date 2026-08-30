@@ -115,7 +115,7 @@ def test_apply_prompt_template_places_routing_hints_after_deferred_tools(monkeyp
     empty_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [])
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kwargs: empty_storage)
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_user_skill_storage", lambda *args, **kwargs: empty_storage)
-    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_agent_soul", lambda agent_name=None: "")
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     prompt = apply_prompt_template(
         app_config=_minimal_prompt_app_config(),

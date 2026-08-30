@@ -64,6 +64,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
+from weakref import WeakValueDictionary
 
 try:
     import fcntl
@@ -73,6 +75,7 @@ except ImportError:  # pragma: no cover - Windows fallback
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
+from deerflow.integrations.lark_broker import LARK_BROKER_URL_ENV
 from deerflow.skills.installer import is_executable_binary_prefix, is_symlink_member, is_unsafe_zip_member
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
@@ -103,10 +106,17 @@ LARK_CLI_MAX_EXTRACTED_BYTES = 256 * 1024 * 1024
 LARK_CLI_MAX_RUNTIME_ASSET_BYTES = 128 * 1024 * 1024
 LARK_CLI_MANIFEST_FILE = ".deerflow-lark-cli-manifest.json"
 LARK_CLI_SANDBOX_CONFIG_DIR = "/mnt/integrations/lark-cli/config"
+LARK_CLI_SANDBOX_LOCKS_DIR = f"{LARK_CLI_SANDBOX_CONFIG_DIR}/locks"
 LARK_CLI_SANDBOX_DATA_DIR = "/mnt/integrations/lark-cli/data"
 LARK_CLI_SANDBOX_RUNTIME_DIR = "/mnt/integrations/lark-cli/runtime"
 LARK_CLI_LINUX_ARCHES = ("amd64", "arm64")
 LARK_CLI_RUNTIME_MANIFEST_FILE = ".deerflow-lark-cli-runtime.json"
+LARK_CLI_FLOW_STATE_FILE = ".deerflow-lark-cli-flow.json"
+
+# Pattern B (issue #4338): loopback URL the sandbox shim uses to reach the broker
+# sidecar. LARK_BROKER_URL_ENV is imported from the broker module so the shim,
+# server, and Gateway overlay share one source of truth.
+LARK_BROKER_SANDBOX_URL = "http://127.0.0.1:8788"
 
 # Arch-dispatch launcher for the sandbox runtime layout. Shared by the Gateway
 # writer (`_write_lark_cli_sandbox_launcher`) and the `docker/lark-cli-init`
@@ -158,6 +168,8 @@ LARK_SKILL_NAMES: tuple[str, ...] = (
 LARK_SKILL_NAME_SET = frozenset(LARK_SKILL_NAMES)
 _LARK_INSTALL_THREAD_LOCK = threading.Lock()
 _LARK_RUNTIME_INSTALL_THREAD_LOCK = threading.Lock()
+_LARK_CREDENTIAL_LOCKS_GUARD = threading.Lock()
+_LARK_CREDENTIAL_LOCKS: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
 
 
 @dataclass(frozen=True)
@@ -210,6 +222,7 @@ class LarkInstallResult:
 class LarkConfigStartResult:
     verification_url: str
     device_code: str
+    generation: str
     expires_in: int | None = None
     interval: int | None = None
     user_code: str | None = None
@@ -221,12 +234,14 @@ class LarkConfigCompleteResult:
     success: bool
     status: LarkIntegrationStatus
     message: str
+    generation: str
 
 
 @dataclass(frozen=True)
 class LarkAuthStartResult:
     verification_url: str
     device_code: str
+    generation: str
     expires_in: int | None = None
     user_code: str | None = None
     hint: str | None = None
@@ -237,6 +252,10 @@ class LarkAuthCompleteResult:
     success: bool
     status: LarkIntegrationStatus
     message: str
+
+
+class LarkFlowSupersededError(ValueError):
+    """Raised when a delayed integration flow is no longer current."""
 
 
 def lark_integration_root(_user_id: str | None = None) -> Path:
@@ -274,6 +293,10 @@ def lark_cli_data_dir(user_id: str) -> Path:
     return get_paths().user_dir(user_id) / "integrations" / INTEGRATION_ID / "data"
 
 
+def _lark_cli_credential_root(user_id: str) -> Path:
+    return get_paths().user_dir(user_id) / "integrations" / INTEGRATION_ID
+
+
 def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None) -> None:
     """Make the user's secret-bearing Lark CLI tree owner-only.
 
@@ -287,7 +310,7 @@ def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None)
         raise ValueError(f"Lark CLI credential path must not be a symlink: {root}")
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     root.chmod(0o700)
-    for required in (root / "config", root / "data"):
+    for required in (root / "config", root / "config" / "locks", root / "data"):
         if required.is_symlink():
             raise ValueError(f"Lark CLI credential path must not be a symlink: {required}")
         required.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -450,6 +473,53 @@ def _exclusive_install_lock(lock_path: Path, thread_lock):
                 msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
+def _lark_credential_thread_lock(user_id: str) -> threading.Lock:
+    with _LARK_CREDENTIAL_LOCKS_GUARD:
+        return _LARK_CREDENTIAL_LOCKS.setdefault(user_id, threading.Lock())
+
+
+@contextmanager
+def _lark_credential_lock(user_id: str):
+    """Serialize credential replacement for one user across threads/processes."""
+    root = _lark_cli_credential_root(user_id)
+    root.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = root.parent / f".{INTEGRATION_ID}.credentials.lock"
+    with _exclusive_install_lock(lock_path, _lark_credential_thread_lock(user_id)):
+        yield
+
+
+def _lark_flow_state_path(user_id: str) -> Path:
+    return _lark_cli_credential_root(user_id) / LARK_CLI_FLOW_STATE_FILE
+
+
+def _write_lark_flow_generation_locked(user_id: str, generation: str) -> None:
+    ensure_lark_cli_credential_tree(user_id)
+    path = _lark_flow_state_path(user_id)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{LARK_CLI_FLOW_STATE_FILE}.", dir=str(path.parent))
+    os.close(fd)
+    temp_path = Path(temp_name)
+    try:
+        temp_path.write_text(json.dumps({"generation": generation}) + "\n", encoding="utf-8")
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _advance_lark_flow_generation_locked(user_id: str) -> str:
+    generation = uuid4().hex
+    _write_lark_flow_generation_locked(user_id, generation)
+    return generation
+
+
+def _require_lark_flow_generation_locked(user_id: str, generation: str) -> str:
+    expected = generation.strip()
+    state = _read_json_object_file(_lark_flow_state_path(user_id))
+    if not expected or state is None or state.get("generation") != expected:
+        raise LarkFlowSupersededError("This Lark integration flow was superseded by a newer action.")
+    return expected
+
+
 def _ensure_managed_sandbox_lark_cli(version: str) -> Path:
     """Install verified official Linux binaries for AIO sandbox execution."""
     tag = _normalize_lark_cli_version_tag(version)
@@ -522,13 +592,23 @@ def _lark_cli_managed_path() -> str | None:
     return None
 
 
-def lark_cli_env_overlay(user_id: str, *, sandbox_paths: bool = False) -> dict[str, str]:
+def lark_cli_env_overlay(user_id: str, *, sandbox_paths: bool = False, broker: bool = False) -> dict[str, str]:
     """Environment overlay for lark-cli using DeerFlow-managed credentials.
 
     The directories are per-user so a local trusted-mode login cannot bleed
-    across accounts. Auth Proxy support can later replace these directories for
-    sandbox execution without changing the status API contract.
+    across accounts.
+
+    When ``broker`` is set (Pattern B, issue #4338), the sandbox talks to a
+    broker sidecar that owns the credentials, so the overlay carries only the
+    broker URL and the runtime PATH — never ``LARKSUITE_CLI_CONFIG_DIR`` /
+    ``DATA_DIR``. This keeps the plaintext app secret / OAuth tokens out of the
+    sandbox filesystem entirely. ``broker`` implies ``sandbox_paths``.
     """
+    if broker:
+        return {
+            "PATH": f"{LARK_CLI_SANDBOX_RUNTIME_DIR}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            LARK_BROKER_URL_ENV: LARK_BROKER_SANDBOX_URL,
+        }
     if sandbox_paths:
         config_dir: Path | str = LARK_CLI_SANDBOX_CONFIG_DIR
         data_dir: Path | str = LARK_CLI_SANDBOX_DATA_DIR
@@ -660,7 +740,12 @@ def _resolve_sandbox_runtime_readiness(
     - ``gateway-download``: local AIO — the Gateway stages a ``sandbox-cli`` dir
       and bind-mounts it; ready when that dir validates.
     - ``init-container``: remote provisioner — a lark-cli init image provisions
-      the runtime; ready when the provisioner reports the init image is configured.
+      the runtime binary + plaintext credential mounts (Pattern A); ready when
+      the provisioner reports the init image is configured.
+    - ``broker``: remote provisioner — a lark-cli broker sidecar holds the
+      credentials and the sandbox gets only a shim (Pattern B, issue #4338);
+      ready when the provisioner reports the broker image is configured. Broker
+      supersedes ``init-container`` when both are available.
 
     ``probe`` gates the (best-effort, short-timeout) provisioner capability call.
     """
@@ -670,12 +755,16 @@ def _resolve_sandbox_runtime_readiness(
     if _uses_remote_provisioner(config):
         if not probe:
             return "init-container", False, None
-        init_image = _probe_provisioner_lark_cli_init_image(config)
-        if init_image is None:
-            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli init image."
-        if not init_image:
-            return "init-container", False, "The provisioner has no lark-cli init image configured (LARK_CLI_INIT_IMAGE)."
-        return "init-container", True, None
+        caps = _probe_provisioner_capabilities(config)
+        if caps is None:
+            return "init-container", False, "Could not reach the provisioner to confirm the lark-cli runtime image."
+        # Pattern B (broker) supersedes Pattern A (init-container binary) when
+        # the provisioner has a broker image configured.
+        if caps["lark_cli_broker_image"]:
+            return "broker", True, None
+        if caps["lark_cli_init_image"]:
+            return "init-container", True, None
+        return "init-container", False, "The provisioner has no lark-cli runtime image configured (LARK_CLI_INIT_IMAGE / LARK_CLI_BROKER_IMAGE)."
 
     # Local AIO: Gateway-download runtime dir.
     runtime_dir = lark_cli_managed_sandbox_dir()
@@ -684,6 +773,61 @@ def _resolve_sandbox_runtime_readiness(
     except (ValueError, OSError):
         return "gateway-download", False, "The managed sandbox lark-cli runtime is not installed."
     return "gateway-download", True, None
+
+
+LARK_BROKER_MODE_TTL_SECONDS = 60
+# Negative results (broker not active) are cached longer than positive ones: a
+# non-broker remote-provisioner deployment stays non-broker for the life of the
+# process far more often than it flips on, so this keeps the hot bash path from
+# re-probing every minute. A positive result still refreshes on the shorter TTL.
+LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS = 300
+# Tight probe budget on the per-bash-call hot path: unlike the Settings status
+# probe (5s, user is waiting on a page), this runs inline before a sandbox
+# lark-cli command, so a slow/unreachable provisioner must not add seconds of
+# latency to every first-call-per-TTL for non-broker deployments.
+LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS = 1.5
+# Guards the cache attribute on sandbox_lark_broker_active against concurrent
+# bash invocations so the correctness story doesn't rely on idempotent races.
+_LARK_BROKER_MODE_CACHE_LOCK = threading.Lock()
+
+
+def sandbox_lark_broker_active(config: AppConfig | None = None) -> bool:
+    """Whether sandbox ``lark-cli`` runs in broker mode (Pattern B).
+
+    Cached with a short TTL because it is consulted on every ``lark-cli`` bash
+    call and reads the provisioner capability over HTTP. Broker mode requires a
+    remote provisioner that reports a configured broker image; any other config
+    (local AIO, init-container binary mode, unreachable provisioner) is False, so
+    the caller falls back to the credential-mount overlay.
+
+    The probe uses a tight timeout and negatives are cached longer than positives
+    so a non-broker remote-provisioner deployment does not pay a latency penalty
+    on the bash hot path.
+    """
+    if config is None:
+        try:
+            from deerflow.config.app_config import get_app_config
+
+            config = get_app_config()
+        except Exception:  # noqa: BLE001 - degrade to non-broker overlay
+            return False
+
+    now = time.monotonic()
+    with _LARK_BROKER_MODE_CACHE_LOCK:
+        cached = getattr(sandbox_lark_broker_active, "_cache", None)
+        if cached is not None:
+            ts, value = cached
+            ttl = LARK_BROKER_MODE_TTL_SECONDS if value else LARK_BROKER_MODE_NEGATIVE_TTL_SECONDS
+            if now - ts < ttl:
+                return value
+
+    active = False
+    if _uses_aio_sandbox(config) and _uses_remote_provisioner(config):
+        caps = _probe_provisioner_capabilities(config, timeout=LARK_BROKER_MODE_PROBE_TIMEOUT_SECONDS)
+        active = bool(caps and caps["lark_cli_broker_image"])
+    with _LARK_BROKER_MODE_CACHE_LOCK:
+        sandbox_lark_broker_active._cache = (now, active)  # type: ignore[attr-defined]
+    return active
 
 
 def get_lark_integration_status(
@@ -862,12 +1006,14 @@ def _uses_remote_provisioner(config: AppConfig) -> bool:
     return bool(_sandbox_config_value(config, "provisioner_url"))
 
 
-def _probe_provisioner_lark_cli_init_image(config: AppConfig) -> bool | None:
-    """Best-effort read of the provisioner's lark-cli init-image capability.
+def _probe_provisioner_capabilities(config: AppConfig, *, timeout: float = 5.0) -> dict[str, bool] | None:
+    """Best-effort read of the provisioner's lark-cli capabilities.
 
-    Returns True/False when the provisioner answers, or None when it can't be
-    reached. Used only to surface a sandbox-runtime readiness signal; failures
-    degrade to "not ready" rather than raising.
+    Returns the capability dict when the provisioner answers, or None when it
+    can't be reached. Used both for the status readiness signal and to select
+    broker vs. binary mode on the bash hot path; failures degrade to "not
+    ready"/"not broker" rather than raising. ``timeout`` is caller-tunable so the
+    per-bash-call probe can use a tighter budget than the Settings status probe.
     """
     base = _sandbox_config_value(config, "provisioner_url")
     if not base:
@@ -877,9 +1023,14 @@ def _probe_provisioner_lark_cli_init_image(config: AppConfig) -> bool | None:
     url = f"{base.rstrip('/')}/api/capabilities"
     try:
         request = urllib.request.Request(url, headers={"User-Agent": "deer-flow", **headers})
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        return bool(payload.get("lark_cli_init_image"))
+        if not isinstance(payload, dict):
+            return None
+        return {
+            "lark_cli_init_image": bool(payload.get("lark_cli_init_image")),
+            "lark_cli_broker_image": bool(payload.get("lark_cli_broker_image")),
+        }
     except Exception:
         return None
 
@@ -887,6 +1038,8 @@ def _probe_provisioner_lark_cli_init_image(config: AppConfig) -> bool | None:
 def start_lark_config(user_id: str, *, brand: str = "feishu") -> LarkConfigStartResult:
     """Start the browser flow that creates/binds a Lark OAuth app for this user."""
     parsed_brand = _normalize_lark_brand(brand)
+    with _lark_credential_lock(user_id):
+        generation = _advance_lark_flow_generation_locked(user_id)
     begin_data = _request_lark_app_registration_begin(parsed_brand)
     user_code = str(begin_data.get("user_code") or "").strip()
     device_code = str(begin_data.get("device_code") or "").strip()
@@ -896,6 +1049,7 @@ def start_lark_config(user_id: str, *, brand: str = "feishu") -> LarkConfigStart
     return LarkConfigStartResult(
         verification_url=verification_url,
         device_code=device_code,
+        generation=generation,
         expires_in=_int_or_none(begin_data.get("expires_in")),
         interval=_int_or_none(begin_data.get("interval")),
         user_code=user_code,
@@ -908,6 +1062,7 @@ def complete_lark_config(
     config: AppConfig,
     *,
     device_code: str,
+    generation: str,
     brand: str = "feishu",
     interval: int | None = None,
     expires_in: int | None = None,
@@ -917,6 +1072,8 @@ def complete_lark_config(
     if not device_code:
         raise ValueError("device_code is required.")
     parsed_brand = _normalize_lark_brand(brand)
+    with _lark_credential_lock(user_id):
+        generation = _require_lark_flow_generation_locked(user_id, generation)
     result = _poll_lark_app_registration(
         device_code=device_code,
         brand=parsed_brand,
@@ -941,12 +1098,57 @@ def complete_lark_config(
     if not app_id or not app_secret:
         raise ValueError("Lark app registration succeeded but did not return app credentials.")
 
-    _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=final_brand)
-    status = get_lark_integration_status(user_id, config)
+    with _lark_credential_lock(user_id):
+        generation = _require_lark_flow_generation_locked(user_id, generation)
+        _replace_lark_app_credentials_locked(
+            user_id,
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=final_brand,
+        )
+        status = get_lark_integration_status(user_id, config)
     return LarkConfigCompleteResult(
         success=True,
         status=status,
         message="Lark/Feishu connection setup completed.",
+        generation=generation,
+    )
+
+
+def set_lark_app_credentials(
+    user_id: str,
+    config: AppConfig,
+    *,
+    app_id: str,
+    app_secret: str,
+    brand: str = "feishu",
+) -> LarkConfigCompleteResult:
+    """Atomically switch this user's app and revoke the previous OAuth token."""
+    app_id = app_id.strip()
+    app_secret = app_secret.strip()
+    if not app_id:
+        raise ValueError("app_id is required.")
+    if not app_secret:
+        raise ValueError("app_secret is required.")
+    parsed_brand = brand.strip().lower()
+    if parsed_brand not in {"feishu", "lark"}:
+        raise ValueError("brand must be feishu or lark.")
+
+    with _lark_credential_lock(user_id):
+        _validate_lark_app_credentials_with_cli(app_id=app_id, app_secret=app_secret, brand=parsed_brand)
+        generation = _advance_lark_flow_generation_locked(user_id)
+        _replace_lark_app_credentials_locked(
+            user_id,
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=parsed_brand,
+        )
+        status = get_lark_integration_status(user_id, config)
+    return LarkConfigCompleteResult(
+        success=True,
+        status=status,
+        message="Lark/Feishu app switched. Reconnect to authorize the new app.",
+        generation=generation,
     )
 
 
@@ -956,6 +1158,7 @@ def start_lark_auth(
     domains: tuple[str, ...] = (),
     scope: str | None = None,
     recommend: bool = False,
+    generation: str | None = None,
 ) -> LarkAuthStartResult:
     """Start a non-blocking Lark device authorization flow.
 
@@ -973,15 +1176,21 @@ def start_lark_auth(
         if domain:
             args.extend(["--domain", domain])
 
-    data = _run_lark_cli_json(args, user_id=user_id, timeout=20)
-    verification_url = str(data.get("verification_url") or data.get("verification_uri_complete") or "").strip()
-    device_code = str(data.get("device_code") or "").strip()
-    if not verification_url or not device_code:
-        raise ValueError("lark-cli did not return a verification_url and device_code.")
+    with _lark_credential_lock(user_id):
+        if generation is None:
+            generation = _advance_lark_flow_generation_locked(user_id)
+        else:
+            generation = _require_lark_flow_generation_locked(user_id, generation)
+        data = _run_lark_cli_json(args, user_id=user_id, timeout=20)
+        verification_url = str(data.get("verification_url") or data.get("verification_uri_complete") or "").strip()
+        device_code = str(data.get("device_code") or "").strip()
+        if not verification_url or not device_code:
+            raise ValueError("lark-cli did not return a verification_url and device_code.")
 
     return LarkAuthStartResult(
         verification_url=verification_url,
         device_code=device_code,
+        generation=generation,
         expires_in=_int_or_none(data.get("expires_in")),
         user_code=str(data.get("user_code") or "") or None,
         hint=str(data.get("hint") or "") or None,
@@ -993,6 +1202,7 @@ def complete_lark_auth(
     config: AppConfig,
     *,
     device_code: str,
+    generation: str,
     wait_timeout_seconds: int = LARK_AUTH_COMPLETE_DEFAULT_WAIT_SECONDS,
 ) -> LarkAuthCompleteResult:
     """Complete a Lark device authorization flow after the user approves it."""
@@ -1002,14 +1212,16 @@ def complete_lark_auth(
     if not LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS <= wait_timeout_seconds <= LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS:
         raise ValueError(f"wait_timeout_seconds must be between {LARK_AUTH_COMPLETE_MIN_WAIT_SECONDS} and {LARK_AUTH_COMPLETE_MAX_WAIT_SECONDS}.")
 
-    path = _require_lark_cli_path()
-    _run_lark_cli_json(
-        [path, "auth", "login", "--device-code", device_code, "--json"],
-        user_id=user_id,
-        timeout=wait_timeout_seconds,
-        allow_empty_success=True,
-    )
-    status = get_lark_integration_status(user_id, config, verify_auth=True)
+    with _lark_credential_lock(user_id):
+        _require_lark_flow_generation_locked(user_id, generation)
+        path = _require_lark_cli_path()
+        _run_lark_cli_json(
+            [path, "auth", "login", "--device-code", device_code, "--json"],
+            user_id=user_id,
+            timeout=wait_timeout_seconds,
+            allow_empty_success=True,
+        )
+        status = get_lark_integration_status(user_id, config, verify_auth=True)
     return LarkAuthCompleteResult(
         success=status.auth.status == "authenticated",
         status=status,
@@ -1205,28 +1417,131 @@ def _tenant_brand(result: dict[str, Any]) -> str | None:
     return brand if brand in {"feishu", "lark"} else None
 
 
-def _save_lark_app_config_with_cli(user_id: str, *, app_id: str, app_secret: str, brand: str) -> None:
+def _lark_cli_env_for_directories(*, config_dir: Path, data_dir: Path) -> dict[str, str]:
+    env = {
+        **os.environ,
+        "LARKSUITE_CLI_CONFIG_DIR": str(config_dir),
+        "LARKSUITE_CLI_DATA_DIR": str(data_dir),
+        "LARKSUITE_CLI_NO_UPDATE_NOTIFIER": "1",
+        "LARKSUITE_CLI_NO_SKILLS_NOTIFIER": "1",
+    }
+    managed_bin = _lark_cli_managed_bin_dir()
+    if _lark_cli_managed_path() is not None:
+        env["PATH"] = f"{managed_bin}{os.pathsep}{os.environ.get('PATH', '')}"
+    return env
+
+
+def _run_lark_config_init(*, app_id: str, app_secret: str, brand: str, env: dict[str, str]) -> None:
     path = _require_lark_cli_path()
     try:
-        try:
-            result = subprocess.run(
-                [path, "config", "init", "--app-id", app_id, "--app-secret-stdin", "--brand", _normalize_lark_brand(brand)],
-                input=app_secret + "\n",
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                env=lark_cli_env(user_id),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise TimeoutError("Timed out while saving Lark connection setup.") from exc
-    finally:
-        ensure_lark_cli_credential_tree(user_id)
+        result = subprocess.run(
+            [path, "config", "init", "--app-id", app_id, "--app-secret-stdin", "--brand", brand],
+            input=app_secret + "\n",
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Timed out while saving Lark connection setup.") from exc
     if result.returncode != 0:
         raw = (result.stderr or result.stdout or "").strip()
         parsed = _parse_json_object(raw)
         message = _auth_error_message(parsed) if parsed else raw
         raise ValueError(message or f"lark-cli config init exited with code {result.returncode}")
+
+
+def _save_lark_app_config_with_cli(user_id: str, *, app_id: str, app_secret: str, brand: str) -> None:
+    try:
+        _run_lark_config_init(
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=brand,
+            env=lark_cli_env(user_id),
+        )
+    finally:
+        ensure_lark_cli_credential_tree(user_id)
+
+
+def _validate_lark_app_credentials_with_cli(*, app_id: str, app_secret: str, brand: str) -> None:
+    """Validate credentials through config init's live tenant-token probe."""
+    with tempfile.TemporaryDirectory(prefix=".validating-lark-app-") as temp_dir:
+        root = Path(temp_dir)
+        config_dir = root / "config"
+        data_dir = root / "data"
+        config_dir.mkdir(mode=0o700)
+        data_dir.mkdir(mode=0o700)
+        _run_lark_config_init(
+            app_id=app_id,
+            app_secret=app_secret,
+            brand=brand,
+            env=_lark_cli_env_for_directories(config_dir=config_dir, data_dir=data_dir),
+        )
+
+
+def _replace_lark_app_credentials_locked(user_id: str, *, app_id: str, app_secret: str, brand: str) -> None:
+    ensure_lark_cli_credential_tree(user_id)
+    root = _lark_cli_credential_root(user_id)
+    with _lark_credential_transaction(user_id, root) as snapshot:
+        _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=brand)
+        _clear_directory_contents(lark_cli_data_dir(user_id))
+        _revoke_lark_auth_from_snapshot(snapshot)
+
+
+def _clear_directory_contents(directory: Path) -> None:
+    if directory.is_symlink():
+        raise ValueError(f"Lark CLI credential path must not be a symlink: {directory}")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for child in directory.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+
+@contextmanager
+def _lark_credential_transaction(user_id: str, root: Path):
+    """Restore the active credential tree if a switch step fails."""
+    with tempfile.TemporaryDirectory(prefix=".switching-lark-app-", dir=str(root.parent)) as temp_dir:
+        snapshot = Path(temp_dir) / "credentials"
+        shutil.copytree(root, snapshot, symlinks=False)
+        try:
+            yield snapshot
+        except Exception:
+            _restore_lark_credential_tree(root, snapshot)
+            ensure_lark_cli_credential_tree(user_id)
+            raise
+
+
+def _restore_lark_credential_tree(root: Path, snapshot: Path) -> None:
+    for name in ("config", "data"):
+        target = root / name
+        _clear_directory_contents(target)
+        shutil.copytree(snapshot / name, target, dirs_exist_ok=True, symlinks=False)
+
+
+def _revoke_lark_auth_from_snapshot(snapshot: Path) -> None:
+    data_dir = snapshot / "data"
+    if not any(path.is_file() for path in data_dir.rglob("*")):
+        return
+    path = _require_lark_cli_path()
+    try:
+        result = subprocess.run(
+            [path, "auth", "logout", "--json"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=_lark_cli_env_for_directories(config_dir=snapshot / "config", data_dir=data_dir),
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError("Timed out while revoking the previous Lark authorization.") from exc
+    if result.returncode != 0:
+        raw = (result.stderr or result.stdout or "").strip()
+        parsed = _parse_json_object(raw)
+        message = _auth_error_message(parsed) if parsed else raw
+        raise ValueError(message or f"lark-cli auth logout exited with code {result.returncode}")
 
 
 def _run_lark_cli_json(

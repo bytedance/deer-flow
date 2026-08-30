@@ -51,7 +51,12 @@ export const zhCN: Translations = {
     exportAsMarkdown: "导出为 Markdown",
     exportAsJSON: "导出为 JSON",
     exportSuccess: "对话已导出",
+    exportFailed: "导出对话失败。",
     regenerate: "重新生成",
+    editAndRerun: "编辑并重新运行",
+    updateAndRerun: "更新并重新运行",
+    editRerunWarning:
+      "重新运行只恢复对话状态，不会撤销文件、Memory 或外部操作。",
     branch: "分叉",
     showArtifacts: "查看此对话的文件",
     browser: "浏览器",
@@ -93,6 +98,31 @@ export const zhCN: Translations = {
     copiedToClipboard: "已复制到剪贴板",
     failedToCopyToClipboard: "复制到剪贴板失败",
     linkCopied: "链接已复制到剪贴板",
+  },
+
+  artifactEditing: {
+    unsaved: "未保存",
+    saving: "正在保存...",
+    saved: "文件已保存",
+    exit: "退出编辑",
+    discard: "放弃修改",
+    discardChanges: "要放弃对此文件的未保存修改吗？",
+    conflict: "开始编辑后文件已发生变化。请放弃草稿并重新加载后再保存。",
+    conflictShort: "远端已更新",
+    runInProgress: "请等待当前 Agent 运行结束后再保存。",
+    saveFailed: "保存文件失败",
+  },
+
+  artifactPreview: {
+    limited: (previewSize, totalSize) =>
+      totalSize
+        ? `当前显示 ${totalSize} 中的前 ${previewSize}。`
+        : `当前显示前 ${previewSize}。`,
+    loadFullFile: "加载完整文件",
+    loadingFullFile: "正在加载完整文件...",
+    previewFailed: "无法预览此文件，但仍可下载原始文件。",
+    viewSource: "查看原始文件",
+    missingTarget: "该链接没有指明要展示哪个文件。",
   },
 
   // Citations
@@ -260,6 +290,76 @@ export const zhCN: Translations = {
     agentsDisabledTooltip: "功能未启用",
   },
 
+  backgroundTasks: {
+    label: "后台任务",
+    title: "后台任务",
+    description: "当前对话中的 MCP 长程任务。",
+    active: "进行中",
+    recent: "最近任务",
+    empty: "暂无后台任务",
+    emptyHint: "在当前对话中启动的 MCP 长程任务会显示在这里。",
+    loadFailed: "无法加载后台任务",
+    retry: "重试",
+    cancel: "取消任务",
+    cancelling: "正在取消…",
+    cancelFailed: "取消任务失败",
+    cancellationRetrying: (attempt) =>
+      `第 ${attempt} 次取消失败；DeerFlow 将继续重试。`,
+    notificationRetrying: (attempt) =>
+      `第 ${attempt} 次聊天通知失败；DeerFlow 将退避后重试。`,
+    notificationStopped: "聊天通知因反复失败或永久拒绝，已停止重试。",
+    trackingDegraded: "状态检查有所延迟，DeerFlow 仍在重试。",
+    viewDetails: "查看详情",
+    hideDetails: "收起详情",
+    detailsFailed: "无法加载任务详情",
+    result: "结果",
+    resultArtifact: "结果产物",
+    inputRequired: "需要输入",
+    inputUnavailable: "当前集成暂时无法将你的回复发回远端任务。",
+    lastPollError: "最近一次状态错误",
+    created: (time) => `开始于${time}`,
+    updated: (time) => `更新于${time}`,
+    status: {
+      submitted: "已提交",
+      working: "进行中",
+      inputRequired: "需要输入",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+  },
+
+  subagentBatches: {
+    label: "批处理",
+    title: "子智能体批处理",
+    description: "面向大量独立条目的持久化、可恢复执行。",
+    workerUnavailable:
+      "批处理 worker 未运行。历史批次仍可查看和导出，当前为只读模式。",
+    empty: "暂无子智能体批处理",
+    emptyHint: "当前对话通过 batch_task 提交的批处理会显示在这里。",
+    loadFailed: "无法加载子智能体批处理",
+    active: "进行中",
+    recent: "最近任务",
+    pause: "暂停",
+    resume: "继续",
+    cancel: "取消",
+    retryItem: "重试",
+    exportResults: "导出 JSONL",
+    viewItems: "查看条目",
+    hideItems: "收起条目",
+    itemsFailed: "无法加载批处理条目",
+    progress: (completed, total) => `${completed}/${total} 已结束`,
+    limits: (live, running) => `存活 ${live} · 运行 ${running}`,
+    status: {
+      queued: "排队中",
+      running: "运行中",
+      paused: "已暂停",
+      completed: "已完成",
+      failed: "已失败",
+      cancelled: "已取消",
+    },
+  },
+
   // 定时任务
   scheduledTasks: {
     scheduleType: {
@@ -306,6 +406,9 @@ export const zhCN: Translations = {
       fresh: "新线程",
       reuse: "复用线程",
       threadIdPlaceholder: "线程 ID",
+      reuseNoticeTitle: "使用该线程的历史对话",
+      reuseNoticeDescription:
+        "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
     },
     filters: {
       allStatuses: "全部状态",
@@ -339,6 +442,8 @@ export const zhCN: Translations = {
       pause: "暂停",
       resume: "恢复",
       trigger: "立即触发",
+      duplicate: "复制",
+      duplicateTitleSuffix: "（副本）",
       delete: "删除",
     },
     deleteConfirm: "确定要删除该定时任务吗？此操作不可撤销。",
@@ -366,6 +471,7 @@ export const zhCN: Translations = {
     runTrigger: { scheduled: "定时", manual: "手动" },
     runStatus: {
       queued: "排队中",
+      launching: "启动中",
       running: "运行中",
       success: "成功",
       failed: "失败",
@@ -475,6 +581,10 @@ export const zhCN: Translations = {
     logout: "退出登录",
     gatewayUnavailable: "网关暂时不可用。",
     gatewayUnavailableRetrying: "正在后台重试…",
+    modelLoadFailed:
+      "模型列表加载失败，模型选择和 Token 用量信息可能暂时不可用。",
+    modelLoadRetry: "重试",
+    modelLoadRetrying: "正在重试…",
   },
 
   // Conversation
@@ -484,11 +594,14 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    outlineLabel: "对话章节",
+    outlineAttachmentFallback: "图片或文件消息",
   },
 
   // Chats
   chats: {
     searchChats: "搜索对话",
+    branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
     loadMoreToSearch: "加载更多以搜索更早的对话",
     loadingMore: "正在加载...",
     loadOlderChats: "加载更早的对话",
@@ -546,6 +659,7 @@ export const zhCN: Translations = {
     saveAndConnect: "保存并连接",
     saveChanges: "保存修改",
     descriptions: {
+      buzz: "通过 DeerFlow 智能体接收 Buzz 频道消息和私聊。",
       telegram: "通过 DeerFlow Bot 接收 Telegram 私聊消息。",
       slack: "接收 Slack 工作区消息和提及。",
       discord: "通过 DeerFlow Bot 接收 Discord 服务器消息。",
@@ -604,6 +718,9 @@ export const zhCN: Translations = {
     otherPlaceholder: "输入其他回答...",
     submit: "提交",
     emptyError: "请输入回答后再提交。",
+    requiredError: "请填写所有必填字段后再提交。",
+    requiredA11yLabel: "必填",
+    selectPlaceholder: "请选择...",
     answeredValue: (value: string) => `已回答：${value}`,
   },
 
@@ -664,6 +781,12 @@ export const zhCN: Translations = {
     removeTodo: (content: string) => `移除 To-do：${content}`,
   },
 
+  contextUsage: {
+    label: "上下文",
+    title: "上下文窗口",
+    badgeAriaLabel: (percentage: string) => `上下文窗口已使用 ${percentage}%`,
+  },
+
   // Shortcuts
   shortcuts: {
     searchActions: "搜索操作...",
@@ -686,6 +809,7 @@ export const zhCN: Translations = {
       integrations: "集成",
       memory: "记忆",
       tools: "工具",
+      subagents: "子智能体",
       skills: "技能",
       notification: "通知",
       about: "关于",
@@ -785,6 +909,51 @@ export const zhCN: Translations = {
       adminRequired: "需要管理员权限才能管理 MCP 工具。",
       empty: "暂无 MCP 工具。",
     },
+    subagents: {
+      title: "子智能体",
+      description:
+        "可由 Lead Agent 和已授权 Custom Agent 派遣、执行边界明确任务的复用型工作智能体。",
+      executionNote:
+        "每次调用都使用全新的临时上下文，没有独立持久会话或记忆，也不能向用户追问。系统提示词只改变工作方式；工具和技能才提供实际能力。",
+      adminNote:
+        "你可以查看目录；只有管理员可以添加、编辑、启停或删除子智能体。",
+      create: "添加子智能体",
+      empty: "暂无可用子智能体。",
+      sourceBuiltin: "内置",
+      sourceConfig: "config.yaml",
+      sourceManaged: "设置页管理",
+      conflict: "名称冲突，已从运行时排除",
+      overridden: "部分运行参数已被 config.yaml 覆盖",
+      createTitle: "添加子智能体",
+      editTitle: "编辑子智能体",
+      name: "名称",
+      nameHint: "仅可使用字母、数字和连字符。",
+      displayName: "显示名称",
+      descriptionLabel: "派遣说明",
+      systemPrompt: "系统提示词",
+      model: "模型",
+      inheritModel: "继承调用者模型",
+      tools: "允许的工具（逗号分隔）",
+      skills: "技能（逗号分隔）",
+      listModeAll: "继承全部可用项",
+      listModeNone: "全部禁用",
+      listModeSelected: "仅允许指定名称",
+      listNamesPlaceholder: "多个名称用逗号分隔",
+      maxTurns: "最大轮次",
+      timeout: "超时时间（秒）",
+      created: "子智能体已创建",
+      saved: "子智能体已保存",
+      deleted: "子智能体已删除",
+      deleteConfirm:
+        "确定删除这个子智能体吗？Custom Agent 可能仍保留对该名称的引用；以同名重建后，这些绑定会重新生效。此操作无法撤销。",
+      bindingTitle: "子智能体权限",
+      bindingDescription:
+        "选择这个 Custom Agent 可以派遣哪些子智能体；服务端会强制执行该范围。",
+      allAllowed: "全部已启用子智能体",
+      noneAllowed: "不允许使用子智能体",
+      selectedAllowed: "仅允许选中的子智能体",
+      missing: "已缺失或不可用；取消勾选后移除",
+    },
     channels: {
       title: "渠道",
       description: "连接可在浏览器外向 DeerFlow 发送消息的即时通讯账号。",
@@ -814,6 +983,7 @@ export const zhCN: Translations = {
         auth: "授权",
         sandboxRuntime: "沙箱运行时",
         sandboxRuntimeInitContainer: "由 init container 提供",
+        sandboxRuntimeBroker: "由 broker sidecar 提供",
         sandboxRuntimeGatewayDownload: "由 Gateway 提供",
         sandboxRuntimeNotReady: "未就绪 —— 对话时 lark-cli 可能不可用",
         notInstalled: "尚未安装",
@@ -834,6 +1004,19 @@ export const zhCN: Translations = {
         requestPermissions: "申请新权限",
         alreadyConnected:
           "飞书已连接，无需重复授权。如果授权已过期，刷新状态后可重新连接。",
+        changeAppButton: "切换飞书 Bot",
+        changeAppTitle: "切换到其他飞书 App",
+        changeAppDescription:
+          "把你的 DeerFlow 账号指向另一个 Lark/飞书 App。只影响你自己的账号，不影响其他用户。",
+        changeAppIdLabel: "App ID",
+        changeAppSecretLabel: "App Secret",
+        changeAppAuthResetNote:
+          "切换时会撤销旧 App 的授权，随后需要授权新 App。",
+        changeAppSubmit: "切换 App",
+        changeAppReRegister: "在浏览器重新注册",
+        changeAppSwitched: "已切换飞书 App。请重新连接以授权新 App。",
+        brandFeishu: "飞书",
+        brandLark: "Lark",
         connectionStarted: "连接链接已打开",
         connectionReady: "连接准备已完成，正在打开授权链接",
         authStarted: "授权页已打开，DeerFlow 会自动检测授权结果。",

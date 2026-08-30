@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import threading
 from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
@@ -31,6 +32,7 @@ from pydantic import PrivateAttr
 from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
 
 from .deermem.config import DeerMemConfig
+from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
 from .deermem.core.llm import build_llm
 from .deermem.core.message_processing import (
     SIGNAL_NAMES,
@@ -132,6 +134,11 @@ class DeerMem(MemoryManager):
         # mirroring pre-abstraction `model_name: null`. Standalone (no factory) -> None.
         self._llm = self._config.host_llm if self._config.host_llm is not None else build_llm(self._config.model)
         self._updater = MemoryUpdater(self._config, self._storage, self._llm, prompts_dir=self._config.prompts_dir, callbacks=self.callbacks)
+        # Retrieval is derived data. The first search for a scope lazily
+        # rebuilds it; Gateway warm-up performs the full rebuild off-loop.
+        self._retrieval_lock = threading.RLock()
+        self._retrieval_warmed_scopes: set[tuple[str | None, str | None]] = set()
+        self._retrieval_fully_warmed = False
         # Validate the *global* explicit prompt templates at construction so a
         # misconfigured prompts_dir surfaces at startup rather than as a silent
         # dropped update. Per-agent overrides ({prompts_dir}/{agent}/*.yaml)
@@ -296,12 +303,18 @@ class DeerMem(MemoryManager):
     ) -> str:
         """Load memory and format it for injection (plain text, no wrap).
 
+        Middleware mode injects the selected agent's facts together with the
+        user-global summaries. Tool mode injects only those global summaries;
+        facts stay behind ``memory_search`` so they are not duplicated in the
+        prompt and a later retrieval result.
+
         Format parameters come from DeerMem's own ``DeerMemConfig`` (set at
         construction from ``backend_config``). The ``enabled``/
         ``injection_enabled`` gate and the ``<memory>`` wrapping stay at the
         call site (``_get_memory_context``); this returns only the body.
         """
-        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=_resolve_agent_name(agent_name), user_id=user_id))
+        injection_agent = None if self.mode == "tool" else _resolve_agent_name(agent_name)
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=injection_agent, user_id=user_id))
         return format_memory_for_injection(
             memory_data,
             max_tokens=self._config.max_injection_tokens,
@@ -319,39 +332,113 @@ class DeerMem(MemoryManager):
         agent_name: str | None = None,
         category: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Case-insensitive substring search over stored facts.
+        """Search through the configured retrieval adapter.
 
-        Stand-in for the planned BM25+vector+MMR retrieval
-        (``core/retrieval.py``): returns facts whose ``content`` contains the
-        query, ranked by confidence desc, capped at ``top_k``. ``category``
-        filters BEFORE the ``top_k`` slice so a category-scoped search is not
-        starved by higher-confidence facts in other categories. Sufficient for
-        the tool-driven memory mode; upgrade to semantic retrieval later
-        without changing call sites.
+        Retrieval errors never make canonical memory unavailable: the existing
+        case-insensitive substring path remains the last-resort fallback.
         """
         if not query or not query.strip() or top_k <= 0:
             return []
-        query_lower = query.strip().lower()
-        search_facts = getattr(self._storage, "search_facts", None)
         resolved_agent_name = _resolve_agent_name(agent_name)
-        scopes = [{"userId": user_id, "agentName": resolved_agent_name}]
-        indexed = (
-            search_facts(
-                query,
-                scopes=scopes,
-                top_k=top_k,
-                mode="hybrid",
-                filters={"category": category} if category else None,
-            )
-            if callable(search_facts)
-            else []
+        indexed = self._fts5_search(query, top_k=top_k, user_id=user_id, agent_name=resolved_agent_name, category=category)
+        results = indexed or self._substring_search(
+            query,
+            top_k=top_k,
+            user_id=user_id,
+            agent_name=resolved_agent_name,
+            category=category,
         )
+        if results and (self._config.fact_eviction_policy == EVICTION_POLICY_HYBRID_V1 or self._config.fact_eviction_shadow_enabled):
+            try:
+                self._storage.record_fact_accesses(
+                    [str(fact["id"]) for fact in results if fact.get("id")],
+                    agent_name=resolved_agent_name,
+                    user_id=user_id,
+                )
+            except Exception:
+                # Usage is an eviction hint, never canonical memory. A sidecar
+                # write failure must not make memory_search lose its results.
+                logger.warning("Failed to record memory-search access heat", exc_info=True)
+        return results
+
+    def _fts5_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        user_id: str | None,
+        agent_name: str | None,
+        category: str | None,
+    ) -> list[dict[str, Any]]:
+        """Return adapter results in the public fact shape (compatibility helper)."""
+        agent_name = _resolve_agent_name(agent_name)
+        search_facts = getattr(self._storage, "search_facts", None)
+        scopes = [{"userId": user_id, "agentName": agent_name}]
+        try:
+            self._ensure_retrieval_scopes(scopes)
+            indexed = (
+                search_facts(
+                    query,
+                    scopes=scopes,
+                    top_k=top_k,
+                    mode="hybrid",
+                    filters={"category": category} if category else None,
+                )
+                if callable(search_facts)
+                else []
+            )
+        except Exception:
+            logger.exception("Memory retrieval adapter failed; using substring fallback")
+            indexed = []
         if indexed:
             return [_compat_document({"facts": [result.get("fact", result)]})["facts"][0] for result in indexed]
-        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=resolved_agent_name, user_id=user_id))
+
+        return []
+
+    def _substring_search(
+        self,
+        query: str,
+        *,
+        top_k: int,
+        user_id: str | None,
+        agent_name: str | None,
+        category: str | None,
+    ) -> list[dict[str, Any]]:
+        query_lower = query.strip().lower()
+        memory_data = _call_backend(lambda: self._updater.get_memory_data(agent_name=agent_name, user_id=user_id))
         matched = [fact for fact in memory_data.get("facts", []) if isinstance(fact.get("content"), str) and query_lower in fact["content"].lower() and (category is None or fact.get("category") == category)]
         matched.sort(key=_coerce_source_confidence, reverse=True)
         return _compat_document({"facts": matched[:top_k]})["facts"]
+
+    def _ensure_retrieval_scopes(self, scopes: list[dict[str, str | None]]) -> None:
+        """Lazily rebuild every requested scope when warm-up was skipped."""
+        if not hasattr(self, "_retrieval_lock"):
+            self._retrieval_lock = threading.RLock()
+        if not hasattr(self, "_retrieval_warmed_scopes"):
+            self._retrieval_warmed_scopes = set()
+        if not hasattr(self, "_retrieval_fully_warmed"):
+            self._retrieval_fully_warmed = False
+        rebuild = getattr(self._storage, "rebuild_index", None)
+        if not callable(rebuild):
+            return
+        with self._retrieval_lock:
+            if self._retrieval_fully_warmed:
+                return
+            status = getattr(self._storage, "retrieval_status", lambda: {"configured": True})()
+            if not status.get("configured", True):
+                self._retrieval_warmed_scopes.update((scope.get("userId"), scope.get("agentName")) for scope in scopes)
+                return
+            for scope in scopes:
+                key = (scope.get("userId"), scope.get("agentName"))
+                if key in self._retrieval_warmed_scopes:
+                    continue
+                try:
+                    result = rebuild([scope])
+                except Exception:
+                    logger.exception("Failed to lazily rebuild memory retrieval index for scope %r", key)
+                    continue
+                if result.get("supported") and not result.get("fatal"):
+                    self._retrieval_warmed_scopes.add(key)
 
     # ── Manage ───────────────────────────────────────────────────────────
     def get_memory(
@@ -408,9 +495,13 @@ class DeerMem(MemoryManager):
         """
         return self._queue.flush_sync(timeout)
 
-    # ── Tier 3 hooks (override the base defaults; warm/reload/fact CRUD) ─
+    def close(self) -> None:
+        """Close derived retrieval resources after pending updates drain."""
+        self._storage.close()
+
+    # ── Tier 3 hooks (override the base defaults; warm/reload/fact CRUD) ──
     def warm(self) -> bool:
-        """Pre-warm DeerMem-specific resources (the tiktoken encoding cache).
+        """Pre-warm DeerMem's token-counting resources.
 
         Overrides the base tier-3 hook (default None = nothing to warm). The
         Gateway lifespan calls ``manager.warm()`` directly off the event loop;
@@ -423,6 +514,29 @@ class DeerMem(MemoryManager):
             logger.info("token_counting='char'; tiktoken not used, skipping warm-up")
             return True
         return warm_tiktoken_cache()
+
+    def warm_retrieval(self) -> bool:
+        """Rebuild the complete derived retrieval index before serving traffic."""
+        rebuild = getattr(self._storage, "rebuild_index", None)
+        if not callable(rebuild):
+            return True
+        try:
+            result = rebuild()
+            index_ok = not bool(result.get("fatal"))
+            failed = int(result.get("failed") or 0)
+            if failed and index_ok:
+                logger.warning(
+                    "Memory retrieval index rebuilt with %d fact(s) skipped",
+                    failed,
+                )
+            if index_ok:
+                with self._retrieval_lock:
+                    self._retrieval_fully_warmed = True
+                    self._retrieval_warmed_scopes.clear()
+            return index_ok
+        except Exception:
+            logger.exception("Failed to rebuild memory retrieval index during warm-up")
+            return False
 
     def reload_memory(
         self,

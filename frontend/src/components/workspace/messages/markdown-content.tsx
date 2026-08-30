@@ -16,8 +16,9 @@ import {
 import { type ClipboardSafeStreamdownProps } from "@/components/ai-elements/streamdown";
 import {
   preprocessStreamdownMarkdown,
+  rehypeStreamingListItems,
   streamdownPluginsWithoutRawHtml,
-  streamdownWordAnimation,
+  streamdownSmoothStreamingAnimation,
 } from "@/core/streamdown";
 import {
   SafeMessageResponse,
@@ -43,7 +44,8 @@ type StreamingCodeProps = ComponentProps<"code"> & {
 };
 
 const SMOOTH_REVEAL_MIN_DELTA = 80;
-const SMOOTH_REVEAL_MIN_CHARS_PER_FRAME = 8;
+const SMOOTH_REVEAL_CADENCE_MS = 50;
+const SMOOTH_REVEAL_MIN_CHARS_PER_COMMIT = 64;
 const SMOOTH_REVEAL_DURATION_MS = 300;
 
 const StreamingCodeBlockContext = createContext(false);
@@ -54,73 +56,61 @@ function useSmoothStreamingContent(content: string, isLoading: boolean) {
   const [displayContent, setDisplayContent] = useState(initialContent);
   const displayContentRef = useRef(initialContent);
   const targetContentRef = useRef(content);
-  const sawLoadingRef = useRef(isLoading);
-
-  useEffect(() => {
-    if (isLoading) {
-      sawLoadingRef.current = true;
-    }
-  }, [isLoading]);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const revealStartedAtRef = useRef<number | null>(null);
 
   useEffect(() => {
     targetContentRef.current = content;
 
     const current = displayContentRef.current;
-    const delta = content.length - current.length;
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     const shouldSmoothReveal =
-      delta >= SMOOTH_REVEAL_MIN_DELTA &&
+      content !== current &&
       content.startsWith(current) &&
-      (isLoading || sawLoadingRef.current);
+      !prefersReducedMotion &&
+      isLoading;
 
     if (!shouldSmoothReveal) {
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+      revealStartedAtRef.current = null;
       if (current !== content) {
         displayContentRef.current = content;
         setDisplayContent(content);
       }
-      if (!isLoading) {
-        sawLoadingRef.current = false;
-      }
       return;
     }
 
-    let cancelled = false;
-    let frame: number | null = null;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let generation = 0;
-    const startedAt = performance.now();
-    const startLength = current.length;
-
-    const tick = (now: number, scheduledGeneration: number) => {
-      if (cancelled || scheduledGeneration !== generation) {
-        return;
-      }
-      generation += 1;
-      if (frame !== null) {
-        cancelAnimationFrame(frame);
-        frame = null;
-      }
-      if (timer !== null) {
-        clearTimeout(timer);
-        timer = null;
-      }
-
+    const tick = () => {
+      timerRef.current = null;
       const target = targetContentRef.current;
       const latest = displayContentRef.current;
       if (!target.startsWith(latest) || latest.length >= target.length) {
-        if (!isLoading) {
-          sawLoadingRef.current = false;
-        }
+        revealStartedAtRef.current = null;
         return;
       }
 
-      const progress = Math.min(
-        1,
-        (now - startedAt) / SMOOTH_REVEAL_DURATION_MS,
+      const startedAt = revealStartedAtRef.current ?? performance.now();
+      revealStartedAtRef.current = startedAt;
+      const remainingDuration = Math.max(
+        SMOOTH_REVEAL_CADENCE_MS,
+        SMOOTH_REVEAL_DURATION_MS - (performance.now() - startedAt),
       );
-      const elapsedLength = startLength + Math.ceil(delta * progress);
-      const nextLength = Math.max(
-        latest.length + SMOOTH_REVEAL_MIN_CHARS_PER_FRAME,
-        elapsedLength,
+      const remainingCommits = Math.max(
+        1,
+        Math.ceil(remainingDuration / SMOOTH_REVEAL_CADENCE_MS),
+      );
+      const nextLength = Math.min(
+        target.length,
+        latest.length +
+          Math.max(
+            SMOOTH_REVEAL_MIN_CHARS_PER_COMMIT,
+            Math.ceil((target.length - latest.length) / remainingCommits),
+          ),
       );
       const next = target.slice(0, nextLength);
       displayContentRef.current = next;
@@ -128,32 +118,28 @@ function useSmoothStreamingContent(content: string, isLoading: boolean) {
 
       if (next.length < target.length) {
         scheduleTick();
-      } else if (!isLoading) {
-        sawLoadingRef.current = false;
+      } else {
+        revealStartedAtRef.current = null;
       }
     };
 
     const scheduleTick = () => {
-      const scheduledGeneration = ++generation;
-      frame = requestAnimationFrame((now) => tick(now, scheduledGeneration));
-      timer = setTimeout(
-        () => tick(performance.now(), scheduledGeneration),
-        50,
-      );
+      if (timerRef.current !== null) return;
+      revealStartedAtRef.current ??= performance.now();
+      timerRef.current = setTimeout(tick, SMOOTH_REVEAL_CADENCE_MS);
     };
 
     scheduleTick();
+  }, [content, isLoading]);
+
+  useEffect(() => {
     return () => {
-      cancelled = true;
-      generation += 1;
-      if (frame !== null) {
-        cancelAnimationFrame(frame);
-      }
-      if (timer !== null) {
-        clearTimeout(timer);
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
       }
     };
-  }, [content, isLoading]);
+  }, []);
 
   return {
     content: displayContent,
@@ -241,8 +227,13 @@ export function MarkdownContent({
   const effectiveRehypePlugins = useMemo(() => {
     const base = streamdownPluginsWithoutRawHtml.rehypePlugins ?? [];
     const extra = rehypePlugins ?? [];
-    return [...base, ...extra] as ClipboardSafeStreamdownProps["rehypePlugins"];
-  }, [rehypePlugins]);
+    const streaming = isStreamingRender ? [rehypeStreamingListItems] : [];
+    return [
+      ...base,
+      ...extra,
+      ...streaming,
+    ] as ClipboardSafeStreamdownProps["rehypePlugins"];
+  }, [isStreamingRender, rehypePlugins]);
   const components = useMemo(() => {
     const baseComponents = {
       a: createMarkdownLinkComponent(),
@@ -267,7 +258,7 @@ export function MarkdownContent({
       rehypePlugins={effectiveRehypePlugins}
       components={toStreamdownComponents(components)}
       parseIncompleteMarkdown={isLoading}
-      animated={streamdownWordAnimation}
+      animated={streamdownSmoothStreamingAnimation}
       isAnimating={isLoading}
     >
       {normalizedContent}

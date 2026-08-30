@@ -1,7 +1,7 @@
 """Regression anchor: serving artifacts must not block the event loop.
 
-``get_artifact`` probes the artifact path (``exists`` / ``is_file``), reads
-text content (``read_text``), sniffs text-ness (``is_text_file_by_content``),
+``get_artifact`` probes the artifact path (``exists`` / ``is_file``), sniffs
+text-ness (``is_text_file_by_content``),
 and extracts ``.skill`` archive members — all blocking filesystem IO. The
 handler offloads each branch's IO via ``asyncio.to_thread``; if any regresses
 back onto the event loop, the strict Blockbuster gate raises ``BlockingError``
@@ -26,19 +26,23 @@ sit at module top so any import-time IO runs at collection, outside the gate.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
 from starlette.responses import FileResponse
 
+import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.path_utils import resolve_thread_virtual_path
-from app.gateway.routers.artifacts import get_artifact
+from app.gateway.routers.artifacts import ArtifactUpdateRequest, get_artifact, update_artifact
 
 pytestmark = pytest.mark.asyncio
 
 # The undecorated coroutine (``require_permission`` uses ``functools.wraps``).
 _get_artifact = get_artifact.__wrapped__
+_update_artifact = update_artifact.__wrapped__
 
 
 async def _seed(tmp_path: Path, monkeypatch, thread_id: str, virtual_path: str) -> Path:
@@ -61,8 +65,10 @@ async def test_get_artifact_text_does_not_block_event_loop(tmp_path: Path, monke
 
     resp = await _get_artifact("t1", vpath, request=None, download=False)
 
+    assert isinstance(resp, FileResponse)
     assert resp.status_code == 200
-    assert resp.body == b"hello world"
+    assert Path(resp.path) == target
+    assert resp.headers.get("content-disposition", "").startswith("inline;")
 
 
 async def test_get_artifact_binary_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
@@ -96,3 +102,33 @@ async def test_get_artifact_skill_archive_member_does_not_block_event_loop(tmp_p
 
     assert resp.status_code == 200
     assert b"# demo skill" in resp.body
+
+
+async def test_update_artifact_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+    vpath = "/mnt/user-data/outputs/notes.txt"
+    target = await _seed(tmp_path, monkeypatch, "t1", vpath)
+    original = b"hello world"
+    await asyncio.to_thread(target.write_bytes, original)
+
+    @asynccontextmanager
+    async def allow_write(*_args, **_kwargs):
+        yield
+
+    class MountedProvider:
+        uses_thread_data_mounts = True
+
+    monkeypatch.setattr(artifacts_router, "reserve_artifact_write", allow_write)
+    monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: MountedProvider())
+
+    result = await _update_artifact(
+        "t1",
+        vpath,
+        ArtifactUpdateRequest(
+            content="updated",
+            expected_sha256=hashlib.sha256(original).hexdigest(),
+        ),
+        request=None,
+    )
+
+    assert result.sha256 == hashlib.sha256(b"updated").hexdigest()
+    assert await asyncio.to_thread(target.read_bytes) == b"updated"

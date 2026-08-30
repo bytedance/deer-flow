@@ -10,12 +10,12 @@ class TestBuildVolumes:
 
     # ── hostPath mode (default) ────────────────────────────────────────
 
-    def test_hostpath_without_legacy_returns_three_volumes(self, provisioner_module):
-        """hostPath mode omits legacy volume unless the backend requests it."""
+    def test_hostpath_uses_three_projection_volumes(self, provisioner_module):
+        """hostPath mode always mounts stable public/custom/legacy views."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
         volumes = provisioner_module._build_volumes("thread-1")
-        assert len(volumes) == 3
+        assert len(volumes) == 4
 
     def test_hostpath_skills_public_volume(self, provisioner_module):
         """First skills volume mounts public/ subdirectory."""
@@ -24,7 +24,7 @@ class TestBuildVolumes:
         pub = volumes[0]
         assert pub.name == "skills-public"
         assert pub.host_path is not None
-        assert pub.host_path.path.endswith("/public")
+        assert pub.host_path.path.endswith("/skills_view/public")
         assert pub.host_path.type == "Directory"
         assert pub.persistent_volume_claim is None
 
@@ -35,11 +35,11 @@ class TestBuildVolumes:
         custom = volumes[1]
         assert custom.name == "skills-custom"
         assert custom.host_path is not None
-        assert "users/user-7/skills/custom" in custom.host_path.path
-        assert custom.host_path.type == "DirectoryOrCreate"
+        assert "users/user-7/skills_view/custom" in custom.host_path.path
+        assert custom.host_path.type == "Directory"
 
     def test_hostpath_skills_legacy_volume(self, provisioner_module):
-        """Legacy global-custom directory is mounted only when requested."""
+        """Legacy projection is per-user and stable regardless of visibility."""
         provisioner_module.SKILLS_PVC_NAME = ""
         volumes = provisioner_module._build_volumes(
             "thread-1",
@@ -48,16 +48,17 @@ class TestBuildVolumes:
         legacy = volumes[2]
         assert legacy.name == "skills-legacy"
         assert legacy.host_path is not None
-        assert legacy.host_path.path.endswith("/custom")
+        assert "users/default/skills_view/legacy" in legacy.host_path.path
         assert legacy.host_path.type == "Directory"
 
-    def test_hostpath_without_legacy_has_no_legacy_volume(self, provisioner_module):
-        """Fresh installs should not require a missing global legacy directory."""
+    def test_hostpath_without_legacy_flag_still_has_empty_capable_mount(self, provisioner_module):
+        """Visibility changes update contents without recreating the Pod."""
         provisioner_module.SKILLS_PVC_NAME = ""
         volumes = provisioner_module._build_volumes("thread-1")
         assert [volume.name for volume in volumes] == [
             "skills-public",
             "skills-custom",
+            "skills-legacy",
             "user-data",
         ]
 
@@ -129,8 +130,8 @@ class TestBuildVolumes:
 
         volumes = provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
 
-        # skills-public + skills-custom + user-data (3 base) + 1 extra volume.
-        assert len(volumes) == 4
+        # Three skill projections + user-data (4 base) + 1 extra volume.
+        assert len(volumes) == 5
         extra_vol = volumes[-1]
         assert extra_vol.name == "extra-0"
         assert extra_vol.host_path.path == "/state/users/alice/integrations/lark-cli/config"
@@ -151,8 +152,8 @@ class TestBuildVolumes:
 
         volumes = provisioner_module._build_volumes("thread-1", extra_mounts=extra_mounts)
 
-        # skills-public + skills-custom + user-data (3 base) + 1 extra volume.
-        assert len(volumes) == 4
+        # Three skill projections + user-data (4 base) + 1 extra volume.
+        assert len(volumes) == 5
         extra_vol = volumes[-1]
         assert extra_vol.name == "extra-0"
         assert extra_vol.persistent_volume_claim is not None
@@ -184,12 +185,12 @@ class TestBuildVolumeMounts:
 
     # ── hostPath mode ──────────────────────────────────────────────────
 
-    def test_hostpath_without_legacy_returns_three_mounts(self, provisioner_module):
-        """hostPath mode omits legacy mount unless the backend requests it."""
+    def test_hostpath_uses_three_projection_mounts(self, provisioner_module):
+        """hostPath mode always mounts stable public/custom/legacy views."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
         mounts = provisioner_module._build_volume_mounts("thread-1")
-        assert len(mounts) == 3
+        assert len(mounts) == 4
 
     def test_hostpath_skills_public_mount(self, provisioner_module):
         """Public skills mount at /mnt/skills/public, read-only."""
@@ -218,13 +219,14 @@ class TestBuildVolumeMounts:
         assert mounts[2].mount_path == "/mnt/skills/legacy"
         assert mounts[2].read_only is True
 
-    def test_hostpath_without_legacy_has_no_legacy_mount(self, provisioner_module):
-        """Users with custom skills should not see hidden legacy content in the sandbox."""
+    def test_hostpath_without_legacy_flag_still_has_legacy_mount(self, provisioner_module):
+        """Hidden legacy content is represented by an empty mounted view."""
         provisioner_module.SKILLS_PVC_NAME = ""
         mounts = provisioner_module._build_volume_mounts("thread-1")
         assert [mount.name for mount in mounts] == [
             "skills-public",
             "skills-custom",
+            "skills-legacy",
             "user-data",
         ]
 
@@ -353,19 +355,19 @@ class TestBuildVolumeMounts:
 class TestBuildPodVolumes:
     """Integration: _build_pod should wire volumes and mounts correctly."""
 
-    def test_pod_hostpath_without_legacy_has_three_volumes(self, provisioner_module):
-        """hostPath Pod spec should omit legacy volume by default."""
+    def test_pod_hostpath_has_four_volumes(self, provisioner_module):
+        """hostPath Pod spec includes all three stable projection categories."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
-        assert len(pod.spec.volumes) == 3
+        assert len(pod.spec.volumes) == 4
 
-    def test_pod_hostpath_without_legacy_has_three_mounts(self, provisioner_module):
-        """hostPath container should omit legacy mount by default."""
+    def test_pod_hostpath_has_four_mounts(self, provisioner_module):
+        """hostPath container includes all three stable projection categories."""
         provisioner_module.SKILLS_PVC_NAME = ""
         provisioner_module.USERDATA_PVC_NAME = ""
         pod = provisioner_module._build_pod("sandbox-1", "thread-1")
-        assert len(pod.spec.containers[0].volume_mounts) == 3
+        assert len(pod.spec.containers[0].volume_mounts) == 4
 
     def test_pod_hostpath_with_legacy_has_four_volumes(self, provisioner_module):
         """Legacy volume should be present when the backend requests it."""
@@ -438,8 +440,8 @@ class TestBuildPodVolumes:
             extra_mounts=extra_mounts,
         )
 
-        # skills-public + skills-custom + user-data (3 base) + 2 extra mounts.
-        assert len(pod.spec.volumes) == 5
+        # Three skill projections + user-data (4 base) + 2 extra mounts.
+        assert len(pod.spec.volumes) == 6
         mount_paths = {mount.mount_path for mount in pod.spec.containers[0].volume_mounts}
         assert "/mnt/integrations/lark-cli/config" in mount_paths
         assert "/mnt/integrations/lark-cli/data" in mount_paths
@@ -536,6 +538,11 @@ class TestLarkCliInitContainer:
             provisioner_module.ExtraMount(
                 host_path="/state/users/alice/integrations/lark-cli/config",
                 container_path="/mnt/integrations/lark-cli/config",
+                read_only=True,
+            ),
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config/locks",
+                container_path="/mnt/integrations/lark-cli/config/locks",
                 read_only=False,
             ),
             provisioner_module.ExtraMount(
@@ -553,11 +560,170 @@ class TestLarkCliInitContainer:
             provision_lark_cli_runtime=True,
         )
 
-        # The credential config mount stays; the hostPath runtime extra mount is
-        # replaced by the emptyDir supplied by the init container (so the runtime
-        # path is not backed by an extra-* hostPath volume).
+        # The read-only credential config and nested writable locks mounts stay;
+        # the hostPath runtime extra mount is replaced by the emptyDir supplied
+        # by the init container (so the runtime path is not backed by an extra-*
+        # hostPath volume).
         runtime_mounts = [m for m in pod.spec.containers[0].volume_mounts if m.mount_path == "/mnt/integrations/lark-cli/runtime"]
         assert len(runtime_mounts) == 1
         assert runtime_mounts[0].name == provisioner_module.LARK_CLI_RUNTIME_VOLUME_NAME
-        mount_paths = {m.mount_path for m in pod.spec.containers[0].volume_mounts}
-        assert "/mnt/integrations/lark-cli/config" in mount_paths
+        sandbox_mount_order = [m.mount_path for m in pod.spec.containers[0].volume_mounts]
+        sandbox_mounts = {m.mount_path: m for m in pod.spec.containers[0].volume_mounts}
+        assert sandbox_mounts["/mnt/integrations/lark-cli/config"].read_only is True
+        assert sandbox_mounts["/mnt/integrations/lark-cli/config/locks"].read_only is False
+        assert sandbox_mount_order.index("/mnt/integrations/lark-cli/config") < sandbox_mount_order.index("/mnt/integrations/lark-cli/config/locks")
+
+
+class TestLarkCliBrokerSidecar:
+    """Broker sidecar provisioning of the sandbox lark-cli runtime (Pattern B)."""
+
+    @staticmethod
+    def _credential_mounts(provisioner_module):
+        return [
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config",
+                container_path="/mnt/integrations/lark-cli/config",
+                read_only=True,
+            ),
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/config/locks",
+                container_path="/mnt/integrations/lark-cli/config/locks",
+                read_only=False,
+            ),
+            provisioner_module.ExtraMount(
+                host_path="/state/users/alice/integrations/lark-cli/data",
+                container_path="/mnt/integrations/lark-cli/data",
+                read_only=False,
+            ),
+        ]
+
+    def test_no_sidecar_when_broker_image_unset(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_BROKER_IMAGE = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_broker=True,
+        )
+        container_names = {c.name for c in pod.spec.containers}
+        assert "lark-cli-broker" not in container_names
+
+    def test_no_sidecar_when_flag_disabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            provision_lark_cli_broker=False,
+        )
+        container_names = {c.name for c in pod.spec.containers}
+        assert "lark-cli-broker" not in container_names
+
+    def test_broker_sidecar_and_shim_when_enabled(self, provisioner_module):
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=self._credential_mounts(provisioner_module),
+            provision_lark_cli_broker=True,
+        )
+
+        # Shim init container from the broker image.
+        assert pod.spec.init_containers is not None
+        assert len(pod.spec.init_containers) == 1
+        init = pod.spec.init_containers[0]
+        assert init.name == "lark-cli-shim-init"
+        assert init.image == "deer-flow/lark-cli-broker:v1.0.65"
+        assert init.args == ["install-shim", provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH]
+
+        # Broker sidecar alongside the sandbox container.
+        sidecars = [c for c in pod.spec.containers if c.name == "lark-cli-broker"]
+        assert len(sidecars) == 1
+        sidecar = sidecars[0]
+        assert sidecar.image == "deer-flow/lark-cli-broker:v1.0.65"
+        assert sidecar.args == ["serve"]
+        # Credentials mounted into the sidecar only.
+        sidecar_mount_order = [m.mount_path for m in sidecar.volume_mounts]
+        sidecar_mounts = {m.mount_path: m for m in sidecar.volume_mounts}
+        sidecar_paths = set(sidecar_mounts)
+        assert provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH in sidecar_paths
+        assert provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH in sidecar_paths
+        assert provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH in sidecar_paths
+        assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH].read_only is True
+        assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH].read_only is False
+        assert sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH) < sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH)
+
+        # Sandbox container: runtime shim mount + broker URL env, NO config/data.
+        sandbox = pod.spec.containers[0]
+        sandbox_paths = {m.mount_path for m in sandbox.volume_mounts}
+        assert provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH in sandbox_paths
+        assert "/mnt/integrations/lark-cli/config" not in sandbox_paths
+        assert "/mnt/integrations/lark-cli/config/locks" not in sandbox_paths
+        assert "/mnt/integrations/lark-cli/data" not in sandbox_paths
+        env = {e.name: e.value for e in (sandbox.env or [])}
+        assert env.get("DEERFLOW_LARK_BROKER_URL") == provisioner_module.LARK_BROKER_URL
+
+    def test_broker_supersedes_init_container(self, provisioner_module):
+        """Both images set + both flags on → broker wins (shim init, sidecar)."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_INIT_IMAGE = "deer-flow/lark-cli-init:v1.0.65"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=self._credential_mounts(provisioner_module),
+            provision_lark_cli_runtime=True,
+            provision_lark_cli_broker=True,
+        )
+        assert pod.spec.init_containers[0].name == "lark-cli-shim-init"
+        assert any(c.name == "lark-cli-broker" for c in pod.spec.containers)
+
+    def test_broker_sidecar_forwards_subcommand_denylist_when_configured(self, provisioner_module):
+        """When DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS is set on the provisioner,
+        it is forwarded to the broker sidecar so it can refuse secret-dump
+        subcommands (issue #4338 hardening)."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        provisioner_module.LARK_CLI_BROKER_DENY_SUBCOMMANDS = "config show, auth token"
+        try:
+            pod = provisioner_module._build_pod(
+                "sandbox-1",
+                "thread-1",
+                user_id="alice",
+                extra_mounts=self._credential_mounts(provisioner_module),
+                provision_lark_cli_broker=True,
+            )
+            sidecar = next(c for c in pod.spec.containers if c.name == "lark-cli-broker")
+            env = {e.name: e.value for e in (sidecar.env or [])}
+            assert env.get("DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS") == "config show, auth token"
+        finally:
+            provisioner_module.LARK_CLI_BROKER_DENY_SUBCOMMANDS = ""
+
+    def test_broker_sidecar_omits_denylist_env_when_unset(self, provisioner_module):
+        """Empty denylist ⇒ no env var (nothing blocked, no behavior change)."""
+        provisioner_module.SKILLS_PVC_NAME = ""
+        provisioner_module.USERDATA_PVC_NAME = ""
+        provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+        provisioner_module.LARK_CLI_BROKER_IMAGE = "deer-flow/lark-cli-broker:v1.0.65"
+        provisioner_module.LARK_CLI_BROKER_DENY_SUBCOMMANDS = ""
+        pod = provisioner_module._build_pod(
+            "sandbox-1",
+            "thread-1",
+            user_id="alice",
+            extra_mounts=self._credential_mounts(provisioner_module),
+            provision_lark_cli_broker=True,
+        )
+        sidecar = next(c for c in pod.spec.containers if c.name == "lark-cli-broker")
+        env = {e.name for e in (sidecar.env or [])}
+        assert "DEERFLOW_LARK_BROKER_DENY_SUBCOMMANDS" not in env

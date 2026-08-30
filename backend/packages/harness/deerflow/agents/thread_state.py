@@ -17,8 +17,19 @@ from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 import deerflow.checkpoint_patches as _checkpoint_patches  # noqa: F401 - import-time saver fixes
 from deerflow.agents.goal_state import GoalState
-from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.config.database_config import DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY, CheckpointChannelMode
 from deerflow.subagents.status_contract import SUBAGENT_STATUS_VALUES
+
+
+def _resolve_snapshot_frequency(snapshot_frequency: int | None) -> int:
+    """Resolve the effective cadence: explicit value, else process-frozen,
+    else default. Imported lazily — ``deerflow.runtime.__init__`` reaches this
+    module via ``checkpoint_state``, so a top-level import would cycle."""
+    if snapshot_frequency is not None:
+        return snapshot_frequency
+    from deerflow.runtime.checkpoint_mode import resolve_checkpoint_snapshot_frequency
+
+    return resolve_checkpoint_snapshot_frequency()
 
 
 class SandboxState(TypedDict):
@@ -29,6 +40,13 @@ class ThreadDataState(TypedDict):
     workspace_path: NotRequired[str | None]
     uploads_path: NotRequired[str | None]
     outputs_path: NotRequired[str | None]
+
+
+class BackgroundTaskState(TypedDict):
+    task_id: str
+    task_name: str
+    status: str
+    updated_at: str
 
 
 class ViewedImageData(TypedDict):
@@ -159,6 +177,9 @@ class DelegationEntry(TypedDict):
     # turn_capped / loop_capped. The status stays completed/failed; this field
     # is the additive signal that distinguishes a capped run from a clean one.
     stop_reason: NotRequired[str]
+    # RFC #4651 PR2: parent-side citation-check verdict (advisory execution
+    # evidence), stamped at task write-back; absent on legacy history.
+    receipt_verdict: NotRequired[dict]
     created_at: str
 
 
@@ -263,6 +284,7 @@ class ThreadState(AgentState):
     delegations: Annotated[list[DelegationEntry], merge_delegations]
     skill_context: Annotated[list[SkillEntry], merge_skill_context]
     summary_text: NotRequired[str | None]
+    background_tasks: NotRequired[list[BackgroundTaskState]]
 
 
 def _normalize_messages(value: Any) -> list[AnyMessage]:
@@ -352,10 +374,15 @@ def merge_message_writes(state: list[AnyMessage], writes: Sequence[Any]) -> list
     return [message for message in messages if message is not None]
 
 
-DELTA_MESSAGES_FIELD = Annotated[
-    list[AnyMessage],
-    DeltaChannel(merge_message_writes, snapshot_frequency=1000),
-]
+def delta_messages_field(snapshot_frequency: int = DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY) -> Any:
+    """Messages field annotation with a ``DeltaChannel`` at the given cadence."""
+    return Annotated[
+        list[AnyMessage],
+        DeltaChannel(merge_message_writes, snapshot_frequency=snapshot_frequency),
+    ]
+
+
+DELTA_MESSAGES_FIELD = delta_messages_field()
 
 
 class DeltaThreadState(ThreadState):
@@ -377,26 +404,48 @@ THREAD_STATE_REDUCER_FIELDS = frozenset(
 )
 
 
-def get_thread_state_schema(mode: CheckpointChannelMode) -> type:
-    return DeltaThreadState if mode == "delta" else ThreadState
+def get_thread_state_schema(mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> type:
+    if mode != "delta":
+        return ThreadState
+    return _delta_thread_state_schema(_resolve_snapshot_frequency(snapshot_frequency))
 
 
 @cache
-def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode) -> type:
+def _delta_thread_state_schema(snapshot_frequency: int) -> type:
+    """Delta thread schema keyed by cadence; the default keeps the static
+    ``DeltaThreadState`` identity so existing type checks keep holding."""
+    if snapshot_frequency == DEFAULT_CHECKPOINT_SNAPSHOT_FREQUENCY:
+        return DeltaThreadState
+    annotations = get_type_hints(ThreadState, include_extras=True)
+    annotations["messages"] = delta_messages_field(snapshot_frequency)
+    return TypedDict(
+        f"DeltaThreadState_f{snapshot_frequency}",
+        annotations,
+        total=getattr(ThreadState, "__total__", True),
+    )
+
+
+def adapt_state_schema_for_mode(schema: type, mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> type:
     if mode == "full":
         return schema
+    return _adapt_state_schema_for_delta(schema, _resolve_snapshot_frequency(snapshot_frequency))
+
+
+@cache
+def _adapt_state_schema_for_delta(schema: type, snapshot_frequency: int) -> type:
     annotations = get_type_hints(schema, include_extras=True)
-    annotations["messages"] = DELTA_MESSAGES_FIELD
+    annotations["messages"] = delta_messages_field(snapshot_frequency)
     return TypedDict(
-        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}",
+        f"Delta{schema.__module__.replace('.', '_')}_{schema.__name__}_f{snapshot_frequency}",
         annotations,
         total=getattr(schema, "__total__", True),
     )
 
 
-def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode) -> list[Any]:
+def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: CheckpointChannelMode, snapshot_frequency: int | None = None) -> list[Any]:
     if mode == "full":
         return list(middleware)
+    resolved_frequency = _resolve_snapshot_frequency(snapshot_frequency)
     normalized = []
     for item in middleware:
         schema = getattr(item, "state_schema", None)
@@ -404,6 +453,6 @@ def normalize_middleware_state_schemas(middleware: Sequence[Any], mode: Checkpoi
             normalized.append(item)
             continue
         adapted = copy.copy(item)
-        adapted.state_schema = adapt_state_schema_for_mode(schema, mode)
+        adapted.state_schema = adapt_state_schema_for_mode(schema, mode, resolved_frequency)
         normalized.append(adapted)
     return normalized

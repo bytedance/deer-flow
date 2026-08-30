@@ -15,6 +15,7 @@ from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     InboundMessage,
     InboundMessageType,
+    InboundReservation,
     MessageBus,
     OutboundMessage,
     ResolvedAttachment,
@@ -24,6 +25,7 @@ from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
 logger = logging.getLogger(__name__)
 
 TELEGRAM_MAX_MESSAGE_LENGTH = 4096
+TELEGRAM_MAX_RICH_MESSAGE_LENGTH = 32768
 # Telegram's hosted Bot API documents this as 20 MB (decimal bytes).
 TELEGRAM_MAX_INBOUND_FILE_BYTES = 20_000_000
 # Keep Telegram cleanup inside the Gateway's five-second shutdown-hook budget.
@@ -39,6 +41,12 @@ MAX_TRACKED_STREAM_MESSAGES = 256
 
 # Indirection so tests can patch the clock without touching the global time module.
 _monotonic = time.monotonic
+
+
+def _load_telegram_input_file(path, filename: str):
+    from telegram import InputFile
+
+    return InputFile(path.read_bytes(), filename=filename)
 
 
 class TelegramChannel(Channel):
@@ -90,6 +98,7 @@ class TelegramChannel(Channel):
             return
 
         self._main_loop = asyncio.get_event_loop()
+        self._open_threadsafe_future_intake()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
 
@@ -127,6 +136,7 @@ class TelegramChannel(Channel):
     async def stop(self) -> None:
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
+        await self._close_and_drain_threadsafe_futures()
         shutdown_loop = asyncio.get_running_loop()
         deadline = shutdown_loop.time() + TELEGRAM_SHUTDOWN_TIMEOUT_SECONDS
         telegram_loop = self._tg_loop
@@ -188,10 +198,23 @@ class TelegramChannel(Channel):
 
         state = self._stream_messages.pop(key, None)
         if state is not None:
+            if self._can_send_rich(msg.text) and await self._edit_rich_message(chat_id, state["message_id"], msg.text):
+                self._last_bot_message[msg.chat_id] = state["message_id"]
+                return
             await self._finalize_stream_message(chat_id, msg.chat_id, state, msg.text)
             return
 
-        await self._send_new_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+        if self._can_send_rich(msg.text):
+            try:
+                message_id = await self._send_new_rich_message(chat_id, msg.chat_id, msg.text, _max_retries=_max_retries)
+            except Exception as exc:
+                logger.warning("[Telegram] Rich Message send failed in chat=%s; falling back to plain text: %s", chat_id, exc)
+                message_id = None
+            if message_id is not None:
+                return
+
+        for chunk in self._split_message(msg.text):
+            await self._send_new_message(chat_id, msg.chat_id, chunk, _max_retries=_max_retries)
 
     async def _send_stream_update(self, chat_id: int, key: str, text: str, reply_to: int | None = None) -> None:
         """Edit the in-flight streamed message with accumulated text.
@@ -285,6 +308,51 @@ class TelegramChannel(Channel):
                 return False
         return False
 
+    def _can_send_rich(self, text: str) -> bool:
+        return bool(self.config.get("rich_messages")) and 0 < len(text) <= TELEGRAM_MAX_RICH_MESSAGE_LENGTH
+
+    async def _edit_rich_message(self, chat_id: int, message_id: int, text: str) -> bool:
+        """Replace a streamed preview with a persistent Telegram Rich Message."""
+        from telegram.error import BadRequest, EndPointNotFound
+
+        bot = self._application.bot
+        data = {"chat_id": chat_id, "message_id": message_id, "rich_message": {"markdown": text}}
+        for attempt in range(2):
+            try:
+                await bot.do_api_request("editMessageText", api_kwargs=data)
+                return True
+            except Exception as exc:
+                if self._is_retry_after(exc) and attempt == 0:
+                    await asyncio.sleep(self._retry_after_seconds(exc))
+                    continue
+                if isinstance(exc, (BadRequest, EndPointNotFound)):
+                    logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
+                    return False
+                logger.warning("[Telegram] final rich edit failed in chat=%s: %s", chat_id, exc)
+                return False
+        return False
+
+    async def _send_new_rich_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int) -> int | None:
+        """Send raw agent Markdown through Bot API 10.1 Rich Messages."""
+        from telegram.error import BadRequest, EndPointNotFound
+
+        bot = self._application.bot
+
+        async def send_message() -> int | None:
+            try:
+                result = await bot.do_api_request(
+                    "sendRichMessage",
+                    api_kwargs={"chat_id": chat_id, "rich_message": {"markdown": text}},
+                )
+            except (BadRequest, EndPointNotFound) as exc:
+                logger.warning("[Telegram] Rich Message rejected in chat=%s; falling back to plain text: %s", chat_id, exc)
+                return None
+            message_id = int(result["message_id"])
+            self._last_bot_message[chat_key] = message_id
+            return message_id
+
+        return await self._send_with_retry(send_message, max_retries=_max_retries, log_prefix="[Telegram]")
+
     async def _send_new_message(self, chat_id: int, chat_key: str, text: str, *, _max_retries: int = 3) -> int | None:
         """Send a fresh message with retry/backoff. Returns the sent message_id."""
         kwargs: dict[str, Any] = {"chat_id": chat_id, "text": text}
@@ -326,21 +394,17 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(msg.chat_id)
 
         try:
+            input_file = await asyncio.to_thread(_load_telegram_input_file, attachment.actual_path, attachment.filename)
             if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
-                with open(attachment.actual_path, "rb") as f:
-                    kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": f}
-                    if reply_to:
-                        kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_photo(**kwargs)
+                kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": input_file}
+                if reply_to:
+                    kwargs["reply_to_message_id"] = reply_to
+                sent = await bot.send_photo(**kwargs)
             else:
-                from telegram import InputFile
-
-                with open(attachment.actual_path, "rb") as f:
-                    input_file = InputFile(f, filename=attachment.filename)
-                    kwargs = {"chat_id": chat_id, "document": input_file}
-                    if reply_to:
-                        kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_document(**kwargs)
+                kwargs = {"chat_id": chat_id, "document": input_file}
+                if reply_to:
+                    kwargs["reply_to_message_id"] = reply_to
+                sent = await bot.send_document(**kwargs)
 
             self._last_bot_message[msg.chat_id] = sent.message_id
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
@@ -660,13 +724,18 @@ class TelegramChannel(Channel):
             return username
         return str(getattr(user, "id", ""))
 
-    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+    async def _bind_connection_from_start_token_on_main(
+        self,
+        update,
+        state_token: str,
+    ) -> bool:
+        """Run the bind flow on the main event loop (SQLAlchemy session is bound there)."""
         if self._connection_repo is None or not state_token:
             return False
 
         state = await self._connection_repo.consume_oauth_state(provider="telegram", state=state_token)
         if state is None:
-            await update.message.reply_text("Telegram connection link is invalid or expired.")
+            await self._run_on_telegram_loop(update.message.reply_text("Telegram connection link is invalid or expired."))
             return True
 
         owner_user_id = state["owner_user_id"]
@@ -687,8 +756,29 @@ class TelegramChannel(Channel):
             status="connected",
         )
         logger.info("[Telegram] bound chat=%s user=%s to DeerFlow user=%s connection=%s", chat_id, user_id, owner_user_id, connection["id"])
-        await update.message.reply_text("Telegram connected to DeerFlow.")
+        await self._run_on_telegram_loop(update.message.reply_text("Telegram connected to DeerFlow."))
         return True
+
+    async def _bind_connection_from_start_token(self, update, state_token: str) -> bool:
+        """Dispatch the bind flow to the main loop if repo is configured."""
+        if self._connection_repo is None or not state_token:
+            return False
+
+        if self._main_loop and self._main_loop.is_running():
+            msg_id = getattr(getattr(update, "message", None), "message_id", None)
+            scheduled = self._submit_threadsafe_coroutine(
+                self._bind_connection_from_start_token_on_main(update, state_token),
+                self._main_loop,
+                name="bind_connection",
+                msg_id=msg_id,
+            )
+            if not scheduled:
+                logger.info("[Telegram] main loop stopped before channel connection bind could be scheduled")
+            # Schedule counts as handled so /start does not fall through to help
+            # while SQL runs on the main loop.
+            return scheduled
+        logger.warning("[Telegram] main loop not running, cannot bind channel connection")
+        return False
 
     async def _attach_connection_identity(self, inbound: InboundMessage) -> InboundMessage:
         return await attach_connection_identity(
@@ -738,9 +828,41 @@ class TelegramChannel(Channel):
             return
         await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
 
-    async def _process_incoming_with_reply(self, chat_id: str, msg_id: int, inbound: InboundMessage) -> None:
-        await self._send_running_reply(chat_id, msg_id)
-        await self.bus.publish_inbound(inbound)
+    async def _process_incoming_with_reply(
+        self,
+        chat_id: str,
+        msg_id: int,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        try:
+            await self._send_running_reply(chat_id, msg_id)
+            if reservation is None:
+                await self.bus.publish_inbound(inbound)
+            else:
+                self._commit_reserved_inbound(reservation, inbound)
+        finally:
+            if reservation is not None:
+                reservation.release()
+
+    async def _process_incoming_with_identity(
+        self,
+        chat_id: str,
+        msg_id: int,
+        inbound: InboundMessage,
+        *,
+        reservation: InboundReservation | None = None,
+    ) -> None:
+        """Attach connection identity and dispatch on the main event loop.
+
+        This must run on the main loop because _attach_connection_identity
+        uses a SQLAlchemy session factory bound to that loop.  Calling it
+        from the Telegram polling thread's own loop raises
+        ``RuntimeError: got Future attached to a different loop``.
+        """
+        inbound = await self._attach_connection_identity(inbound)
+        await self._process_incoming_with_reply(chat_id, msg_id, inbound, reservation=reservation)
 
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
@@ -772,11 +894,29 @@ class TelegramChannel(Channel):
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
-        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
-            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
+            try:
+                scheduled = self._submit_threadsafe_coroutine(
+                    self._process_incoming_with_identity(
+                        chat_id,
+                        update.message.message_id,
+                        inbound,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                    name="process_incoming_with_identity",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
+                )
+                if not scheduled:
+                    logger.info("[Telegram] main loop stopped before reserved command could be scheduled")
+            except Exception:
+                reservation.release()
+                raise
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")
 
@@ -824,10 +964,28 @@ class TelegramChannel(Channel):
             metadata={"message_id": msg_id},
         )
         inbound.topic_id = topic_id
-        inbound = await self._attach_connection_identity(inbound)
 
         if self._main_loop and self._main_loop.is_running():
-            fut = asyncio.run_coroutine_threadsafe(self._process_incoming_with_reply(chat_id, update.message.message_id, inbound), self._main_loop)
-            fut.add_done_callback(lambda f: self._log_future_error(f, "process_incoming_with_reply", update.message.message_id))
+            reservation = self._reserve_inbound(inbound)
+            if reservation is None:
+                return
+            try:
+                scheduled = self._submit_threadsafe_coroutine(
+                    self._process_incoming_with_identity(
+                        chat_id,
+                        update.message.message_id,
+                        inbound,
+                        reservation=reservation,
+                    ),
+                    self._main_loop,
+                    name="process_incoming_with_identity",
+                    msg_id=update.message.message_id,
+                    reservation=reservation,
+                )
+                if not scheduled:
+                    logger.info("[Telegram] main loop stopped before reserved inbound could be scheduled")
+            except Exception:
+                reservation.release()
+                raise
         else:
             logger.warning("[Telegram] Main loop not running. Cannot publish inbound message.")

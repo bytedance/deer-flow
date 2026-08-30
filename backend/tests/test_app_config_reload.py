@@ -119,6 +119,70 @@ def test_checkpoint_channel_mode_rejects_unknown_value() -> None:
         DatabaseConfig(checkpoint_channel_mode="auto")
 
 
+def test_checkpoint_delta_defaults_to_production_cadence() -> None:
+    assert DatabaseConfig().checkpoint_delta.snapshot_frequency == 10
+
+
+def test_checkpoint_delta_accepts_custom_snapshot_frequency() -> None:
+    assert DatabaseConfig(checkpoint_delta={"snapshot_frequency": 250}).checkpoint_delta.snapshot_frequency == 250
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_checkpoint_delta_rejects_non_positive_snapshot_frequency(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta={"snapshot_frequency": value})
+
+
+def test_legacy_snapshot_frequency_maps_to_nested_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(checkpoint_delta_snapshot_frequency=1000)
+    assert config.checkpoint_delta.snapshot_frequency == 1000
+    assert "checkpoint_delta_snapshot_frequency is deprecated" in caplog.text
+
+
+def test_nested_snapshot_frequency_wins_over_legacy_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(
+            checkpoint_delta_snapshot_frequency=1000,
+            checkpoint_delta={"snapshot_frequency": 250},
+        )
+    assert config.checkpoint_delta.snapshot_frequency == 250
+    assert "the nested key wins" in caplog.text
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_legacy_snapshot_frequency_rejects_non_positive_value(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta_snapshot_frequency=value)
+
+
+def test_checkpoint_graph_cache_defaults() -> None:
+    assert DatabaseConfig().checkpoint_graph_cache.accessor_graph_max == 64
+
+
+def test_checkpoint_graph_cache_accepts_custom_cap() -> None:
+    assert DatabaseConfig(checkpoint_graph_cache={"accessor_graph_max": 8}).checkpoint_graph_cache.accessor_graph_max == 8
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_checkpoint_graph_cache_rejects_non_positive_cap(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_graph_cache={"accessor_graph_max": value})
+
+
+def test_resolve_checkpoint_graph_cache_max_tolerates_stub_configs() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+
+    assert resolve_checkpoint_graph_cache_max(None, "accessor_graph_max", 64) == 64
+    assert resolve_checkpoint_graph_cache_max(SimpleNamespace(), "accessor_graph_max", 64) == 64
+    assert resolve_checkpoint_graph_cache_max(MagicMock(), "accessor_graph_max", 64) == 64
+    stub = SimpleNamespace(checkpoint_graph_cache=SimpleNamespace(accessor_graph_max=3))
+    assert resolve_checkpoint_graph_cache_max(stub, "accessor_graph_max", 64) == 3
+
+
 def test_config_example_does_not_enable_empty_extensions_block_by_default():
     config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
 
@@ -578,6 +642,56 @@ def test_get_app_config_keeps_persistence_runtime_singletons_when_checkpointer_u
 
         assert get_checkpointer() is initial_checkpointer
         assert get_store() is initial_store
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_app_config_does_not_reset_persistence_singletons_when_database_changes(tmp_path, monkeypatch):
+    # ``database`` is a restart-required field: the ORM engine is built once at
+    # startup and never rebuilt on a config.yaml edit. Resetting only the sync
+    # checkpointer/store singletons on a live ``postgres_schema`` change would
+    # half-migrate the deployment (new checkpoint/store tables in the new schema,
+    # ORM rows still in the old one). So a ``database`` change must NOT trigger a
+    # partial reset -- the operator must restart.
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config_with_sections(
+        config_path,
+        {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/db", "postgres_schema": "schema_a"}},
+    )
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    reset_calls = {"checkpointer": 0, "store": 0}
+
+    def _reset_checkpointer() -> None:
+        reset_calls["checkpointer"] += 1
+
+    def _reset_store() -> None:
+        reset_calls["store"] += 1
+
+    monkeypatch.setattr("deerflow.runtime.checkpointer.reset_checkpointer", _reset_checkpointer)
+    monkeypatch.setattr("deerflow.runtime.store.reset_store", _reset_store)
+
+    try:
+        get_app_config()
+        reset_calls["checkpointer"] = 0
+        reset_calls["store"] = 0
+
+        _write_config_with_sections(
+            config_path,
+            {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/db", "postgres_schema": "schema_b"}},
+        )
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        get_app_config()
+
+        assert get_checkpointer_config() is None
+        assert reset_calls == {"checkpointer": 0, "store": 0}
     finally:
         _reset_config_singletons()
 

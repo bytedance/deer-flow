@@ -281,6 +281,50 @@ def test_mode_selects_expected_state_schema() -> None:
     assert any(isinstance(item, DeltaChannel) for item in message_hint.__metadata__)
 
 
+def _delta_channel(schema: type) -> DeltaChannel:
+    hint = get_type_hints(schema, include_extras=True)["messages"]
+    return next(item for item in hint.__metadata__ if isinstance(item, DeltaChannel))
+
+
+def test_snapshot_frequency_parametrizes_delta_schema() -> None:
+    schema = get_thread_state_schema("delta", 250)
+    assert _delta_channel(schema).snapshot_frequency == 250
+    # Cached per frequency, and the default keeps DeltaThreadState identity.
+    assert get_thread_state_schema("delta", 250) is schema
+    assert get_thread_state_schema("delta") is DeltaThreadState
+    assert get_thread_state_schema("delta", 10) is DeltaThreadState
+
+
+def test_frozen_snapshot_frequency_drives_default_delta_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.runtime import checkpoint_mode
+
+    monkeypatch.setattr(checkpoint_mode, "_frozen_checkpoint_snapshot_frequency", 500)
+    assert _delta_channel(get_thread_state_schema("delta")).snapshot_frequency == 500
+    # An explicit argument always wins over the frozen value.
+    assert _delta_channel(get_thread_state_schema("delta", 250)).snapshot_frequency == 250
+
+
+def test_delta_adaptation_cache_keys_on_snapshot_frequency() -> None:
+    slow = adapt_state_schema_for_mode(AgentState, "delta", 250)
+    fast = adapt_state_schema_for_mode(AgentState, "delta", 500)
+    assert slow is not fast
+    assert _delta_channel(slow).snapshot_frequency == 250
+    assert _delta_channel(fast).snapshot_frequency == 500
+    assert adapt_state_schema_for_mode(AgentState, "delta", 250) is slow
+
+
+def test_compiled_delta_graph_bakes_configured_snapshot_frequency() -> None:
+    graph = create_agent(
+        model=_FakeModel(responses=[AIMessage(id="response", content="done")]),
+        tools=None,
+        middleware=[],
+        state_schema=get_thread_state_schema("delta", 2),
+    )
+    channel = graph.channels["messages"]
+    assert isinstance(channel, DeltaChannel)
+    assert channel.snapshot_frequency == 2
+
+
 def test_delta_adaptation_replaces_agent_state_message_reducer() -> None:
     adapted = adapt_state_schema_for_mode(AgentState, "delta")
     hint = get_type_hints(adapted, include_extras=True)["messages"]

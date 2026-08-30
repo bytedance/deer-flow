@@ -14,6 +14,7 @@ from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     clamp_subagent_concurrency,
     clamp_total_subagents_per_run,
+    effective_subagent_concurrency,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -305,11 +306,13 @@ def _build_available_subagents_description(available_names: list[str], bash_avai
     Mirrors Codex's pattern where agent_type_description is dynamically generated
     from all registered roles, so the LLM knows about every available type.
     """
-    # Built-in descriptions (kept for backward compatibility with existing prompt quality)
+    # Compact model-visible descriptions for the built-in roles.
     builtin_descriptions = {
-        "general-purpose": "For ANY non-trivial task - web research, code exploration, file operations, analysis, etc.",
+        "general-purpose": "For bounded work with clear delegation benefit from specialist capability, context isolation, or independent parallel execution.",
         "bash": (
-            "For command execution (git, build, test, deploy operations)" if bash_available else "Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
+            "For bounded shell workflows with clear context-isolation or independent-parallel benefit. Routine git, build, test, or deploy operations are not sufficient reason to delegate."
+            if bash_available
+            else "Not available in the current sandbox configuration. Use direct file/web tools or switch to AioSandboxProvider for isolated shell access."
         ),
     }
 
@@ -341,6 +344,8 @@ def _build_subagent_section(
     max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     *,
     app_config: AppConfig | None = None,
+    allowed_subagents: list[str] | None = None,
+    batch_enabled: bool = False,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -353,148 +358,169 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    if allowed_subagents is None:
+        available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    else:
+        available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    if not available_names:
+        return ""
     bash_available = "bash" in available_names
+
+    # The verification guidance must follow verification.receipts_enabled: with
+    # receipts disabled, subagent reports carry no receipt citations and the
+    # delegation ledger has no citation line, so telling the lead to expect one
+    # would make legitimate results look uncorroborated.
+    verification_cfg = getattr(app_config, "verification", None) if app_config is not None else None
+    receipts_enabled = getattr(verification_cfg, "receipts_enabled", True)
+    if receipts_enabled:
+        single_verify_step = (
+            "6. Verify the result before synthesizing: the delegation ledger's citation line is execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."
+        )
+        parallel_verify_step = "6. Verify returned results: ledger citation lines are execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."
+    else:
+        single_verify_step = (
+            "6. Verify the result before synthesizing: receipt citations are disabled in this configuration "
+            "(verification.receipts_enabled=false), so reports carry no ledger citation line; rely on verifiable "
+            "handles and spot-check them for load-bearing claims."
+        )
+        parallel_verify_step = (
+            "6. Verify returned results: receipt citations are disabled in this configuration "
+            "(verification.receipts_enabled=false), so reports carry no ledger citation lines; rely on verifiable "
+            "handles and spot-check them for load-bearing claims."
+        )
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
     available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
     direct_tool_examples = "bash, ls, read_file, web_search, etc." if bash_available else "ls, read_file, web_search, etc."
     direct_execution_example = (
-        '# User asks: "Run the tests"\n# Thinking: Cannot decompose into parallel sub-tasks\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
+        '# User asks: "Run the tests"\n# Thinking: Direct bash is cheaper than delegation\n# → Execute directly\n\nbash("npm test")  # Direct execution, not task()'
         if bash_available
         else '# User asks: "Read the README"\n# Thinking: Single straightforward file read\n# → Execute directly\n\nread_file("/mnt/user-data/workspace/README.md")  # Direct execution, not task()'
     )
+    if n == 1:
+        expected_benefit = "specialist capability + context isolation"
+        parallel_dispatch_guidance = ""
+        valid_benefits = """- **Specialist capability**: A subagent has tools, skills, a model, or domain instructions that materially improve the result.
+- **Context isolation**: A bounded, unusually context-heavy investigation would otherwise displace important lead-agent context.
+
+With a per-response limit of 1, delegate only for material specialist or context-isolation benefit. Parallel dispatch cannot reduce wall-clock latency in this configuration."""
+        limit_action_guidance = """- When the per-response limit is reached, verify and synthesize the returned result or continue directly."""
+        followup_guidance = """- After any delegated result, re-evaluate whether the remaining work still has specialist or context-isolation benefit. Do not chain delegations merely to work around the per-response limit."""
+        workflow = f"""1. Establish the cheapest credible direct-execution path.
+2. Include all negative signals in expected cost.
+3. Compare specialist or context-isolation benefit with all listed costs.
+4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
+5. Launch at most 1 call and stay within the remaining run allowance.
+{single_verify_step}"""
+        examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+- Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
+- Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
+- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+        multi_batch_example = ""
+    else:
+        expected_benefit = "parallel wall-clock savings + specialist capability + context isolation"
+        parallel_dispatch_guidance = """**Hard vetoes for parallel dispatch - do not launch these scopes concurrently:**
+- **Inter-agent dependencies**: One delegated task needs another delegated task's result. Keep the dependency chain together instead of splitting it across parallel subagents.
+- **Unsafe shared state**: Tasks may touch overlapping files, shared mutable state, or external side effects without disjoint ownership.
+
+A bounded sequential chain may still be delegated to one subagent when specialist capability or context isolation clearly outweighs delegation overhead.
+"""
+        valid_benefits = """- **Parallel latency**: Two or more independent, non-overlapping tasks can run concurrently and materially reduce wall-clock time.
+- **Specialist capability**: A subagent has tools, skills, a model, or domain instructions that materially improve the result.
+- **Context isolation**: A bounded, unusually context-heavy investigation would otherwise displace important lead-agent context.
+
+A single subagent is justified only by material specialist or context-isolation benefit. Parallelism requires independent scopes with no output dependency. **Use the fewest subagents needed** to realize the benefit."""
+        limit_action_guidance = """- Never start a batch that would exceed either limit. When a limit is reached, synthesize existing results or continue directly."""
+        followup_guidance = (
+            "- **Re-evaluate the remaining work after every batch.** Later batches cannot overlap earlier batches, but can still deliver "
+            "material within-batch parallel savings. Recompute benefit and cost instead of automatically continuing or stopping."
+        )
+        workflow = f"""1. Establish the cheapest credible direct-execution path.
+2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
+3. Compare expected benefit with all listed costs.
+4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
+5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
+{parallel_verify_step}
+7. Synthesize. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
+        examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
+- Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
+- Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
+- Run a routine test, build, or git command directly. Use one Bash subagent only when a bounded shell workflow has material context-isolation benefit."""
+        multi_batch_example = f"""**Multi-batch example (limit {n}):** For independent scopes that exceed the per-response limit:
+- **Batch 1: launch up to {n} independent scopes.**
+- Wait for the batch, then re-evaluate the remaining work and net benefit.
+- **Batch 2** may launch the next scopes if it still wins; otherwise continue directly.
+- **Synthesize all retained results** at the end.
+"""
+    durable_batch_guidance = ""
+    if batch_enabled:
+        durable_batch_guidance = """
+## Explicit durable batch mode
+
+`batch_task` is a separate execution mode for a large collection of independent,
+idempotent or read-only items. It returns a durable batch id immediately and does
+not consume the ordinary `task` per-run total. Never infer batch mode from item
+count and never emulate it by repeatedly calling `task`.
+
+- Every item must be self-contained and must not depend on another item's output.
+- Give every item a stable unique key; retries reuse that key as idempotency identity.
+- Set total, live-window, and running concurrency separately. A high total never
+  implies that all items become live or run at once.
+- Use `batch_status` for compact progress and `cancel_batch` for cancellation.
+- Do not wait for or paste all item results into this run. The Web UI and results
+  export API own progress and result inspection.
+"""
     return f"""<subagent_system>
-**🚀 SUBAGENT MODE ACTIVE - DECOMPOSE, DELEGATE, SYNTHESIZE**
+## Subagent Routing: Delegate Only for Clear Net Benefit
 
-You are running with subagent capabilities enabled. Your role is to be a **task orchestrator**:
-1. **DECOMPOSE**: Break complex tasks into parallel sub-tasks
-2. **DELEGATE**: Launch multiple subagents simultaneously using parallel `task` calls
-3. **SYNTHESIZE**: Collect and integrate results into a coherent answer
+Subagents are optional. **Default to direct execution.** Do not delegate merely because a task is complex, has many steps, produces verbose output, or touches a large repository.
 
-**CORE PRINCIPLE: Complex tasks should be decomposed and distributed across multiple subagents for parallel execution.**
+**DELEGATION CHECK (required before every `task` call):**
 
-**⛔ HARD CONCURRENCY LIMIT: MAXIMUM {n} `task` CALLS PER RESPONSE. THIS IS NOT OPTIONAL.**
-- Each response, you may include **at most {n}** `task` tool calls. Any excess calls are **silently discarded** by the system — you will lose that work.
-- **Before launching subagents, you MUST count your sub-tasks in your thinking:**
-  - If count ≤ {n}: Launch all in this response.
-  - If count > {n}: **Pick the {n} most important/foundational sub-tasks for this turn.** Save the rest for the next turn.
-- **HARD TOTAL LIMIT: MAXIMUM {total} `task` CALLS PER RUN. THIS IS NOT OPTIONAL.**
-  - Before each batch, count `task` delegations already launched for the current user request/run.
-  - "Work already delegated" may include older thread history; reuse it when helpful, but do not count older runs against this run's {total} total.
-  - Do not launch a new batch if it would exceed {total} total subagents for this run.
-  - When the total limit is reached, synthesize with existing results or continue directly with ordinary tools.
-- **Multi-batch execution** (for >{n} sub-tasks):
-  - Turn 1: Launch sub-tasks 1-{n} in parallel → wait for results
-  - Turn 2: Launch next batch in parallel → wait for results
-  - ... continue until all sub-tasks are complete
-  - Final turn: Synthesize ALL results into a coherent answer
-- **Example thinking pattern**: "I identified 6 sub-tasks. Since the limit is {n} per turn, I will launch the first {n} now, and the rest in the next turn."
+Expected benefit = {expected_benefit}
+
+Expected cost = delegation and startup overhead + duplicate context and repository discovery + coordination and synthesis + state-conflict risk + side-effect risk
+
+**Delegate only when the expected benefit is clearly greater than the expected cost.** When uncertain, execute directly.
+
+{parallel_dispatch_guidance}
+
+**Delegation costs and negative signals - include these in the net-benefit comparison:**
+- **Duplicate discovery**: Each subagent would need to read the same repository area or reconstruct context the lead agent already has.
+- **Cheap direct path**: The lead agent can finish with a small number of tool calls or less work than delegation plus synthesis.
+- **Coordination burden**: The lead agent would spend substantial work reconciling or verifying subagent results.
+
+**Clarify first**: Requirements that need user input must be resolved before direct execution or delegation.
+
+**Valid sources of delegation benefit:**
+{valid_benefits}
+
+**HARD LIMITS - NON-NEGOTIABLE:**
+- **MAXIMUM {n} `task` CALLS PER RESPONSE - NEVER emit more. VIOLATION IS A HARD ERROR.** Excess calls are discarded and their work is lost.
+- **MAXIMUM {total} `task` CALLS PER RUN - NEVER exceed it. VIOLATION IS A HARD ERROR.** Count only delegations for the current user request/run; older thread history does not consume this run's allowance.
+{limit_action_guidance}
+{followup_guidance}
 
 **Available Subagents:**
 {available_subagents}
 
-**Your Orchestration Strategy:**
+**Delegation workflow:**
+{workflow}
 
-✅ **DECOMPOSE + PARALLEL EXECUTION (Preferred Approach):**
+**Examples:**
+{examples}
 
-For complex queries, break them down into focused sub-tasks and execute in parallel batches (max {n} per turn):
+{multi_batch_example}
 
-**Example 1: "Why is Tencent's stock price declining?" (3 sub-tasks → 1 batch)**
-→ Turn 1: Launch 3 subagents in parallel:
-- Subagent 1: Recent financial reports, earnings data, and revenue trends
-- Subagent 2: Negative news, controversies, and regulatory issues
-- Subagent 3: Industry trends, competitor performance, and market sentiment
-→ Turn 2: Synthesize results
-
-**Example 2: "Compare 5 cloud providers" (5 sub-tasks → multi-batch)**
-→ Turn 1: Launch {n} subagents in parallel (first batch)
-→ Turn 2: Launch remaining subagents in parallel
-→ Final turn: Synthesize ALL results into comprehensive comparison
-
-**Example 3: "Refactor the authentication system"**
-→ Turn 1: Launch 3 subagents in parallel:
-- Subagent 1: Analyze current auth implementation and technical debt
-- Subagent 2: Research best practices and security patterns
-- Subagent 3: Review related tests, documentation, and vulnerabilities
-→ Turn 2: Synthesize results
-
-✅ **USE Parallel Subagents (max {n} per turn) when:**
-- **Complex research questions**: Requires multiple information sources or perspectives
-- **Multi-aspect analysis**: Task has several independent dimensions to explore
-- **Large codebases**: Need to analyze different parts simultaneously
-- **Comprehensive investigations**: Questions requiring thorough coverage from multiple angles
-
-❌ **DO NOT use subagents (execute directly) when:**
-- **Task cannot be decomposed**: If you can't break it into 2+ meaningful parallel sub-tasks, execute directly
-- **Ultra-simple actions**: Read one file, quick edits, single commands
-- **Need immediate clarification**: Must ask user before proceeding
-- **Meta conversation**: Questions about conversation history
-- **Sequential dependencies**: Each step depends on previous results (do steps yourself sequentially)
-
-**CRITICAL WORKFLOW** (STRICTLY follow this before EVERY action):
-1. **COUNT**: In your thinking, list all sub-tasks and count them explicitly: "I have N sub-tasks"
-2. **PLAN BATCHES**: If N > {n}, explicitly plan which sub-tasks go in which batch:
-   - "Batch 1 (this turn): first {n} sub-tasks"
-   - "Batch 2 (next turn): next batch of sub-tasks"
-3. **EXECUTE**: Launch ONLY the current batch (max {n} `task` calls). Do NOT launch sub-tasks from future batches.
-4. **REPEAT**: After results return, launch the next batch. Continue until all batches complete.
-5. **SYNTHESIZE**: After ALL batches are done, synthesize all results.
-6. **Cannot decompose** → Execute directly using available tools ({direct_tool_examples})
-
-**⛔ VIOLATION: Launching more than {n} `task` calls in a single response is a HARD ERROR. The system WILL discard excess calls and you WILL lose work. Always batch.**
-
-**Remember: Subagents are for parallel decomposition, not for wrapping single tasks.**
-
-**How It Works:**
-- The task tool runs subagents asynchronously in the background
-- The backend automatically polls for completion (you don't need to poll)
-- The tool call will block until the subagent completes its work
-- Once complete, the result is returned to you directly
-
-**Usage Example 1 - Single Batch (≤{n} sub-tasks):**
-
-```python
-# User asks: "Why is Tencent's stock price declining?"
-# Thinking: 3 sub-tasks → fits in 1 batch
-
-# Turn 1: Launch 3 subagents in parallel
-task(description="Tencent financial data", prompt="...", subagent_type="general-purpose")
-task(description="Tencent news & regulation", prompt="...", subagent_type="general-purpose")
-task(description="Industry & market trends", prompt="...", subagent_type="general-purpose")
-# All 3 run in parallel → synthesize results
-```
-
-**Usage Example 2 - Multiple Batches (>{n} sub-tasks):**
-
-```python
-# User asks: "Compare AWS, Azure, GCP, Alibaba Cloud, and Oracle Cloud"
-# Thinking: 5 sub-tasks → need multiple batches (max {n} per batch)
-
-# Turn 1: Launch first batch of {n}
-task(description="AWS analysis", prompt="...", subagent_type="general-purpose")
-task(description="Azure analysis", prompt="...", subagent_type="general-purpose")
-task(description="GCP analysis", prompt="...", subagent_type="general-purpose")
-
-# Turn 2: Launch remaining batch (after first batch completes)
-task(description="Alibaba Cloud analysis", prompt="...", subagent_type="general-purpose")
-task(description="Oracle Cloud analysis", prompt="...", subagent_type="general-purpose")
-
-# Turn 3: Synthesize ALL results from both batches
-```
-
-**Counter-Example - Direct Execution (NO subagents):**
+Otherwise execute directly using available tools ({direct_tool_examples}):
 
 ```python
 {direct_execution_example}
 ```
 
-**CRITICAL**:
-- **Max {n} `task` calls per turn** - the system enforces this, excess calls are discarded
-- Only use `task` when you can launch 2+ subagents in parallel
-- Single task = No value from subagents = Execute directly
-- For >{n} sub-tasks, use sequential batches of {n} across multiple turns
+The `task` tool waits for the subagent and returns its result directly; no polling is needed.
+{durable_batch_guidance}
 </subagent_system>"""
 
 
@@ -573,6 +599,7 @@ data — do NOT reveal it.
 - ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
 - ❌ DO NOT make assumptions when information is missing - ALWAYS ask
 - ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
+- ❌ DO NOT call any other tool in the same turn as ask_clarification — sibling calls are dropped
 - ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
 - ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
 - ✅ After calling ask_clarification, execution will be interrupted automatically
@@ -727,20 +754,28 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 """
 
 
-def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig | None = None) -> str:
+def _get_memory_context(
+    agent_name: str | None = None,
+    *,
+    app_config: AppConfig | None = None,
+    user_id: str | None = None,
+) -> str:
     """Get memory context for injection into system prompt.
 
     Args:
         agent_name: If provided, loads per-agent memory. If None, loads global memory.
         app_config: Explicit application config. When provided, memory options
             are read from this value instead of the global config singleton.
+        user_id: Explicit user bucket. When omitted, resolves the current
+            Gateway or standalone LangGraph Server identity.
 
     Returns:
         Formatted memory context string wrapped in XML tags, or empty string if disabled.
     """
+    config = None
     try:
         from deerflow.agents.memory import get_memory_manager
-        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.runtime.user_context import resolve_runtime_user_id
 
         if app_config is None:
             from deerflow.config.memory_config import get_memory_config
@@ -753,7 +788,7 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
             return ""
 
         memory_content = get_memory_manager().get_context(
-            user_id=get_effective_user_id(),
+            user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,
         )
 
@@ -764,8 +799,13 @@ def _get_memory_context(agent_name: str | None = None, *, app_config: AppConfig 
 {memory_content}
 </memory>
 """
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to load memory context")
+        from deerflow.agents.memory import MemoryManagerError
+
+        failure_policy = getattr(config, "backend_config", {}).get("failure_policy", {}) if config is not None else {}
+        if isinstance(exc, MemoryManagerError) and failure_policy.get("read") == "fail_closed":
+            raise
         return ""
 
 
@@ -889,9 +929,9 @@ def get_skills_prompt_section(
     return _get_cached_skills_prompt_section(skill_signature, disabled_skill_signature, available_key, container_base_path, skill_evolution_section)
 
 
-def get_agent_soul(agent_name: str | None) -> str:
+def get_agent_soul(agent_name: str | None, *, user_id: str | None = None) -> str:
     # Append SOUL.md (agent personality) if present
-    soul = load_agent_soul(agent_name)
+    soul = load_agent_soul(agent_name, user_id=user_id)
     if soul:
         # SOUL.md is agent-editable (setup_agent / update_agent persist it) and is
         # rendered into the <soul> block of the lead-agent system prompt. Escape it
@@ -994,8 +1034,8 @@ def _build_memory_tool_section(*, app_config: AppConfig | None = None) -> str:
         return ""
 
     return """<memory_tool_system>
-Memory is running in tool mode. Use the injected <memory> block as current context, and use the memory tools to keep durable user memory accurate:
-- Call `memory_search` before relying on memory that may be absent, stale, or too broad for the injected context.
+Memory is running in tool mode. When present, the injected <memory> block contains only global user and history summaries; agent facts are not injected automatically. Use the memory tools to keep durable user memory accurate:
+- Call `memory_search` whenever prior preferences, constraints, corrections, or durable context may be relevant. Do not assume an absent fact does not exist until you have searched with an appropriate query.
 - Call `memory_add` only for stable facts useful in future sessions: explicit user preferences, corrections, personal/work context, or durable project context.
 - Call `memory_update` when an existing fact is outdated or imprecise; prefer updating over adding a near-duplicate.
 - Call `memory_delete` only when a fact is clearly wrong or no longer relevant.
@@ -1014,33 +1054,65 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    allowed_subagents: list[str] | None = None,
+    subagent_execution_capacity: int | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = clamp_subagent_concurrency(max_concurrent_subagents)
+    n = (
+        effective_subagent_concurrency(
+            max_concurrent_subagents,
+            app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
+        if app_config is not None
+        else clamp_subagent_concurrency(
+            max_concurrent_subagents,
+            execution_capacity=subagent_execution_capacity,
+        )
+    )
     total = max_total_subagents
     if total is None:
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
-    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
+    if subagent_enabled:
+        from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+
+        subagent_section = _build_subagent_section(
+            n,
+            total,
+            app_config=app_config,
+            allowed_subagents=allowed_subagents,
+            batch_enabled=is_subagent_batch_runtime_available(),
+        )
+    else:
+        subagent_section = ""
 
     # Add subagent reminder to critical_reminders if enabled
+    reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"
     subagent_reminder = (
-        "- **Orchestrator Mode**: You are a task orchestrator - decompose complex tasks into parallel sub-tasks. "
-        f"**HARD LIMITS: max {n} `task` calls per response, max {total} per run.** "
-        f"If >{n} sub-tasks, split into sequential batches of ≤{n} without exceeding {total} total. Synthesize after batches complete.\n"
+        f"- **Benefit-Based Delegation**: Default to direct execution. Use `task` only when expected benefit from {reminder_benefits} "
+        "clearly exceeds delegation, duplicate-discovery, synthesis, conflict, and side-effect costs. "
+        f"Use the fewest subagents needed. HARD LIMITS ARE NON-NEGOTIABLE: max {n} `task` calls per response, max {total} per run; excess calls are discarded and their work is lost.\n"
         if subagent_enabled
         else ""
     )
 
     # Add subagent thinking guidance if enabled
-    subagent_thinking = (
-        "- **DECOMPOSITION CHECK: Can this task be broken into 2+ parallel sub-tasks? If YES, COUNT them. "
-        f"If count > {n}, you MUST plan batches of ≤{n} and only launch the FIRST batch now. "
-        f"NEVER launch more than {n} `task` calls in one response or {total} total in this run.**\n"
-        if subagent_enabled
-        else ""
-    )
+    if subagent_enabled and n == 1:
+        subagent_thinking = (
+            "- **DELEGATION CHECK: Default to direct execution; complexity alone is not a reason to delegate. Before each `task` call, "
+            "require clear positive net benefit from specialist capability or context isolation. "
+            f"Never exceed {n} `task` call in one response or {total} total in this run.**\n"
+        )
+    elif subagent_enabled:
+        subagent_thinking = (
+            "- **DELEGATION CHECK: Default to direct execution; complexity alone is not a reason to delegate. Before each `task` call, "
+            "require clear positive net benefit; before parallel calls, rule out inter-agent dependencies and overlapping state or side effects. "
+            f"If delegating, use the fewest agents needed and never exceed {n} `task` calls in one response or {total} total in this run.**\n"
+        )
+    else:
+        subagent_thinking = ""
 
     # Get skills section (deferred discovery when skill_names is provided)
     skills_section = get_skills_prompt_section(
@@ -1074,7 +1146,7 @@ def apply_prompt_template(
     # identical across users and sessions for maximum prefix-cache reuse.
     return SYSTEM_PROMPT_TEMPLATE.format(
         agent_name=agent_name or "DeerFlow 2.0",
-        soul=get_agent_soul(agent_name),
+        soul=get_agent_soul(agent_name, user_id=user_id),
         self_update_section=_build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,

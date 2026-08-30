@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import LeaseRenewal, RunIdempotencyConflict, RunStore, StatusFinalization
 
 
 class MemoryRunStore(RunStore):
@@ -50,8 +50,10 @@ class MemoryRunStore(RunStore):
         created_at=None,
         owner_worker_id=None,
         lease_expires_at=None,
+        idempotency_key=None,
     ):
         now = datetime.now(UTC).isoformat()
+        existing = self._runs.get(run_id)
         self._runs[run_id] = {
             "run_id": run_id,
             "thread_id": thread_id,
@@ -69,6 +71,11 @@ class MemoryRunStore(RunStore):
             "updated_at": now,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "idempotency_key": idempotency_key,
+            # ``put`` is an idempotent snapshot write. Preserve a cancellation
+            # request that may have raced a retry of an earlier snapshot.
+            "cancel_action": existing.get("cancel_action") if existing else None,
+            "cancel_requested_at": existing.get("cancel_requested_at") if existing else None,
         }
         self._index_run(run_id, thread_id)
 
@@ -104,6 +111,22 @@ class MemoryRunStore(RunStore):
             if isinstance(source, str) and source:
                 sources.add(source)
         return sources
+
+    async def list_edit_regenerate_runs(self, thread_id, *, user_id=None):
+        run_ids = self._runs_by_thread.get(thread_id) or ()
+        results = []
+        for run_id in run_ids:
+            run = self._runs.get(run_id)
+            if run is None:
+                continue
+            if user_id is not None and run.get("user_id") != user_id:
+                continue
+            metadata = run.get("metadata") or {}
+            source = metadata.get("regenerate_from_run_id")
+            if metadata.get("replay_kind") == "edit" and isinstance(source, str) and source:
+                results.append(run)
+        results.sort(key=lambda r: r["created_at"])
+        return results
 
     async def get_many_by_thread(self, thread_id, run_ids, *, user_id=None):
         thread_run_ids = self._runs_by_thread.get(thread_id) or ()
@@ -238,6 +261,66 @@ class MemoryRunStore(RunStore):
         run["updated_at"] = datetime.now(UTC).isoformat()
         return True
 
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        # Delegate through ``update_lease`` so lightweight subclasses and tests
+        # that override the legacy primitive keep the same behavior.
+        renewed = await self.update_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+        if not renewed:
+            return LeaseRenewal(renewed=False)
+        run = self._runs.get(run_id)
+        return LeaseRenewal(
+            renewed=True,
+            cancel_action=run.get("cancel_action") if run is not None else None,
+        )
+
+    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+        if action not in ("interrupt", "rollback"):
+            raise ValueError(f"Unsupported cancellation action: {action}")
+        run = self._runs.get(run_id)
+        if run is None or run["status"] not in ("pending", "running"):
+            return None
+        if run.get("cancel_action") is None:
+            run["cancel_action"] = action
+            run["cancel_requested_at"] = datetime.now(UTC).isoformat()
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return run["cancel_action"]
+
+    async def finalize_if_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        run = self._runs.get(run_id)
+        if run is None:
+            return StatusFinalization(finalized=False)
+        if run.get("cancel_action") is not None:
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=run["cancel_action"],
+            )
+        if run["status"] not in ("pending", "running"):
+            return StatusFinalization(finalized=False)
+        run["status"] = status
+        if error is not None:
+            run["error"] = error
+        if stop_reason is not None:
+            run["stop_reason"] = stop_reason
+        run["updated_at"] = datetime.now(UTC).isoformat()
+        return StatusFinalization(finalized=True)
+
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -321,11 +404,17 @@ class MemoryRunStore(RunStore):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from deerflow.runtime.runs.manager import ConflictError
 
         now = datetime.now(UTC).isoformat()
         cutoff = datetime.now(UTC) - timedelta(seconds=grace_seconds)
+
+        if idempotency_key is not None:
+            for existing in self._runs.values():
+                if existing.get("idempotency_key") == idempotency_key:
+                    raise RunIdempotencyConflict(existing)
 
         # For reject: check if any active run exists
         if multitask_strategy == "reject":
@@ -393,6 +482,9 @@ class MemoryRunStore(RunStore):
             "error": None,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_expires_at,
+            "idempotency_key": idempotency_key,
+            "cancel_action": None,
+            "cancel_requested_at": None,
             "created_at": created_at or now,
             "updated_at": now,
         }

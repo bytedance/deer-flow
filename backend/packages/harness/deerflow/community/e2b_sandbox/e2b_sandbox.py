@@ -205,13 +205,23 @@ class E2BSandbox(Sandbox):
             logger.warning("e2b sandbox ping raised non-fatal error: %s", e)
             return True
 
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         resolved = self._resolve_path(path)
         try:
             content = self._client.files.read(resolved)
-            if isinstance(content, bytes):
-                return content.decode("utf-8", errors="replace")
-            return content if content is not None else ""
+            if start_line is None and end_line is None:
+                return content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
+            text = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else content or ""
+            lines = text.splitlines()
+            start = start_line or 1
+            end = end_line if end_line is not None else len(lines)
+            content = "\n".join(lines[start - 1 : end])
+            return content
         except Exception as e:
             logger.error("Failed to read file %s in e2b sandbox: %s", resolved, e)
             return f"Error: {e}"
@@ -476,8 +486,8 @@ class E2BSandbox(Sandbox):
                 # ``--include`` flag above only pre-filtered by basename.
                 if file_path != root and not file_path.startswith(root_prefix):
                     continue
-                rel_path = file_path[len(root) :].lstrip("/")
-                if not rel_path or not path_matches(glob, rel_path):
+                rel_path = file_path.rsplit("/", 1)[-1] if file_path == root else file_path[len(root) :].lstrip("/")
+                if not path_matches(glob, rel_path):
                     continue
             matches.append(
                 GrepMatch(

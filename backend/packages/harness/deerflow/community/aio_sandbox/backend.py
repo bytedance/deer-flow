@@ -41,6 +41,13 @@ def sandbox_http_trust_env(sandbox_url: str) -> bool:
     return not (address.is_loopback or address.is_private or address.is_link_local)
 
 
+# The readiness deadline the local-container provider paths (sync and async)
+# enforce before destroying a sandbox that never became ready. Tests that
+# validate the shipped image must use this same budget: a longer one can
+# pass while every real acquisition still fails.
+SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT = 60
+
+
 def wait_for_sandbox_ready(sandbox_url: str, timeout: int = 30) -> bool:
     """Poll sandbox health endpoint until ready or timeout.
 
@@ -110,6 +117,7 @@ class SandboxBackend(ABC):
         *,
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
+        provision_lark_cli_broker: bool = False,
     ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
@@ -122,6 +130,10 @@ class SandboxBackend(ABC):
             provision_lark_cli_runtime: Ask the backend to provision the sandbox
                 lark-cli runtime via its native mechanism (e.g. the provisioner's
                 init container + emptyDir). Backends that can't do this ignore it.
+            provision_lark_cli_broker: Ask the backend to provision a lark-cli
+                broker sidecar (Pattern B, issue #4338) so credentials stay out of
+                the sandbox. Supersedes ``provision_lark_cli_runtime`` when the
+                backend supports it; backends that can't do this ignore it.
 
         Returns:
             SandboxInfo with connection details.

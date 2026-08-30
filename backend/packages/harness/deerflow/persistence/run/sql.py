@@ -11,11 +11,17 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import case, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run.model import RunRow
-from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.base import (
+    LeaseRenewal,
+    RunIdempotencyConflict,
+    RunStore,
+    StatusFinalization,
+)
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -77,7 +83,7 @@ class RunRepository(RunStore):
         # Convert datetime to ISO string for consistency with MemoryRunStore.
         # SQLite drops tzinfo on read despite ``DateTime(timezone=True)`` —
         # ``coerce_iso`` normalizes naive datetimes as UTC.
-        for key in ("created_at", "updated_at", "lease_expires_at"):
+        for key in ("created_at", "updated_at", "lease_expires_at", "cancel_requested_at"):
             val = d.get(key)
             if isinstance(val, datetime):
                 d[key] = coerce_iso(val)
@@ -102,6 +108,7 @@ class RunRepository(RunStore):
         follow_up_to_run_id=None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        idempotency_key: str | None = None,
     ):
         """Insert or update a run row.
 
@@ -128,6 +135,7 @@ class RunRepository(RunStore):
             "follow_up_to_run_id": follow_up_to_run_id,
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "idempotency_key": idempotency_key,
             "updated_at": now,
         }
         async with self._sf() as session:
@@ -190,6 +198,28 @@ class RunRepository(RunStore):
         async with self._sf() as session:
             result = await session.execute(stmt)
             return {value for value in result.scalars() if isinstance(value, str) and value}
+
+    async def list_edit_regenerate_runs(
+        self,
+        thread_id,
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ):
+        resolved_user_id = resolve_user_id(user_id, method_name="RunRepository.list_edit_regenerate_runs")
+        replay_kind = RunRow.metadata_json["replay_kind"].as_string()
+        source = RunRow.metadata_json["regenerate_from_run_id"].as_string()
+        stmt = select(RunRow).where(
+            RunRow.thread_id == thread_id,
+            replay_kind == "edit",
+            source.is_not(None),
+            source != "",
+        )
+        if resolved_user_id is not None:
+            stmt = stmt.where(RunRow.user_id == resolved_user_id)
+        stmt = stmt.order_by(RunRow.created_at.asc())
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
 
     async def get_many_by_thread(
         self,
@@ -490,6 +520,105 @@ class RunRepository(RunStore):
             await session.commit()
             return result.rowcount != 0
 
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        """Renew the owner lease and read cancellation intent atomically."""
+        lease_dt = datetime.fromisoformat(lease_expires_at)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.owner_worker_id == owner_worker_id,
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .values(
+                    lease_expires_at=lease_dt,
+                    updated_at=datetime.now(UTC),
+                )
+                .returning(RunRow.run_id, RunRow.cancel_action)
+            )
+            row = result.first()
+            await session.commit()
+        if row is None:
+            return LeaseRenewal(renewed=False)
+        return LeaseRenewal(renewed=True, cancel_action=row.cancel_action)
+
+    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+        """Atomically persist the first cancellation action on an active run."""
+        if action not in ("interrupt", "rollback"):
+            raise ValueError(f"Unsupported cancellation action: {action}")
+        now = datetime.now(UTC)
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                )
+                .values(
+                    cancel_action=case(
+                        (RunRow.cancel_action.is_(None), action),
+                        else_=RunRow.cancel_action,
+                    ),
+                    cancel_requested_at=case(
+                        (RunRow.cancel_requested_at.is_(None), now),
+                        else_=RunRow.cancel_requested_at,
+                    ),
+                    updated_at=now,
+                )
+                .returning(RunRow.cancel_action)
+            )
+            row = result.first()
+            await session.commit()
+        return row.cancel_action if row is not None else None
+
+    async def finalize_if_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        """Atomically let completion win only before cancellation."""
+        values: dict[str, Any] = {
+            "status": status,
+            "updated_at": datetime.now(UTC),
+        }
+        if error is not None:
+            values["error"] = error
+        if stop_reason is not None:
+            values["stop_reason"] = stop_reason
+
+        async with self._sf() as session:
+            result = await session.execute(
+                update(RunRow)
+                .where(
+                    RunRow.run_id == run_id,
+                    RunRow.status.in_(("pending", "running")),
+                    RunRow.cancel_action.is_(None),
+                )
+                .values(**values)
+                .returning(RunRow.run_id)
+            )
+            if result.first() is not None:
+                await session.commit()
+                return StatusFinalization(finalized=True)
+
+            current = await session.execute(select(RunRow.cancel_action).where(RunRow.run_id == run_id))
+            cancel_action = current.scalar_one_or_none()
+            await session.commit()
+            return StatusFinalization(
+                finalized=False,
+                cancel_action=cancel_action,
+            )
+
     async def claim_for_takeover(
         self,
         run_id: str,
@@ -561,6 +690,7 @@ class RunRepository(RunStore):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create a run with cross-process thread-uniqueness.
 
@@ -595,6 +725,7 @@ class RunRepository(RunStore):
             "kwargs_json": self._safe_json(kwargs) or {},
             "owner_worker_id": owner_worker_id,
             "lease_expires_at": lease_dt,
+            "idempotency_key": idempotency_key,
             "created_at": created,
             "updated_at": now,
         }
@@ -643,7 +774,15 @@ class RunRepository(RunStore):
                     claimed.append(self._row_to_dict(row))
 
             session.add(RunRow(run_id=run_id, **values))
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if idempotency_key is not None:
+                    existing = (await session.execute(select(RunRow).where(RunRow.idempotency_key == idempotency_key))).scalar_one_or_none()
+                    if existing is not None:
+                        raise RunIdempotencyConflict(self._row_to_dict(existing)) from exc
+                raise
 
             new_row = await session.get(RunRow, run_id)
             return self._row_to_dict(new_row), claimed

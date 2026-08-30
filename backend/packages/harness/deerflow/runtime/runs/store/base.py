@@ -11,7 +11,42 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass(frozen=True)
+class EditReplayVisibility:
+    hidden_source_run_ids: set[str] = field(default_factory=set)
+    hidden_attempt_run_ids: set[str] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class LeaseRenewal:
+    """Result of renewing a run lease.
+
+    ``cancel_action`` carries a durable cancellation request to the owning
+    worker without transferring lease ownership.
+    """
+
+    renewed: bool
+    cancel_action: str | None = None
+
+
+@dataclass(frozen=True)
+class StatusFinalization:
+    """Result of completing a run only if cancellation has not won."""
+
+    finalized: bool
+    cancel_action: str | None = None
+
+
+class RunIdempotencyConflict(RuntimeError):
+    """A run with the requested process-wide idempotency key already exists."""
+
+    def __init__(self, existing: dict[str, Any]) -> None:
+        super().__init__(f"Run idempotency key already belongs to {existing.get('run_id')}")
+        self.existing = existing
 
 
 class RunStore(abc.ABC):
@@ -34,6 +69,7 @@ class RunStore(abc.ABC):
         created_at: str | None = None,
         owner_worker_id: str | None = None,
         lease_expires_at: str | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         pass
 
@@ -67,6 +103,15 @@ class RunStore(abc.ABC):
         Implementations must inspect the complete thread and must not apply the
         normal bounded run-list limit.
         """
+        raise NotImplementedError
+
+    async def list_edit_regenerate_runs(
+        self,
+        thread_id: str,
+        *,
+        user_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all edit-regenerate attempt runs for one thread, oldest first."""
         raise NotImplementedError
 
     async def get_many_by_thread(
@@ -201,6 +246,57 @@ class RunStore(abc.ABC):
         """Renew the lease on an active run. Returns ``False`` when no row matched."""
         pass
 
+    async def renew_lease(
+        self,
+        run_id: str,
+        *,
+        owner_worker_id: str,
+        lease_expires_at: str,
+    ) -> LeaseRenewal:
+        """Renew ownership and return any durable cancellation request.
+
+        The default wraps the legacy ``update_lease`` method and returns no
+        cancellation action, so third-party stores remain source-compatible
+        without adding a background read. Stores that support multi-process
+        cancellation must override this method to renew and observe the
+        request atomically.
+        """
+        renewed = await self.update_lease(
+            run_id,
+            owner_worker_id=owner_worker_id,
+            lease_expires_at=lease_expires_at,
+        )
+        return LeaseRenewal(renewed=renewed)
+
+    async def request_cancel(self, run_id: str, *, action: str) -> str | None:
+        """Persist the first cancellation action for an active run.
+
+        Implementations must update only ``pending`` or ``running`` rows and
+        return the winning action, or ``None`` when no active row matched.
+        """
+        raise NotImplementedError
+
+    async def finalize_if_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        error: str | None = None,
+        stop_reason: str | None = None,
+    ) -> StatusFinalization:
+        """Atomically finalize an active run unless cancellation won.
+
+        The compatibility default is safe for stores that do not implement
+        durable cancellation.
+        """
+        updated = await self.update_status(
+            run_id,
+            status,
+            error=error,
+            stop_reason=stop_reason,
+        )
+        return StatusFinalization(finalized=updated is not False)
+
     @abc.abstractmethod
     async def claim_for_takeover(
         self,
@@ -251,6 +347,7 @@ class RunStore(abc.ABC):
         kwargs: dict[str, Any] | None = None,
         created_at: str | None = None,
         grace_seconds: int = 10,
+        idempotency_key: str | None = None,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Atomically create an active thread operation with cross-process uniqueness.
 
@@ -267,6 +364,8 @@ class RunStore(abc.ABC):
             raise NotImplementedError("RunStore must implement create_thread_operation_atomic() or create_run_atomic()")
         if operation_kind != "run":
             raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot create non-run thread operations")
+        if idempotency_key is not None:
+            raise NotImplementedError("Legacy RunStore.create_run_atomic() cannot guarantee idempotent admission")
         return await self.create_run_atomic(
             run_id,
             thread_id=thread_id,

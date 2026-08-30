@@ -63,6 +63,24 @@ class MemoryCallbacks:
         """Pre-LLM-call: mutate ``invoke_config`` (e.g. merge trace metadata)
         before the backend invokes the model. Default: no-op."""
 
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Post-LLM-call hook for host-owned observation. Default: no-op.
+
+        This callback keeps the vendorable DeerMem backend independent from
+        DeerFlow's extension API. It is invoked for both provider success and
+        failure, and backend callers isolate exceptions raised by an
+        implementation.
+        """
+
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
@@ -143,6 +161,10 @@ class MemoryManager(BaseModel):
     # that fails fast at instantiation rather than silently returning empty
     # results). Default False: a new backend must explicitly opt in to tool mode.
     supports_search: ClassVar[bool] = False
+    # Backends that rely on conversation-level extraction instead of fact CRUD
+    # can retain MemoryMiddleware writes while tool mode supplies query-aware
+    # search. Most backends keep tool mode fully model-directed.
+    requires_passive_writes_in_tool_mode: ClassVar[bool] = False
 
     @model_validator(mode="after")
     def _check_invariants(self) -> MemoryManager:
@@ -481,6 +503,15 @@ class MemoryManager(BaseModel):
         ``cls(backend_config=backend_config, mode=mode)``.
         """
 
+    def close(self) -> None:
+        """Release backend resources during graceful process shutdown.
+
+        Backends that own external resources may override this hook. The
+        default is intentionally a no-op for lightweight or third-party
+        implementations.
+        """
+        return None
+
 
 # ── Backend discovery (drop-in) ───────────────────────────────────────────
 def _scan_backends() -> dict[str, type[MemoryManager]]:
@@ -576,6 +607,15 @@ def _resolve_manager_class(manager_class: str) -> type[MemoryManager]:
     )
 
 
+def backend_requires_passive_writes_in_tool_mode(manager_class: str) -> bool:
+    """Return whether a backend needs middleware writes in tool mode.
+
+    Resolve the class without constructing it so agent assembly does not run
+    backend startup checks or perform network I/O.
+    """
+    return _resolve_manager_class(manager_class).requires_passive_writes_in_tool_mode
+
+
 # ── Host-default hook providers (passed to from_config by the factory) ────
 #
 # These callables are the host's defaults for the slots a backend may consume
@@ -601,6 +641,13 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
     langfuse is not an enabled tracing provider.
     """
 
+    def __init__(self, *, extensions=None) -> None:
+        if extensions is None:
+            from deerflow.extensions import get_loaded_extensions
+
+            extensions = get_loaded_extensions()
+        self._extensions = extensions
+
     def on_memory_llm_call(
         self,
         invoke_config: dict[str, Any],
@@ -621,6 +668,60 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=trace_id,
         )
+
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Forward a DeerMem provider result using the captured snapshot."""
+        extensions = self._extensions
+        if not extensions.has_system_model_observers:
+            return
+        try:
+            from deerflow_extension_api import (
+                SystemModelRequest,
+                SystemModelResult,
+                SystemOperationKind,
+            )
+
+            from deerflow.extensions.notify import (
+                dispatch_system_model_observation,
+                notify_system_model_call,
+                task_store_for_system_call,
+            )
+
+            dispatch_system_model_observation(
+                notify_system_model_call(
+                    extensions,
+                    task_store_for_system_call(invoke_config),
+                    SystemOperationKind.MEMORY,
+                    SystemModelRequest(
+                        messages=prompt,
+                        model_name=model_name,
+                        invoke_config=invoke_config,
+                    ),
+                    SystemModelResult(
+                        response=response,
+                        error=error,
+                        duration_ms=duration_ms,
+                    ),
+                ),
+                SystemOperationKind.MEMORY.value,
+            )
+        except Exception:
+            # Only the bridge's own failures are non-fatal. A teardown signal
+            # must propagate, matching the boundary the DeerMem-side call
+            # site documents and tests.
+            logger.warning(
+                "Extension observation of the memory model call failed (non-fatal)",
+                exc_info=True,
+            )
 
 
 def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
@@ -672,6 +773,8 @@ def _host_default_extraction_callback(payload: Any) -> None:
     extracted = payload.get("facts_extracted")
     passed_confidence = payload.get("facts_passed_confidence")
     rejected = payload.get("rejected_low_confidence", 0)
+    rejected_by_scope = payload.get("rejected_by_scope_gate", 0)
+    scope_breakdown = payload.get("scope_gate_rejections")
     thread_id = payload.get("thread_id")
     model_name = payload.get("model_name")
     if isinstance(extracted, int) and isinstance(passed_confidence, int) and extracted > 0:
@@ -699,6 +802,22 @@ def _host_default_extraction_callback(payload: Any) -> None:
             payload.get("success"),
             payload.get("token_usage"),
         )
+    if isinstance(scope_breakdown, dict):
+        logger.info(
+            "Memory scope-gate metrics: thread=%s model=%s rejected=%s breakdown=%s",
+            thread_id,
+            model_name,
+            rejected_by_scope,
+            scope_breakdown,
+        )
+        fact_breakdown = scope_breakdown.get("facts")
+        fact_scope_rejected = sum(value for value in fact_breakdown.values() if isinstance(value, int)) if isinstance(fact_breakdown, dict) else 0
+        if isinstance(extracted, int) and extracted > 0 and fact_scope_rejected / extracted > 0.6:
+            logger.warning(
+                "Memory fact scope-gate rejection rate %.0f%% exceeds 60%% - review extraction model classification / prompt (thread=%s)",
+                fact_scope_rejected / extracted * 100,
+                thread_id,
+            )
 
 
 def _collect_host_hooks() -> dict[str, Any]:

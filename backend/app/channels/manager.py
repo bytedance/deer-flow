@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import mimetypes
 import re
 import time
@@ -18,8 +19,10 @@ from urllib.parse import quote
 import httpx
 from langgraph_sdk.errors import ConflictError
 
+from app.channels import buzz_run_policy as _buzz_run_policy  # noqa: F401
 from app.channels import feishu_run_policy as _feishu_run_policy  # noqa: F401
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
+from app.channels.dedupe_store import InboundDedupeStore, MemoryInboundDedupeStore
 from app.channels.message_bus import (
     INBOUND_FILE_CONTENT_KEY,
     PENDING_CLARIFICATION_METADATA_KEY,
@@ -52,6 +55,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:8001/api"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+DEFAULT_CHANNEL_MAX_CONCURRENCY = 5
+DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS = 3.0
 CUSTOM_AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
 # Lead-agent recursion budget (LangGraph super-steps for the lead graph only).
@@ -75,15 +80,14 @@ MESSAGE_STREAM_EVENTS = ("messages-tuple", "messages")
 THREAD_BUSY_MESSAGE = "This conversation is already processing another request. Please wait for it to finish and try again."
 BOUND_IDENTITY_REQUIRED_MESSAGE = "Connect this channel from DeerFlow Settings, complete the in-channel connect step, then send your message again."
 BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is temporarily unavailable. Please try again later or contact the DeerFlow operator."
-# Inbound-redelivery dedup window. ``_recent_inbound_events`` (below) is a
-# process-local, in-memory-only OrderedDict — it is never persisted to
-# ``ChannelStore`` — so a recorded key survives only for this TTL (or until
-# evicted by the entry cap below) and is gone entirely across a Gateway
-# restart. 10 minutes is a deliberately bounded window: long enough to
-# absorb a near-term redelivery of the same event — whether a provider's
-# own automatic retry (where the provider implements one) or an operator
-# explicitly triggering a resend — without keeping a growing in-memory
-# ledger.
+# Inbound-redelivery dedup window. The dedupe state lives in
+# ``self._inbound_dedupe_store``: the default in-process Memory store is
+# local to this Gateway process (a recorded key survives only for the store's
+# TTL / entry cap and is gone across a restart), while a Postgres-backed store
+# is shared across pods. 10 minutes is a deliberately bounded window: long
+# enough to absorb a near-term redelivery of the same event — whether a
+# provider's own automatic retry or an operator resend — without keeping a
+# growing ledger.
 #
 # For GitHub specifically: GitHub does NOT automatically retry or redeliver
 # a failed delivery (non-2xx response, timeout, or connection error) — it
@@ -114,8 +118,6 @@ BOUND_IDENTITY_UNAVAILABLE_MESSAGE = "Channel connection verification is tempora
 FOLLOWUP_BUFFER_MAX_PER_THREAD = 20
 FOLLOWUP_DRAIN_BATCH_SIZE = 10
 FOLLOWUP_BLOCK_TAG = "followups-while-busy"
-INBOUND_DEDUPE_TTL_SECONDS = 10 * 60
-INBOUND_DEDUPE_MAX_ENTRIES = 4096
 # Only server-stable provider message ids: client-generated ids (client_msg_id,
 # client_id) are not guaranteed identical across a provider's own redelivery, so
 # keying dedupe on them would miss exactly the retries we want to absorb.
@@ -127,6 +129,7 @@ INBOUND_DEDUPE_METADATA_KEYS = ("event_id", "message_id", "msg_id")
 CHAT_SCOPED_WORKSPACE_CHANNELS = frozenset({"telegram", "feishu", "wechat"})
 
 CHANNEL_CAPABILITIES = {
+    "buzz": {"supports_streaming": True},
     "dingtalk": {"supports_streaming": False},
     "discord": {"supports_streaming": False},
     "feishu": {"supports_streaming": True},
@@ -517,12 +520,93 @@ def _extract_stream_message_id(payload: Any, metadata: Any) -> str | None:
     return None
 
 
+def _stream_payload_type(payload: Mapping[str, Any]) -> str:
+    """Resolve the message ``type`` of one ``messages-tuple`` payload.
+
+    Two payload shapes reach this function and they name the message type in
+    different places:
+
+    * The shape DeerFlow's own gateway emits (``runtime/serialization.py``
+      calls ``model_dump()``): ``type`` is the LangChain literal directly --
+      ``"ai"`` / ``"AIMessageChunk"`` / ``"human"`` / ``"tool"`` / ``"system"``.
+    * LangChain's ``to_json()`` constructor shape, which
+      ``_extract_stream_message_id`` and the content extraction below already
+      accommodate: the wrapper's own ``type`` is the literal string
+      ``"constructor"`` and the real class name is the last element of the
+      ``id`` path (``["langchain", "schema", "messages", "AIMessageChunk"]``),
+      with the constructor kwargs under ``kwargs``.
+
+    Reading only the top level would classify every constructor-shaped payload
+    as ``"constructor"``, which an allowlist rejects (safe) but which would
+    also mean hidden context and assistant output are treated identically --
+    so the class name is resolved properly instead of guessed.
+    """
+    raw_type = payload.get("type")
+    if isinstance(raw_type, str) and raw_type and raw_type != "constructor":
+        return raw_type
+    kwargs = payload.get("kwargs")
+    if isinstance(kwargs, Mapping):
+        nested = kwargs.get("type")
+        if isinstance(nested, str) and nested:
+            return nested
+    lc_path = payload.get("id")
+    if isinstance(lc_path, (list, tuple)) and lc_path:
+        tail = lc_path[-1]
+        if isinstance(tail, str) and tail:
+            return tail
+    return raw_type if isinstance(raw_type, str) else ""
+
+
+def _is_assistant_stream_type(payload_type: str) -> bool:
+    """Is this message type assistant output, i.e. displayable in an IM channel?
+
+    An ALLOWLIST, deliberately.  The previous denylist ("reject anything whose
+    type contains 'tool'") published every other message type, and DeerFlow
+    writes hidden model context into the ``messages`` channel as ordinary
+    messages: ``DynamicContextMiddleware`` injects the ``<memory>`` block as a
+    hidden ``HumanMessage`` (``type == "human"``) and rewrites the user's own
+    turn into a new ``HumanMessage``, and ``DurableContextMiddleware`` injects a
+    hidden ``<durable_context_data>`` ``HumanMessage``.  LangGraph fans state
+    writes out on the ``messages-tuple`` stream, so all of those reached the
+    channel as if they were the assistant's reply -- proved live on a Buzz
+    relay, where each streaming update is an immutable public Nostr event and a
+    later corrective edit cannot unpublish the leaked one.
+
+    The accepted spellings are the ones assistant output actually carries:
+    LangChain serializes ``AIMessage.type`` as ``"ai"`` and
+    ``AIMessageChunk.type`` as ``"AIMessageChunk"``; ``"assistant"`` is the
+    OpenAI-style spelling a foreign runtime may use.  Matching is by prefix
+    rather than substring because a substring test is not safe here -- ordinary
+    English words contain "ai" ("chain", "domain"), so ``"ai" in type`` would
+    admit a future/foreign type name by accident, which is exactly the class of
+    mistake this allowlist exists to prevent.  No LangChain message type other
+    than the AI ones begins with "ai" or "assistant".
+    """
+    normalized = payload_type.strip().lower()
+    return normalized.startswith(("ai", "assistant"))
+
+
 def _accumulate_stream_text(
     buffers: dict[str, str],
     current_message_id: str | None,
     event_data: Any,
 ) -> tuple[str | None, str | None]:
-    """Convert a ``messages-tuple`` event into the latest displayable AI text."""
+    """Convert a ``messages-tuple`` event into the latest displayable AI text.
+
+    Only assistant output is displayable.  Hidden human/system context (memory
+    facts, durable context, the middleware-rewritten echo of the user's own
+    message) and tool traffic must never be published to an IM channel; see
+    :func:`_is_assistant_stream_type`.
+
+    A bare ``str`` payload -- previously accepted here and buffered under the
+    current message id -- carries no type information at all, so it cannot be
+    attributed to the assistant.  Nothing in DeerFlow produces it (the gateway
+    always serializes a ``messages-tuple`` chunk as ``[message_dict, metadata]``
+    via ``runtime/serialization.py::serialize_messages_tuple``), and a runtime
+    that did emit raw text deltas would emit hidden context the same way, with
+    no way to tell them apart.  Under an allowlist an unattributable payload is
+    dropped rather than published.
+    """
     payload = event_data
     metadata: Any = None
     if isinstance(event_data, (list, tuple)):
@@ -531,16 +615,10 @@ def _accumulate_stream_text(
         if len(event_data) > 1:
             metadata = event_data[1]
 
-    if isinstance(payload, str):
-        message_id = current_message_id or "__default__"
-        buffers[message_id] = _merge_stream_text(buffers.get(message_id, ""), payload)
-        return buffers[message_id], message_id
-
     if not isinstance(payload, Mapping):
         return None, current_message_id
 
-    payload_type = str(payload.get("type", "")).lower()
-    if "tool" in payload_type:
+    if not _is_assistant_stream_type(_stream_payload_type(payload)):
         return None, current_message_id
 
     text = _extract_text_content(payload.get("content"))
@@ -909,7 +987,8 @@ class ChannelManager:
         bus: MessageBus,
         store: ChannelStore,
         *,
-        max_concurrency: int = 5,
+        max_concurrency: int = DEFAULT_CHANNEL_MAX_CONCURRENCY,
+        shutdown_grace_period_seconds: float = DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS,
         langgraph_url: str = DEFAULT_LANGGRAPH_URL,
         gateway_url: str = DEFAULT_GATEWAY_URL,
         assistant_id: str = DEFAULT_ASSISTANT_ID,
@@ -917,11 +996,17 @@ class ChannelManager:
         channel_sessions: dict[str, Any] | None = None,
         connection_repo: Any | None = None,
         require_bound_identity: bool = False,
+        inbound_dedupe_store: InboundDedupeStore | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
     ) -> None:
+        if isinstance(max_concurrency, bool) or not isinstance(max_concurrency, int) or max_concurrency <= 0:
+            raise ValueError("max_concurrency must be a positive integer")
+        if isinstance(shutdown_grace_period_seconds, bool) or not isinstance(shutdown_grace_period_seconds, (int, float)) or not math.isfinite(shutdown_grace_period_seconds) or shutdown_grace_period_seconds < 0:
+            raise ValueError("shutdown_grace_period_seconds must be a non-negative finite number")
         self.bus = bus
         self.store = store
         self._max_concurrency = max_concurrency
+        self._shutdown_grace_period_seconds = float(shutdown_grace_period_seconds)
         self._langgraph_url = langgraph_url
         self._gateway_url = gateway_url
         self._assistant_id = assistant_id
@@ -947,7 +1032,6 @@ class ChannelManager:
         self._serialized_thread_runs: dict[tuple[str, str], _SerializedThreadRunState] = {}
         self._skill_storage: SkillStorage | None = None
         self._csrf_token = generate_csrf_token()
-        self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         # Distinct from self._running: that flag is also False before the
         # very first start() (so tests that call internal drain/handler
@@ -955,15 +1039,19 @@ class ChannelManager:
         # working unchanged). self._stopped tracks specifically whether
         # stop() has run, for the follow-up drain guard below.
         self._stopped = False
-        self._task: asyncio.Task | None = None
-        # Insertion order == chronological (keys are never re-inserted), so an
-        # OrderedDict lets us evict expired/overflow entries from the front in
-        # O(k) instead of scanning all entries on every inbound message.
-        self._recent_inbound_events: OrderedDict[tuple[str, str, str, str], float] = OrderedDict()
+        # Fixed, long-lived workers own message handling end to end. The pool
+        # size is the only number of handler coroutines that can exist; inbound
+        # bursts remain as bounded queue entries instead of semaphore-waiting
+        # task-per-message fan-out.
+        self._worker_tasks: set[asyncio.Task[None]] = set()
+        # Inbound webhook dedupe store. Defaults to the in-process Memory store
+        # (pre-#4120 behavior). Multi-pod deployments inject a shared store so
+        # duplicate deliveries landing on different pods are collapsed.
+        self._inbound_dedupe_store = inbound_dedupe_store if inbound_dedupe_store is not None else MemoryInboundDedupeStore()
         # Per-thread follow-up buffers for busy fire_and_forget channels that
         # opted into ChannelRunPolicy.buffer_followups_on_busy (issue #4121
         # Slice 2). Keyed by thread_id -> OrderedDict[dedupe_key -> entry],
-        # oldest-first, mirroring _recent_inbound_events's shape but scoped
+        # oldest-first, mirroring the dedupe store's shape but scoped
         # per-thread with a hard cap instead of a global TTL (see
         # _buffer_followup / _enforce_followup_cap).
         self._followup_buffers: dict[str, OrderedDict[str, _FollowupEntry]] = {}
@@ -1135,7 +1223,7 @@ class ChannelManager:
         threaded in — e.g. a ``ChannelManager`` constructed directly without
         going through ``start_channel_service()`` — so tests and any
         not-yet-wired deployment never see a dangling background task for
-        this. When wired, mirrors the existing ``_dispatch_loop`` pattern:
+        this. When wired, mirrors the worker-task error-reporting pattern:
         ``asyncio.create_task`` + ``add_done_callback(self._log_task_error)``
         so an unexpected watcher failure is surfaced in the logs instead of
         silently vanishing. The task is also tracked in
@@ -1143,7 +1231,7 @@ class ChannelManager:
         so ``stop()`` can cancel+await any watcher still in flight instead of
         leaving it to fire a follow-up run after shutdown.
         """
-        if self._get_stream_bridge is None:
+        if self._get_stream_bridge is None or self._stopped:
             return
 
         run_id = run_result.get("run_id") if isinstance(run_result, dict) else None
@@ -1490,77 +1578,174 @@ class ChannelManager:
     # -- lifecycle ---------------------------------------------------------
 
     async def start(self) -> None:
-        """Start the dispatch loop."""
+        """Open inbound admission and start the fixed message-worker pool."""
         if self._running:
             return
+        unfinished_workers = {task for task in self._worker_tasks if not task.done()}
+        if unfinished_workers:
+            raise RuntimeError("cannot restart ChannelManager while workers are still running")
+        self._worker_tasks.clear()
         self._running = True
         self._stopped = False
-        self._semaphore = asyncio.Semaphore(self._max_concurrency)
-        self._task = asyncio.create_task(self._dispatch_loop())
-        logger.info("ChannelManager started (max_concurrency=%d)", self._max_concurrency)
+        self.bus.open_inbound()
+        self._worker_tasks = {
+            asyncio.create_task(
+                self._worker_loop(worker_index),
+                name=f"deerflow-channel-worker-{worker_index}",
+            )
+            for worker_index in range(self._max_concurrency)
+        }
+        for task in self._worker_tasks:
+            task.add_done_callback(self._log_task_error)
+            task.add_done_callback(self._worker_tasks.discard)
+        logger.info(
+            "ChannelManager started (workers=%d, inbound_queue_maxsize=%d, shutdown_grace=%.1fs)",
+            self._max_concurrency,
+            self.bus.inbound_queue_maxsize,
+            self._shutdown_grace_period_seconds,
+        )
 
-    async def stop(self) -> None:
-        """Stop the dispatch loop."""
+    def begin_shutdown(self) -> int:
+        """Close admission while leaving workers alive to drain accepted work."""
         self._running = False
         self._stopped = True
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-            self._task = None
+        return self.bus.close_inbound()
 
-        # Follow-up watchers are long-lived background tasks (they await a
-        # run's full stream, which can take minutes) started outside the
-        # dispatch loop, so cancelling self._task above does not touch them.
-        # Left unmanaged, one still subscribed to a run that ends AFTER this
-        # point would drain its buffer and fire a brand new runs.create()
-        # into a manager that has already been stopped.
+    async def stop(self) -> None:
+        """Drain accepted work, then cancel and await every owned task.
+
+        Admission closes immediately, but workers keep processing the accepted
+        queue for ``shutdown_grace_period_seconds`` so provider acknowledgments
+        are normally followed by a final response. Once that grace expires,
+        workers are cancelled. A successful return means no worker or follow-up
+        watcher can continue using channel resources. The Gateway lifespan owns
+        the process-level timeout; if it cancels this coroutine, transports stay
+        attached to the service and shutdown can be retried.
+        """
+        invalidated_reservations = self.begin_shutdown()
+        loop = asyncio.get_running_loop()
+        grace_deadline = loop.time() + self._shutdown_grace_period_seconds
+        worker_tasks = list(self._worker_tasks)
         watcher_tasks = list(self._followup_watcher_tasks)
+
+        # Watchers can create follow-up runs and are not acknowledgments for
+        # this accepted queue. Stop them immediately; active workers are still
+        # allowed to finish their current/queued messages during the grace.
         for task in watcher_tasks:
             task.cancel()
-        for task in watcher_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                logger.exception("[Manager] follow-up watcher task raised during stop()")
-        self._followup_watcher_tasks.clear()
+
+        join_task = asyncio.create_task(self.bus.join_inbound(), name="deerflow-channel-inbound-drain")
+        drained = False
+        try:
+            done, _ = await asyncio.wait({join_task}, timeout=max(0.0, grace_deadline - loop.time()))
+            drained = join_task in done and not join_task.cancelled() and join_task.exception() is None
+        except asyncio.CancelledError:
+            for task in worker_tasks:
+                task.cancel()
+            discarded_messages = self.bus.discard_pending_inbound()
+            if not join_task.done():
+                join_task.cancel()
+            if invalidated_reservations or discarded_messages:
+                logger.warning(
+                    "[Manager] cancelled shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                    invalidated_reservations,
+                    discarded_messages,
+                )
+            raise
+
+        if not drained:
+            logger.warning(
+                "[Manager] graceful shutdown period expired after %.1fs; cancelling active handlers",
+                self._shutdown_grace_period_seconds,
+            )
+
+        for task in worker_tasks:
+            task.cancel()
+
+        # Anything still queued never started and must not keep Queue.join()
+        # pending after its workers have been cancelled.
+        discarded_messages = self.bus.discard_pending_inbound()
+        if not join_task.done():
+            join_task.cancel()
+
+        owned_tasks = {task for task in (*worker_tasks, *watcher_tasks, join_task) if not task.done()}
+        if owned_tasks:
+            await asyncio.gather(*owned_tasks, return_exceptions=True)
+
+        for task in tuple(self._worker_tasks):
+            if task.done():
+                self._worker_tasks.discard(task)
+        for task in tuple(self._followup_watcher_tasks):
+            if task.done():
+                self._followup_watcher_tasks.discard(task)
+
+        if invalidated_reservations or discarded_messages:
+            logger.warning(
+                "[Manager] shutdown rejected pending inbound work: reservations=%d, queued_messages=%d",
+                invalidated_reservations,
+                discarded_messages,
+            )
 
         logger.info("ChannelManager stopped")
 
-    # -- dispatch loop -----------------------------------------------------
+    # -- worker pool -------------------------------------------------------
 
-    async def _dispatch_loop(self) -> None:
-        logger.info("[Manager] dispatch loop started, waiting for inbound messages")
-        while self._running:
+    async def _worker_loop(self, worker_index: int) -> None:
+        logger.info("[Manager] inbound worker %d started", worker_index)
+        # Closing admission flips ``_running`` to False, but queued messages
+        # were already accepted (and providers may already have acknowledged
+        # them). Keep draining until the queue is empty; stop() then cancels
+        # workers that are idle in get_inbound().
+        while self._running or not self.bus.inbound_queue.empty():
             try:
-                msg = await asyncio.wait_for(self.bus.get_inbound(), timeout=1.0)
-            except TimeoutError:
-                continue
+                msg = await self.bus.get_inbound()
             except asyncio.CancelledError:
-                break
+                raise
 
-            # Dedupe before logging "received" so a provider retrying an event N
-            # times does not log N accepts; duplicates are logged once as ignored.
-            # Note: this manager-level dedupe only guards the agent run / final
-            # answer. Provider adapters may emit ack side-effects (a "Working on
-            # it…" reply, an "eyes" reaction) before publish_inbound, so those are
-            # intentionally not deduped here.
-            if self._is_duplicate_inbound(msg):
-                continue
-            logger.info(
-                "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
-                msg.channel_name,
-                msg.chat_id,
-                msg.msg_type.value,
-                len(msg.text or ""),
-                len(msg.files),
-            )
-            task = asyncio.create_task(self._handle_message(msg))
-            task.add_done_callback(self._log_task_error)
+            dedupe_recorded = False
+            try:
+                # Dedupe before logging "received" so a provider retrying an
+                # event N times does not log N accepts. Provider ack side
+                # effects may still happen before this manager-level dedupe.
+                if await self._is_duplicate_inbound(msg):
+                    continue
+                dedupe_recorded = self._inbound_dedupe_key(msg) is not None
+                logger.info(
+                    "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                    msg.channel_name,
+                    msg.chat_id,
+                    msg.msg_type.value,
+                    len(msg.text or ""),
+                    len(msg.files),
+                )
+                # Deliberately awaited inline: never create a task per message.
+                await self._handle_message(msg)
+            except asyncio.CancelledError:
+                # A cancellation after dedupe admission must make provider
+                # redelivery retryable rather than retaining a TTL-long key for
+                # work that never completed.
+                if dedupe_recorded:
+                    try:
+                        await self._release_inbound_dedupe_key(msg)
+                    except Exception:
+                        logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
+                raise
+            except Exception:
+                logger.exception(
+                    "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
+                    worker_index,
+                    msg.channel_name,
+                    msg.chat_id,
+                )
+                if dedupe_recorded:
+                    try:
+                        await self._release_inbound_dedupe_key(msg)
+                    except Exception:
+                        # A dedupe backend outage must not shrink the fixed
+                        # worker pool by letting cleanup escape this loop.
+                        logger.exception("[Manager] failed to release inbound dedupe key after worker error")
+            finally:
+                self.bus.inbound_task_done()
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:
@@ -1598,36 +1783,25 @@ class ChannelManager:
             return None
         return (msg.channel_name, str(workspace_id), msg.chat_id, message_id)
 
-    def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
+    async def _is_duplicate_inbound(self, msg: InboundMessage) -> bool:
         key = self._inbound_dedupe_key(msg)
         if key is None:
             return False
 
-        now = time.monotonic()
-        # Entries are in chronological insertion order, so expired ones cluster at
-        # the front: pop from the front until we hit a still-live entry.
-        while self._recent_inbound_events:
-            _, oldest_at = next(iter(self._recent_inbound_events.items()))
-            if now - oldest_at > INBOUND_DEDUPE_TTL_SECONDS:
-                self._recent_inbound_events.popitem(last=False)
-            else:
-                break
-        while len(self._recent_inbound_events) > INBOUND_DEDUPE_MAX_ENTRIES:
-            self._recent_inbound_events.popitem(last=False)
-
-        if key in self._recent_inbound_events:
+        # Delegated to the shared/per-pod dedupe store. The store owns TTL eviction
+        # and capacity bounds; try_record returns True when the key was already
+        # present (i.e. this is a duplicate delivery to drop).
+        is_duplicate = await self._inbound_dedupe_store.try_record(key)
+        if is_duplicate:
             logger.info(
                 "[Manager] duplicate inbound ignored: channel=%s, chat_id=%s, message_id=%s",
                 msg.channel_name,
                 msg.chat_id,
                 key[-1],
             )
-            return True
+        return is_duplicate
 
-        self._recent_inbound_events[key] = now
-        return False
-
-    def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
+    async def _release_inbound_dedupe_key(self, msg: InboundMessage) -> None:
         """Drop a recorded dedupe key so a provider redelivery can be reprocessed.
 
         Called only on transient/unexpected handling failures: the key was
@@ -1637,7 +1811,7 @@ class ChannelManager:
         """
         key = self._inbound_dedupe_key(msg)
         if key is not None:
-            self._recent_inbound_events.pop(key, None)
+            await self._inbound_dedupe_store.release(key)
 
     @staticmethod
     def _log_task_error(task: asyncio.Task) -> None:
@@ -1651,8 +1825,7 @@ class ChannelManager:
     async def _handle_message(self, msg: InboundMessage) -> None:
         msg = _apply_effective_owner(msg)
         try:
-            # Non-command chat can be rejected before it consumes a semaphore
-            # slot. Commands are handled below because provider adapters consume
+            # Commands are handled below because provider adapters consume
             # binding commands before manager dispatch, and _handle_command()
             # applies its own admission gate for manager-level commands.
             bound_identity_rejection = None
@@ -1662,11 +1835,10 @@ class ChannelManager:
                 await self._reject_unbound_channel_message(msg, bound_identity_rejection=bound_identity_rejection)
                 return
 
-            async with self._semaphore:
-                if msg.msg_type == InboundMessageType.COMMAND:
-                    await self._handle_command(msg)
-                else:
-                    await self._handle_chat(msg, bound_identity_checked=True)
+            if msg.msg_type == InboundMessageType.COMMAND:
+                await self._handle_command(msg)
+            else:
+                await self._handle_chat(msg, bound_identity_checked=True)
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -1692,7 +1864,7 @@ class ChannelManager:
             # Transient/unexpected failure: release the dedupe key so a provider
             # redelivery of the same message can recover instead of being dropped
             # for the dedupe TTL.
-            self._release_inbound_dedupe_key(msg)
+            await self._release_inbound_dedupe_key(msg)
             await self._send_error(msg, "An internal error occurred. Please try again.")
 
     # -- chat handling -----------------------------------------------------
@@ -2064,7 +2236,7 @@ class ChannelManager:
                         # Swallowed like the generic handler would not be: release the
                         # key so the provider's redelivery can retry once the thread
                         # frees, instead of being dropped for the dedupe TTL.
-                        self._release_inbound_dedupe_key(msg)
+                        await self._release_inbound_dedupe_key(msg)
                     await self._send_error(msg, THREAD_BUSY_MESSAGE)
                     return
                 raise
@@ -2084,7 +2256,7 @@ class ChannelManager:
                 logger.warning("[Manager] thread busy (concurrent run rejected): thread_id=%s", thread_id)
                 # Same reason as the fire-and-forget branch above: this error is
                 # handled here rather than re-raised, so release explicitly.
-                self._release_inbound_dedupe_key(msg)
+                await self._release_inbound_dedupe_key(msg)
                 await self._send_error(msg, THREAD_BUSY_MESSAGE)
                 return
             else:
@@ -2261,7 +2433,7 @@ class ChannelManager:
                 # handler never runs and never releases the key. Release only
                 # after publishing the final outbound so a provider redelivery
                 # cannot overtake this attempt's terminal reply.
-                self._release_inbound_dedupe_key(msg)
+                await self._release_inbound_dedupe_key(msg)
 
     # -- command handling --------------------------------------------------
 

@@ -91,11 +91,18 @@ class Sandbox(ABC):
         pass
 
     @abstractmethod
-    def read_file(self, path: str) -> str:
+    def read_file(
+        self,
+        path: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> str:
         """Read the content of a file.
 
         Args:
             path: The absolute path of the file to read.
+            start_line: Optional starting line number (1-indexed, inclusive).
+            end_line: Optional ending line number (1-indexed, inclusive).
 
         Returns:
             The content of the file.
@@ -161,7 +168,7 @@ class Sandbox(ABC):
         case_sensitive: bool = False,
         max_results: int = 100,
     ) -> tuple[list[GrepMatch], bool]:
-        """Search for matches inside text files under a directory."""
+        """Search for matches inside a text file or files under a directory."""
         pass
 
     @abstractmethod

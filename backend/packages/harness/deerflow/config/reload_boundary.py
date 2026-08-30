@@ -43,6 +43,7 @@ STARTUP_ONLY_PREFIX = "startup-only:"
 #: field is restart-required — so an operator changing the value knows
 #: which subsystem to restart.
 STARTUP_ONLY_FIELDS: dict[str, str] = {
+    "plugins": ("load_extensions() runs once during create_app() and the process-wide middleware registry is not rebuilt on config.yaml edits; adding, removing or reconfiguring a plugin requires a restart."),
     "database": ("init_engine_from_config() runs once during langgraph_runtime() startup; the SQLAlchemy engine holds the connection pool and is not rebuilt on config.yaml edits."),
     "checkpointer": ("make_checkpointer() binds the persistent checkpointer once at startup, including SQLite WAL / busy_timeout settings."),
     "run_events": ("make_run_event_store() picks the memory- vs SQL-backed implementation at startup and is frozen onto app.state.run_events_config to stay paired with the underlying event store."),
@@ -67,11 +68,23 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     ),
     "scheduler": (
         "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
-        "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
+        "max_concurrent_runs, queue_timeout_seconds, and multi_instance are captured into the service instance and the background poller task is not rebuilt on config.yaml edits. "
+        "Changing multi-instance recovery prerequisites or lease behavior requires restarting every Gateway Pod together. "
+        "scheduler.recursion_limit is not captured there: launch_scheduled_thread_run reads it from get_app_config() on each dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart."
     ),
+    "mcp_tasks": (
+        "McpTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, lease_seconds, "
+        "and max_concurrent_polls are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
+    ),
+    "subagent_runtime": ("the shared native-subagent admission controller and isolated execution loop are configured once during Gateway lifespan startup; changing process slots, queue policy, or queue bounds requires a restart."),
+    "subagent_batches": ("the durable subagent batch service is constructed and started once during Gateway lifespan startup; scheduler limits, leases, and recovery behavior are captured by that service instance."),
     "run_ownership": (
         "RunOwnershipConfig is captured once into RunManager at langgraph_runtime() startup; the lease heartbeat background task is created and "
         "started there, and heartbeat_enabled / lease_seconds / grace_seconds are not re-read on config.yaml edits."
+    ),
+    "dedupe_storage": (
+        "make_inbound_dedupe_store() resolves the inbound dedupe store once when ChannelService is constructed at startup; the store "
+        "(in-process memory or shared Postgres) is captured onto ChannelManager and is not rebuilt on config.yaml edits."
     ),
 }
 

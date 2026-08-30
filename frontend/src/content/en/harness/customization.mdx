@@ -25,19 +25,21 @@ To add a custom middleware:
 2. Pass your middleware to the `custom_middlewares` parameter when building the agent.
 
 ```python
+from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from deerflow.agents.thread_state import ThreadState
+from langgraph.runtime import Runtime
 
-class AuditMiddleware(AgentMiddleware):
-    async def on_start(self, state: ThreadState, config):
-        # Runs before each model call
+
+class AuditMiddleware(AgentMiddleware[AgentState]):
+    def before_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Runs before each model call."""
         print(f"[audit] turn starts: {len(state.messages)} messages in context")
-        return state, config
+        return None
 
-    async def on_end(self, state: ThreadState, config):
-        # Runs after each model call
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Runs after each model call."""
         print(f"[audit] turn ends: last message type = {state.messages[-1].type}")
-        return state, config
+        return None
 ```
 
 Custom middlewares are injected into the chain immediately before `ClarificationMiddleware`, which always runs last.

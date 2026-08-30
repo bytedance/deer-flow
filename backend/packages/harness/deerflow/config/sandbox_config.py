@@ -29,6 +29,7 @@ class SandboxOwnershipConfig(BaseModel):
     renewal_interval_seconds: float = Field(
         default=30.0,
         gt=0,
+        allow_inf_nan=False,
         description=(
             "How often an owning instance refreshes its leases. The lease TTL is derived from this (interval x ttl_multiplier), so ownership liveness is independent of sandbox.idle_timeout: "
             "renewal keeps running even when idle cleanup is disabled (idle_timeout: 0)."
@@ -37,6 +38,7 @@ class SandboxOwnershipConfig(BaseModel):
     ttl_multiplier: float = Field(
         default=4.0,
         ge=2,
+        allow_inf_nan=False,
         description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
     )
     key_prefix: str = Field(
@@ -74,10 +76,11 @@ class SandboxConfig(BaseModel):
         allow_host_bash: Enable host-side bash execution for LocalSandboxProvider.
             Dangerous and intended only for fully trusted local workflows.
 
-    AioSandboxProvider, BoxliteProvider, and E2BSandboxProvider shared options:
-        image: Sandbox image to use (Docker/AIO image or BoxLite OCI image)
-        replicas: Positive provider capacity per gateway process. Each provider
-            defines which lifecycle states count toward this limit.
+    AioSandboxProvider, BoxliteProvider, E2BSandboxProvider, and OpenSandboxProvider shared options:
+        image: Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)
+        replicas: Positive provider capacity. E2B shares it across Gateway
+            workers when ownership uses Redis; other modes/providers keep
+            process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
@@ -88,8 +91,19 @@ class SandboxConfig(BaseModel):
         port: Base port for sandbox containers (default: 8080)
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         mounts: List of volume mounts to share directories with the container
-        ownership: Cross-instance container ownership store (memory | redis). Multi-instance
-            deployments sharing a container backend need redis; see SandboxOwnershipConfig.
+        thread_data_mounts: Override whether thread data is already visible to
+            the sandbox through shared mounts. Omit to auto-detect from the backend.
+
+    AioSandboxProvider and E2BSandboxProvider shared options:
+        ownership: Cross-instance sandbox ownership store (memory | redis). Multi-instance
+            deployments sharing a sandbox backend need redis; see SandboxOwnershipConfig.
+
+    OpenSandboxProvider specific options:
+        api_key, domain, protocol, request_timeout, use_server_proxy: OpenSandbox
+            management and execd connection settings.
+        ready_timeout: Create/readiness deadline in seconds (default: 30).
+        sandbox_timeout: Remote lifetime in seconds (default: 14400); 0 requires
+            explicit provider cleanup.
     """
 
     use: str = Field(
@@ -102,7 +116,7 @@ class SandboxConfig(BaseModel):
     )
     image: str | None = Field(
         default=None,
-        description="Sandbox image to use (Docker/AIO image or BoxLite OCI image)",
+        description="Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)",
     )
     port: int | None = Field(
         default=None,
@@ -111,7 +125,7 @@ class SandboxConfig(BaseModel):
     replicas: int | None = Field(
         default=None,
         gt=0,
-        description="Positive provider capacity per gateway process. Each provider defines which lifecycle states count toward this limit.",
+        description=("Positive provider capacity. E2B enforces it deployment-wide when sandbox ownership uses Redis; otherwise accounting is per Gateway process. Each provider defines which lifecycle states count."),
     )
     overflow_policy: SandboxOverflowPolicy = Field(
         default="wait",
@@ -143,13 +157,17 @@ class SandboxConfig(BaseModel):
     ownership: SandboxOwnershipConfig | None = Field(
         default=None,
         description=(
-            "AioSandboxProvider-only: where cross-instance container ownership is tracked (#4206). Omitted = memory (single-instance). "
-            "Multi-worker / load-balanced gateways sharing one container backend must set type: redis, or peers will adopt and idle-destroy each other's live sandboxes."
+            "AioSandboxProvider/E2BSandboxProvider: where cross-instance sandbox ownership is tracked (#4206, #4341). Omitted = memory (single-instance). "
+            "Multi-worker / load-balanced gateways sharing one sandbox backend must set type: redis, or peers can adopt and destroy each other's live sandboxes."
         ),
     )
     mounts: list[VolumeMountConfig] = Field(
         default_factory=list,
         description="List of volume mounts to share directories between host and container",
+    )
+    thread_data_mounts: bool | None = Field(
+        default=None,
+        description=("AioSandboxProvider: override whether /mnt/user-data is already visible through shared mounts. Omitted uses backend auto-detection; true skips explicit upload synchronization; false forces it."),
     )
     environment: dict[str, str] = Field(
         default_factory=dict,
@@ -175,8 +193,9 @@ class SandboxConfig(BaseModel):
         default=600,
         gt=0,
         description=(
-            "Maximum wall-clock seconds a host bash command may run before it is terminated, process group and all (LocalSandboxProvider). "
-            "Keeps a blocking foreground command (e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+            "Maximum wall-clock seconds a bash command may run before it is terminated. LocalSandboxProvider applies it to the host process group; "
+            "OpenSandboxProvider forwards it to the remote exec service when a call has no explicit timeout. Keeps a blocking foreground command "
+            "(e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
         ),
     )
 

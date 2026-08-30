@@ -22,3 +22,10 @@ def test_read_human_input_response_preserves_non_empty_value():
 
     assert response is not None
     assert response["value"] == " staging "
+
+
+def test_read_human_input_response_rejects_unknown_kind():
+    raw = _text_response("staging")
+    raw["response_kind"] = "unknown"
+
+    assert read_human_input_response({"human_input_response": raw}) is None
