@@ -16,6 +16,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from deerflow.runtime import CancelOutcome
+from deerflow.runtime.runs import manager as runs_manager
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -390,6 +391,67 @@ async def test_eviction_retry_lifecycle_is_deduplicated_and_shutdown_fenced():
     await run_manager.evict_finished_run(record.run_id)
     assert run_manager._eviction_retry_tasks == {}
     assert record.run_id in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_store_canonicalization_alone_does_not_trigger_repair():
+    """Rows differing only by the store's canonicalization — SQL-side message
+    truncation, empty containers stored as absent keys — are durable as-is;
+    only genuinely missing values take the repair path."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    record.last_ai_message = "x" * 3000
+    record.token_usage_by_model = {}
+
+    full_row = {"last_ai_message": "x" * 3000, "token_usage_by_model": {}}
+    assert run_manager._completion_needs_repair(full_row, record) is False
+
+    # SQL-canonicalized row: summaries truncated to the write-side limit and
+    # the empty usage dict stored as an absent key.
+    canonical = {"last_ai_message": "x" * 2000}
+    assert run_manager._completion_needs_repair(canonical, record) is False
+
+    # A genuinely missing completion value still reports repair.
+    record.total_tokens = 5
+    assert run_manager._completion_needs_repair(canonical, record) is True
+
+
+@pytest.mark.anyio
+async def test_exhausted_eviction_rearms_after_store_recovers(monkeypatch):
+    """A record whose bounded retries exhausted is re-armed by the next
+    successful eviction once the store is healthy again."""
+    monkeypatch.setattr(runs_manager, "RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(runs_manager, "RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS", 0.01)
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    stuck = await run_manager.create("thread-1")
+    await run_manager.set_status(stuck.run_id, RunStatus.success, persist=False)
+    original_get = store.get
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store unavailable")
+
+    store.get = failing_get
+    await run_manager.evict_finished_run(stuck.run_id)
+    await asyncio.wait_for(run_manager._eviction_retry_tasks[stuck.run_id], timeout=5)
+    assert stuck.run_id in run_manager._runs
+    assert stuck.run_id in run_manager._stalled_evictions
+
+    # Store recovers; an unrelated run's successful eviction re-arms the
+    # stalled record, whose own retry now repairs and evicts it.
+    store.get = original_get
+    healthy = await run_manager.create("thread-2")
+    await run_manager.set_status(healthy.run_id, RunStatus.success)
+    await run_manager.evict_finished_run(healthy.run_id)
+    assert healthy.run_id not in run_manager._runs
+
+    rearmed = run_manager._eviction_retry_tasks.get(stuck.run_id)
+    assert rearmed is not None and not rearmed.done()
+    await asyncio.wait_for(rearmed, timeout=5)
+    assert stuck.run_id not in run_manager._runs
+    assert stuck.run_id not in run_manager._stalled_evictions
+    assert (await store.get(stuck.run_id))["status"] == RunStatus.success.value
 
 
 class _CompletionRefusingStore(MemoryRunStore):

@@ -41,6 +41,10 @@ RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS = 30.0
 # Completion fields mirrored onto RunRecord by update_run_completion. That
 # durable write is best-effort, so eviction confirms these are present in the
 # store before dropping the record that may hold the only copy.
+_MESSAGE_SUMMARY_FIELDS = frozenset({"last_ai_message", "first_human_message"})
+# Mirrors the SQL store's write-side truncation (persistence/run/sql.py).
+_MESSAGE_SUMMARY_COMPARE_CHARS = 2000
+
 _COMPLETION_FIELDS = (
     "total_input_tokens",
     "total_output_tokens",
@@ -280,6 +284,9 @@ class RunManager:
         # unreferenced sleeper could be garbage-collected mid-retry, and
         # shutdown needs the full set to cancel them boundedly.
         self._eviction_retry_tasks: dict[str, asyncio.Task[None]] = {}
+        # Records whose bounded eviction retries exhausted; re-armed whenever
+        # a later eviction proves the store healthy or reconciliation ticks.
+        self._stalled_evictions: set[str] = set()
         self._shutting_down = False
 
     def _index_run_locked(self, record: RunRecord) -> None:
@@ -1966,6 +1973,9 @@ class RunManager:
         and no new retry is spawned once shutdown has begun.
         """
         if await self._evict_run_record_if_durable(run_id):
+            # This eviction proves the store is serving reads and writes
+            # again — give stalled records another bounded retry window.
+            self._rearm_stalled_evictions()
             return
         if self._shutting_down:
             # The drain below cancels pending retries; a fresh sleeper here
@@ -1973,6 +1983,10 @@ class RunManager:
             # remains the source of truth for the next process.
             logger.warning("Run record %s retained: durability unconfirmed at shutdown", run_id)
             return
+        self._spawn_eviction_retry(run_id)
+
+    def _spawn_eviction_retry(self, run_id: str) -> None:
+        """Start one deduplicated, strongly referenced eviction retry task."""
         existing = self._eviction_retry_tasks.get(run_id)
         if existing is not None and not existing.done():
             return
@@ -1980,6 +1994,21 @@ class RunManager:
         task.set_name(f"deerflow-run-record-eviction-retry-{run_id}")
         self._eviction_retry_tasks[run_id] = task
         task.add_done_callback(lambda done, run_id=run_id: self._eviction_retry_done(run_id, done))
+
+    def _rearm_stalled_evictions(self) -> None:
+        """Give records whose bounded retries exhausted another eviction window.
+
+        Re-arming is event-driven — the next successful eviction and each
+        orphan-reconciliation tick — so a store outage longer than the retry
+        window degrades to a delayed eviction instead of a permanent leak.
+        """
+        if self._shutting_down:
+            return
+        for run_id in list(self._stalled_evictions):
+            if self._runs.get(run_id) is None:
+                self._stalled_evictions.discard(run_id)
+                continue
+            self._spawn_eviction_retry(run_id)
 
     def _eviction_retry_done(self, run_id: str, task: asyncio.Task[None]) -> None:
         """Drop the strong reference once the retry settles (or is cancelled)."""
@@ -2072,8 +2101,24 @@ class RunManager:
 
     @classmethod
     def _completion_needs_repair(cls, row: dict[str, Any], record: RunRecord) -> bool:
-        """Does the durable row miss any completion value the record holds?"""
-        return any(row.get(key) != value for key, value in cls._completion_payload(record).items())
+        """Does the durable row miss any completion value the record holds?
+
+        Values are compared in the canonical form a store row can hold: the
+        SQL store truncates message summaries to 2000 characters and stores
+        empty containers as absent keys, so a raw comparison would route
+        every long-message run through the repair path.
+        """
+        for key, value in cls._completion_payload(record).items():
+            if key in _MESSAGE_SUMMARY_FIELDS and isinstance(value, str):
+                value = value[:_MESSAGE_SUMMARY_COMPARE_CHARS]
+            row_value = row.get(key)
+            if key in _MESSAGE_SUMMARY_FIELDS and isinstance(row_value, str):
+                row_value = row_value[:_MESSAGE_SUMMARY_COMPARE_CHARS]
+            if row_value is None and not value:
+                continue
+            if row_value != value:
+                return True
+        return False
 
     async def _repair_durable_run_state(self, run_id: str, record: RunRecord) -> bool:
         """Converge the durable row to the memory snapshot, completion included.
@@ -2149,8 +2194,9 @@ class RunManager:
                 attempt,
                 RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS,
             )
-        logger.error(
-            "Run record %s retained after %d eviction retries; its run-store row may be stale",
+        self._stalled_evictions.add(run_id)
+        logger.warning(
+            "Run record %s retained after %d eviction retries; its run-store row may be stale (re-armed once the store recovers)",
             run_id,
             RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS,
         )
@@ -2162,6 +2208,7 @@ class RunManager:
                 return
             self._runs.pop(run_id, None)
             self._unindex_run_locked(run_id, current.thread_id)
+            self._stalled_evictions.discard(run_id)
         logger.debug("Run record %s evicted", run_id)
 
     # ------------------------------------------------------------------
@@ -2462,6 +2509,10 @@ class RunManager:
                         [record.run_id for record in recovered],
                         exc_info=True,
                     )
+        # This sweep terminalizes expired-lease rows — the event stalled
+        # eviction overlays (e.g. fenced records waiting on a slow peer) wait
+        # for — so re-arm them here.
+        self._rearm_stalled_evictions()
 
     def _schedule_orphan_reconciliation(self) -> None:
         """Start one supervised recovery pass unless one is already running."""
