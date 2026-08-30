@@ -638,6 +638,8 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
             record.finalizing = finalizing
 
         async def cleanup(self, *_args, **_kwargs):
+
+        def schedule_cleanup(self, *_args, **_kwargs) -> None:
             return None
 
     class FakeBridge:
@@ -726,6 +728,8 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
             record.finalizing = finalizing
 
         async def cleanup(self, *_args, **_kwargs):
+
+        def schedule_cleanup(self, *_args, **_kwargs) -> None:
             return None
 
     class FakeBridge:
@@ -913,6 +917,8 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
             record.finalizing = finalizing
 
         async def cleanup(self, *_args, **_kwargs):
+
+        def schedule_cleanup(self, *_args, **_kwargs) -> None:
             return None
 
     class FakeBridge:

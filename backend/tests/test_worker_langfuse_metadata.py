@@ -66,6 +66,8 @@ class _FakeRunManager:
         return None
 
     async def cleanup(self, *_args, **_kwargs) -> None:
+
+    def schedule_cleanup(self, *_args, **_kwargs) -> None:
         return None
 
 

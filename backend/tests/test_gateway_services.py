@@ -3183,6 +3183,7 @@ async def test_run_agent_full_mode_rejects_delta_before_graph_invocation():
         set_status=set_status,
         set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
         cleanup=AsyncMock(),
+        schedule_cleanup=MagicMock(return_value=None),
     )
     record = RunRecord(
         run_id="run-checkpoint-mode",
@@ -3263,6 +3264,7 @@ async def test_run_agent_full_mode_checks_selected_checkpoint_before_graph():
         set_status=set_status,
         set_status_if_not_cancelled=AsyncMock(side_effect=set_status_if_not_cancelled),
         cleanup=AsyncMock(),
+        schedule_cleanup=MagicMock(return_value=None),
     )
     record = RunRecord(
         run_id="run-selected-checkpoint-mode",

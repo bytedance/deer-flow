@@ -1637,6 +1637,10 @@ async def run_agent(
                 # task, and request payload. Durable run history remains available
                 # through RunStore.
                 _create_contextless_task(run_manager.cleanup(run_id))
+                # Schedule terminal-record eviction from the outer cleanup path so
+                # a failure in any earlier finalization step (including
+                # ``publish_end``) cannot strand the in-memory record.
+                run_manager.schedule_cleanup(run_id)
                 _schedule_terminal_cycle_collection()
 
                 if lease_cleanup_interrupt is not None:

@@ -672,6 +672,82 @@ async def test_cleanup(manager: RunManager):
 
 
 @pytest.mark.anyio
+async def test_schedule_cleanup_without_store_retains_record(manager: RunManager):
+    """Memory-only mode must keep the previous retain-forever behaviour.
+
+    Eviction would erase the run's history entirely (no store fallback), so
+    ``schedule_cleanup`` is a no-op without a backing store.
+    """
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    assert manager.schedule_cleanup(record.run_id, delay=0) is None
+    assert await manager.get(record.run_id) is record
+    assert manager._cleanup_tasks == set()
+
+
+@pytest.mark.anyio
+async def test_schedule_cleanup_with_store_evicts_and_prunes_thread_index(manager_with_store: RunManager):
+    """With a durable store, terminal records are evicted after the delay.
+
+    Both registries must be pruned in lockstep, and history must remain
+    readable through the store fallback afterwards.
+    """
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    task = mgr.schedule_cleanup(record.run_id, delay=0.01)
+    assert task is not None
+    await asyncio.wait_for(task, timeout=5)
+
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+
+    hydrated = await mgr.get(record.run_id)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    assert hydrated.store_only is True
+
+
+@pytest.mark.anyio
+async def test_shutdown_cancels_pending_cleanup_tasks(manager_with_store: RunManager):
+    """Shutdown must cancel eviction tasks that are still mid-delay."""
+    mgr = manager_with_store
+    record = await mgr.create("thread-1")
+    await mgr.set_status(record.run_id, RunStatus.success)
+
+    task = mgr.schedule_cleanup(record.run_id, delay=3600)
+    assert task is not None
+
+    await mgr.shutdown(timeout=0.1)
+    assert task.cancelled()
+    assert mgr._cleanup_tasks == set()
+    # The record is never evicted, so reads stay in-memory.
+    assert await mgr.get(record.run_id) is not None
+
+
+@pytest.mark.anyio
+async def test_fail_start_if_pending_schedules_cleanup_only_with_store():
+    """Spawn-failure terminalization schedules eviction only when store-backed."""
+    store_mgr = RunManager(store=MemoryRunStore())
+    record = await store_mgr.create("thread-1")
+    assert await store_mgr.fail_start_if_pending(record.run_id, error="no worker") is True
+    assert record.status == RunStatus.error
+
+    scheduled = list(store_mgr._cleanup_tasks)
+    assert len(scheduled) == 1
+    for task in scheduled:
+        task.cancel()
+    await asyncio.gather(*scheduled, return_exceptions=True)
+
+    memory_mgr = RunManager()
+    memory_record = await memory_mgr.create("thread-1")
+    assert await memory_mgr.fail_start_if_pending(memory_record.run_id, error="no worker") is True
+    assert memory_mgr._cleanup_tasks == set()
+
+
+@pytest.mark.anyio
 async def test_set_status_with_error(manager: RunManager):
     """Error message should be stored on the record."""
     record = await manager.create("thread-1")

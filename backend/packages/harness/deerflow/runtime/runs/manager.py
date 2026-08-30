@@ -250,6 +250,10 @@ class RunManager:
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
         self._orphan_recovery_task: asyncio.Task[None] | None = None
+        # Strong references to scheduled terminal-record eviction tasks. Without
+        # these the event loop may garbage-collect a sleeping task before it
+        # fires (the StreamBridge scheduled-cleanup hazard, issue #4930).
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     def _index_run_locked(self, record: RunRecord) -> None:
         """Register *record* in the thread index. Caller must hold ``self._lock``."""
@@ -877,6 +881,9 @@ class RunManager:
             record.updated_at = _now_iso()
 
         await self._persist_status(record, RunStatus.error, error=error)
+        # This run has no attached worker task, so no ``run_agent`` finalization
+        # will ever schedule terminal-record eviction for it. Do it here.
+        self.schedule_cleanup(run_id)
         return True
 
     async def get_many_by_thread(
@@ -1881,6 +1888,37 @@ class RunManager:
                 self._unindex_run_locked(run_id, record.thread_id)
         logger.debug("Run record %s cleaned up", run_id)
 
+    def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> asyncio.Task[None] | None:
+        """Schedule terminal-record eviction from the in-memory registries.
+
+        Terminal runs are evicted only when a durable RunStore backs this
+        manager: after eviction, history is still served by the store
+        fallback in ``get()`` / ``list_by_thread()``. Without a store,
+        eviction would erase the run's history entirely, so memory-only mode
+        keeps the previous retain-forever behaviour and this returns ``None``.
+
+        The returned task (``None`` above) is kept strongly referenced so it
+        cannot be garbage-collected mid-delay, and :meth:`shutdown` cancels
+        any eviction tasks that are still pending.
+
+        Callers must invoke this only after the run has reached a terminal
+        status and all persistence/finalization for it has completed.
+        """
+        if self._store is None:
+            return None
+        task = asyncio.create_task(self.cleanup(run_id, delay=delay))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_task_done)
+        return task
+
+    def _cleanup_task_done(self, task: asyncio.Task[None]) -> None:
+        """Drop the finished eviction task and surface unexpected failures."""
+        self._cleanup_tasks.discard(task)
+        if task.cancelled():
+            return
+        if (exc := task.exception()) is not None:
+            logger.warning("Run record eviction task failed", exc_info=exc)
+
     # ------------------------------------------------------------------
     # Lease heartbeat
     # ------------------------------------------------------------------
@@ -2216,6 +2254,20 @@ class RunManager:
                 timeout,
             )
 
+    async def _cancel_pending_cleanups(self) -> None:
+        """Cancel and await terminal-record eviction tasks on shutdown.
+
+        Eviction only pops in-memory records, so there is nothing to persist:
+        cancellation leaves the durable store rows untouched. Evictions
+        scheduled after this point by a worker task that settles late are
+        cancelled when the event loop closes.
+        """
+        tasks = [task for task in self._cleanup_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
     async def shutdown(self, *, timeout: float = 5.0) -> None:
         """Cancel and bounded-await all in-flight runs on process shutdown.
 
@@ -2263,6 +2315,7 @@ class RunManager:
 
         if not inflight:
             await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+            await self._cancel_pending_cleanups()
             return
 
         tasks = [record.task for record in inflight]
@@ -2315,6 +2368,7 @@ class RunManager:
             logger.warning("Run drain exceeded %.1fs on shutdown; %d run task(s) still active and may race checkpointer teardown", timeout, len(pending))
         logger.info("Drained %d in-flight run(s) on shutdown (%d settled within %.1fs)", len(inflight), len(inflight) - len(pending), timeout)
         await self._drain_orphan_recovery_task(timeout=max(0.0, deadline - loop.time()))
+        await self._cancel_pending_cleanups()
 
 
 class CancelOutcome(StrEnum):
