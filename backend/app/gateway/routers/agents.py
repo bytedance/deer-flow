@@ -499,7 +499,7 @@ class UserProfileUpdateRequest(BaseModel):
     "/user-profile",
     response_model=UserProfileResponse,
     summary="Get User Profile",
-    description="Read the caller's per-user USER.md file (injected into that user's agents).",
+    description="Read the caller's per-user USER.md file.",
 )
 @require_permission("agents", "read")
 async def get_user_profile(request: Request) -> UserProfileResponse:
@@ -529,14 +529,16 @@ async def get_user_profile(request: Request) -> UserProfileResponse:
     "/user-profile",
     response_model=UserProfileResponse,
     summary="Update User Profile",
-    description="Write the caller's per-user USER.md file (injected into that user's agents).",
+    description="Write the caller's per-user USER.md file.",
 )
 @require_permission("agents", "write")
 async def update_user_profile(body: UserProfileUpdateRequest, request: Request) -> UserProfileResponse:
     """Create or overwrite the current user's USER.md.
 
-    The write targets the caller's own user bucket, so the content only ever
-    affects that user's agent prompts.
+    The write targets the caller's own user bucket, so one user can never
+    write the profile of another. (Storage and retrieval only — nothing at
+    this head consumes USER.md for prompt injection; this route and the GET
+    above are its only readers/writers.)
 
     Args:
         body: The update request with the new USER.md content.

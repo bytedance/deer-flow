@@ -279,3 +279,65 @@ class TestMigrateSkills:
         assert not (base_dir / "skills" / "custom").exists()
         assert (base_dir / "skills").exists()
         assert (base_dir / "skills" / "public").exists()
+
+
+class TestMigrateUserProfile:
+    def test_moves_global_user_md(self, base_dir: Path, paths: Paths):
+        legacy = base_dir / "USER.md"
+        legacy.write_text("# About me\n", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        migrate_user_profile(paths, user_id="default")
+
+        expected = base_dir / "users" / "default" / "USER.md"
+        assert expected.read_text(encoding="utf-8") == "# About me\n"
+        assert not legacy.exists()
+
+    def test_conflict_renames_legacy_and_keeps_destination(self, base_dir: Path, paths: Paths):
+        legacy = base_dir / "USER.md"
+        legacy.write_text("# legacy\n", encoding="utf-8")
+
+        dest = base_dir / "users" / "default" / "USER.md"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("# current\n", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        migrate_user_profile(paths, user_id="default")
+
+        # The per-user copy wins; the legacy global file is preserved aside
+        # instead of silently overwritten.
+        assert dest.read_text(encoding="utf-8") == "# current\n"
+        assert (base_dir / "USER.legacy.md").read_text(encoding="utf-8") == "# legacy\n"
+
+    def test_no_legacy_user_md_is_noop(self, base_dir: Path, paths: Paths):
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        migrate_user_profile(paths, user_id="default")  # should not raise
+
+    def test_dry_run_moves_nothing(self, base_dir: Path, paths: Paths):
+        legacy = base_dir / "USER.md"
+        legacy.write_text("# About me\n", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        migrate_user_profile(paths, user_id="default", dry_run=True)
+
+        assert legacy.exists()
+        assert not (base_dir / "users" / "default" / "USER.md").exists()
+
+    def test_dry_run_conflict_renames_nothing(self, base_dir: Path, paths: Paths):
+        legacy = base_dir / "USER.md"
+        legacy.write_text("# legacy\n", encoding="utf-8")
+        dest = base_dir / "users" / "default" / "USER.md"
+        dest.parent.mkdir(parents=True)
+        dest.write_text("# current\n", encoding="utf-8")
+
+        from scripts.migrate_user_isolation import migrate_user_profile
+
+        migrate_user_profile(paths, user_id="default", dry_run=True)
+
+        assert not (base_dir / "USER.legacy.md").exists()
+        assert dest.read_text(encoding="utf-8") == "# current\n"
+        assert legacy.exists()
