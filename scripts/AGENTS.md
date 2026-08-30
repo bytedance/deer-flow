@@ -6,6 +6,15 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
+## Shell Script Invocation Contract
+
+Root Makefile recipes must invoke repository `.sh` files through
+`RUN_SHELL_SCRIPT`. On POSIX this expands to `$(BASH)`; on Windows it uses the
+Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
+likewise prefix the target with `bash`. This keeps documented `make` commands
+working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
+does not preserve executable bits.
+
 ## Backend Static Analysis Commands
 
 The root `detect-thread-boundaries` target statically inventories execution

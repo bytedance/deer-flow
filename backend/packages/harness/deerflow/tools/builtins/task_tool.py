@@ -13,6 +13,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.config import get_stream_writer
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
@@ -232,6 +233,8 @@ def _task_result_command(
     stop_reason: SubagentStopReasonValue | None = None,
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
+    tool_receipts: list[dict] | None = None,
+    receipt_verdict: dict | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     return Command(
@@ -248,6 +251,8 @@ def _task_result_command(
                         stop_reason=stop_reason,
                         model_name=model_name,
                         token_usage=usage,
+                        tool_receipts=tool_receipts,
+                        receipt_verdict=receipt_verdict,
                     ),
                 )
             ]
@@ -262,6 +267,8 @@ async def task_tool(
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
+    *,
+    acceptance_criteria: list[str] | None = None,
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -305,10 +312,33 @@ async def task_tool(
     - Coordination, verification, and synthesis of returned results
     - Any task the parent can complete more cheaply with direct tools
 
+    Reading the result (subagent reports are SELF-REPORTS, not verified facts):
+    - While receipt verification is enabled (the default; `verification.receipts_enabled`
+      in config), the subagent is instructed to cite receipt ids `[rN]` from its
+      execution record for every action claim and to attach a verifiable handle
+      (absolute path, URL, ID, HTTP status) to every deliverable. In that
+      configuration the delegation ledger cross-checks those citations; a
+      completed report whose action claims carry no citation is flagged UNVERIFIED.
+      When receipt verification is disabled, reports carry no receipt citations
+      and no citation verdict — judge them by their verifiable handles alone.
+    - A resolved citation means the cited call happened with the recorded status
+      — it does not validate that the adjacent claim is correct. Before relying
+      on a load-bearing claim, spot-check its verifiable handle yourself.
+
     Args:
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
         prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
         subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        acceptance_criteria: Optional list of completion requirements, handed to
+            the subagent as untrusted data appended to its task input (never as
+            system-prompt authority) and addressed one by one in its final
+            report. Attach them when
+            the outcome is objectively checkable; prefer the canonical forms
+            `file:<path> exists`, `file:<path> non-empty`, `file_written:<path>`,
+            and `tests_passed:<command>` so each criterion stays objectively
+            decidable. Example for a report-writing delegation:
+            ["file:../outputs/report.md non-empty"]. Omit for open-ended
+            exploration where no crisp acceptance condition exists.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
@@ -452,6 +482,13 @@ async def task_tool(
         "is_internal": is_internal,
         "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
+        # RFC #4651 PR3: lead-supplied acceptance criteria are handed to the
+        # executor, which appends them to the subagent's task HumanMessage as
+        # untrusted data (sanitized and boundary-framed by
+        # InputSanitizationMiddleware). The subagent's SystemMessage carries
+        # only a framework-owned pointer note, so criterion text can never gain
+        # system-channel authority over framework instructions.
+        "acceptance_criteria": acceptance_criteria,
     }
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
@@ -555,6 +592,15 @@ async def task_tool(
                 # stop_reason carries a guardrail cap (token_capped / turn_capped)
                 # when the run was ended early but still produced a final answer
                 # — the work survives on result_brief like a clean success.
+                # RFC #4651 PR2: cross-check the report's [rN] citations
+                # against the harvested receipts once, here — the only point
+                # holding the full (untruncated) report text. receipts=None
+                # means no harvest happened (receipts_enabled=false, or the
+                # run ended before streaming): skip, keeping disabled
+                # deployments exactly pre-PR2. An empty list is a real
+                # harvest (zero stamped calls) and still gets a verdict.
+                receipts = getattr(result, "tool_receipts", None)
+                receipt_verdict = verify_receipt_citations(result.result or "", receipts) if receipts is not None else None
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="completed",
@@ -562,6 +608,8 @@ async def task_tool(
                     stop_reason=result.stop_reason,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=receipts,
+                    receipt_verdict=receipt_verdict,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
@@ -587,6 +635,7 @@ async def task_tool(
                     stop_reason=result.stop_reason,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -608,6 +657,7 @@ async def task_tool(
                     error=result.error,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -629,6 +679,7 @@ async def task_tool(
                     error=result.error,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
 
             # Still running, wait before next poll
@@ -664,6 +715,7 @@ async def task_tool(
                     error=message,
                     model_name=effective_model,
                     usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
                 )
     except asyncio.CancelledError:
         # Signal the background subagent thread to stop cooperatively.

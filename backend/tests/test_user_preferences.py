@@ -114,8 +114,8 @@ async def _read_raw_preferences(user_id: str) -> tuple[object, bool, int]:
 
 
 def _load_user_preferences_migration() -> ModuleType:
-    migration_path = Path(__file__).parents[1] / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "versions" / "0017_user_preferences.py"
-    spec = importlib.util.spec_from_file_location("migration_0017_user_preferences", migration_path)
+    migration_path = Path(__file__).parents[1] / "packages" / "harness" / "deerflow" / "persistence" / "migrations" / "versions" / "0018_user_preferences.py"
+    spec = importlib.util.spec_from_file_location("migration_0018_user_preferences", migration_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
