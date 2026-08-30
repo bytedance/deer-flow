@@ -380,7 +380,7 @@ class BuzzChannel(Channel):
         self._pending_auth_challenge = None
         # Seen-id persistence is coalesced (FLUSH_DELAY_SECONDS); a clean stop
         # must not lose records still inside that window to a replay on restart.
-        self._seen_events.flush()
+        await self._seen_events.aflush()
         logger.info("[buzz] channel stopped")
 
     # -- subscriptions ------------------------------------------------------
@@ -1255,7 +1255,7 @@ class BuzzChannel(Channel):
         # created_at — is never affected. Sits before the /connect branch
         # deliberately: a replayed /connect would otherwise be re-answered with
         # a spurious "code invalid or expired" reply on every reconnect.
-        if self._seen_events.seen(channel_id, event_id):
+        if await self._seen_events.aseen(channel_id, event_id):
             logger.debug("[buzz] dropped replayed event id=%s in channel %s", event_id, channel_id)
             return
 
@@ -1279,7 +1279,7 @@ class BuzzChannel(Channel):
             # cursor: leaving it behind would replay this /connect on every reconnect
             # and answer each replay with a spurious "code invalid or expired" reply.
             self._advance_watermark(channel_id, created_at)
-            self._seen_events.record(channel_id, event_id)
+            await self._seen_events.arecord(channel_id, event_id)
             return
         if author not in self._allowed_users:
             # Deny-by-default is intentional (see start()'s empty-allowlist warning),
@@ -1315,7 +1315,7 @@ class BuzzChannel(Channel):
         # same rule applies to the persistent seen-id record: recording before a
         # failed publish would turn "replayable" into "silently skipped".
         self._advance_watermark(channel_id, created_at)
-        self._seen_events.record(channel_id, event_id)
+        await self._seen_events.arecord(channel_id, event_id)
 
     # -- outbound --------------------------------------------------------------
 
