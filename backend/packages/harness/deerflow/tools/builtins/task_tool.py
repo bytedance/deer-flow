@@ -212,6 +212,8 @@ def _deliver_final_usage_report(
     runtime: Runtime,
     result: Any,
     report_loop: asyncio.AbstractEventLoop | None,
+    *,
+    execution_id: str,
 ) -> None:
     """Schedule the FINAL usage report onto the loop that owns the RunJournal.
 
@@ -231,12 +233,19 @@ def _deliver_final_usage_report(
     the time the deferred cleaner reaches a terminal result. The report is
     then dropped on purpose: the run has finished and persisted its completion
     data, so nothing reads those counters back — recording into a dead run's
-    journal would account nothing. The report bypasses the snapshot's
-    ``usage_reported`` flag so records accumulated after the snapshot are
-    counted; the journal itself dedupes by ``source_run_id``.
+    journal would account nothing. This is the one path where a subagent's
+    tail usage goes permanently unaccounted (the registry entry is removed
+    right after, so the records exist nowhere else), so the drop is logged at
+    info with the execution id and the record count. The report bypasses the
+    snapshot's ``usage_reported`` flag so records accumulated after the
+    snapshot are counted; the journal itself dedupes by ``source_run_id``.
     """
     if report_loop is None:
-        logger.debug("No parent loop captured for deferred final usage report — skipping")
+        logger.info(
+            "Dropping deferred final usage report for execution %s: no parent loop captured (%d usage records unaccounted)",
+            execution_id,
+            len(getattr(result, "token_usage_records", None) or []),
+        )
         return
     try:
         # A lambda, not plain arguments: call_soon_threadsafe forwards keyword
@@ -245,9 +254,14 @@ def _deliver_final_usage_report(
         report_loop.call_soon_threadsafe(lambda: _report_subagent_usage(runtime, result, final=True))
     except Exception:
         # Loop closed between the capture and this call, or scheduling was
-        # rejected — same drop rationale. Never-raise by contract: delivery
-        # problems must not block the caller's registry removal.
-        logger.debug("Parent loop unavailable for the deferred final usage report — skipping")
+        # rejected — same drop rationale and same info-level visibility.
+        # Never-raise by contract: delivery problems must not block the
+        # caller's registry removal.
+        logger.info(
+            "Dropping deferred final usage report for execution %s: parent loop closed before delivery (%d usage records unaccounted)",
+            execution_id,
+            len(getattr(result, "token_usage_records", None) or []),
+        )
 
 
 async def _deferred_cleanup_subagent_task(
@@ -282,7 +296,7 @@ async def _deferred_cleanup_subagent_task(
         elif _is_subagent_terminal(result):
             # Never-raise by contract: delivery problems (closed parent loop)
             # are logged inside and must not block the registry removal.
-            _deliver_final_usage_report(runtime, result, report_loop)
+            _deliver_final_usage_report(runtime, result, report_loop, execution_id=execution_id)
             cleanup_background_task(execution_id)
             return
         if cleanup_poll_count >= max_polls:

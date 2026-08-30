@@ -2632,11 +2632,17 @@ async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
     await orig_sleep(0.01)
 
     assert cleaned == ["exec-gc"]
-    # The completion chain discards the handle once its done-callbacks run.
+    # The transport runs on this test's own loop, so the production
+    # add_done_callback(_deferred_cleanup_tasks.discard) fires on the same
+    # loop — deterministic once `cleaned` was observed. The assert (not a
+    # manual discard) is the point: if that done-callback were deleted from
+    # _schedule_deferred_subagent_cleanup, the handle would linger and this
+    # would fail instead of the test silently cleaning up after itself.
     for _ in range(10):
         if weak_task() not in task_tool_module._deferred_cleanup_tasks:
             break
         await orig_sleep(0.01)
+    assert weak_task() not in task_tool_module._deferred_cleanup_tasks
     task_tool_module._deferred_cleanup_tasks.discard(weak_task())
 
 
