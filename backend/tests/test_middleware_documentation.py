@@ -1,10 +1,15 @@
 """Keep documented middleware examples aligned with the locked LangChain API."""
 
+import inspect
 import re
 from pathlib import Path
 
 import pytest
 from langchain.agents.middleware import AgentMiddleware
+
+from deerflow.agents import create_deerflow_agent
+from deerflow.client import DeerFlowClient
+from deerflow.config.extensions_config import ExtensionsConfig
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MIDDLEWARE_GUIDES = (
@@ -39,3 +44,9 @@ def test_custom_middleware_example_uses_current_lifecycle_hooks(path: Path) -> N
     middleware = middleware_type()
     assert middleware.before_model({"messages": []}, None) is None
     assert middleware.after_model({"messages": []}, None) is None
+
+
+def test_documented_registration_apis_exist() -> None:
+    ExtensionsConfig.model_validate({"middlewares": ["pkg.mod:MyMiddleware"]})
+    assert "middlewares" in inspect.signature(DeerFlowClient.__init__).parameters
+    assert "extra_middleware" in inspect.signature(create_deerflow_agent).parameters

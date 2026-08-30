@@ -312,6 +312,14 @@ Embedded callers can instead pass middleware instances through
 `DeerFlowClient(middlewares=[...])` or
 `create_deerflow_agent(extra_middleware=[...])`.
 
+Choose the registration path by ownership and placement. The legacy fixed-slot
+`extensions.middlewares` list is accepted in `config.yaml` and
+`extensions_config.json` (`config.yaml` wins) and applies to both lead and
+subagent pipelines. Packaged extensions registered through the top-level
+`plugins:` list contribute middleware at semantic extension points. Contributor
+code that needs committed, programmatic lead-only wiring can use
+`build_middlewares(..., custom_middlewares=[MyMiddleware()])`.
+
 ### Adding New API Endpoints
 
 1. Create router in `app/gateway/routers/`:
