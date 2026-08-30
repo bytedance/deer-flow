@@ -781,6 +781,7 @@ def _existing_thread_response(thread_id: str, record: dict) -> ThreadResponse:
 
 
 @router.post("", response_model=ThreadResponse)
+@require_permission("threads", "write")
 async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadResponse:
     """Create a new thread.
 
@@ -1055,6 +1056,7 @@ async def _branch_thread_with_reservation(
 
 
 @router.post("/search", response_model=list[ThreadResponse])
+@require_permission("threads", "read")
 async def search_threads(body: ThreadSearchRequest, request: Request) -> list[ThreadResponse]:
     """Search and list threads.
 
