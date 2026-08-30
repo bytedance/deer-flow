@@ -216,14 +216,17 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 **Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
 
 - Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
-- Run the full offline suite before and after your change: `make test`
+- Run both offline targets before and after your change: `make test` and `make test-blocking-io`
 - Tests must pass before a feature is considered complete
 - For lightweight config/utility modules, prefer pure unit tests with no external dependencies
 - If a module causes circular import issues in tests, add a `sys.modules` mock in `tests/conftest.py` (see existing example for `deerflow.subagents.executor`)
 
 ```bash
-# Run all offline tests
+# Run default offline tests
 make test
+
+# Run strict blocking-I/O tests
+make test-blocking-io
 
 # Explicit live integration tests (requires config.yaml and credentials;
 # calls real APIs and may create local side effects)

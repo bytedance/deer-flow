@@ -160,3 +160,11 @@ def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
 
     assert "make test" in workflow
     assert LIVE_OPT_IN not in workflow
+
+
+def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
+    command = _dry_run_make_target("test-blocking-io")
+    workflow = (REPO_ROOT / ".github" / "workflows" / "backend-blocking-io-tests.yml").read_text(encoding="utf-8")
+
+    assert "tests/blocking_io" in command
+    assert "make test-blocking-io" in workflow

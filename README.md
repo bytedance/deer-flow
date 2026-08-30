@@ -1508,12 +1508,12 @@ immediately after starting any deployment that is not loopback-only.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
-Backend `make test` is offline by default and excludes live external-API
-coverage. Maintainers can explicitly run the real `DeerFlowClient` integration
-suite with `cd backend && make test-live` after providing a valid root
-`config.yaml` and API credentials; this may incur API costs and create local
-sandboxes, artifacts, or files. Direct pytest runs additionally require
-`DEER_FLOW_RUN_LIVE_TESTS=1`.
+Backend `make test` excludes live external-API and blocking-I/O coverage.
+Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
+Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
+This command requires a valid root `config.yaml` and API credentials.
+It can incur API costs and create local sandboxes, artifacts, or files.
+Direct pytest runs additionally require `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
 Backend blocking-IO diagnostics are available from the repository root with
