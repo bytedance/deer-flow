@@ -1,19 +1,20 @@
 """GET on the join-stream route must not carry cancel actions.
 
 ``stream_existing_run`` is registered for both GET and POST, and its
-``action`` branch cancels the run. The CSRF middleware exempts GET, so a
-session-authenticated browser could be forced cross-site (img / script /
-top-level navigation) into ``GET .../runs/{run_id}/stream?action=interrupt``
-or ``?action=rollback`` — a state-changing GET that bypasses the CSRF
-protection guarding the POST variant. The handler's documented contract is
-cancel-then-stream on POST only; these tests pin that GET stays a read-only
-join and POST keeps cancelling.
+``action`` branch cancels the run. The CSRF middleware exempts GET, while a
+SameSite=Lax session cookie still accompanies a cross-site top-level safe
+navigation. An attacker-induced navigation to
+``GET .../runs/{run_id}/stream?action=interrupt|rollback`` was therefore a
+state-changing GET that bypassed the CSRF protection guarding the POST
+variant. These tests pin that GET stays a read-only join and POST keeps
+cancelling.
 """
 
 from __future__ import annotations
 
 import asyncio
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
@@ -24,7 +25,7 @@ from deerflow.runtime.stream_bridge import MemoryStreamBridge
 THREAD_ID = "thread-get-action"
 
 
-def _make_client(run_status: RunStatus = RunStatus.running) -> tuple[TestClient, RunManager, str]:
+def _make_seeded_run_client(run_status: RunStatus = RunStatus.running) -> tuple[TestClient, RunManager, str]:
     mgr = RunManager()
 
     async def _seed():
@@ -40,37 +41,63 @@ def _make_client(run_status: RunStatus = RunStatus.running) -> tuple[TestClient,
     return TestClient(app, raise_server_exceptions=False), mgr, run_id
 
 
-def test_get_with_cancel_action_is_rejected():
-    """GET + action=interrupt|rollback must answer 405, not cancel."""
-    client, mgr, run_id = _make_client()
-    for action in ("interrupt", "rollback"):
-        response = client.get(f"/api/threads/{THREAD_ID}/runs/{run_id}/stream?action={action}")
-        assert response.status_code == 405, action
-        assert "POST" in response.json()["detail"]
-
-    async def _status():
+def _get_run_status(mgr: RunManager, run_id: str) -> RunStatus:
+    async def _read_status() -> RunStatus:
         record = await mgr.get(run_id)
+        assert record is not None
         return record.status
 
-    assert asyncio.run(_status()) == RunStatus.running
+    return asyncio.run(_read_status())
+
+
+@pytest.mark.parametrize("action", ("interrupt", "rollback"))
+def test_get_with_cancel_action_is_rejected(action: str):
+    """GET + action=interrupt|rollback must answer 405, not cancel."""
+    client, mgr, run_id = _make_seeded_run_client()
+    response = client.get(f"/api/threads/{THREAD_ID}/runs/{run_id}/stream?action={action}")
+    assert response.status_code == 405
+    assert response.headers["allow"] == "POST"
+    assert "POST" in response.json()["detail"]
+    assert _get_run_status(mgr, run_id) == RunStatus.running
+
+
+def test_get_with_invalid_action_has_one_validation_error():
+    """The dependency must not duplicate the endpoint's query validation."""
+    client, mgr, run_id = _make_seeded_run_client()
+
+    response = client.get(f"/api/threads/{THREAD_ID}/runs/{run_id}/stream?action=invalid")
+
+    assert response.status_code == 422
+    assert len(response.json()["detail"]) == 1
+    assert _get_run_status(mgr, run_id) == RunStatus.running
+
+
+def test_get_with_action_is_rejected_before_owner_lookup():
+    """The method gate must not reveal whether a thread metadata row exists."""
+    app = make_authed_test_app(owner_check_passes=False)
+    app.include_router(thread_runs.router)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get(f"/api/threads/{THREAD_ID}/runs/missing-run/stream?action=interrupt")
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "POST"
+    app.state.thread_store.check_access.assert_not_awaited()
 
 
 def test_get_without_action_still_joins():
     """The method guard must not break the plain read-only GET join. The
     seeded run is terminal so the SSE stream emits `end` and completes."""
-    client, _, run_id = _make_client(run_status=RunStatus.success)
+    client, _, run_id = _make_seeded_run_client(run_status=RunStatus.success)
     with client.stream("GET", f"/api/threads/{THREAD_ID}/runs/{run_id}/stream") as response:
         assert response.status_code == 200
 
 
-def test_post_with_cancel_action_still_cancels():
+@pytest.mark.parametrize("action", ("interrupt", "rollback"))
+def test_post_with_cancel_action_still_cancels(action: str):
     """The documented POST cancel-then-stream flow is unchanged."""
-    client, mgr, run_id = _make_client()
-    with client.stream("POST", f"/api/threads/{THREAD_ID}/runs/{run_id}/stream?action=interrupt") as response:
+    client, mgr, run_id = _make_seeded_run_client()
+    with client.stream("POST", f"/api/threads/{THREAD_ID}/runs/{run_id}/stream?action={action}") as response:
         assert response.status_code == 200
 
-    async def _status():
-        record = await mgr.get(run_id)
-        return record.status
-
-    assert asyncio.run(_status()) in (RunStatus.interrupted, RunStatus.error)
+    assert _get_run_status(mgr, run_id) == RunStatus.interrupted

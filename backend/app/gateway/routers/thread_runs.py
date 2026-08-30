@@ -18,7 +18,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -1019,11 +1019,24 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     )
 
 
+def _reject_get_stream_action(request: Request) -> None:
+    """Keep the GET join read-only before thread ownership or run lookup."""
+    if request.query_params.get("action") in {"interrupt", "rollback"}:
+        # SameSite=Lax still sends the session cookie on a cross-site top-level
+        # safe navigation. Reject the state-changing action before the endpoint
+        # wrapper performs its thread ownership lookup.
+        raise HTTPException(
+            status_code=405,
+            detail="`action` is only supported on POST requests",
+            headers={"Allow": "POST"},
+        )
+
+
 # Register GET and POST as separate routes so each method gets a unique OpenAPI
 # operationId. ``api_route(methods=["GET", "POST"])`` shares one route registration
 # across both methods, which makes FastAPI emit the same ``operationId`` twice and
 # warn about a duplicate operation id during OpenAPI generation.
-@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None)
+@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None, dependencies=[Depends(_reject_get_stream_action)])
 @router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
@@ -1040,15 +1053,6 @@ async def stream_existing_run(
     is present the run is cancelled first; the response then streams any
     remaining buffered events so the client observes a clean shutdown.
     """
-    if request.method == "GET" and action is not None:
-        # Cancel is a state change; CSRF middleware exempts GET, so a
-        # GET carrying an action would let a cross-site page cancel a
-        # session user's run via an img/script/navigation request. The
-        # documented contract is POST-only for cancel-then-stream.
-        raise HTTPException(
-            status_code=405,
-            detail="`action` is only supported on POST requests",
-        )
     require_cancel_permission_when_action(request, action)
 
     run_mgr = get_run_manager(request)
