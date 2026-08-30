@@ -245,38 +245,50 @@
 }
 
 :root {
-  --radius: 0.625rem;
-  --background: oklch(0.9855 0.0098 87.47);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0.0098 87.47);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0.0098 87.47);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.9455 0.0098 87.47);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0.0098 87.47);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.94 0.0098 87.47);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0.0098 87.47);
-  --input: oklch(0.88 0.0098 87.47);
-  --ring: oklch(0.58 0.18 255);
-  --chart-1: oklch(0.646 0.222 41.116);
-  --chart-2: oklch(0.6 0.118 184.704);
-  --chart-3: oklch(0.398 0.07 227.392);
-  --chart-4: oklch(0.828 0.189 84.429);
-  --chart-5: oklch(0.769 0.188 70.08);
-  --sidebar: oklch(0.965 0.0098 87.47);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0.0098 87.47);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.925 0.0098 87.47);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0.0098 87.47);
-  --sidebar-ring: oklch(0.708 0 0);
+  --radius: 0.75rem;
+  --bg: oklch(0.9855 0.0098 87.47);
+  --bg2: oklch(0.97 0.0098 87.47);
+  --bg3: oklch(0.9455 0.0098 87.47);
+  --bg4: oklch(0.922 0.0098 87.47);
+  --ink: #3a352d;
+  --ink2: #5c544a;
+  --muted-ink: oklch(0.55 0.005 87.47);
+  --muted2: oklch(0.65 0.005 87.47);
+  --rule: oklch(0.922 0.006 87.47);
+  --brand: #3a352d;
+  --red: #b42318;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --card: oklch(1 0.006 87.47);
+  --card-foreground: var(--ink);
+  --popover: oklch(1 0.006 87.47);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: #ffffff;
+  --secondary: var(--bg3);
+  --secondary-foreground: var(--ink2);
+  --muted: var(--bg2);
+  --muted-foreground: var(--muted-ink);
+  --accent: var(--bg3);
+  --accent-foreground: var(--ink);
+  --destructive: var(--red);
+  --destructive-foreground: #ffffff;
+  --border: var(--rule);
+  --input: var(--rule);
+  --ring: var(--brand);
+  --chart-1: var(--bg4);
+  --chart-2: var(--muted2);
+  --chart-3: var(--muted-ink);
+  --chart-4: var(--ink2);
+  --chart-5: var(--ink);
+  --sidebar: var(--bg2);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--bg3);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--rule);
+  --sidebar-ring: var(--brand);
 }
 
 html.dark .shiki span {
@@ -284,38 +296,49 @@ html.dark .shiki span {
 }
 
 .dark {
-  --background: oklch(0.24 0.0036 106.64);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.238 0.0036 106.64);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0.0036 106.64);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(1 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.3 0.0036 106.64);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0.0036 106.64);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.32 0.0036 106.64);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.74 0.16 255);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.245 0.0036 106.64);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.29 0.0036 106.64);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
-  font-weight: 300;
+  --bg: oklch(0.18 0.005 87.47);
+  --bg2: oklch(0.22 0.005 87.47);
+  --bg3: oklch(0.26 0.006 87.47);
+  --bg4: oklch(0.3 0.006 87.47);
+  --ink: oklch(0.93 0.005 87.47);
+  --ink2: oklch(0.82 0.005 87.47);
+  --muted-ink: oklch(0.65 0.005 87.47);
+  --muted2: oklch(0.5 0.005 87.47);
+  --rule: oklch(0.3 0.006 87.47);
+  --brand: #ffffff;
+  --red: #f97066;
+  --background: var(--bg);
+  --foreground: var(--ink);
+  --card: var(--bg2);
+  --card-foreground: var(--ink);
+  --popover: var(--bg2);
+  --popover-foreground: var(--ink);
+  --primary: var(--brand);
+  --primary-foreground: #111111;
+  --secondary: var(--bg3);
+  --secondary-foreground: var(--ink2);
+  --muted: var(--bg3);
+  --muted-foreground: var(--muted-ink);
+  --accent: var(--bg3);
+  --accent-foreground: var(--ink);
+  --destructive: var(--red);
+  --destructive-foreground: #ffffff;
+  --border: var(--rule);
+  --input: var(--rule);
+  --ring: var(--brand);
+  --chart-1: var(--bg4);
+  --chart-2: var(--muted2);
+  --chart-3: var(--muted-ink);
+  --chart-4: var(--ink2);
+  --chart-5: var(--ink);
+  --sidebar: var(--bg2);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--brand);
+  --sidebar-primary-foreground: #111111;
+  --sidebar-accent: var(--bg3);
+  --sidebar-accent-foreground: var(--ink);
+  --sidebar-border: var(--rule);
+  --sidebar-ring: var(--brand);
 }
 
 @layer base {
@@ -450,4 +473,601 @@ html.dark .shiki span {
   --container-width-sm: calc(var(--spacing) * 144);
   --container-width-md: calc(var(--spacing) * 204);
   --container-width-lg: calc(var(--spacing) * 256);
+}
+/* ===== Skin: observatory ===== */
+[data-skin="observatory"] {
+  /* theme v4 — Observatory (default skin) */
+  color-scheme: light;
+  --bg: #f3f5fa;
+  --bg2: #e8ecf4;
+  --bg3: #dde3ef;
+  --bg4: #cdd5e4;
+  --ink: #1b2436;
+  --ink2: #5b6578;
+  --muted-ink: #5b6578;
+  --muted2: #8b95ab;
+  --rule: #cdd5e4;
+  --brand: #2f5fa3;
+  --red: #b42318;
+  --radius: 0.75rem;
+  --sidebar-width: 256px;
+  --sidebar-width-icon: 48px;
+  --background: #f3f5fa;
+  --foreground: #1b2436;
+  --card: #ffffff;
+  --card-foreground: #1b2436;
+  --popover: #ffffff;
+  --popover-foreground: #1b2436;
+  --primary: #2f5fa3;
+  --primary-foreground: #f3f5fa;
+  --secondary: #e8ecf4;
+  --secondary-foreground: #1b2436;
+  --muted: #e8ecf4;
+  --muted-foreground: #5b6578;
+  --accent: #e8ecf4;
+  --accent-foreground: #1b2436;
+  --destructive: #b42318;
+  --destructive-foreground: #ffffff;
+  --border: #cdd5e4;
+  --input: #cdd5e4;
+  --ring: #2f5fa3;
+  --chart-1: #cdd5e4;
+  --chart-2: #8b95ab;
+  --chart-3: #5b6578;
+  --chart-4: #1b2436;
+  --chart-5: #2f5fa3;
+  --sidebar: #e8ecf4;
+  --sidebar-foreground: #1b2436;
+  --sidebar-primary: #2f5fa3;
+  --sidebar-primary-foreground: #f3f5fa;
+  --sidebar-accent: #dde3ef;
+  --sidebar-accent-foreground: #1b2436;
+  --sidebar-border: #cdd5e4;
+  --sidebar-ring: #2f5fa3;
+  --star: rgba(47, 95, 163, 0.16);
+  --star-bright: rgba(47, 95, 163, 0.55);
+  --veil: #0b1020;
+  --sun: #f2c14e;
+  --moon-core: #e7ecf6;
+}
+
+[data-skin="observatory"].dark,
+.dark[data-skin="observatory"] {
+  color-scheme: dark;
+  --bg: #0b1020;
+  --bg2: #10182c;
+  --bg3: #151d32;
+  --bg4: #1b2540;
+  --ink: #e7ecf6;
+  --ink2: #c5cde0;
+  --muted-ink: #8b95ab;
+  --muted2: #5b6578;
+  --rule: #243049;
+  --brand: #7eb6ff;
+  --red: #f97066;
+  --background: #0b1020;
+  --foreground: #e7ecf6;
+  --card: #10182c;
+  --card-foreground: #e7ecf6;
+  --popover: #10182c;
+  --popover-foreground: #e7ecf6;
+  --primary: #7eb6ff;
+  --primary-foreground: #0b1020;
+  --secondary: #151d32;
+  --secondary-foreground: #e7ecf6;
+  --muted: #151d32;
+  --muted-foreground: #8b95ab;
+  --accent: #151d32;
+  --accent-foreground: #e7ecf6;
+  --destructive: #f97066;
+  --destructive-foreground: #0b1020;
+  --border: #243049;
+  --input: #243049;
+  --ring: #7eb6ff;
+  --chart-1: #1b2540;
+  --chart-2: #5b6578;
+  --chart-3: #8b95ab;
+  --chart-4: #c5cde0;
+  --chart-5: #7eb6ff;
+  --sidebar: #10182c;
+  --sidebar-foreground: #e7ecf6;
+  --sidebar-primary: #7eb6ff;
+  --sidebar-primary-foreground: #0b1020;
+  --sidebar-accent: #151d32;
+  --sidebar-accent-foreground: #e7ecf6;
+  --sidebar-border: #243049;
+  --sidebar-ring: #7eb6ff;
+  --star: rgba(231, 236, 246, 0.16);
+  --star-bright: rgba(126, 182, 255, 0.85);
+  --veil: #070a14;
+  --sun: #f2c14e;
+  --moon-core: #e7ecf6;
+}
+
+/* ===== Observatory motion & motif ===== */
+[data-skin="observatory"] [data-slot="sidebar"],
+[data-skin="observatory"] [data-slot="sidebar-inset"] {
+  position: relative;
+}
+[data-skin="observatory"] [data-slot="sidebar"]::before,
+[data-skin="observatory"] [data-slot="sidebar-inset"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.9;
+  background-image:
+    radial-gradient(1.2px 1.2px at 8% 18%, var(--star) 50%, transparent 51%),
+    radial-gradient(1.4px 1.4px at 22% 72%, var(--star) 50%, transparent 51%),
+    radial-gradient(1px 1px at 41% 28%, var(--star) 50%, transparent 51%),
+    radial-gradient(1.6px 1.6px at 63% 14%, var(--star) 50%, transparent 51%),
+    radial-gradient(1.1px 1.1px at 78% 61%, var(--star) 50%, transparent 51%),
+    radial-gradient(1.3px 1.3px at 91% 33%, var(--star) 50%, transparent 51%),
+    radial-gradient(1px 1px at 14% 48%, var(--star) 50%, transparent 51%),
+    radial-gradient(1.5px 1.5px at 52% 82%, var(--star) 50%, transparent 51%);
+}
+[data-skin="observatory"] [data-slot="sidebar"] > *,
+[data-skin="observatory"] [data-slot="sidebar-inset"] > * {
+  position: relative;
+  z-index: 1;
+}
+.obs-horizon {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  pointer-events: none;
+  opacity: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+.obs-horizon.is-on {
+  visibility: visible;
+  animation: obs-horizon-hold 2s ease-in-out both;
+}
+.obs-horizon-sky {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    circle at 50% 118%,
+    var(--sun) 0%,
+    var(--primary) 38%,
+    var(--veil) 72%
+  );
+}
+.obs-horizon[data-dir="to-dawn"] .obs-horizon-sky {
+  background: radial-gradient(
+    circle at 50% 118%,
+    var(--primary) 0%,
+    var(--border) 36%,
+    var(--background) 74%
+  );
+}
+.obs-horizon-orbit {
+  --obs-orbit: min(38vw, 34vh, 280px);
+  --obs-planet: clamp(36px, 5.2vmin, 56px);
+  position: absolute;
+  left: 50%;
+  bottom: 8%;
+  width: var(--obs-orbit);
+  height: var(--obs-orbit);
+  margin-left: calc(var(--obs-orbit) / -2);
+  transform-origin: 50% 50%;
+}
+.obs-horizon.is-on[data-dir="to-night"] .obs-horizon-orbit {
+  animation: obs-orbit-night 2s cubic-bezier(0.45, 0.05, 0.25, 1) both;
+}
+.obs-horizon.is-on[data-dir="to-dawn"] .obs-horizon-orbit {
+  animation: obs-orbit-dawn 2s cubic-bezier(0.45, 0.05, 0.25, 1) both;
+}
+.obs-planet {
+  position: absolute;
+  left: 50%;
+  width: var(--obs-planet);
+  height: var(--obs-planet);
+  margin-left: calc(var(--obs-planet) / -2);
+  border-radius: 50%;
+}
+.obs-planet.sun {
+  top: calc(var(--obs-planet) / -2);
+  background: radial-gradient(
+    circle at 35% 32%,
+    color-mix(in srgb, var(--sun) 40%, var(--background)),
+    var(--sun)
+  );
+  box-shadow: 0 0 0 8px color-mix(in srgb, var(--sun) 18%, transparent);
+}
+.obs-planet.moon {
+  bottom: calc(var(--obs-planet) / -2);
+  background: radial-gradient(
+    circle at 38% 34%,
+    var(--moon-core),
+    color-mix(in srgb, var(--moon-core) 70%, var(--primary))
+  );
+  box-shadow: inset -10px -6px 0
+    color-mix(in srgb, var(--veil) 55%, transparent);
+}
+html[data-skin="observatory"].obs-theme-fading,
+html[data-skin="observatory"].obs-theme-fading body,
+html[data-skin="observatory"].obs-theme-fading [data-slot="sidebar"],
+html[data-skin="observatory"].obs-theme-fading [data-slot="sidebar-inset"] {
+  transition:
+    background-color 0.9s ease,
+    color 0.9s ease,
+    border-color 0.9s ease !important;
+}
+.obs-horizon-ground {
+  position: absolute;
+  left: -10%;
+  right: -10%;
+  bottom: -8%;
+  height: 34%;
+  border-radius: 50% 50% 0 0;
+  background: color-mix(in srgb, var(--veil) 88%, var(--background));
+  box-shadow: 0 -1px 0 color-mix(in srgb, var(--primary) 28%, transparent);
+}
+.obs-opening {
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  z-index: 0;
+  width: min(700px, 140%);
+  height: 220px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  overflow: visible;
+}
+.obs-opening-star {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 99px;
+  background: var(--star-bright);
+  opacity: 0;
+  transform: scale(0.4);
+}
+.obs-opening-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.obs-opening-line {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 1.4;
+  stroke-dasharray: 180;
+  stroke-dashoffset: 180;
+}
+html[data-skin="observatory"] [data-slot="sidebar"] {
+  animation: obs-dock-in 0.7s both;
+}
+html.obs-is-opening [data-slot="sidebar"] {
+  animation: none;
+  transform: translateX(-110%);
+}
+html.obs-is-opening .obs-welcome-copy,
+html.obs-is-opening .obs-welcome-kicker {
+  opacity: 0;
+  pointer-events: none;
+}
+html.obs-is-ready .obs-opening-star {
+  animation: obs-star-on 0.35s both;
+}
+html.obs-is-ready .obs-opening-star:nth-child(1) {
+  animation-delay: 0.42s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(2) {
+  animation-delay: 0.54s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(3) {
+  animation-delay: 0.66s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(4) {
+  animation-delay: 0.78s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(5) {
+  animation-delay: 0.9s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(6) {
+  animation-delay: 1.02s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(7) {
+  animation-delay: 1.14s;
+}
+html.obs-is-ready .obs-opening-star:nth-child(8) {
+  animation-delay: 1.26s;
+}
+html.obs-is-ready .obs-opening-line {
+  animation: obs-draw-line 0.7s 1.2s forwards;
+}
+html.obs-is-ready .obs-welcome-title {
+  animation: obs-name-in 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+html.obs-is-ready .obs-welcome-copy,
+html.obs-is-ready .obs-welcome-kicker {
+  animation: obs-rise 0.5s 0.08s both;
+}
+@keyframes obs-star-on {
+  0% {
+    opacity: 0;
+    transform: scale(0.4);
+  }
+  70% {
+    opacity: 1;
+    transform: scale(1.18);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes obs-draw-line {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+@keyframes obs-name-in {
+  from {
+    opacity: 0;
+    transform: scale(0.92) translateY(-16px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes obs-rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+[data-skin="observatory"] .obs-page-enter {
+  opacity: 0;
+}
+[data-skin="observatory"] .obs-page-enter.is-on {
+  animation: obs-rise 0.7s ease both;
+}
+@keyframes obs-dock-in {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes obs-horizon-hold {
+  0% {
+    opacity: 0;
+  }
+  18% {
+    opacity: 1;
+  }
+  68% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes obs-orbit-night {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(180deg);
+  }
+}
+@keyframes obs-orbit-dawn {
+  from {
+    transform: rotate(180deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.obs-corner-sky {
+  position: fixed;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.obs-corner {
+  position: absolute;
+  width: 168px;
+  height: 120px;
+  overflow: visible;
+}
+.obs-corner path {
+  fill: none;
+  stroke: var(--primary);
+  stroke-width: 0.4;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+.obs-corner circle {
+  fill: color-mix(in srgb, var(--primary) 70%, white);
+  filter: drop-shadow(
+    0 0 6px color-mix(in srgb, var(--primary) 40%, transparent)
+  );
+}
+.obs-corner--br {
+  right: 22px;
+  bottom: 22px;
+}
+.obs-idle-sky {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 20;
+  pointer-events: none;
+  overflow: hidden;
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity 1s ease,
+    visibility 1s ease;
+}
+.obs-idle-sky.is-on {
+  opacity: 1;
+  visibility: visible;
+}
+.obs-idle-fall {
+  position: absolute;
+  border-radius: 99px;
+  background: var(--primary);
+  box-shadow:
+    0 0 8px color-mix(in srgb, var(--primary) 70%, transparent),
+    -10px -14px 0 -1px color-mix(in srgb, var(--primary) 28%, transparent),
+    -18px -26px 0 -1.2px color-mix(in srgb, var(--primary) 14%, transparent);
+  animation-name: obs-idle-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+}
+.obs-idle-sky:not(.is-on) .obs-idle-fall {
+  animation-play-state: paused;
+}
+@keyframes obs-idle-fall {
+  0% {
+    transform: translate3d(0, 0, 0);
+    opacity: 0;
+  }
+  8% {
+    opacity: 0.85;
+  }
+  82% {
+    opacity: 0.7;
+  }
+  100% {
+    transform: translate3d(28vw, 78vh, 0);
+    opacity: 0;
+  }
+}
+[data-skin="observatory"] .obs-settings-nav {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--primary) 7%, var(--sidebar)),
+    var(--sidebar)
+  );
+}
+[data-skin="observatory"] .obs-settings-panel {
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--primary) 4%, var(--background)),
+    var(--background)
+  );
+}
+[data-skin="observatory"] .obs-skin-card,
+[data-skin="observatory"] .obs-theme-card {
+  background: color-mix(in srgb, var(--card) 88%, transparent);
+  backdrop-filter: blur(8px);
+  transform: rotateX(var(--obs-tilt-x, 0deg)) rotateY(var(--obs-tilt-y, 0deg))
+    translateZ(0);
+  transform-style: preserve-3d;
+  transition: transform 0.2s ease;
+  box-shadow:
+    0 10px 24px color-mix(in srgb, var(--primary) 8%, transparent),
+    inset 0 1px 0 color-mix(in srgb, white 18%, transparent);
+}
+[data-skin="observatory"] .obs-skin-card:hover,
+[data-skin="observatory"] .obs-theme-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--primary) 12%, transparent);
+}
+[data-skin="observatory"] .obs-skin-card::after,
+[data-skin="observatory"] .obs-theme-card::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 42%;
+  pointer-events: none;
+  border-radius: inherit;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, white 16%, transparent),
+    transparent 80%
+  );
+  background-position: var(--obs-shine-x, 50%) var(--obs-shine-y, 0%);
+  background-size: 160% 160%;
+  mix-blend-mode: soft-light;
+  opacity: 0.7;
+}
+html[data-skin="observatory"].obs-is-opening body.obs-lock-scroll {
+  overflow: hidden;
+}
+.obs-pointer-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  pointer-events: none;
+  overflow: hidden;
+}
+.obs-pointer-dust {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  margin: -1px 0 0 -1px;
+  border-radius: 99px;
+  background: color-mix(in srgb, var(--primary) 70%, white);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+.obs-pointer-link {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+}
+.obs-pointer-link line {
+  stroke: var(--primary);
+  stroke-width: 0.4;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+[data-skin="observatory"] .obs-appearance {
+  perspective: 900px;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-skin="observatory"] [data-slot="sidebar"] {
+    animation: none !important;
+    transform: none !important;
+  }
+  html.obs-is-opening [data-slot="sidebar"],
+  html.obs-is-opening .obs-welcome-copy {
+    transform: none;
+    opacity: 1;
+    pointer-events: auto;
+  }
+  .obs-opening-star,
+  .obs-opening-line,
+  .obs-horizon,
+  .obs-horizon-orbit,
+  .obs-idle-sky,
+  .obs-pointer-layer {
+    display: none;
+  }
+  html.obs-is-ready .obs-welcome-title,
+  html.obs-is-ready .obs-welcome-copy,
+  html.obs-is-ready .obs-welcome-kicker {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+  [data-skin="observatory"] .obs-page-enter {
+    opacity: 1 !important;
+  }
+  [data-skin="observatory"] .obs-page-enter.is-on,
+  [data-skin="observatory"] .obs-skin-card,
+  [data-skin="observatory"] .obs-theme-card {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
 }
