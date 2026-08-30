@@ -46,10 +46,17 @@ def build_report_contract_section(*, receipts_enabled: bool = True) -> str:
     execution record mandatory for action claims and states the consequences
     (mismatched anchors, unknown ids, UNVERIFIED for uncited claims) in the
     verifier's own neutral vocabulary — never as a promise of acceptance.
+    When receipts are disabled no execution record exists parent-side, so the
+    opening describes the handle-only mode instead of promising a
+    cross-check that cannot happen.
     """
+    if receipts_enabled:
+        opening = "Your final report is a SELF-REPORT. The delegating agent cross-checks it against your execution record and treats uncorroborated action claims as unverified."
+    else:
+        opening = "Your final report is a SELF-REPORT. The delegating agent reviews it against the verifiable handles you attach, so back every deliverable and action claim with a handle it can check."
     lines = [
         "<report_contract>",
-        "Your final report is a SELF-REPORT. The delegating agent cross-checks it against your execution record and treats uncorroborated action claims as unverified.",
+        opening,
         "",
     ]
     if receipts_enabled:

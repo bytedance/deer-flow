@@ -40,6 +40,11 @@ class TestReportContractSection:
         assert "flagged as unknown" in section
         assert "flagged UNVERIFIED" in section
 
+    def test_receipts_enabled_promises_execution_record_crosscheck(self) -> None:
+        section = build_report_contract_section(receipts_enabled=True)
+
+        assert "cross-checks it against your execution record" in section
+
     def test_receipts_enabled_requires_verifiable_handles_and_honesty(self) -> None:
         section = build_report_contract_section(receipts_enabled=True)
 
@@ -57,6 +62,20 @@ class TestReportContractSection:
         # Handles and honesty still apply without receipts.
         assert "absolute file path, URL, record ID, or HTTP status" in section
         assert "never claim an action you did not execute" in section
+
+    def test_receipts_disabled_promises_no_execution_record_crosscheck(self) -> None:
+        """With verification.receipts_enabled=false the parent harvests no
+        receipts and produces no verdict, so the contract must not tell the
+        subagent about an execution-record cross-check that cannot happen
+        (PR review finding)."""
+        section = build_report_contract_section(receipts_enabled=False)
+
+        assert "execution record" not in section
+        assert "cross-check" not in section
+        assert "uncorroborated" not in section
+        assert "unverified" not in section.lower()
+        # The handle-only mode is described instead.
+        assert "verifiable handles" in section
 
 
 class TestAcceptanceCriteriaBlock:
