@@ -31,6 +31,38 @@ import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
 
+const SKILL_ZH: Record<string, string> = {
+  "deep-research": "深度研究",
+  "frontend-design": "前端设计",
+  "github-deep-research": "GitHub 深度研究",
+  "image-generation": "图片生成",
+  "music-generation": "音乐生成",
+  "podcast-generation": "播客生成",
+  "ppt-generation": "PPT 生成",
+  "skill-creator": "技能创建器",
+  "vercel-deploy-claimable": "Vercel 部署",
+  "video-generation": "视频生成",
+  "web-design-guidelines": "Web 设计规范",
+  "academic-paper-review": "学术论文审阅",
+  bootstrap: "个性化引导",
+  "chart-visualization": "图表可视化",
+  "claude-to-deerflow": "Claude 迁移",
+  "code-documentation": "代码文档",
+  "consulting-analysis": "咨询分析",
+  "data-analysis": "数据分析",
+  "find-skills": "技能发现",
+  "newsletter-generation": "新闻稿生成",
+  "surprise-me": "小惊喜",
+  "systematic-literature-review": "系统性文献综述",
+};
+
+function localizeSkill(skill: Skill, locale: string): Skill {
+  if (!locale.startsWith("zh")) return skill;
+  const zh = SKILL_ZH[skill.name];
+  if (!zh) return skill;
+  return { ...skill, displayName: zh };
+}
+
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const { skills, isLoading, error } = useSkills();
@@ -48,7 +80,9 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
           {t.settings.skills.adminRequired}
         </div>
       ) : error ? (
-        <div>Error: {error.message}</div>
+        <div className="text-destructive text-sm">
+          {t.settings.skills.loadError}: {error.message}
+        </div>
       ) : (
         <SkillSettingsList skills={skills} onClose={onClose} />
       )}
@@ -63,15 +97,18 @@ function SkillSettingsList({
   skills: Skill[];
   onClose?: () => void;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const router = useRouter();
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
   const [filter, setFilter] = useState<string>("public");
   const { mutate: enableSkill } = useEnableSkill();
   const filteredSkills = useMemo(
-    () => skills.filter((skill) => skill.category === filter),
-    [skills, filter],
+    () =>
+      skills
+        .filter((skill) => skill.category === filter)
+        .map((skill) => localizeSkill(skill, locale)),
+    [skills, filter, locale],
   );
   const handleCreateSkill = () => {
     onClose?.();
@@ -103,7 +140,9 @@ function SkillSettingsList({
           <Item className="w-full" variant="outline" key={skill.name}>
             <ItemContent>
               <ItemTitle>
-                <div className="flex items-center gap-2">{skill.name}</div>
+                <div className="flex items-center gap-2">
+                  {skill.displayName ?? skill.name}
+                </div>
               </ItemTitle>
               <ItemDescription className="line-clamp-4">
                 {skill.description}

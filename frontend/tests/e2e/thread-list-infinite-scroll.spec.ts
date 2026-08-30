@@ -33,9 +33,9 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
   }) => {
     mockLangGraphAPI(page, { threads: THREADS });
 
-    await page.goto("/workspace/chats");
+    await page.goto("/workspace/chats/new?settings=chats");
 
-    const main = page.locator("main");
+    const main = page.getByTestId("chats-settings-page");
 
     // First page renders.
     await expect(main.getByText(FIRST_PAGE_LAST)).toBeVisible({
@@ -45,7 +45,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     await expect(main.getByText(SECOND_PAGE_FIRST)).toHaveCount(0);
 
     // Scrolling the sentinel into view triggers the next page.
-    const sentinel = page.getByTestId("chats-page-sentinel");
+    const sentinel = page.getByTestId("chats-settings-sentinel");
     await sentinel.scrollIntoViewIfNeeded();
 
     await expect(main.getByText(SECOND_PAGE_FIRST)).toBeVisible({
@@ -93,10 +93,12 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
 
     mockLangGraphAPI(page, { threads: THREADS });
 
-    await page.goto("/workspace/chats");
+    await page.goto("/workspace/chats/new?settings=chats");
 
     // Wait for the first page to render so we have a baseline count.
-    await expect(page.locator("main").getByText(FIRST_PAGE_LAST)).toBeVisible({
+    await expect(
+      page.getByTestId("chats-settings-page").getByText(FIRST_PAGE_LAST),
+    ).toBeVisible({
       timeout: 15_000,
     });
     const baselineRequests = searchRequestCount;
@@ -108,8 +110,8 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
       .fill("zzz-no-such-conversation");
 
     // The auto-sentinel must be gone; an explicit button takes its place.
-    await expect(page.getByTestId("chats-page-sentinel")).toHaveCount(0);
-    await expect(page.getByTestId("chats-page-load-more")).toBeVisible();
+    await expect(page.getByTestId("chats-settings-sentinel")).toHaveCount(0);
+    await expect(page.getByTestId("chats-settings-load-more")).toBeVisible();
 
     // Give the IntersectionObserver a couple of frames to misbehave if the
     // guard regresses.  No additional /threads/search calls should fire.
@@ -117,7 +119,7 @@ test.describe("Thread list infinite scroll (issue #3482)", () => {
     expect(searchRequestCount).toBe(baselineRequests);
 
     // The explicit button still works as an escape hatch.
-    await page.getByTestId("chats-page-load-more").click();
+    await page.getByTestId("chats-settings-load-more").click();
     await expect
       .poll(() => searchRequestCount, { timeout: 10_000 })
       .toBeGreaterThan(baselineRequests);

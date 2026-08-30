@@ -19,6 +19,7 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "subagents",
   "skills",
   "notification",
+  "chats",
   "about",
 ]);
 

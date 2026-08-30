@@ -297,7 +297,6 @@ export const enUS: Translations = {
   // Sidebar
   sidebar: {
     newChat: "New chat",
-    chats: "Chats",
     channels: "Channels",
     recentChats: "Recent chats",
     demoChats: "Demo chats",
@@ -380,6 +379,8 @@ export const enUS: Translations = {
 
   // Scheduled tasks
   scheduledTasks: {
+    title: "Scheduled tasks",
+    description: "Manage when and how often automated tasks run.",
     scheduleType: {
       cron: "Recurring",
       once: "One-time",
@@ -395,12 +396,33 @@ export const enUS: Translations = {
     fields: {
       minute: "Minute",
       time: "Time",
+      year: "Year",
+      month: "Month",
+      day: "Day",
       weekday: "On",
       dayOfMonth: "Day of month",
       cron: "Cron expression",
       cronPlaceholder: "0 9 * * *",
       runAt: "Run at",
       timezone: "Timezone",
+    },
+    timezone: {
+      more: "More timezones",
+      less: "Show common",
+      common: {
+        UTC: "UTC",
+        "Asia/Shanghai": "Shanghai (China)",
+        "Asia/Hong_Kong": "Hong Kong",
+        "Asia/Taipei": "Taipei",
+        "Asia/Tokyo": "Tokyo (Japan)",
+        "Asia/Seoul": "Seoul (South Korea)",
+        "Asia/Singapore": "Singapore",
+        "Europe/London": "London (UK)",
+        "Europe/Berlin": "Berlin (Germany)",
+        "America/New_York": "New York (US)",
+        "America/Chicago": "Chicago (US)",
+        "America/Los_Angeles": "Los Angeles (US)",
+      },
     },
     weekdays: {
       mon: "Mon",
@@ -415,10 +437,12 @@ export const enUS: Translations = {
     cronHelp: "Open crontab.guru",
     create: {
       title: "Create scheduled task",
+      back: "Back to scheduled tasks",
       taskTitle: "Task title",
       prompt: "Prompt",
       submit: "Create",
-      fillRequired: "Fill all required fields",
+      invalidOnce: "Enter a valid date and time",
+      sourceMissing: "The task to duplicate could not be loaded.",
     },
     context: {
       fresh: "Fresh thread",
@@ -429,14 +453,8 @@ export const enUS: Translations = {
         "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
     filters: {
-      allStatuses: "All statuses",
       enabled: "Enabled",
       paused: "Paused",
-      completed: "Completed",
-      failed: "Failed",
-      allTypes: "All types",
-      cron: "Cron",
-      once: "Once",
     },
     detail: {
       contextMode: "Context mode",
@@ -445,12 +463,15 @@ export const enUS: Translations = {
       schedule: "Schedule",
       nextRun: "Next run",
       lastRun: "Last run",
-      lastRunId: "Last run id",
       lastError: "Last error",
       runsCount: "{count} runs",
       runsCountOne: "{count} run",
       noRuns: "No runs yet",
-      noSelection: "No scheduled task selected",
+      noTasksTitle: "No scheduled tasks yet",
+      noTasksDescription:
+        "Create a scheduled task to let DeerFlow run workflows on a schedule.",
+      noMatchesTitle: "No tasks match this filter",
+      noMatchesDescription: "Try switching back to view all scheduled tasks.",
       filteredByThread: "Filtered by thread: {id}",
       loadFailed: "Failed to load scheduled tasks",
     },
@@ -478,6 +499,7 @@ export const enUS: Translations = {
       titlePlaceholder: "Edit title",
       promptPlaceholder: "Edit prompt",
       submit: "Save edit",
+      invalidOnce: "Enter a valid date and time",
     },
     status: {
       enabled: "Enabled",
@@ -496,25 +518,6 @@ export const enUS: Translations = {
       failed: "Failed",
       skipped: "Skipped",
       interrupted: "Interrupted",
-    },
-    recipes: {
-      label: "Quick create",
-      trending: {
-        title: "GitHub Trending daily",
-        desc: "Summarize today's top 10 trending repos",
-      },
-      news: {
-        title: "Daily tech news digest",
-        desc: "Collect and summarize the day's top tech news",
-      },
-      issues: {
-        title: "GitHub Issue triage",
-        desc: "Triage a repo's open issues (fill in {{repo}})",
-      },
-      weekly: {
-        title: "Weekly report",
-        desc: "Compile a weekly summary, every Monday",
-      },
     },
   },
 
@@ -601,10 +604,8 @@ export const enUS: Translations = {
     officialWebsite: "DeerFlow's official website",
     githubTooltip: "DeerFlow on GitHub",
     settingsAndMore: "Settings and more",
-    visitGithub: "DeerFlow on GitHub",
-    reportIssue: "Report an issue",
+    github: "GitHub",
     contactUs: "Contact us",
-    about: "About DeerFlow",
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
@@ -628,11 +629,17 @@ export const enUS: Translations = {
 
   // Chats
   chats: {
+    description: "Manage all of your conversations.",
+    noMatches: "No matching conversations",
+    emptyTitle: "No conversations yet",
+    emptyDescription: "Start a new conversation and it will show up here.",
     searchChats: "Search chats",
     branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
+    loadError: "Failed to load conversations",
+    retry: "Try again",
     pinChat: "Pin chat",
     unpinChat: "Unpin chat",
     pinChatFailed: "Failed to update pinned chat",
@@ -702,7 +709,6 @@ export const enUS: Translations = {
   // Page titles (document title)
   pages: {
     appName: "DeerFlow",
-    chats: "Chats",
     newChat: "New chat",
     untitled: "Untitled",
   },
@@ -836,6 +842,7 @@ export const enUS: Translations = {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
     sections: {
+      chats: "Chats",
       account: "Account",
       appearance: "Appearance",
       channels: "Channels",
@@ -852,6 +859,7 @@ export const enUS: Translations = {
       description:
         "DeerFlow automatically learns from your conversations in the background. These memories help DeerFlow understand you better and deliver a more personalized experience.",
       empty: "No memory data to display.",
+      loadError: "Failed to load memory data",
       rawJson: "Raw JSON",
       exportButton: "Export memory",
       exportSuccess: "Memory exported",
@@ -888,28 +896,12 @@ export const enUS: Translations = {
       factValidationContent: "Fact content cannot be empty.",
       factValidationConfidence: "Confidence must be a number between 0 and 1.",
       noFacts: "No saved facts yet.",
-      summaryReadOnly:
-        "Summary sections are read-only for now. You can currently add, edit, or delete individual facts, or clear all memory.",
       memoryFullyEmpty: "No memory saved yet.",
       factPreviewLabel: "Fact to delete",
       searchPlaceholder: "Search memory",
-      filterAll: "All",
-      filterFacts: "Facts",
-      filterSummaries: "Summaries",
       noMatches: "No matching memory found.",
       markdown: {
-        overview: "Overview",
-        userContext: "User context",
-        work: "Work",
-        personal: "Personal",
-        topOfMind: "Top of mind",
-        historyBackground: "History",
-        recentMonths: "Recent months",
-        earlierContext: "Earlier context",
-        longTermBackground: "Long-term background",
-        updatedAt: "Updated at",
         facts: "Facts",
-        empty: "(empty)",
         table: {
           category: "Category",
           confidence: "Confidence",
@@ -938,12 +930,16 @@ export const enUS: Translations = {
       darkDescription: "Dim palette that reduces glare for focus.",
       languageTitle: "Language",
       languageDescription: "Switch between languages.",
+      skinTitle: "Skin",
+      skinDescription:
+        "Choose the interface look. Light and dark can be switched separately.",
     },
     tools: {
       title: "Tools",
       description: "Manage the configuration and enabled status of MCP tools.",
       adminRequired: "Admin privileges are required to manage MCP tools.",
       empty: "No MCP tools configured.",
+      loadError: "Failed to load tool configuration",
     },
     subagents: {
       title: "Subagents",
@@ -1221,6 +1217,7 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      loadError: "Failed to load skills",
     },
     notification: {
       title: "Notification",
@@ -1259,6 +1256,13 @@ export const enUS: Translations = {
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
+    },
+  },
+
+  skins: {
+    classic: {
+      name: "Classic",
+      tagline: "The current DeerFlow look.",
     },
   },
   login: {

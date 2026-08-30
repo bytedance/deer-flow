@@ -23,7 +23,6 @@ export type ScheduleFormState = {
   scheduleType: "once" | "cron";
   preset?: CronPreset;
   parts?: CronParts;
-  /** datetime-local wall value "YYYY-MM-DDTHH:mm", interpreted in `timezone`. */
   runAtLocal?: string;
   timezone: string;
 };
@@ -50,17 +49,6 @@ const WEEKDAY_TO_CRON: Record<Weekday, string> = {
   sun: "0",
 };
 
-const CRON_TO_WEEKDAY: Record<string, Weekday> = {
-  "0": "sun",
-  "1": "mon",
-  "2": "tue",
-  "3": "wed",
-  "4": "thu",
-  "5": "fri",
-  "6": "sat",
-  "7": "sun",
-};
-
 const EN_WEEKDAY: Record<Weekday, string> = {
   mon: "Mon",
   tue: "Tue",
@@ -81,6 +69,17 @@ const ZH_WEEKDAY: Record<Weekday, string> = {
   sun: "周日",
 };
 
+const CRON_TO_WEEKDAY: Record<string, Weekday> = {
+  "0": "sun",
+  "1": "mon",
+  "2": "tue",
+  "3": "wed",
+  "4": "thu",
+  "5": "fri",
+  "6": "sat",
+  "7": "sun",
+};
+
 function clamp(
   value: number | undefined,
   min: number,
@@ -94,6 +93,39 @@ function clamp(
 
 export function pad2(n: number): string {
   return String(Math.trunc(Number.isFinite(n) ? n : 0)).padStart(2, "0");
+}
+
+/**
+ * Build a "YYYY-MM-DDTHH:mm" wall-time string for a one-time run from the
+ * individual year/month/day/time fields, or "" when the inputs do not form a
+ * valid date. Mirrors the bounds checks the form previously inlined: integer
+ * fields, year >= 1970, month 1-12, day 1-31, and a day that actually exists
+ * in the month (rejects e.g. Feb 30 via the Date.UTC rollover check).
+ */
+export function buildOnceRunAtLocal(
+  year: string,
+  month: string,
+  day: string,
+  time: string,
+): string {
+  const y = Number(year);
+  const mo = Number(month);
+  const d = Number(day);
+  const valid =
+    year !== "" &&
+    month !== "" &&
+    day !== "" &&
+    time !== "" &&
+    Number.isInteger(y) &&
+    Number.isInteger(mo) &&
+    Number.isInteger(d) &&
+    y >= 1970 &&
+    mo >= 1 &&
+    mo <= 12 &&
+    d >= 1 &&
+    d <= 31 &&
+    new Date(Date.UTC(y, mo - 1, d)).getUTCDate() === d;
+  return valid ? `${year}-${pad2(mo)}-${pad2(d)}T${time}` : "";
 }
 
 function orderedWeekdays(days: Weekday[] | undefined): Weekday[] {
@@ -245,7 +277,6 @@ export function describeSchedule(
         ? `自定义: ${parts.raw ?? ""} (${tz})`
         : `Custom: ${parts.raw ?? ""} (${tz})`;
   }
-  // Unreachable — switch is exhaustive over CronPreset.
   return zh ? `自定义 (${tz})` : `Custom (${tz})`;
 }
 

@@ -62,6 +62,20 @@ export function AppearanceSettingsPage() {
   return (
     <div className="space-y-8">
       <SettingsSection
+        title={t.settings.appearance.skinTitle}
+        description={t.settings.appearance.skinDescription}
+      >
+        <div className="grid gap-3 sm:max-w-sm">
+          <SkinCard
+            name={t.skins.classic.name}
+            tagline={t.skins.classic.tagline}
+          />
+        </div>
+      </SettingsSection>
+
+      <Separator />
+
+      <SettingsSection
         title={t.settings.appearance.themeTitle}
         description={t.settings.appearance.themeDescription}
       >
@@ -75,7 +89,7 @@ export function AppearanceSettingsPage() {
               active={currentTheme === option.id}
               mode={option.id as "system" | "light" | "dark"}
               systemTheme={systemTheme}
-              onSelect={(value) => setTheme(value)}
+              onSelect={setTheme}
             />
           ))}
         </div>
@@ -192,5 +206,20 @@ function ThemePreviewCard({
         </div>
       </div>
     </button>
+  );
+}
+
+function SkinCard({ name, tagline }: { name: string; tagline: string }) {
+  return (
+    <div className="relative flex h-full flex-col gap-3 overflow-hidden rounded-lg border p-4 text-left">
+      <div className="relative h-20 overflow-hidden rounded-md border bg-[#f6f1e7]">
+        <div className="absolute top-2 bottom-2 left-2 w-10 rounded-sm bg-[#efe6d6]" />
+        <div className="absolute top-5 right-3 h-6 w-16 rounded-sm bg-[#3a352d]" />
+      </div>
+      <div className="space-y-1">
+        <div className="text-sm font-semibold">{name}</div>
+        <p className="text-muted-foreground text-xs leading-snug">{tagline}</p>
+      </div>
+    </div>
   );
 }
