@@ -254,6 +254,7 @@ class TestCleanupStaleUploadStagingFiles:
         (legacy_uploads / ".env").write_text("intentional dotfile")
         (legacy_uploads / ".upload-note.txt").write_text("intentional upload")
         (legacy_uploads / "draft.part").write_text("intentional upload")
+        (legacy_uploads / ".deer-flow-companions.json").write_text("{}", encoding="utf-8")
 
         removed = cleanup_stale_upload_staging_files(tmp_path)
 
@@ -264,6 +265,7 @@ class TestCleanupStaleUploadStagingFiles:
         assert (legacy_uploads / ".env").exists()
         assert (legacy_uploads / ".upload-note.txt").exists()
         assert (legacy_uploads / "draft.part").exists()
+        assert (legacy_uploads / ".deer-flow-companions.json").exists()
 
 
 # ---------------------------------------------------------------------------

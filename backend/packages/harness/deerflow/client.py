@@ -66,6 +66,7 @@ from deerflow.subagents.capacity import configure_subagent_execution_capacity
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.uploads.companion_map import record_companion_mapping
 from deerflow.uploads.manager import (
     claim_unique_filename,
     delete_file_safe,
@@ -1603,6 +1604,7 @@ class DeerFlowClient:
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
                         info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                        record_companion_mapping(uploads_dir, dest_name, md_path.name)
                     else:
                         # Conversion failed and wrote nothing, so release the
                         # claim; holding it would rename a later same-stem

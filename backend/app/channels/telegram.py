@@ -20,7 +20,7 @@ from app.channels.message_bus import (
     OutboundMessage,
     ResolvedAttachment,
 )
-from deerflow.uploads.manager import is_upload_staging_file, normalize_filename
+from deerflow.uploads.manager import is_upload_hidden_file, normalize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -573,7 +573,7 @@ class TelegramChannel(Channel):
             candidate = normalize_filename(value.strip())
         except (UnicodeError, ValueError):
             return fallback
-        if is_upload_staging_file(candidate) or any(ord(char) < 32 for char in candidate):
+        if is_upload_hidden_file(candidate) or any(ord(char) < 32 for char in candidate):
             return fallback
         return candidate
 

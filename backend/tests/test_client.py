@@ -2246,6 +2246,9 @@ class TestUploads:
             assert result["files"][1]["markdown_file"] == "a_1.md"
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.docx"
             assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM:a.pdf"
+            from deerflow.uploads.companion_map import load_companion_map
+
+            assert load_companion_map(uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
 
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.

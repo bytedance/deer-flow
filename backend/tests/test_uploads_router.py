@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
 from app.gateway.routers import uploads
+from deerflow.uploads.companion_map import has_companion_entry, lookup_companion_mapping, record_companion_mapping
 
 
 class ChunkedUpload:
@@ -764,6 +765,111 @@ def test_delete_uploaded_file_removes_generated_markdown_companion(tmp_path):
     assert not (thread_uploads_dir / "report.md").exists()
 
 
+def test_rejected_upload_keeps_unrelated_historical_companion_mapping(tmp_path):
+    """A failed request must not drop mappings it never created.
+
+    Regression: cleanup used to delete any entry whose *companion* name matched
+    a file in the rejected request. Uploading ``notes.md`` in a request that
+    failed therefore destroyed the pre-existing ``notes.pdf → notes.md``
+    mapping from an earlier turn.
+    """
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    # Earlier turn: notes.pdf was converted to notes.md.
+    (thread_uploads_dir / "notes.md").write_text("converted earlier", encoding="utf-8")
+    record_companion_mapping(thread_uploads_dir, "notes.pdf", "notes.md")
+
+    # This turn uploads report.pdf (converted to report.md) and then dies on
+    # a later file. report.md is unrelated to the historical mapping, so the
+    # rollback must not disturb notes.pdf → notes.md.
+    async def _fake_convert(source: Path, output_path: Path) -> Path:
+        output_path.write_text("converted", encoding="utf-8")
+        return output_path
+
+    with (
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=_fake_convert)),
+        patch.object(uploads, "_get_upload_limits", return_value=uploads.UploadLimits(max_files=10, max_file_size=10, max_total_size=5)),
+    ):
+        files = [
+            ChunkedUpload("report.pdf", [b"123"]),
+            ChunkedUpload("overflow.txt", [b"456"]),
+        ]
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(call_unwrapped(uploads.upload_files, "thread-local", request=MagicMock(), files=files, config=SimpleNamespace()))
+
+    assert exc_info.value.status_code == 413
+    # The historical mapping survives: this request never created it.
+    assert lookup_companion_mapping(thread_uploads_dir, "notes.pdf") == "notes.md"
+    # The mapping this request created is rolled back, along with its file.
+    assert lookup_companion_mapping(thread_uploads_dir, "report.pdf") is None
+    assert not (thread_uploads_dir / "report.md").exists()
+
+
+def test_cleanup_uploaded_paths_scopes_rollback_to_each_directory(tmp_path):
+    """Rollback must act on the directory a mapping was recorded in.
+
+    Regression: cleanup tracked a single ``parent`` across the whole loop, so
+    with paths from two directories every name was applied to the last one,
+    leaving the first directory's mappings behind.
+    """
+    dir_a = tmp_path / "a"
+    dir_b = tmp_path / "b"
+    dir_a.mkdir()
+    dir_b.mkdir()
+    (dir_a / "one.pdf").write_bytes(b"pdf")
+    (dir_a / "one.md").write_text("a", encoding="utf-8")
+    (dir_b / "two.pdf").write_bytes(b"pdf")
+    (dir_b / "two.md").write_text("b", encoding="utf-8")
+    record_companion_mapping(dir_a, "one.pdf", "one.md")
+    record_companion_mapping(dir_b, "two.pdf", "two.md")
+
+    # The request wrote into dir_b only; dir_a appears in the path list purely
+    # because cleanup also unlinks pre-existing files it replaced. dir_a's
+    # entry is historical and must survive. dir_a's paths come LAST, so the
+    # old single-``parent`` bug applied every collected name to dir_a —
+    # including "two.md", whose deletion wiped dir_a's unrelated entry.
+    uploads._cleanup_uploaded_paths(
+        [dir_b / "two.pdf", dir_b / "two.md", dir_a / "one.pdf"],
+        {dir_b: [("two.pdf", "two.md")]},
+    )
+
+    assert not (dir_a / "one.pdf").exists()
+    assert not (dir_b / "two.pdf").exists()
+    assert lookup_companion_mapping(dir_b, "two.pdf") is None
+    assert has_companion_entry(dir_a, "one.pdf"), "A directory that recorded no mapping for this request must keep its historical entries, regardless of path ordering"
+
+
+def test_cleanup_uploaded_paths_leaves_unpaired_entries_alone(tmp_path):
+    """Rollback matches on the exact (original, companion) pair only.
+
+    Regression for the name-only cleanup: a rejected request that happened to
+    upload ``notes.md`` used to wipe the pre-existing ``notes.pdf → notes.md``
+    mapping, because ``companion=name`` matched any entry pointing at that
+    companion. Here the request rolls back ``keep.pdf → keep.md`` while an
+    unrelated entry shares the ``other.md`` companion name.
+    """
+    uploads_dir = tmp_path / "uploads"
+    uploads_dir.mkdir(parents=True)
+    (uploads_dir / "keep.md").write_text("keep", encoding="utf-8")
+    (uploads_dir / "other.md").write_text("other", encoding="utf-8")
+    record_companion_mapping(uploads_dir, "keep.pdf", "keep.md")
+    # Companion name collides with a file in the rejected request.
+    record_companion_mapping(uploads_dir, "other.pdf", "other.md")
+
+    # The rejected request's own file shares a name with the unrelated
+    # companion above; name-only cleanup would delete both entries.
+    uploads._cleanup_uploaded_paths(
+        [uploads_dir / "keep.md", uploads_dir / "other.md"],
+        {uploads_dir: [("keep.pdf", "keep.md")]},
+    )
+
+    assert lookup_companion_mapping(uploads_dir, "keep.pdf") is None
+    assert has_companion_entry(uploads_dir, "other.pdf"), "Unrelated entry must survive rollback even though the request uploaded a file sharing its companion name"
+
+
 def test_auto_convert_documents_enabled_defaults_to_false_on_config_errors():
     class BrokenConfig:
         def __getattribute__(self, name):
@@ -959,6 +1065,50 @@ def test_upload_files_two_convertibles_get_distinct_markdown_companions(tmp_path
     # Each response entry points at content that belongs to that source
     assert (thread_uploads_dir / result.files[0].markdown_file).read_text(encoding="utf-8") == "FROM_DOCX"
     assert (thread_uploads_dir / result.files[1].markdown_file).read_text(encoding="utf-8") == "FROM_PDF"
+    from deerflow.uploads.companion_map import load_companion_map
+
+    assert load_companion_map(thread_uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
+
+
+def test_upload_files_records_companion_mapping_via_file_io(tmp_path):
+    """Sidecar writes must leave the Gateway event loop, like other upload FS work."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    offloaded: list[object] = []
+    real_run_file_io = uploads.run_file_io
+
+    async def tracking_run_file_io(func, /, *args, **kwargs):
+        offloaded.append(func)
+        return await real_run_file_io(func, *args, **kwargs)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=_fake_convert_honoring_output_path({"notes.docx": "FROM_DOCX"})),
+        ),
+        patch.object(uploads, "run_file_io", tracking_run_file_io),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename="notes.docx", file=BytesIO(b"DOCX"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file == "notes.md"
+    assert uploads.record_companion_mapping in offloaded
+    from deerflow.uploads.companion_map import load_companion_map
+
+    assert load_companion_map(thread_uploads_dir) == {"notes.docx": "notes.md"}
 
 
 def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten(tmp_path):

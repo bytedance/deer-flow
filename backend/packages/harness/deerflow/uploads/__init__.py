@@ -1,3 +1,17 @@
+from .companion_map import (
+    COMPANION_MAP_FILENAME,
+    CompanionEntry,
+    companion_entry_matches,
+    forget_companion_mapping,
+    forget_companion_mappings,
+    has_companion_entry,
+    is_companion_map_file,
+    load_companion_entries,
+    load_companion_map,
+    lookup_companion_mapping,
+    mapped_companion_names,
+    record_companion_mapping,
+)
 from .manager import (
     UPLOAD_STAGING_PREFIX,
     UPLOAD_STAGING_SUFFIX,
@@ -8,6 +22,7 @@ from .manager import (
     enrich_file_listing,
     ensure_uploads_dir,
     get_uploads_dir,
+    is_upload_hidden_file,
     is_upload_staging_file,
     list_files_in_dir,
     normalize_filename,
@@ -18,6 +33,9 @@ from .manager import (
 )
 
 __all__ = [
+    "COMPANION_MAP_FILENAME",
+    "CompanionEntry",
+    "companion_entry_matches",
     "get_uploads_dir",
     "ensure_uploads_dir",
     "normalize_filename",
@@ -26,7 +44,17 @@ __all__ = [
     "UPLOAD_STAGING_SUFFIX",
     "claim_unique_filename",
     "cleanup_stale_upload_staging_files",
+    "forget_companion_mapping",
+    "forget_companion_mappings",
+    "has_companion_entry",
+    "is_companion_map_file",
+    "is_upload_hidden_file",
     "is_upload_staging_file",
+    "load_companion_entries",
+    "load_companion_map",
+    "lookup_companion_mapping",
+    "mapped_companion_names",
+    "record_companion_mapping",
     "validate_path_traversal",
     "list_files_in_dir",
     "delete_file_safe",

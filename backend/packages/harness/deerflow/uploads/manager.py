@@ -13,6 +13,12 @@ from urllib.parse import quote
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.uploads.companion_map import (
+    forget_companion_mapping,
+    has_companion_entry,
+    is_companion_map_file,
+    lookup_companion_mapping,
+)
 from deerflow.utils.thread_id import validate_thread_id
 
 
@@ -70,6 +76,8 @@ def normalize_filename(filename: str) -> str:
         raise ValueError(f"Filename contains backslash: {filename!r}")
     if len(safe.encode("utf-8")) > _MAX_FILENAME_BYTES:
         raise ValueError(f"Filename too long: {len(safe)} chars")
+    if is_companion_map_file(safe):
+        raise ValueError(f"Filename is reserved: {filename!r}")
     return safe
 
 
@@ -124,6 +132,16 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
 def is_upload_staging_file(filename: str) -> bool:
     """Return whether *filename* is a transient Gateway upload staging file."""
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)
+
+
+def is_upload_hidden_file(filename: str) -> bool:
+    """Return whether *filename* should be omitted from upload listings.
+
+    Covers Gateway staging files and the converted-markdown companion sidecar
+    (plus its lock/tmp siblings). Staging files are still the only names
+    swept on Gateway startup.
+    """
+    return is_upload_staging_file(filename) or is_companion_map_file(filename)
 
 
 def validate_path_traversal(path: Path, base: Path) -> None:
@@ -301,7 +319,7 @@ def list_files_in_dir(directory: Path) -> dict:
     files = []
     with os.scandir(directory) as entries:
         for entry in sorted(entries, key=lambda e: e.name):
-            if is_upload_staging_file(entry.name):
+            if is_upload_hidden_file(entry.name):
                 continue
             if not entry.is_file(follow_symlinks=False):
                 continue
@@ -322,7 +340,11 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
     """Delete a file inside *base_dir* after path-traversal validation.
 
     If *convertible_extensions* is provided and the file's extension matches,
-    the companion ``.md`` file is also removed (if it exists).
+    the converted-markdown companion is also removed (if it exists). The
+    companion path comes from the sidecar when present and still current;
+    a stale sidecar entry (companion deleted or replaced outside this API)
+    disables companion cleanup so no unrelated file is removed. Without any
+    sidecar entry the legacy ``<stem>.md`` heuristic applies.
 
     Args:
         base_dir: Directory containing the file.
@@ -337,17 +359,42 @@ def delete_file_safe(base_dir: Path, filename: str, *, convertible_extensions: s
         FileNotFoundError: If the file does not exist.
         PathTraversalError: If path traversal is detected.
     """
+    safe_name = Path(filename).name
     file_path = (base_dir / filename).resolve()
     validate_path_traversal(file_path, base_dir)
+    if is_upload_hidden_file(safe_name):
+        raise FileNotFoundError(f"File not found: {filename}")
 
     if not file_path.is_file():
         raise FileNotFoundError(f"File not found: {filename}")
 
+    mapped = lookup_companion_mapping(base_dir, safe_name)
     file_path.unlink()
 
     # Clean up companion markdown generated during upload conversion.
     if convertible_extensions and file_path.suffix.lower() in convertible_extensions:
-        file_path.with_suffix(".md").unlink(missing_ok=True)
+        companion_name: str | None
+        if mapped is not None:
+            companion_name = mapped
+        elif has_companion_entry(base_dir, safe_name):
+            # Stale entry: the recorded companion was deleted or replaced
+            # outside this API, so no file may be removed in its name.
+            companion_name = None
+        else:
+            companion_name = file_path.with_suffix(".md").name
+        if companion_name is not None and companion_name != safe_name:
+            companion_path = file_path.with_name(companion_name)
+            try:
+                validate_path_traversal(companion_path.resolve(), base_dir)
+            except PathTraversalError:
+                companion_path = None
+            if companion_path is not None:
+                companion_path.unlink(missing_ok=True)
+                forget_companion_mapping(base_dir, companion=companion_name)
+
+    forget_companion_mapping(base_dir, original=safe_name)
+    if file_path.suffix.lower() == ".md":
+        forget_companion_mapping(base_dir, companion=safe_name)
 
     return {"success": True, "message": f"Deleted {filename}"}
 

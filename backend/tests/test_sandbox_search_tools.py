@@ -590,6 +590,7 @@ def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
     (uploads / "report.txt").write_text("ready\n", encoding="utf-8")
     (uploads / ".upload-active.part").write_text("partial\n", encoding="utf-8")
     (uploads / ".upload-note.txt").write_text("intentional\n", encoding="utf-8")
+    (uploads / ".deer-flow-companions.json").write_text("{}\n", encoding="utf-8")
 
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime: LocalSandbox(id="local"))
 
@@ -602,6 +603,7 @@ def test_ls_tool_filters_upload_staging_files(tmp_path, monkeypatch) -> None:
     assert "/mnt/user-data/uploads/report.txt" in result
     assert "/mnt/user-data/uploads/.upload-note.txt" in result
     assert ".upload-active.part" not in result
+    assert ".deer-flow-companions.json" not in result
 
 
 def _make_skills_sandbox(tmp_path, monkeypatch, *, disabled: str):

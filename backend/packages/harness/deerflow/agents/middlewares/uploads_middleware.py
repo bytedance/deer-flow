@@ -18,7 +18,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.uploads.manager import is_upload_staging_file
+from deerflow.uploads.manager import is_upload_hidden_file
 from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
@@ -192,7 +192,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             if not isinstance(f, dict):
                 continue
             filename = f.get("filename") or ""
-            if not filename or Path(filename).name != filename or is_upload_staging_file(filename):
+            if not filename or Path(filename).name != filename or is_upload_hidden_file(filename):
                 continue
             if uploads_dir is not None and not (uploads_dir / filename).is_file():
                 continue

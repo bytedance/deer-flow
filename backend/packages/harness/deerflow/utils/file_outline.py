@@ -10,6 +10,7 @@ import logging
 import re
 from pathlib import Path
 
+from deerflow.uploads.companion_map import companion_entry_matches, load_companion_entries
 from deerflow.uploads.manager import is_upload_staging_file
 
 logger = logging.getLogger(__name__)
@@ -39,33 +40,54 @@ def resolve_converted_markdown_path(
     """Return the on-disk converted-markdown path for *file_path*, or ``None``.
 
     Prefers an explicit companion basename (used when conversion renamed
-    ``a.pdf`` to ``a_1.md``). Falls back to a same-directory ``<stem>.md``.
+    ``a.pdf`` to ``a_1.md``), then the convert-time sidecar mapping, then a
+    same-directory ``<stem>.md`` for threads that predate the sidecar. A
+    sidecar entry whose target is missing or no longer matches its
+    convert-time fingerprint (deleted or replaced by an unrelated file) is
+    treated as stale — the stem fallback is skipped so ``a.pdf`` cannot
+    inherit ``a.md`` from ``a.docx``.
     Symlinks and paths that resolve outside *file_path*'s directory are ignored.
     """
-    candidates: list[Path] = []
+    names: list[str] = []
     if is_safe_markdown_companion_name(companion_name):
-        candidates.append(file_path.parent / companion_name)
-    sibling = file_path.with_suffix(".md")
-    if sibling not in candidates and is_safe_markdown_companion_name(sibling.name):
-        candidates.append(sibling)
+        names.append(companion_name)
+
+    entries = load_companion_entries(file_path.parent)
+    entry = entries.get(file_path.name)
+    if entry is not None and companion_entry_matches(file_path.parent, entry) and entry.name not in names and is_safe_markdown_companion_name(entry.name):
+        names.append(entry.name)
+    has_sidecar_entry = entry is not None
 
     try:
         parent_resolved = file_path.parent.resolve()
     except OSError:
         return None
 
-    for md_path in candidates:
+    def _existing(name: str) -> Path | None:
+        md_path = file_path.parent / name
         try:
             if md_path.is_symlink() or not md_path.is_file():
-                continue
+                return None
             resolved = md_path.resolve(strict=True)
         except OSError:
-            continue
+            return None
         if resolved.parent != parent_resolved:
-            continue
+            return None
         if resolved.suffix.lower() != ".md":
-            continue
+            return None
         return md_path
+
+    for name in names:
+        found = _existing(name)
+        if found is not None:
+            return found
+
+    if has_sidecar_entry:
+        return None
+
+    sibling = file_path.with_suffix(".md")
+    if sibling.name not in names and is_safe_markdown_companion_name(sibling.name):
+        return _existing(sibling.name)
     return None
 
 
@@ -188,9 +210,9 @@ def extract_outline_for_file(
 ) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
-    Looks for a sibling ``<stem>.md`` file produced by the upload conversion
-    pipeline, or an explicit companion basename when conversion renamed it
-    (for example ``a.pdf`` → ``a_1.md``).
+    Looks for a converted-markdown companion: an explicit basename, the
+    convert-time sidecar mapping, or a sibling ``<stem>.md`` for legacy
+    threads (for example ``a.pdf`` → ``a_1.md``).
 
     Returns:
         (outline, preview) where:
