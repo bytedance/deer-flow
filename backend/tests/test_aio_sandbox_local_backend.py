@@ -333,6 +333,10 @@ def test_start_container_binds_dood_port_to_bridge_gateway(monkeypatch):
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: None,
+    )
+    monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
         lambda: "172.17.0.1",
     )
