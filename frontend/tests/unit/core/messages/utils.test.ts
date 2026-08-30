@@ -798,7 +798,9 @@ test("null copy data is not cached for a reference", () => {
   // A turn with no copyable AI text must keep recomputing (and stay null)
   // rather than a cached null hiding a later value — the same array can be
   // re-used once messages are appended to a rebuilt group.
-  const messages = [{ id: "human-1", type: "human", content: "hi" }] as Message[];
+  const messages = [
+    { id: "human-1", type: "human", content: "hi" },
+  ] as Message[];
 
   expect(getAssistantTurnCopyData(messages)).toBeNull();
   expect(getAssistantTurnCopyData(messages)).toBeNull();
