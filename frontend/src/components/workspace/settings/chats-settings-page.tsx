@@ -11,8 +11,10 @@ import { ThreadChannelIcon } from "@/components/workspace/thread-channel-source"
 import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
+import { buildThreadListModel } from "@/core/threads/thread-list-model";
 import {
   channelSourceOfThread,
+  isThreadPinned,
   pathOfThread,
   titleOfThread,
 } from "@/core/threads/utils";
@@ -20,7 +22,9 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
 
-export function ChatsSettingsPage() {
+export function ChatsSettingsPage({
+  onClose,
+}: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const {
     data: infiniteThreads,
@@ -31,23 +35,26 @@ export function ChatsSettingsPage() {
     error,
     refetch,
   } = useInfiniteThreads();
-  const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
-    [infiniteThreads],
+  const threadListModel = useMemo(
+    () => buildThreadListModel(infiniteThreads?.pages ?? []),
+    [infiniteThreads?.pages],
   );
   const [search, setSearch] = useState("");
   const isSearching = search.trim().length > 0;
 
   const filteredThreads = useMemo(() => {
     const query = search.trim().toLowerCase();
-    return threads
+    return threadListModel.threads
       .filter((thread) => titleOfThread(thread).toLowerCase().includes(query))
       .sort((a, b) => {
+        const pinnedDiff =
+          Number(isThreadPinned(b)) - Number(isThreadPinned(a));
+        if (pinnedDiff !== 0) return pinnedDiff;
         const aTime = a.updated_at ? Date.parse(a.updated_at) : 0;
         const bTime = b.updated_at ? Date.parse(b.updated_at) : 0;
         return bTime - aTime;
       });
-  }, [threads, search]);
+  }, [threadListModel.threads, search]);
 
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -65,7 +72,7 @@ export function ChatsSettingsPage() {
     return () => observer.disconnect();
   }, [fetchNextPage, hasNextPage, isFetchingNextPage, isSearching]);
 
-  const showError = Boolean(error && threads.length === 0);
+  const showError = Boolean(error && threadListModel.threads.length === 0);
   const showSkeleton = isLoading && !showError;
 
   return (
@@ -130,6 +137,7 @@ export function ChatsSettingsPage() {
                   <Link
                     key={thread.thread_id}
                     href={pathOfThread(thread)}
+                    onClick={() => onClose?.()}
                     className="hover:bg-secondary/50 flex min-h-14 items-center gap-3 border-b px-4 transition-colors"
                   >
                     <ThreadChannelIcon source={channelSource} />

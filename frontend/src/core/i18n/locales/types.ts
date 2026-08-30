@@ -594,7 +594,6 @@ export interface Translations {
   // Page titles (document title)
   pages: {
     appName: string;
-    chats: string;
     newChat: string;
     untitled: string;
   };

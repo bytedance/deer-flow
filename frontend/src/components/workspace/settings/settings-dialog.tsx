@@ -247,7 +247,11 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   onClose={() => props.onOpenChange?.(false)}
                 />
               )}
-              {activeSection === "chats" && <ChatsSettingsPage />}
+              {activeSection === "chats" && (
+                <ChatsSettingsPage
+                  onClose={() => props.onOpenChange?.(false)}
+                />
+              )}
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "integrations" && <IntegrationsSettingsPage />}
