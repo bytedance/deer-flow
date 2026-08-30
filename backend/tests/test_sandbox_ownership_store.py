@@ -359,8 +359,25 @@ def test_ttl_multiplier_below_two_is_rejected():
 @pytest.mark.parametrize("field", ["renewal_interval_seconds", "ttl_multiplier"])
 @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
 def test_lease_timing_rejects_non_finite_values(field, value):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="finite"):
         SandboxOwnershipConfig(**{field: value})
+
+
+def test_lease_timing_rejects_finite_values_with_infinite_product():
+    with pytest.raises(ValueError, match="lease TTL must be finite"):
+        SandboxOwnershipConfig(
+            renewal_interval_seconds=1e308,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_lease_timing_allows_large_finite_product():
+    config = SandboxOwnershipConfig(
+        renewal_interval_seconds=1e100,
+        ttl_multiplier=4.0,
+    )
+
+    assert compute_lease_ttl(config) == 4e100
 
 
 def test_owner_ids_are_unique_per_instance():

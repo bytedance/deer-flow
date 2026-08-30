@@ -53,6 +53,9 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
+- `sandbox.ownership` - Cross-instance sandbox lease storage. Renewal interval
+  and TTL multiplier must each be finite, and their derived lease TTL must also
+  remain finite so invalid Redis lease timing fails during config validation.
 - `skills.path` / `skills.container_path` - Host and container paths to skills directory
 - `skills.deferred_discovery` - When `true`, replaces the full-metadata `<available_skills>` prompt block with a compact `<skill_index>` (names only) and registers the `describe_skill` tool so the agent fetches metadata on demand. Defaults to `false` (legacy full-metadata injection)
 - `title` - Auto-title generation (enabled, max_words, max_chars, model_name; null model_name uses fast local fallback, explicit model_name uses the prompt_template LLM path)
