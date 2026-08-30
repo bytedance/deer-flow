@@ -7,7 +7,7 @@ import json
 import logging
 import tempfile
 import threading
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -263,6 +263,47 @@ class TestChannelStore:
         entries = store.list_entries(channel_name="slack")
         assert len(entries) == 1
         assert entries[0]["channel_name"] == "slack"
+
+    def test_channel_store_concurrent_list_and_mutation(self, store, monkeypatch):
+        iteration_started = threading.Event()
+        mutation_requested = threading.Event()
+        mutation_finished = threading.Event()
+
+        class CoordinatedData(dict):
+            def items(self):
+                iterator = iter(super().items())
+                first = next(iterator)
+                iteration_started.set()
+
+                if store._lock.locked():
+                    assert mutation_requested.wait(timeout=5), "mutation thread never requested the store lock"
+                else:
+                    assert mutation_finished.wait(timeout=5), "mutation thread never changed the unlocked store"
+
+                yield first
+                yield from iterator
+
+        store._data = CoordinatedData(
+            {
+                "slack:ch1": {"thread_id": "t1", "user_id": "u1", "created_at": 1.0, "updated_at": 1.0},
+                "feishu:ch2": {"thread_id": "t2", "user_id": "u2", "created_at": 2.0, "updated_at": 2.0},
+            }
+        )
+        monkeypatch.setattr(store, "_save", lambda: None)
+
+        def mutate():
+            assert iteration_started.wait(timeout=5), "list_entries never started iterating"
+            mutation_requested.set()
+            store.set_thread_id("test", "new", "t3")
+            mutation_finished.set()
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            list_future = executor.submit(store.list_entries)
+            mutation_future = executor.submit(mutate)
+            mutation_future.result(timeout=5)
+            entries = list_future.result(timeout=5)
+
+        assert {(entry["channel_name"], entry["chat_id"]) for entry in entries} == {("slack", "ch1"), ("feishu", "ch2")}
 
     def test_persistence(self, tmp_path):
         path = tmp_path / "store.json"

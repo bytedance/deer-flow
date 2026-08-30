@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import hashlib
 import json
 import logging
 import os
@@ -58,7 +57,9 @@ from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -191,9 +192,9 @@ class E2BSandboxProvider(SandboxProvider):
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id) -> sandbox id for fast in-process lookup.
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
-        # Per-(user,thread) lock to serialise acquire() and release() state
+        # Per-(user,thread) serializer for acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
-        self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._acquire_serializer: AcquireSerializer[tuple[str, str]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
@@ -356,7 +357,12 @@ class E2BSandboxProvider(SandboxProvider):
 
     @staticmethod
     def _stable_seed(thread_id: str, user_id: str) -> str:
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        """Warm-pool lookup seed derived from user/thread scope.
+
+        For E2B this value is the warm-pool lookup seed, not the
+        provider-issued remote id (RFC #4741 §6).
+        """
+        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
     def _metadata_matches_capacity_ledger(
         self,
@@ -412,19 +418,10 @@ class E2BSandboxProvider(SandboxProvider):
                     sig_name,
                 )
 
-    def _get_thread_lock(self, thread_id: str, user_id: str) -> threading.Lock:
-        key = self._thread_key(thread_id, user_id)
-        with self._lock:
-            lock = self._thread_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._thread_locks[key] = lock
-            return lock
-
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
-            with self._get_thread_lock(thread_id, effective_user_id):
+            with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
 
@@ -2343,7 +2340,7 @@ class E2BSandboxProvider(SandboxProvider):
             return
 
         user_id, thread_id = thread_key
-        with self._get_thread_lock(thread_id, user_id):
+        with self._acquire_serializer.hold(self._thread_key(thread_id, user_id)):
             self._release_internal(sandbox_id)
 
     def _release_internal(self, sandbox_id: str) -> None:
@@ -2505,7 +2502,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._remote_ops_in_progress.clear()
             self._unowned_remote_ops_in_progress.clear()
             self._thread_sandboxes.clear()
-            self._thread_locks.clear()
+            self._acquire_serializer.close()
             self._owned_sandbox_ids.clear()
             self._acquire_inflight.clear()
             self._orphan_first_seen.clear()

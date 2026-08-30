@@ -9,6 +9,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
+from deerflow.agents.middlewares.receipt_verification import render_citation_verdict, validate_receipt_verdict
 from deerflow.agents.thread_state import DelegationEntry
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
@@ -135,6 +136,9 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         stop_reason = structured.get("stop_reason")
         if stop_reason:
             entry["stop_reason"] = stop_reason
+        receipt_verdict = structured.get("receipt_verdict")
+        if receipt_verdict:
+            entry["receipt_verdict"] = receipt_verdict
         result_text = structured.get("result_brief") or structured.get("error") or _STATUS_ONLY_RESULT_BRIEFS.get(structured["status"])
         if result_text:
             result_sha256 = structured.get("result_sha256") or hashlib.sha256(result_text.encode("utf-8")).hexdigest()
@@ -161,6 +165,11 @@ def _render_entry_line(entry: DelegationEntry) -> str:
     result_brief = entry.get("result_brief")
     if result_brief:
         line += f" -> {_escape_context_text(_bound_text(result_brief, _LEDGER_ENTRY_RESULT_RENDER_CAP))}"
+    receipt_verdict = validate_receipt_verdict(entry.get("receipt_verdict"))
+    if receipt_verdict is not None:
+        segment = render_citation_verdict(receipt_verdict)
+        if segment:
+            line += f" · {segment}"
     return line
 
 
