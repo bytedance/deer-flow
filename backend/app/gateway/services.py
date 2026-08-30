@@ -1455,6 +1455,9 @@ async def start_run(
                         record.run_id,
                         error=f"Failed to attach run worker: {exc}",
                     )
+                    # No run_agent follows this path, so nothing else evicts
+                    # the failed record — do it explicitly, once durable.
+                    await run_mgr.evict_finished_run(record.run_id)
                     raise
         except ConflictError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc

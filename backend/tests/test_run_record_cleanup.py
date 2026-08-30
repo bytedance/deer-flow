@@ -49,9 +49,9 @@ class _ExplodingAgent:
         yield  # pragma: no cover - keeps this a generator
 
 
-async def _run_to_completion(run_manager: RunManager, record, *, agent_factory) -> None:
+async def _run_to_completion(run_manager: RunManager, record, *, agent_factory, bridge=None) -> None:
     await run_agent(
-        _make_bridge(),
+        bridge or _make_bridge(),
         run_manager,
         record,
         ctx=RunContext(checkpointer=None, event_store=None),
@@ -96,7 +96,10 @@ async def test_failed_run_evicts_record_after_finalization():
 
 
 @pytest.mark.anyio
-async def test_fail_start_if_pending_evicts_record():
+async def test_fail_start_if_pending_retains_record_until_caller_evicts():
+    """fail_start_if_pending no longer evicts: the metadata-failure caller
+    continues into run_agent (whose tail owns the eviction), so evicting here
+    would race its try_start. The attach-failure caller evicts explicitly."""
     store = MemoryRunStore()
     run_manager = RunManager(store=store)
     record = await run_manager.create("thread-1")
@@ -104,10 +107,82 @@ async def test_fail_start_if_pending_evicts_record():
     marked = await run_manager.fail_start_if_pending(record.run_id, error="worker attach failed")
     assert marked is True
 
+    assert record.run_id in run_manager._runs
+    assert (await store.get(record.run_id))["status"] == RunStatus.error.value
+
+    # The attach-failure site's explicit eviction (no run_agent follows).
+    await run_manager.evict_finished_run(record.run_id)
     assert record.run_id not in run_manager._runs
     hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
     assert hydrated is not None
     assert hydrated.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_run_agent_after_fail_start_if_pending_publishes_only_end():
+    """Regression (review #5061000616): the metadata-failure path calls
+    fail_start_if_pending and then continues into run_agent — the startup
+    barrier must turn the failed admission into no-agent-construction plus a
+    single end frame, not a spurious RunStartupError error frame."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    events: list[tuple[str, object]] = []
+
+    class _RecordingBridge:
+        async def publish(self, run_id, event, data):
+            events.append((event, data))
+
+        async def publish_end(self, run_id):
+            events.append(("end", None))
+
+        async def cleanup(self, run_id, *, delay=0):
+            return None
+
+    assert await run_manager.fail_start_if_pending(record.run_id, error="Timed out verifying existing thread metadata") is True
+    assert record.run_id in run_manager._runs
+
+    await _run_to_completion(
+        run_manager,
+        record,
+        agent_factory=lambda *, config: _OkAgent(),
+        bridge=_RecordingBridge(),
+    )
+
+    # Exactly one end frame, no error frame — main's behavior.
+    assert [event for event, _ in events] == ["end"]
+    # run_agent's tail evicts the failed record once durable.
+    assert record.run_id not in run_manager._runs
+    assert (await store.get(record.run_id))["status"] == RunStatus.error.value
+
+
+@pytest.mark.anyio
+async def test_skipped_eviction_does_not_rearm_stalled_records(monkeypatch):
+    """A skipped eviction (no store read at all) proves nothing about store
+    health and must not send stalled records back through failing retries."""
+    monkeypatch.setattr("deerflow.runtime.runs.manager.RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS", 0.0)
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+
+    # One record whose eviction retries exhaust while the store is down.
+    stalled = await run_manager.create("thread-stalled")
+    await run_manager.set_status(stalled.run_id, RunStatus.success, persist=False)
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store down")
+
+    store.get = failing_get
+    await run_manager.evict_finished_run(stalled.run_id)
+    await run_manager._eviction_retry_tasks[stalled.run_id]
+    assert stalled.run_id in run_manager._stalled_evictions
+
+    # An eviction that early-exits without touching the store (active record)
+    # must NOT re-arm the stalled one.
+    active = await run_manager.create("thread-active")
+    await run_manager.set_status(active.run_id, RunStatus.running)
+    assert await run_manager._evict_run_record_if_durable(active.run_id) == "skipped"
+    assert run_manager._eviction_retry_tasks == {}
 
 
 @pytest.mark.anyio
@@ -139,11 +214,11 @@ async def test_eviction_retains_record_until_terminal_state_durable():
         raise OSError("store unavailable")
 
     store.get = failing_get
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is False
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "unconfirmed"
     assert record.run_id in run_manager._runs
 
     store.get = original_get
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert record.run_id not in run_manager._runs
 
 
@@ -159,7 +234,7 @@ async def test_eviction_repairs_stale_store_row_from_memory_snapshot():
     row = await store.get(record.run_id)
     assert row is not None and row["status"] != RunStatus.success.value
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
 
     row = await store.get(record.run_id)
     assert row is not None and row["status"] == RunStatus.success.value
@@ -257,7 +332,7 @@ async def test_fenced_worker_never_repairs_store_on_eviction():
     store.put = counting_put
 
     # Eviction with the row still active: no store write, record retained.
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is False
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "unconfirmed"
     assert puts == []
     assert record.run_id in run_manager._runs
     assert (await store.get(record.run_id))["status"] == RunStatus.running.value
@@ -266,7 +341,7 @@ async def test_fenced_worker_never_repairs_store_on_eviction():
     # The peer terminalizes the row; the next eviction is read-only and drops
     # the fenced overlay.
     row["status"] = RunStatus.success.value
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert puts == []
     assert record.run_id not in run_manager._runs
 
@@ -283,7 +358,7 @@ async def test_fenced_worker_evicts_overlay_when_row_missing():
 
     await store.delete(record.run_id)
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert record.run_id not in run_manager._runs
 
 
@@ -303,7 +378,7 @@ async def test_eviction_repairs_completion_data_when_status_only_durable():
     assert row["status"] == RunStatus.success.value
     assert row.get("total_tokens", 0) == 0
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
 
     row = await store.get(record.run_id)
     assert row["total_tokens"] == 123
@@ -488,12 +563,12 @@ async def test_eviction_retains_record_when_completion_repair_reports_failure():
     record.total_tokens = 123
     store.refuse_completion = True
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is False
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "unconfirmed"
     assert record.run_id in run_manager._runs
     assert (await store.get(record.run_id)).get("total_tokens") is None
 
     store.refuse_completion = False
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert (await store.get(record.run_id))["total_tokens"] == 123
     assert record.run_id not in run_manager._runs
 
@@ -521,7 +596,7 @@ async def test_eviction_drops_overlay_when_peer_wrote_conflicting_terminal():
     await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
     record.total_tokens = 123
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert record.run_id not in run_manager._runs
 
     row = await store.get(record.run_id)
@@ -563,7 +638,7 @@ async def test_eviction_never_overwrites_an_already_conflicting_terminal_row():
     row["error"] = "taken over by peer"
     store.writes.clear()
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert record.run_id not in run_manager._runs
     assert store.writes == []
 
@@ -603,7 +678,7 @@ async def test_eviction_detects_peer_takeover_between_read_and_repair():
     record.total_tokens = 123
     store.writes.clear()
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
     assert record.run_id not in run_manager._runs
     assert store.writes == []
 
@@ -628,7 +703,7 @@ async def test_full_preservation_store_detects_summary_divergence_beyond_shared_
     row["status"] = RunStatus.success.value
     row["last_ai_message"] = f"{shared}-store"
 
-    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
 
     row = await store.get(record.run_id)
     assert row["last_ai_message"] == f"{shared}-record"

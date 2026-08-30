@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 # eviction is retried with backoff before the record is given up on.
 RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS = 5
 RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS = 30.0
+
+#: Outcome of a single durability-guarded eviction attempt. ``"evicted"``
+#: proves the store served the read (and any repair writes) — the only
+#: outcome that justifies re-arming stalled evictions; ``"unconfirmed"``
+#: means durability could not be verified and the eviction is retryable;
+#: ``"skipped"`` means nothing was evicted and nothing was proven.
+_EvictionOutcome = Literal["evicted", "unconfirmed", "skipped"]
 # Completion fields mirrored onto RunRecord by update_run_completion. That
 # durable write is best-effort, so eviction confirms these are present in the
 # store before dropping the record that may hold the only copy.
@@ -902,7 +909,15 @@ class RunManager:
             return RunStartOutcome.cancelled
 
     async def fail_start_if_pending(self, run_id: str, *, error: str) -> bool:
-        """Mark an admitted run as failed if its worker task could not be attached."""
+        """Mark an admitted run as failed if its worker task could not be attached.
+
+        The registry record is deliberately retained: the metadata-failure
+        caller continues into ``run_agent``, whose startup barrier and
+        finalization tail own the end frame and the eviction; the
+        attach-failure caller — where no ``run_agent`` ever runs — evicts
+        explicitly right after this call. Evicting here would race the
+        continuing caller's ``try_start``.
+        """
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None or record.status != RunStatus.pending:
@@ -913,9 +928,6 @@ class RunManager:
             record.updated_at = _now_iso()
 
         await self._persist_status(record, RunStatus.error, error=error)
-        # No worker can attach after this point, so the terminal record has no
-        # other path off the registry — evict it now, once durable.
-        await self.evict_finished_run(run_id)
         return True
 
     async def get_many_by_thread(
@@ -1950,10 +1962,9 @@ class RunManager:
         """Evict a finished run's registry record, event-driven.
 
         This is the terminal-path companion to ``run_agent``'s finalization
-        tail, ``fail_start_if_pending`` and ``_close_cancelled_admission``: it
-        must only be awaited once the run is terminal and every finalization
-        step has completed, so dropping the record cannot race anything that
-        still references it.
+        tail and the Gateway's attach-failure site: it must only be awaited
+        once the run is terminal and every finalization step has completed,
+        so dropping the record cannot race anything that still references it.
 
         The in-memory record may hold the only copy of a terminal outcome
         whose best-effort durable write failed, so the backing store row is
@@ -1973,18 +1984,21 @@ class RunManager:
         Retry tasks are strongly referenced and deduplicated by ``run_id``,
         and no new retry is spawned once shutdown has begun.
         """
-        if await self._evict_run_record_if_durable(run_id):
-            # This eviction proves the store is serving reads and writes
-            # again — give stalled records another bounded retry window.
+        outcome = await self._evict_run_record_if_durable(run_id)
+        if outcome == "unconfirmed":
+            if self._shutting_down:
+                # The drain below cancels pending retries; a fresh sleeper here
+                # would outlive it. The record is retained — the backing store
+                # remains the source of truth for the next process.
+                logger.warning("Run record %s retained: durability unconfirmed at shutdown", run_id)
+                return
+            self._spawn_eviction_retry(run_id)
+            return
+        if outcome == "evicted":
+            # The store just served the read (and any repair writes) — give
+            # stalled records another bounded retry window. Skipped outcomes
+            # prove nothing about store health and must not re-arm.
             self._rearm_stalled_evictions()
-            return
-        if self._shutting_down:
-            # The drain below cancels pending retries; a fresh sleeper here
-            # would outlive it. The record is retained — the backing store
-            # remains the source of truth for the next process.
-            logger.warning("Run record %s retained: durability unconfirmed at shutdown", run_id)
-            return
-        self._spawn_eviction_retry(run_id)
 
     def _spawn_eviction_retry(self, run_id: str) -> None:
         """Start one deduplicated, strongly referenced eviction retry task."""
@@ -2059,31 +2073,33 @@ class RunManager:
                 task.cancel()
             logger.warning("Eviction retry drain exceeded %.1fs; %d task(s) still pending", timeout, len(pending))
 
-    async def _evict_run_record_if_durable(self, run_id: str) -> bool:
+    async def _evict_run_record_if_durable(self, run_id: str) -> _EvictionOutcome:
         """Remove *run_id*'s record once its terminal state is durable.
 
-        Returns ``True`` when this call is complete (record removed, absent,
-        not evictable, or no store backing) and ``False`` when the terminal
-        state could not be confirmed in the store and the eviction should be
-        retried.
+        ``"evicted"`` — the record was removed after the store served the
+        read (and any repair writes); the only outcome proving the store is
+        healthy again. ``"unconfirmed"`` — durability could not be verified
+        and the eviction is retryable. ``"skipped"`` — nothing to do (record
+        absent, still active, or no store backing): nothing was proven, so
+        callers neither retry nor re-arm.
         """
         async with self._lock:
             record = self._runs.get(run_id)
         if record is None:
-            return True
+            return "skipped"
         if record.status in (RunStatus.pending, RunStatus.running) or record.finalizing:
             # Still owned by a live worker or a finalizing barrier; its own
             # terminal path performs the eviction. Never race it.
-            return True
+            return "skipped"
         if self._store is None:
             # No durable fallback: eviction would erase the run entirely and
             # break in-memory idempotency dedup. Retain in this mode.
-            return True
+            return "skipped"
         try:
             row = await self._call_store_with_retry("eviction get", run_id, lambda: self._store.get(run_id))
         except Exception:
             logger.warning("Failed to read run %s from the store during registry eviction", run_id, exc_info=True)
-            return False
+            return "unconfirmed"
         if row is not None and row.get("status") not in (RunStatus.pending.value, RunStatus.running.value):
             # The durable row is terminal — any terminal outcome, including a
             # peer takeover. For our own runs the completion write was
@@ -2092,9 +2108,9 @@ class RunManager:
             # the record that may hold the only copy.
             if not record.ownership_lost and self._completion_needs_repair(row, record):
                 if not await self._repair_durable_run_state(run_id, record):
-                    return False
+                    return "unconfirmed"
             await self._remove_run_record(run_id, expected=record)
-            return True
+            return "evicted"
         if record.ownership_lost:
             # This worker was fenced from durable finalization: the local
             # error snapshot is not an authorized terminal outcome, and a
@@ -2106,15 +2122,15 @@ class RunManager:
             # retained for read-only retries until the peer terminalizes.
             if row is None:
                 await self._remove_run_record(run_id, expected=record)
-                return True
-            return False
+                return "evicted"
+            return "unconfirmed"
         # Row missing or still active: this record holds the only terminal
         # snapshot, so repair the row from it — completion data included —
         # before dropping the record.
         if await self._repair_durable_run_state(run_id, record):
             await self._remove_run_record(run_id, expected=record)
-            return True
-        return False
+            return "evicted"
+        return "unconfirmed"
 
     @staticmethod
     def _completion_payload(record: RunRecord) -> dict[str, Any]:
@@ -2214,7 +2230,7 @@ class RunManager:
     async def _retry_eviction_until_durable(self, run_id: str) -> None:
         for attempt in range(1, RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS + 1):
             await asyncio.sleep(RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS)
-            if await self._evict_run_record_if_durable(run_id):
+            if (await self._evict_run_record_if_durable(run_id)) != "unconfirmed":
                 return
             logger.warning(
                 "Run record %s retained: terminal state not yet confirmed in the run store (eviction retry %d/%d)",
