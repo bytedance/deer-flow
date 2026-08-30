@@ -65,8 +65,12 @@ export function useRevokePat() {
   const { user } = useAuth();
   return useMutation({
     mutationFn: (patId: string) => revokePat(patId),
-    onSuccess: () => {
-      void client.invalidateQueries({
+    onSuccess: async () => {
+      // Unlike creation, revocation has no show-once result that must be
+      // exposed immediately. Keep the mutation pending until active list
+      // observers have refreshed so the success UI cannot leave the revoked
+      // credential rendered as active.
+      await client.invalidateQueries({
         queryKey: patQueryKey(user?.id ?? null),
       });
     },

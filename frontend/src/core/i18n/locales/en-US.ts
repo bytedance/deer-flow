@@ -1007,7 +1007,7 @@ export const enUS: Translations = {
       lastUsed: "Last used",
       neverUsed: "Never used",
       revoke: "Revoke",
-      revokeTitle: "Revoke this token?",
+      revokeTitle: 'Revoke "{name}"?',
       revokeDescription:
         "Revocation is immediate: API calls using this token will fail from now on. This cannot be undone.",
       revokeConfirm: "Revoke token",

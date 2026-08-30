@@ -41,7 +41,13 @@ import {
   usePats,
   useRevokePat,
 } from "@/core/pats";
-import { PAT_SCOPES, type PatCreated, type PatSummary } from "@/core/pats";
+import {
+  PAT_SCOPES,
+  type PatCreated,
+  type PatScope,
+  type PatSummary,
+} from "@/core/pats";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { formatDate, formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
@@ -54,11 +60,9 @@ const EXPIRY_CHOICES = [
   { value: "never", days: null },
 ] as const;
 
-const DEFAULT_SCOPES = new Set<string>([
-  "threads:read",
-  "runs:create",
-  "runs:read",
-]);
+// Start with no implicit grant. The form already requires at least one scope,
+// so every created token reflects an explicit permission choice.
+const DEFAULT_SCOPES = new Set<PatScope>();
 
 // The repository lists every row regardless of expiry (only credential
 // validation drops expired tokens), so the UI must flag them itself.
@@ -74,6 +78,27 @@ function formatExpiry(pat: PatSummary): string {
 }
 
 export function PatSettingsPage() {
+  if (isStaticWebsiteOnly()) {
+    return <StaticPatSettingsPage />;
+  }
+  return <InteractivePatSettingsPage />;
+}
+
+function StaticPatSettingsPage() {
+  const { t } = useI18n();
+  return (
+    <SettingsSection
+      title={t.settings.tokens.title}
+      description={t.settings.tokens.description}
+    >
+      <div className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
+        {t.common.notAvailableInDemoMode}
+      </div>
+    </SettingsSection>
+  );
+}
+
+function InteractivePatSettingsPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -83,7 +108,7 @@ export function PatSettingsPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [name, setName] = useState("");
-  const [scopes, setScopes] = useState<Set<string>>(new Set(DEFAULT_SCOPES));
+  const [scopes, setScopes] = useState<Set<PatScope>>(new Set(DEFAULT_SCOPES));
   const [expiry, setExpiry] = useState<string>("90");
   const [created, setCreated] = useState<PatCreated | null>(null);
   const [copied, setCopied] = useState(false);
@@ -100,6 +125,9 @@ export function PatSettingsPage() {
     if (created === null && !create.isPending) return;
     const warnUnrecoverable = (event: BeforeUnloadEvent) => {
       event.preventDefault();
+      // Safari/WebKit still relies on the legacy returnValue signal, while
+      // preventDefault covers modern Chromium and Firefox.
+      event.returnValue = true;
     };
     window.addEventListener("beforeunload", warnUnrecoverable);
     return () => window.removeEventListener("beforeunload", warnUnrecoverable);
@@ -122,7 +150,7 @@ export function PatSettingsPage() {
     create.reset();
   }
 
-  function toggleScope(scope: string, enabled: boolean) {
+  function toggleScope(scope: PatScope, enabled: boolean) {
     setScopes((previous) => {
       const next = new Set(previous);
       if (enabled) {
@@ -153,10 +181,7 @@ export function PatSettingsPage() {
         // the create dialog and refetch so the unavailable banner takes over
         // instead of a stale list plus a still-open form.
         closeCreateDialog();
-        toast.error(t.settings.tokens.unavailableTitle);
-        void queryClient.invalidateQueries({
-          queryKey: patQueryKey(user?.id ?? null),
-        });
+        showUnavailableStoreState();
         return;
       }
       toast.error(err instanceof Error ? err.message : String(err));
@@ -186,11 +211,22 @@ export function PatSettingsPage() {
     } catch (err) {
       if (err instanceof UnauthorizedError) return;
       if (err instanceof PatStoreUnavailableError) {
-        toast.error(t.settings.tokens.unavailableTitle);
+        // A deployment that no longer has a PAT store cannot service any of
+        // the cached management UI. Close the confirmation and refresh so
+        // the deployment-level unavailable state replaces the stale list.
+        setRevoking(null);
+        showUnavailableStoreState();
         return;
       }
       toast.error(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  function showUnavailableStoreState() {
+    toast.error(t.settings.tokens.unavailableTitle);
+    void queryClient.invalidateQueries({
+      queryKey: patQueryKey(user?.id ?? null),
+    });
   }
 
   return (
@@ -482,7 +518,12 @@ export function PatSettingsPage() {
       >
         <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{t.settings.tokens.revokeTitle}</DialogTitle>
+            <DialogTitle>
+              {t.settings.tokens.revokeTitle.replace(
+                "{name}",
+                () => revoking?.name ?? "",
+              )}
+            </DialogTitle>
             <DialogDescription>
               {t.settings.tokens.revokeDescription}
             </DialogDescription>

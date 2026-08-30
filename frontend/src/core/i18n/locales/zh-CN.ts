@@ -969,7 +969,7 @@ export const zhCN: Translations = {
       lastUsed: "最近使用",
       neverUsed: "从未使用",
       revoke: "撤销",
-      revokeTitle: "撤销此令牌？",
+      revokeTitle: "撤销“{name}”？",
       revokeDescription:
         "撤销立即生效：使用此令牌的 API 调用将从现在起失败。此操作无法撤销。",
       revokeConfirm: "撤销令牌",

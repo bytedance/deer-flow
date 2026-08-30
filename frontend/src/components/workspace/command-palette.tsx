@@ -39,8 +39,14 @@ export function CommandPalette() {
   const [isMac, setIsMac] = useState(false);
 
   const handleNewChat = useCallback(() => {
-    router.push("/workspace/chats/new");
     setOpen(false);
+    // Keep in-progress Settings flows intact. In particular, navigating away
+    // while a show-once PAT is visible could permanently hide the token before
+    // the user has copied it.
+    if (getSettingsDialogSnapshot().open) {
+      return;
+    }
+    router.push("/workspace/chats/new");
   }, [router]);
 
   const handleOpenSettings = useCallback(() => {

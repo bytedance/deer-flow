@@ -804,9 +804,11 @@ can call the Gateway API with a **personal access token (PAT)** instead of a
 browser session. The easiest way to manage tokens is the web UI: open
 **Settings → API Tokens** to create one (pick a name, the scopes it needs, and
 an expiry), copy the raw `dfp_...` value — it is shown exactly once; only its
-SHA-256 digest is stored — and list or revoke tokens at any time. The same
-operations are available over the API; with `POST /api/v1/auth/pats` you
-create a token like this:
+SHA-256 digest is stored — and list or revoke tokens at any time. No scope is
+preselected, so every permission grant is explicit. Static website/demo builds
+show this section as read-only because they have no Gateway PAT store. The same
+operations are available over the API; with `POST /api/v1/auth/pats` you create
+a token like this:
 
 ```http
 POST /api/threads/search
