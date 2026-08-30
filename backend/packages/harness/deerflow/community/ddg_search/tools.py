@@ -18,6 +18,8 @@ DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
 
 WIKIPEDIA_BACKENDS = {"auto", "all", "wikipedia"}
+TIME_RANGE_CAPABLE_BACKENDS = ("brave", "duckduckgo", "yahoo")
+DEFAULT_TIME_RANGE_BACKEND = ",".join(TIME_RANGE_CAPABLE_BACKENDS)
 WIKIPEDIA_LANGUAGE_ALIASES = {
     "jp": "ja",
     "kr": "ko",
@@ -36,6 +38,20 @@ def _normalize_backend(backend: str | list[str] | tuple[str, ...] | None) -> str
 
 def _normalize_setting(value: str | None, default: str) -> str:
     return str(value).strip() if value else default
+
+
+def _resolve_time_range_backend(backend: str | list[str] | tuple[str, ...] | None) -> str:
+    """Exclude DDGS text backends that ignore the native time limit."""
+    normalized_backend = _normalize_backend(backend)
+    configured_backends = [part.strip().lower() for part in normalized_backend.split(",") if part.strip()]
+    if any(part in {"auto", "all"} for part in configured_backends):
+        return DEFAULT_TIME_RANGE_BACKEND
+
+    supported_backends = [part for part in configured_backends if part in TIME_RANGE_CAPABLE_BACKENDS]
+    excluded_backends = [part for part in configured_backends if part not in TIME_RANGE_CAPABLE_BACKENDS]
+    if excluded_backends:
+        logger.warning("Ignoring DDGS backends without time-range support: %s", ", ".join(excluded_backends))
+    return ",".join(supported_backends) or DEFAULT_TIME_RANGE_BACKEND
 
 
 def _backend_includes_wikipedia(backend: str | list[str] | tuple[str, ...] | None) -> bool:
@@ -116,7 +132,7 @@ def _search_text(
     ddgs = DDGS(timeout=30)
 
     try:
-        backend = _normalize_backend(backend)
+        backend = _resolve_time_range_backend(backend) if time_range is not None else _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
         search_kwargs: dict[str, object] = {

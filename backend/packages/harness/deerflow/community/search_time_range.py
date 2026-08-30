@@ -1,4 +1,4 @@
-"""Shared relative time-range contract for bundled web-search providers."""
+"""Shared relative time-range contract for supported bundled web-search providers."""
 
 from typing import Literal
 
