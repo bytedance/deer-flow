@@ -311,6 +311,19 @@ def test_get_agent_store_propagates_invalid_on_disk_config(tmp_path, monkeypatch
         reset_app_config()
 
 
+def test_get_agent_store_propagates_malformed_yaml(tmp_path, monkeypatch):
+    """An unparseable config.yaml must surface the parse error, not fall back to file."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("agent_storage: [oops\n", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(cfg_path))
+    try:
+        reset_app_config()
+        with pytest.raises(yaml.YAMLError):  # ParserError/ScannerError, previously swallowed
+            get_agent_store()
+    finally:
+        reset_app_config()
+
+
 def test_get_agent_store_does_not_fallback_when_extensions_config_is_missing(tmp_path, monkeypatch):
     """A missing nested config must not look like a missing main config."""
     cfg_path = tmp_path / "config.yaml"
