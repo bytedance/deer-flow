@@ -1011,6 +1011,8 @@ export const enUS: Translations = {
         "Revocation is immediate: API calls using this token will fail from now on. This cannot be undone.",
       revokeConfirm: "Revoke token",
       revoked: "Token revoked",
+      navAwayConfirm:
+        "A token is being created or shown only once. Leave now and it cannot be recovered. Leave this page?",
       unavailableTitle: "API tokens are unavailable",
       unavailableDescription:
         "Personal access tokens require a configured database backend (SQLite or PostgreSQL). The current deployment runs on the in-memory backend.",
