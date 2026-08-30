@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   buildOnceRunAtLocal,
+  describeSchedule,
   parseCron,
   serializeCron,
   utcToZonedLocalInput,
@@ -124,6 +125,140 @@ describe("parseCron", () => {
     expect(parseCron("0 9 * * 1-5").preset).toBe("custom");
     expect(parseCron("garbage").preset).toBe("custom");
     expect(parseCron("garbage").parts.raw).toBe("garbage");
+  });
+});
+
+describe("describeSchedule", () => {
+  const baseCron = {
+    minute: 0,
+    hour: 9,
+    weekdays: [],
+    dayOfMonth: 1,
+  } as CronParts;
+
+  test("once renders wall time + timezone (en)", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "once",
+          runAtLocal: "2026-07-02T09:00",
+          timezone: "Asia/Shanghai",
+        },
+        "en",
+      ),
+    ).toBe("Once at 2026-07-02 09:00 (Asia/Shanghai)");
+  });
+
+  test("daily en", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "daily",
+          parts: baseCron,
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every day at 09:00 (UTC)");
+  });
+
+  test("daily zh", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "daily",
+          parts: baseCron,
+          timezone: "UTC",
+        },
+        "zh",
+      ),
+    ).toBe("每天 09:00 (UTC)");
+  });
+
+  test("weekly en lists weekday abbreviations", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "weekly",
+          parts: { ...baseCron, weekdays: ["mon", "wed"] },
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every Mon, Wed at 09:00 (UTC)");
+  });
+
+  test("weekly zh lists 周X", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "weekly",
+          parts: { ...baseCron, weekdays: ["mon", "wed", "fri"] },
+          timezone: "UTC",
+        },
+        "zh",
+      ),
+    ).toBe("每周 周一、周三、周五 09:00 (UTC)");
+  });
+
+  test("weekly with no weekdays falls back to daily wording", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "weekly",
+          parts: { ...baseCron, weekdays: [] },
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every day at 09:00 (UTC)");
+  });
+
+  test("hourly en", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "hourly",
+          parts: { minute: 30 },
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Every hour at :30 (UTC)");
+  });
+
+  test("monthly en", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "monthly",
+          parts: { minute: 0, hour: 9, dayOfMonth: 1 },
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("On day 1 of every month at 09:00 (UTC)");
+  });
+
+  test("custom en echoes the expression", () => {
+    expect(
+      describeSchedule(
+        {
+          scheduleType: "cron",
+          preset: "custom",
+          parts: { raw: "*/5 * * * *" },
+          timezone: "UTC",
+        },
+        "en",
+      ),
+    ).toBe("Custom: */5 * * * * (UTC)");
   });
 });
 
