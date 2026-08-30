@@ -8,6 +8,7 @@ persistence layer.
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from deerflow.persistence.agents.base import (
@@ -81,6 +82,8 @@ def get_agent_store() -> AgentStore:
     try:
         config = get_app_config()
     except FileNotFoundError:
+        if os.getenv("DEER_FLOW_CONFIG_PATH"):
+            raise
         # ``get_app_config()`` also loads optional nested config files. Only
         # fall back when the main config itself is absent.
         try:

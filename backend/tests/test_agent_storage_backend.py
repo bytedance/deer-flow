@@ -263,10 +263,22 @@ def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch
     """The ``except -> file`` fallback is for genuinely unresolvable config only
     (CLI/tests); it must not fire when a config exists — that asymmetry is what
     keeps a misconfigured graph process from silently downgrading db to file."""
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
     try:
         reset_app_config()
         assert isinstance(get_agent_store(), FileAgentStore)
+    finally:
+        reset_app_config()
+
+
+def test_get_agent_store_does_not_fallback_when_explicit_config_is_missing(tmp_path, monkeypatch):
+    """An explicit config path is an operator assertion and must fail closed."""
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(tmp_path / "does-not-exist.yaml"))
+    try:
+        reset_app_config()
+        with pytest.raises(FileNotFoundError, match="DEER_FLOW_CONFIG_PATH"):
+            get_agent_store()
     finally:
         reset_app_config()
 
