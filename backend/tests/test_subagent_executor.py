@@ -3069,6 +3069,33 @@ class TestCooperativeCancellation:
 
         assert task_id not in executor_module._background_tasks
 
+    def test_force_cleanup_removes_unreadable_running_task(self, executor_module, classes):
+        """Force cleanup removes a RUNNING entry unconditionally.
+
+        Last resort for interrupted unwinds where the status object can no
+        longer be read (persistent accessor failure), so the terminality
+        check inside cleanup_background_task cannot be trusted: cooperative
+        cancellation was already requested by the caller.
+        """
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-force-cleanup-running"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.force_cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
+    def test_force_cleanup_handles_unknown_task_gracefully(self, executor_module):
+        """Force cleanup doesn't raise for unknown task IDs."""
+        executor_module.force_cleanup_background_task("nonexistent-task")
+
 
 # -----------------------------------------------------------------------------
 # Subagent Tracing Wiring

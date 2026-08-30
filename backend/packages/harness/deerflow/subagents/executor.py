@@ -1651,3 +1651,24 @@ def cleanup_background_task(execution_id: str) -> None:
                 execution_id,
                 result.status.value if hasattr(result.status, "value") else result.status,
             )
+
+
+def force_cleanup_background_task(execution_id: str) -> None:
+    """Remove a background task entry unconditionally.
+
+    Last resort for interrupted unwind paths where the registry entry exists
+    but its result object can no longer be read (persistent status-lookup /
+    status-object failure), so :func:`cleanup_background_task` — which reads
+    the entry to check terminality — cannot succeed. Cooperative cancellation
+    has already been requested by then; leaking the entry forever is worse
+    than dropping it. The subagent thread keeps its own reference to the
+    result object, so a later ``try_set_terminal`` on the removed object is
+    harmless.
+
+    Args:
+        execution_id: The execution ID to remove.
+    """
+    with _background_tasks_lock:
+        _background_tasks.pop(execution_id, None)
+        _background_futures.pop(execution_id, None)
+    logger.warning("Force-cleaned background execution %s after unreadable status", execution_id)

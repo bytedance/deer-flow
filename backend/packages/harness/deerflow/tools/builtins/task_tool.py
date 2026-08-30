@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import time
 import uuid
 from contextvars import ContextVar
 from dataclasses import replace
@@ -26,6 +27,7 @@ from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
     SubagentStatus,
     cleanup_background_task,
+    force_cleanup_background_task,
     get_background_task_result,
     request_cancel_background_task,
     run_on_isolated_subagent_loop,
@@ -45,6 +47,23 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Poll cadence for terminal-state waits in both the interrupted unwind and the
+# deferred registry cleaner.
+_SUBAGENT_POLL_INTERVAL_SECONDS = 5.0
+
+# How long the generic-error unwind waits for a terminal result before
+# re-raising. This is deliberately a short grace period, not the full
+# ``max_poll_count`` budget: a subagent blocked inside a long model/tool call
+# may not observe cooperative cancellation for the whole execution timeout
+# (~31 minutes by default), and an unrelated poller failure must not stall
+# the parent run that long. The remaining lifecycle is handed to the deferred
+# cleaner on the persistent subagent loop.
+_UNEXPECTED_EXIT_GRACE_SECONDS = 5.0
+
+# Sentinel returned by ``_peek_subagent_result`` when the registry entry exists
+# but cannot be read (persistent status-lookup / status-object failure).
+_STATUS_UNREADABLE = object()
+
 _explicit_execution_capacity: ContextVar[SubagentExecutionCapacity | None] = ContextVar(
     "deerflow_explicit_subagent_execution_capacity",
     default=None,
@@ -60,59 +79,195 @@ def _is_subagent_terminal(result: Any) -> bool:
     return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
 
 
-async def _await_subagent_terminal(execution_id: str, max_polls: int) -> Any | None:
-    """Poll until the background subagent reaches a terminal status or we run out of polls."""
-    for _ in range(max_polls):
+def _peek_subagent_result(execution_id: str, *, trace_id: str) -> Any:
+    """Read a registry entry without letting a broken status object raise.
+
+    The generic-error unwind exists to handle poller failures caused by
+    persistent status-lookup/status-object errors; finalization re-reading
+    through the same failing accessor must not abort the unwind. Returns the
+    entry when readable, ``None`` when it is gone (nothing left to clean),
+    and ``_STATUS_UNREADABLE`` when it exists but cannot be read.
+    """
+    try:
         result = get_background_task_result(execution_id)
-        if result is None:
-            return None
+    except Exception:
+        logger.warning(
+            f"[trace={trace_id}] Background status lookup failed for execution {execution_id}",
+            exc_info=True,
+        )
+        return _STATUS_UNREADABLE
+    if result is None:
+        return None
+    try:
+        _is_subagent_terminal(result)
+    except Exception:
+        logger.warning(
+            f"[trace={trace_id}] Background status object unreadable for execution {execution_id}",
+            exc_info=True,
+        )
+        return _STATUS_UNREADABLE
+    return result
+
+
+async def _await_subagent_terminal(execution_id: str, max_polls: int, *, trace_id: str = "", grace_seconds: float | None = None) -> Any:
+    """Poll until the background subagent reaches a terminal status.
+
+    Without ``grace_seconds`` the wait is bounded by ``max_polls`` polls (the
+    cancellation unwind's contract). With it, the wait is additionally bounded
+    by wall-clock time — the generic-error unwind must re-raise promptly
+    instead of stalling the parent run for the full execution timeout. Never
+    raises through a broken status accessor; propagates ``_STATUS_UNREADABLE``
+    to the caller instead.
+    """
+    polls = 0
+    deadline = None if grace_seconds is None else time.monotonic() + grace_seconds
+    while True:
+        result = _peek_subagent_result(execution_id, trace_id=trace_id)
+        if result is None or result is _STATUS_UNREADABLE:
+            return result
         if _is_subagent_terminal(result):
             return result
-        await asyncio.sleep(5)
-    return None
+        if polls >= max_polls - 1:
+            return None
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            await asyncio.sleep(min(_SUBAGENT_POLL_INTERVAL_SECONDS, remaining))
+        else:
+            await asyncio.sleep(_SUBAGENT_POLL_INTERVAL_SECONDS)
+        polls += 1
 
 
-async def _finalize_interrupted_subagent(runtime: Runtime, execution_id: str, trace_id: str, max_polls: int) -> None:
+async def _finalize_interrupted_subagent(
+    runtime: Runtime,
+    execution_id: str,
+    trace_id: str,
+    max_polls: int,
+    *,
+    grace_seconds: float | None = None,
+) -> None:
     """Shared unwind for interrupted polling (cancellation or unexpected error).
 
-    Wait (shielded, bounded by ``max_polls``) for the subagent to reach a
-    terminal state so the final token usage snapshot is reported to the parent
-    RunJournal, then remove the registry entry. Terminal results are removed
-    synchronously before re-raising; non-terminal ones defer removal to the
-    process-owned persistent subagent loop, which survives teardown of a
-    short-lived caller loop (``asyncio.run()`` cancels caller-loop tasks —
-    including any detached cleanup task — on exit).
+    Wait (shielded, bounded by ``max_polls`` or ``grace_seconds``) for the
+    subagent to reach a terminal state so the final token usage snapshot is
+    reported to the parent RunJournal, then remove the registry entry.
+    Terminal results are removed synchronously before re-raising; non-terminal
+    and unreadable ones defer removal to the process-owned persistent subagent
+    loop, which survives teardown of a short-lived caller loop (``asyncio.run``
+    cancels caller-loop tasks — including any detached cleanup task — on exit).
+
+    This function must never raise: it runs while an exception (the original
+    poller failure or cancellation) is already in flight, and any error it
+    raised would replace that exception and skip the cleanup attachment. A
+    persistently unreadable status object therefore falls through to the
+    deferred cleaner rather than propagating.
     """
-    terminal_result = None
     try:
-        terminal_result = await asyncio.shield(_await_subagent_terminal(execution_id, max_polls))
-    except asyncio.CancelledError:
-        pass
+        unreadable = False
+        terminal_result = None
+        try:
+            waited = await asyncio.shield(_await_subagent_terminal(execution_id, max_polls, trace_id=trace_id, grace_seconds=grace_seconds))
+            if waited is _STATUS_UNREADABLE:
+                unreadable = True
+            else:
+                terminal_result = waited
+        except asyncio.CancelledError:
+            pass
 
-    # Report whatever the subagent collected (even if we timed out).
-    final_result = terminal_result or get_background_task_result(execution_id)
-    if final_result is not None:
-        _report_subagent_usage(runtime, final_result)
-    if final_result is not None and _is_subagent_terminal(final_result):
-        cleanup_background_task(execution_id)
-    else:
-        _schedule_deferred_subagent_cleanup(execution_id, trace_id, max_polls)
+        # Report whatever the subagent collected (even if we timed out).
+        final_result = terminal_result
+        final_terminal = False
+        if final_result is not None:
+            final_terminal = _is_subagent_terminal(final_result)
+        else:
+            peek = _peek_subagent_result(execution_id, trace_id=trace_id)
+            if peek is _STATUS_UNREADABLE:
+                unreadable = True
+            elif peek is not None:
+                final_result = peek
+                final_terminal = _is_subagent_terminal(peek)
+
+        if unreadable:
+            # The entry exists but cannot be read; the terminal-gated sync
+            # cleanup cannot be trusted here. Attach the deferred cleaner,
+            # whose last resort force-removes unreadable entries.
+            _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_polls)
+            return
+
+        if final_result is not None:
+            _report_subagent_usage(runtime, final_result)
+        if final_terminal:
+            cleanup_background_task(execution_id)
+        else:
+            _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_polls)
+    except Exception:
+        logger.error(
+            f"[trace={trace_id}] Interrupted-subagent finalization failed for execution {execution_id}",
+            exc_info=True,
+        )
 
 
-async def _deferred_cleanup_subagent_task(execution_id: str, trace_id: str, max_polls: int) -> None:
-    """Keep polling a cancelled subagent until it can be safely removed."""
+async def _report_deferred_final_usage(runtime: Runtime, result: Any) -> None:
+    """Report the subagent's FINAL usage from the deferred cleaner's context.
+
+    The cleaner runs on the process-owned persistent subagent loop while the
+    RunJournal belongs to the parent run's loop. Dispatching the report onto
+    that loop with ``call_soon_threadsafe`` would not guarantee delivery: on
+    the synchronous ``asyncio.run`` path the caller loop is torn down right
+    after the unwind re-raises, and callbacks scheduled moments earlier are
+    dropped when it closes. The record transfer therefore runs in a plain
+    worker thread (``to_thread``) with no running loop: the journal's
+    ``record_external_llm_usage_records`` is synchronous, and with no running
+    loop in the thread its best-effort progress flush is skipped instead of
+    being scheduled on a foreign loop (its flush path awaits loop-bound,
+    ``asyncio.Lock``-guarded persistence that is not safe across loops).
+    The report bypasses the snapshot's ``usage_reported`` flag so records
+    accumulated after the snapshot are counted; the journal itself dedupes
+    by ``source_run_id``.
+    """
+    await asyncio.to_thread(_report_subagent_usage, runtime, result, final=True)
+
+
+async def _deferred_cleanup_subagent_task(
+    runtime: Runtime,
+    execution_id: str,
+    trace_id: str,
+    max_polls: int,
+) -> None:
+    """Keep polling an interrupted subagent until it can be safely removed.
+
+    On a terminal result, report the subagent's final usage (deltas since the
+    unwind snapshot included) BEFORE removing the entry, so the parent
+    RunJournal sees everything the subagent collected. When the entry exists
+    but stays unreadable through the whole poll budget, force-remove it:
+    cooperative cancellation was already requested, and a broken status
+    object must not leak the entry forever.
+    """
     cleanup_poll_count = 0
     while True:
-        result = get_background_task_result(execution_id)
+        result = _peek_subagent_result(execution_id, trace_id=trace_id)
         if result is None:
             return
-        if _is_subagent_terminal(result):
+        if result is _STATUS_UNREADABLE:
+            if cleanup_poll_count >= max_polls:
+                logger.warning(f"[trace={trace_id}] Deferred cleanup for execution {execution_id}: status stayed unreadable after {cleanup_poll_count} polls, force-removing")
+                force_cleanup_background_task(execution_id)
+                return
+        elif _is_subagent_terminal(result):
+            try:
+                await _report_deferred_final_usage(runtime, result)
+            except Exception:
+                logger.error(
+                    f"[trace={trace_id}] Deferred final usage report failed for execution {execution_id}",
+                    exc_info=True,
+                )
             cleanup_background_task(execution_id)
             return
         if cleanup_poll_count >= max_polls:
             logger.warning(f"[trace={trace_id}] Deferred cleanup for execution {execution_id} timed out after {cleanup_poll_count} polls")
             return
-        await asyncio.sleep(5)
+        await asyncio.sleep(_SUBAGENT_POLL_INTERVAL_SECONDS)
         cleanup_poll_count += 1
 
 
@@ -161,7 +316,12 @@ def bind_task_tool(
     return task_tool.model_copy(update={"coroutine": bound_coroutine})
 
 
-def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_polls: int) -> asyncio.Task[None] | concurrent.futures.Future:
+def _schedule_deferred_subagent_cleanup(
+    runtime: Runtime,
+    execution_id: str,
+    trace_id: str,
+    max_polls: int,
+) -> asyncio.Task[None] | concurrent.futures.Future:
     """Schedule the deferred registry cleanup on the process-owned subagent loop.
 
     The persistent loop outlives the poller's own event loop, so the cleanup
@@ -172,7 +332,7 @@ def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_po
     unwind path that is already handling an error.
     """
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled execution {execution_id}")
-    coro = _deferred_cleanup_subagent_task(execution_id, trace_id, max_polls)
+    coro = _deferred_cleanup_subagent_task(runtime, execution_id, trace_id, max_polls)
     try:
         cleanup_handle = run_on_isolated_subagent_loop(coro)
     except Exception:
@@ -182,7 +342,13 @@ def _schedule_deferred_subagent_cleanup(execution_id: str, trace_id: str, max_po
             f"[trace={trace_id}] Persistent subagent loop unavailable for deferred cleanup of {execution_id}; falling back to the caller loop",
             exc_info=True,
         )
-        cleanup_handle = asyncio.create_task(coro)
+        try:
+            cleanup_handle = asyncio.create_task(coro)
+        except Exception:
+            # No caller loop either — close the coroutine so it is not left
+            # un-awaited, and let the unwind's error handling take over.
+            coro.close()
+            raise
     _deferred_cleanup_tasks.add(cleanup_handle)
     cleanup_handle.add_done_callback(_deferred_cleanup_tasks.discard)
     cleanup_handle.add_done_callback(lambda task: _log_cleanup_failure(task, trace_id=trace_id, execution_id=execution_id))
@@ -232,12 +398,16 @@ def _summarize_usage(records: list[dict] | None) -> dict | None:
     }
 
 
-def _report_subagent_usage(runtime: Any, result: Any) -> None:
+def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False) -> None:
     """Report subagent token usage to the parent RunJournal, if available.
 
-    Each subagent task must be reported only once (guarded by usage_reported).
+    Each subagent task's snapshot must be reported only once (guarded by
+    usage_reported). The deferred cleaner's final report passes ``final=True``
+    to bypass that flag: records accumulated after the snapshot are still
+    delivered, and the journal dedupes per ``source_run_id`` so nothing is
+    double-counted.
     """
-    if getattr(result, "usage_reported", True):
+    if not final and getattr(result, "usage_reported", True):
         return
     records = getattr(result, "token_usage_records", None) or []
     if not records:
@@ -762,7 +932,7 @@ async def task_tool(
                 # cancellation and schedule deferred cleanup to remove the entry from
                 # _background_tasks once the background thread reaches a terminal state.
                 request_cancel_background_task(execution_id)
-                _schedule_deferred_subagent_cleanup(execution_id, trace_id, max_poll_count)
+                _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
                 return _task_result_command(
                     tool_call_id=tool_call_id,
@@ -776,8 +946,15 @@ async def task_tool(
         # Signal the background subagent thread to stop cooperatively, then
         # wait for the terminal result so the final token usage snapshot is
         # reported to the parent RunJournal before the parent worker persists
-        # get_completion_data().
-        request_cancel_background_task(execution_id)
+        # get_completion_data(). A failure here must not replace the
+        # CancelledError that is already in flight.
+        try:
+            request_cancel_background_task(execution_id)
+        except Exception:
+            logger.warning(
+                f"[trace={trace_id}] Failed to request cancellation for background task {execution_id} during unwind",
+                exc_info=True,
+            )
         await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
         raise
     except Exception:
@@ -786,7 +963,16 @@ async def task_tool(
         # cooperatively, report its final usage, and remove the registry entry —
         # synchronously when it already reached terminal, otherwise via
         # deferred cleanup pinned to the process-owned subagent loop so it
-        # survives asyncio.run() teardown on the synchronous tool path.
-        request_cancel_background_task(execution_id)
-        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
+        # survives asyncio.run() teardown on the synchronous tool path. The
+        # unwind is bounded by a short grace period (not the full execution
+        # timeout) and never lets a failing status accessor or cancellation
+        # request replace the original exception.
+        try:
+            request_cancel_background_task(execution_id)
+        except Exception:
+            logger.warning(
+                f"[trace={trace_id}] Failed to request cancellation for background task {execution_id} during unwind",
+                exc_info=True,
+            )
+        await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count, grace_seconds=_UNEXPECTED_EXIT_GRACE_SECONDS)
         raise
