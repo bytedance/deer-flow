@@ -26,10 +26,11 @@ export function usePats() {
     queryFn: listPats,
     // A 503 (memory backend, no PAT store) is a legitimate deployment state,
     // not a transient failure worth retrying — everything else (network
-    // blips, 5xx) gets TanStack's default retry instead of collapsing the
-    // list into the error state on the first hiccup.
-    retry: (_failureCount, error) =>
-      !(error instanceof PatStoreUnavailableError),
+    // blips, 5xx) retries like the skills hook (count < 3). A bare predicate
+    // would replace TanStack's numeric default with "retry forever", pinning
+    // the page in the loading state and never surfacing the error.
+    retry: (count, error) =>
+      !(error instanceof PatStoreUnavailableError) && count < 3,
   });
   return {
     pats: query.data ?? [],
