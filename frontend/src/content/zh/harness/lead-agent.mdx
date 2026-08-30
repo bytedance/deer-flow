@@ -121,7 +121,7 @@ models:
 - 它可以使用的**工具组**
 - 它默认使用的**模型**
 
-自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。其配置存储在后端目录的 `agents/{name}/config.yaml` 中。
+自定义 Agent 通过 DeerFlow 应用界面或 `/api/agents` 端点创建。这两种方式都要求在 `config.yaml` 中设置 `agents_api.enabled: true`；管理 API 默认关闭。配置按用户存储在 `{data_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{data_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。
 
 <Callout type="tip">
   当在线程中选择自定义 Agent 时，Lead Agent 在运行时加载该 Agent 的配置。为特定

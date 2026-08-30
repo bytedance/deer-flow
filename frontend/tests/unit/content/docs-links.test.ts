@@ -96,6 +96,7 @@ describe("documentation content links", () => {
     );
 
     for (const source of customAgentApiDocs) {
+      expect(source).toContain("agents_api.enabled");
       expect(source).toContain("^[A-Za-z0-9-]+$");
       expect(source).not.toMatch(/["']display_name["']\s*:/);
     }
