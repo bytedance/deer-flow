@@ -1,9 +1,9 @@
 """GET on the join-stream route must not carry cancel actions.
 
-``stream_existing_run`` is registered for both GET and POST, and its
-``action`` branch cancels the run. The CSRF middleware exempts GET, while a
-SameSite=Lax session cookie still accompanies a cross-site top-level safe
-navigation. An attacker-induced navigation to
+The existing-run stream path supports both GET and POST; POST's ``action``
+branch cancels the run. The CSRF middleware exempts GET, while a SameSite=Lax
+session cookie still accompanies a cross-site top-level safe navigation. An
+attacker-induced navigation to
 ``GET .../runs/{run_id}/stream?action=interrupt|rollback`` was therefore a
 state-changing GET that bypassed the CSRF protection guarding the POST
 variant. These tests pin that GET stays a read-only join and POST keeps
@@ -72,6 +72,16 @@ def test_get_with_invalid_action_has_one_validation_error():
     assert _get_run_status(mgr, run_id) == RunStatus.running
 
 
+def test_unsupported_method_preserves_post_allow_header():
+    """Splitting the handlers must not change Starlette's route precedence."""
+    client, _, run_id = _make_seeded_run_client()
+
+    response = client.put(f"/api/threads/{THREAD_ID}/runs/{run_id}/stream")
+
+    assert response.status_code == 405
+    assert response.headers["allow"] == "POST"
+
+
 def test_get_with_action_is_rejected_before_owner_lookup():
     """The method gate must not reveal whether a thread metadata row exists."""
     app = make_authed_test_app(owner_check_passes=False)
@@ -91,6 +101,9 @@ def test_get_without_action_still_joins():
     client, _, run_id = _make_seeded_run_client(run_status=RunStatus.success)
     with client.stream("GET", f"/api/threads/{THREAD_ID}/runs/{run_id}/stream") as response:
         assert response.status_code == 200
+        events = [line for line in response.iter_lines() if line.startswith("event:")]
+
+    assert events[-1].strip() == "event: end"
 
 
 @pytest.mark.parametrize("action", ("interrupt", "rollback"))

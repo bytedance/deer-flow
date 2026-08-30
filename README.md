@@ -801,7 +801,9 @@ For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=t
 
 Existing-run SSE joins are observation-only on `GET`: supplying
 `action=interrupt|rollback` returns `405`. Cancellation on this stream route is
-`POST`-only and requires the `runs:cancel` permission.
+`POST`-only and requires the `runs:cancel` permission. Accordingly, the OpenAPI
+contract exposes `action` and `wait` only on `POST`; the `GET` operation exposes
+only its path parameters.
 
 #### Personal Access Tokens
 
