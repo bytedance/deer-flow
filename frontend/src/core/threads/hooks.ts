@@ -3233,8 +3233,16 @@ export function useRenameThread() {
         values: { title },
       });
     },
-    onSuccess(_, { threadId, title }) {
+    async onSuccess(_, { threadId, title }) {
+      const metadataQuery = {
+        queryKey: ["thread", "metadata", threadId],
+        exact: false,
+      };
+
+      // Prevent a pre-rename metadata request from restoring the stale title.
+      await queryClient.cancelQueries(metadataQuery);
       setThreadTitleInCaches(queryClient, threadId, title);
+      void queryClient.invalidateQueries(metadataQuery);
     },
   });
 }
