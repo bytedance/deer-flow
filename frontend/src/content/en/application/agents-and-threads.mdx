@@ -30,6 +30,8 @@ Custom agents are created and managed through:
 - **The App UI**: open the Agents section in the settings panel.
 - **The Gateway API**: `POST /api/agents` with the agent definition.
 
+Both paths require `agents_api.enabled: true` in `config.yaml`. The management API is disabled by default and should be exposed only within a trusted boundary.
+
 The `name` must match `^[A-Za-z0-9-]+$` and be unique. The backend stores it in lowercase. Use `/api/agents/check?name={name}` to validate a name and check whether it is available before creating the agent.
 
 Agent configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.

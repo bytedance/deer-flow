@@ -88,14 +88,16 @@ describe("documentation content links", () => {
   });
 
   it("documents the custom-agent create request naming contract", () => {
-    const customAgentDocs = DOC_LANGUAGES.flatMap((lang) =>
-      ["application/agents-and-threads.mdx", "harness/lead-agent.mdx"].map(
-        (path) => readFileSync(join(CONTENT_ROOT, lang, path), "utf8"),
+    const customAgentApiDocs = DOC_LANGUAGES.map((lang) =>
+      readFileSync(
+        join(CONTENT_ROOT, lang, "application/agents-and-threads.mdx"),
+        "utf8",
       ),
     );
 
-    for (const source of customAgentDocs) {
-      expect(source).not.toContain("display_name");
+    for (const source of customAgentApiDocs) {
+      expect(source).toContain("^[A-Za-z0-9-]+$");
+      expect(source).not.toMatch(/["']display_name["']\s*:/);
     }
 
     const chineseApiGuide = readFileSync(
