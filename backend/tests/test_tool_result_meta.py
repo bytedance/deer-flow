@@ -473,6 +473,7 @@ def test_numeric_keyword_word_boundary(content: str, expected_error_type: str):
     assert m["status"] == "error"
     assert m["error_type"] == expected_error_type, f"{content!r} → expected {expected_error_type!r}, got {m['error_type']!r}"
 
+
 # ---------------------------------------------------------------------------
 # Structured subagent_status failures (delegated task Command results)
 #
