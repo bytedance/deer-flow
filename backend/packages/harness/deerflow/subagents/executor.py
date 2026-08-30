@@ -2,8 +2,10 @@
 
 import asyncio
 import atexit
+import json
 import logging
 import os
+import re
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -18,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
@@ -112,6 +114,14 @@ class SubagentResult:
             streaming produced a state (e.g. pre-stream cancellation), when
             receipts are disabled, or when harvesting failed; an empty list
             means the stream carried no stamped receipts (zero tool calls).
+        bash_executions: Bounded bash command/output evidence accumulated from
+            every streamed chunk (RFC #4651 PR4), letting the parent anchor a
+            ``tests_passed:<command>`` acceptance leaf to a specific recorded
+            execution. Accumulated per chunk (merged by ``tool_call_id``) so
+            summarization compacting earlier messages cannot erase a recorded
+            execution. ``None`` when the delegation carried no acceptance
+            criteria or the run ended before streaming; an empty list means the
+            stream carried no bash-family tool calls.
     """
 
     task_id: str
@@ -128,6 +138,7 @@ class SubagentResult:
     usage_reported: bool = False
     admission_failure: bool = False
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
+    bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -149,6 +160,24 @@ class SubagentResult:
         with self._state_lock:
             if not self.status.is_terminal:
                 self.tool_receipts = [dict(receipt) for receipt in receipts]
+
+    def update_bash_executions(self, executions: list[dict[str, Any]] | None) -> None:
+        """Merge bash evidence from the latest yielded state while still running.
+
+        Entries merge by ``tool_call_id`` in first-seen order and are capped to
+        the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
+        ``final_state`` scan, accumulation survives summarization compacting
+        earlier AI/ToolMessages out of the streamed history.
+        """
+        if not executions:
+            return
+        with self._state_lock:
+            if self.status.is_terminal:
+                return
+            merged = {str(entry.get("tool_call_id")): entry for entry in (self.bash_executions or [])}
+            for execution in executions:
+                merged[str(execution.get("tool_call_id"))] = dict(execution)
+            self.bash_executions = list(merged.values())[-_BASH_EVIDENCE_MAX_ENTRIES:]
 
     def snapshot_tool_receipts(self) -> list[dict[str, Any]] | None:
         """Copy the latest published receipts for a racing terminal writer."""
@@ -343,6 +372,111 @@ def _harvest_tool_receipts(
         return [dict(receipt) for receipt in receipts]
     except Exception:
         logger.warning("Failed to harvest subagent tool receipts", exc_info=True)
+        return None
+
+
+#: Bash-family tool names whose calls count as recorded command executions.
+_BASH_EVIDENCE_TOOL_NAMES = frozenset({"bash", "bash_tool"})
+#: Bounds for the harvested evidence: only the newest few executions travel,
+#: with command/output text capped (test summaries print at the tail).
+_BASH_EVIDENCE_MAX_ENTRIES = 20
+_BASH_EVIDENCE_COMMAND_CHARS = 500
+_BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
+
+#: Exit-status markers in bash *output text*: a nonzero exit does not raise —
+#: local sandboxes append ``Exit Code: N``; e2b/opensandbox emit
+#: ``Command exited with code N`` when the command produced no output.
+_BASH_EXIT_CODE_MARKER_RE = re.compile(r"Exit Code: (-?\d+)\s*$")
+#: Remote providers emit ``Command exited with code N`` ONLY as the complete
+#: output of a silent command — anchor it to the whole (trimmed) content so
+#: a successful command that merely prints the phrase while exercising an
+#: error path is not misrecorded as failed.
+_BASH_EXITED_WITH_CODE_RE = re.compile(r"Command exited with code (-?\d+)")
+
+
+def _bash_evidence_status(content: str, meta_status: str) -> str:
+    """Derive the recorded status from the shell exit marker when present.
+
+    The explicit marker is authoritative: ``deerflow_tool_meta`` reports the
+    generic ToolMessage status, which stays ``success`` for a nonzero exit
+    rendered as ordinary output text.
+    """
+    match = _BASH_EXIT_CODE_MARKER_RE.search(content) or _BASH_EXITED_WITH_CODE_RE.fullmatch(content.strip())
+    if match is None:
+        return meta_status
+    # Signal-killed local subprocesses report signed codes (Exit Code: -9);
+    # only an exact zero is a success.
+    return "success" if int(match.group(1)) == 0 else "error"
+
+
+def _harvest_bash_executions(
+    final_state: Any,
+) -> list[dict[str, Any]] | None:
+    """Harvest bounded bash command/output evidence from one streamed state.
+
+    RFC #4651 PR4: a ``tests_passed:<command>`` acceptance leaf must anchor to
+    a specific recorded execution — the command text lets the parent match the
+    criterion against the call that actually ran, and the bounded output tail
+    carries the test-summary shape. The recorded status is the **actual shell
+    exit status**: a nonzero bash exit comes back as ordinary output text
+    (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
+    ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
+    as success — so an explicit exit marker wins, and the meta status is only
+    the fallback when no marker exists. Failure-isolated like the receipt
+    harvest: an error returns ``None`` and the leaves degrade to UNVERIFIED.
+    """
+    if not final_state:
+        return None
+    messages = final_state.get("messages") if isinstance(final_state, dict) else None
+    if not messages:
+        return None
+    try:
+        from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+        commands: dict[str, tuple[str, str, bool]] = {}
+        for message in messages:
+            if not isinstance(message, AIMessage):
+                continue
+            for tool_call in message.tool_calls or []:
+                name = str(tool_call.get("name") or "")
+                if name not in _BASH_EVIDENCE_TOOL_NAMES:
+                    continue
+                tool_call_id = str(tool_call.get("id") or "")
+                args = tool_call.get("args")
+                command = args.get("command") if isinstance(args, dict) else None
+                command = command if isinstance(command, str) else ""
+                # A truncated command loses its suffix; the matcher must not
+                # treat shell-structure analysis of the prefix as proof (a
+                # selection-changing suffix like ``-k smoke`` could be cut).
+                commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
+        if not commands:
+            return []
+        executions: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, ToolMessage):
+                continue
+            tool_call_id = str(message.tool_call_id or "")
+            entry = commands.get(tool_call_id)
+            if entry is None:
+                continue
+            name, command, command_truncated = entry
+            meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
+            meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
+            content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
+            status = _bash_evidence_status(content, meta_status)
+            executions.append(
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": name,
+                    "command": command,
+                    "command_truncated": command_truncated,
+                    "output_tail": content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:],
+                    "status": status,
+                }
+            )
+        return executions[-_BASH_EVIDENCE_MAX_ENTRIES:]
+    except Exception:
+        logger.warning("Failed to harvest subagent bash execution evidence", exc_info=True)
         return None
 
 
@@ -1131,6 +1265,15 @@ class SubagentExecutor:
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
 
+        def current_bash_executions() -> list[dict[str, Any]] | None:
+            # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
+            # Accumulated from every chunk (not harvested once at terminal) so
+            # summarization compacting earlier messages cannot erase a recorded
+            # execution. Criteria-free runs pay nothing.
+            if not self.acceptance_criteria:
+                return None
+            return _harvest_bash_executions(final_state)
+
         try:
             if task_info is not None and task_store is not None:
                 await notify_task_start(
@@ -1250,6 +1393,7 @@ class SubagentExecutor:
                 # cancellation request was in flight.
                 final_state = chunk
                 result.update_tool_receipts(terminal_receipts())
+                result.update_bash_executions(current_bash_executions())
 
                 # Cooperative cancellation: check if parent requested stop.
                 # Note: cancellation is only detected at astream iteration boundaries,

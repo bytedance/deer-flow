@@ -76,7 +76,7 @@ from deerflow.runtime.secret_context import (
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
-from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -121,6 +121,7 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             TOOL_TRANSFORMS_KEY,
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
+            SUBAGENT_ACCEPTANCE_VERDICT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -272,18 +273,23 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     return item
 
 
-def _strip_external_delegation_verdict(entry: Any) -> Any:
-    """Remove the runtime-stamped receipt verdict from a caller-supplied
-    delegation-ledger entry.
+#: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped
+#: execution evidence (citation verdict PR2, acceptance checklist PR4) that a
+#: caller must never supply.
+_SERVER_OWNED_DELEGATION_VERDICT_KEYS = frozenset({"receipt_verdict", "acceptance_verdict"})
 
-    ``receipt_verdict`` is server-owned execution evidence stamped at task
-    write-back. Ledger entries are plain dicts, not messages, so the
-    message-metadata stripper never sees them; without this a caller can
-    persist a forged verdict that ``render_delegation_ledger`` would present
-    as fact.
+
+def _strip_external_delegation_verdict(entry: Any) -> Any:
+    """Remove runtime-stamped verdicts from a caller-supplied ledger entry.
+
+    ``receipt_verdict``/``acceptance_verdict`` are server-owned execution
+    evidence stamped at task write-back. Ledger entries are plain dicts, not
+    messages, so the message-metadata stripper never sees them; without this
+    a caller can persist a forged verdict that ``render_delegation_ledger``
+    would present as fact.
     """
-    if isinstance(entry, dict) and "receipt_verdict" in entry:
-        return {key: value for key, value in entry.items() if key != "receipt_verdict"}
+    if isinstance(entry, dict) and _SERVER_OWNED_DELEGATION_VERDICT_KEYS & entry.keys():
+        return {key: value for key, value in entry.items() if key not in _SERVER_OWNED_DELEGATION_VERDICT_KEYS}
     return entry
 
 

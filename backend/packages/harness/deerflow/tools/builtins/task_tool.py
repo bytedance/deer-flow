@@ -20,6 +20,7 @@ from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -235,8 +236,13 @@ def _task_result_command(
     usage: dict[str, int] | None = None,
     tool_receipts: list[dict] | None = None,
     receipt_verdict: dict | None = None,
+    acceptance_verdict: dict | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
+    if acceptance_verdict is not None:
+        # RFC #4651 PR4: the rendered checklist rides the model-visible result
+        # text; metadata carries the structured verdict for the ledger/judge.
+        content = f"{content}\n\n{render_acceptance_section(acceptance_verdict)}"
     return Command(
         update={
             "messages": [
@@ -253,6 +259,7 @@ def _task_result_command(
                         token_usage=usage,
                         tool_receipts=tool_receipts,
                         receipt_verdict=receipt_verdict,
+                        acceptance_verdict=acceptance_verdict,
                     ),
                 )
             ]
@@ -324,6 +331,13 @@ async def task_tool(
     - A resolved citation means the cited call happened with the recorded status
       — it does not validate that the adjacent claim is correct. Before relying
       on a load-bearing claim, spot-check its verifiable handle yourself.
+    - When you attach `acceptance_criteria`, the result includes a deterministic
+      acceptance checklist: decidable criteria (`file:<path> exists|non-empty`,
+      `file_written:<path>`, `tests_passed:<command>`) are checked in code
+      against the shared thread workspace and the recorded bash executions, and
+      every criterion that cannot be checked deterministically is marked
+      UNVERIFIED — never silently passed. A `holds` leaf is execution evidence,
+      not a guarantee that the deliverable is correct.
 
     Args:
         description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
@@ -335,8 +349,10 @@ async def task_tool(
             report. Attach them when
             the outcome is objectively checkable; prefer the canonical forms
             `file:<path> exists`, `file:<path> non-empty`, `file_written:<path>`,
-            and `tests_passed:<command>` so each criterion stays objectively
-            decidable. Example for a report-writing delegation:
+            and `tests_passed:<command>` — these are checked deterministically
+            against the shared thread workspace and the recorded execution
+            evidence when the subagent completes, while any other wording comes
+            back marked UNVERIFIED. Example for a report-writing delegation:
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
     """
@@ -601,6 +617,23 @@ async def task_tool(
                 # harvest (zero stamped calls) and still gets a verdict.
                 receipts = getattr(result, "tool_receipts", None)
                 receipt_verdict = verify_receipt_citations(result.result or "", receipts) if receipts is not None else None
+                # RFC #4651 PR4: deterministic acceptance checklist. Runs only
+                # when the delegation carried criteria; offloaded because the
+                # file leaves perform sandbox IO. Failure-isolated like the
+                # citation check — a checker error never changes the outcome,
+                # the result just flows back without a checklist verdict.
+                acceptance_verdict = None
+                if acceptance_criteria:
+                    try:
+                        acceptance_verdict = await asyncio.to_thread(
+                            check_acceptance_criteria,
+                            acceptance_criteria,
+                            runtime=runtime,
+                            thread_data=thread_data,
+                            bash_executions=getattr(result, "bash_executions", None),
+                        )
+                    except Exception:
+                        logger.warning(f"[trace={trace_id}] Acceptance checklist failed for task {tool_call_id}; result flows back unchecked", exc_info=True)
                 return _task_result_command(
                     tool_call_id=tool_call_id,
                     status="completed",
@@ -610,6 +643,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=receipts,
                     receipt_verdict=receipt_verdict,
+                    acceptance_verdict=acceptance_verdict,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
