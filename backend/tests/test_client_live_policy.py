@@ -166,5 +166,5 @@ def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
     command = _dry_run_make_target("test-blocking-io")
     workflow = (REPO_ROOT / ".github" / "workflows" / "backend-blocking-io-tests.yml").read_text(encoding="utf-8")
 
-    assert "tests/blocking_io" in command
+    assert "pytest tests/blocking_io" in command
     assert "make test-blocking-io" in workflow
