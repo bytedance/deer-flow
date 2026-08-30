@@ -265,6 +265,9 @@ def test_get_agent_store_falls_back_to_file_without_config(tmp_path, monkeypatch
     keeps a misconfigured graph process from silently downgrading db to file."""
     monkeypatch.delenv("DEER_FLOW_CONFIG_PATH", raising=False)
     monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(tmp_path))
+    from deerflow.config import app_config
+
+    monkeypatch.setattr(app_config, "_legacy_config_candidates", lambda: ())
     try:
         reset_app_config()
         assert isinstance(get_agent_store(), FileAgentStore)
