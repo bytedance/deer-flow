@@ -541,6 +541,52 @@ async def test_valid_put_repairs_timeout_persisted_by_older_gateway(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_repair_put_reports_non_timeout_legacy_defect_without_writing(tmp_path, monkeypatch) -> None:
+    from app.gateway.routers import mcp as mcp_router
+
+    config_path = tmp_path / "extensions_config.json"
+    original = json.dumps(
+        {
+            "mcpServers": {
+                "legacy": {
+                    "type": "http",
+                    "url": "https://legacy.example.invalid/mcp",
+                    "routing": {"mode": "unsupported"},
+                    "session_init_timeout": 0,
+                }
+            },
+            "skills": {},
+        }
+    ).encode()
+    config_path.write_bytes(original)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
+    monkeypatch.setattr(mcp_router, "require_admin_user", AsyncMock(return_value=None))
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    app = FastAPI()
+    app.include_router(mcp_router.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.put(
+            "/api/mcp/config",
+            json={
+                "mcp_servers": {
+                    "legacy": {
+                        "type": "http",
+                        "url": "https://legacy.example.invalid/mcp",
+                        "session_init_timeout": 0.5,
+                    }
+                }
+            },
+        )
+
+    assert response.status_code == 422
+    assert "legacy" in response.json()["detail"]
+    assert "routing.mode" in response.json()["detail"]
+    assert "directly edit" in response.json()["detail"]
+    assert config_path.read_bytes() == original
+
+
+@pytest.mark.asyncio
 async def test_get_put_round_trip_removes_omitted_invalid_legacy_server(tmp_path, monkeypatch) -> None:
     from app.gateway.routers import mcp as mcp_router
 

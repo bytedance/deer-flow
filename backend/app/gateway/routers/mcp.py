@@ -913,9 +913,17 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
                     "tool_call_timeout": incoming.tool_call_timeout,
                     "session_init_timeout": incoming.session_init_timeout,
                 }
+                try:
+                    existing_server = McpServerConfigResponse(**existing_for_merge)
+                except ValidationError as exc:
+                    invalid_fields = ", ".join(sorted({".".join(str(part) for part in error["loc"]) for error in exc.errors() if error.get("loc")}))
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=(f"Stored MCP server '{name}' has invalid non-timeout field(s): {invalid_fields or 'unknown'}. Back up extensions_config.json, directly edit those fields, and retry the full configuration update."),
+                    ) from exc
                 merged_servers[name] = _merge_preserving_secrets(
                     incoming,
-                    McpServerConfigResponse(**existing_for_merge),
+                    existing_server,
                 )
             else:
                 merged_servers[name] = incoming

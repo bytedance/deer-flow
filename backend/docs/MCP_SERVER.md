@@ -217,7 +217,10 @@ GET back through PUT, the omitted invalid server is removed from
 secret, OAuth refresh token, and per-user credential values in
 `user_auth.users`. The visible-server switches in Settings > Tools use PATCH
 and do not perform that replacement, but any settings or API flow that submits
-a GET-derived full replacement has the same removal behavior.
+a GET-derived full replacement has the same removal behavior. Unrelated
+configuration writes, including public-skill enable-state changes through the
+Gateway or embedded client, retain the isolated server's original raw JSON and
+stored credentials; isolation alone does not delete the entry.
 
 Before repair, preserve a backup of `extensions_config.json` that still
 contains the server's secret fields. To repair through PUT, re-supply the
@@ -226,7 +229,10 @@ timeouts. Alternatively, edit or restore the file directly before any
 GET-derived full-replacement save. Incoming validated timeout values then take
 precedence before the old raw entry is parsed for secret and advanced-field
 preservation, so masked secrets can still be round-tripped when the server is
-included in the request. `PATCH /api/mcp/config` may disable the invalid server
+included in the request. If that raw entry also contains an invalid non-timeout
+field, the repair PUT returns 422 with the server name and invalid field path
+and leaves the file unchanged. Back up the file, edit that field directly, and
+retry the full update. `PATCH /api/mcp/config` may disable the invalid server
 without rewriting its other fields; attempting to enable it returns 422 and
 leaves the file unchanged until a valid PUT repairs it.
 

@@ -135,6 +135,32 @@ async def test_update_skill_persists_state_when_source_omits_skills(tmp_path: Pa
     assert written["middlewares"] == ["pkg:Middleware"]
 
 
+async def test_update_skill_preserves_isolated_legacy_mcp_server(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "extensions_config.json"
+    legacy_server = {
+        "type": "http",
+        "url": "https://legacy.example.invalid/mcp",
+        "env": {"TOKEN": "$LEGACY_TOKEN"},
+        "oauth": {
+            "token_url": "https://legacy.example.invalid/oauth/token",
+            "client_secret": "legacy-secret",
+        },
+        "session_init_timeout": 0,
+    }
+    await asyncio.to_thread(
+        config_path.write_text,
+        json.dumps({"mcpServers": {"legacy": legacy_server}, "skills": {}}),
+        encoding="utf-8",
+    )
+    _patch_config_infra(monkeypatch, config_path)
+
+    await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+
+    written = json.loads(await asyncio.to_thread(config_path.read_text, encoding="utf-8"))
+    assert written["mcpServers"]["legacy"] == legacy_server
+    assert written["skills"] == {"demo-skill": {"enabled": False}}
+
+
 @pytest.mark.allow_blocking_io  # gate-exempt: needs real worker-thread overlap to observe serialization
 async def test_update_skill_serializes_concurrent_writes(tmp_path: Path, monkeypatch) -> None:
     state_lock = threading.Lock()

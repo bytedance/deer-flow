@@ -1866,9 +1866,15 @@ class TestSkillsManagement:
     def test_update_skill(self, client):
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
+        legacy_server = {
+            "type": "http",
+            "url": "https://legacy.example.invalid/mcp",
+            "env": {"TOKEN": "$LEGACY_TOKEN"},
+            "session_init_timeout": 0,
+        }
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"mcpServers": {}, "skills": {"untouched-skill": {"enabled": False}}}, f)
+            json.dump({"mcpServers": {"legacy": legacy_server}, "skills": {"untouched-skill": {"enabled": False}}}, f)
             tmp_path = Path(f.name)
 
         try:
@@ -1892,6 +1898,7 @@ class TestSkillsManagement:
             assert client._agent is None  # M2: agent invalidated
             persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
             assert persisted["skills"]["untouched-skill"] == {"enabled": False}
+            assert persisted["mcpServers"]["legacy"] == legacy_server
         finally:
             tmp_path.unlink()
 
