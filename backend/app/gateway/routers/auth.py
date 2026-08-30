@@ -449,12 +449,18 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
+    from app.gateway.auth_disabled import is_auth_disabled
+
     return UserResponse(
         id=str(user.id),
         email=user.email,
         system_role=user.system_role,
         needs_setup=user.needs_setup,
         oauth_provider=user.oauth_provider,
+        # Runtime truth for clients: the browser cannot read the Gateway's
+        # DEER_FLOW_AUTH_DISABLED (a non-NEXT_PUBLIC env compiles to false in
+        # the client bundle), so session-only affordances gate on this field.
+        auth_disabled=is_auth_disabled(),
     )
 
 

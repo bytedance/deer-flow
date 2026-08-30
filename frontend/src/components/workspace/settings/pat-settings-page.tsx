@@ -78,8 +78,14 @@ function formatExpiry(pat: PatSummary): string {
 }
 
 export function PatSettingsPage() {
+  const { user } = useAuth();
   if (isStaticWebsiteOnly()) {
     return <StaticPatSettingsPage />;
+  }
+  // Runtime signal from /me: the backend answers session-auth-only routes
+  // with 403 under DEER_FLOW_AUTH_DISABLED, so hide the dead controls.
+  if (user?.auth_disabled) {
+    return <AuthDisabledPatSettingsPage />;
   }
   return <InteractivePatSettingsPage />;
 }
@@ -93,6 +99,20 @@ function StaticPatSettingsPage() {
     >
       <div className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
         {t.common.notAvailableInDemoMode}
+      </div>
+    </SettingsSection>
+  );
+}
+
+function AuthDisabledPatSettingsPage() {
+  const { t } = useI18n();
+  return (
+    <SettingsSection
+      title={t.settings.tokens.title}
+      description={t.settings.tokens.description}
+    >
+      <div className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
+        {t.settings.tokens.authDisabledNotice}
       </div>
     </SettingsSection>
   );

@@ -963,6 +963,7 @@ export const zhCN: Translations = {
         "创建一个令牌，让脚本或 CI 以你的身份调用 DeerFlow API。",
       revokedBadge: "已撤销",
       expiredBadge: "已过期",
+      authDisabledNotice: "个人访问令牌需要会话登录，而本部署已禁用登录。",
       neverExpires: "永不过期",
       expires: "过期于",
       created: "创建于",

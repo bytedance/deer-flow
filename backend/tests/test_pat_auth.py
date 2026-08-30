@@ -698,3 +698,23 @@ def test_auth_disabled_mode_ignores_bearer_header(monkeypatch, tmp_path):
         response = disabled_client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_garbage"})
     assert response.status_code == 200
     assert response.json()["auth_source"] == "auth_disabled"
+
+
+def test_me_reports_runtime_auth_disabled_state(client, monkeypatch):
+    """The /me payload carries the Gateway's runtime DEER_FLOW_AUTH_DISABLED
+    state so the browser can hide session-only affordances (the env itself is
+    invisible to the client bundle)."""
+    # get_me imports the helper function-locally at call time, so patch the
+    # source module attribute the import reads from.
+    import app.gateway.auth_disabled as auth_disabled_module
+
+    monkeypatch.setattr(auth_disabled_module, "is_auth_disabled", lambda: True)
+    _session_cookie(client)
+    while_disabled = client.get("/api/v1/auth/me")
+    assert while_disabled.status_code == 200
+    assert while_disabled.json()["auth_disabled"] is True
+
+    monkeypatch.setattr(auth_disabled_module, "is_auth_disabled", lambda: False)
+    while_enabled = client.get("/api/v1/auth/me")
+    assert while_enabled.status_code == 200
+    assert while_enabled.json()["auth_disabled"] is False

@@ -40,3 +40,4 @@ class UserResponse(BaseModel):
     system_role: Literal["admin", "user"]
     needs_setup: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
+    auth_disabled: bool = Field(False, description="Runtime DEER_FLOW_AUTH_DISABLED state, so clients can hide session-only affordances")

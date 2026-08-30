@@ -1001,6 +1001,8 @@ export const enUS: Translations = {
         "Create a token to let scripts or CI call the DeerFlow API on your behalf.",
       revokedBadge: "Revoked",
       expiredBadge: "Expired",
+      authDisabledNotice:
+        "Personal access tokens need session sign-in, which this deployment has disabled.",
       neverExpires: "Never expires",
       expires: "Expires",
       created: "Created",

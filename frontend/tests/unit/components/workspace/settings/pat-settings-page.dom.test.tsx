@@ -75,8 +75,14 @@ const PatStoreUnavailableError = rs.hoisted(() => {
   };
 });
 
+const authMockState = rs.hoisted(() => ({
+  authDisabled: false,
+}));
+
 rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: { id: "test-user" } }),
+  useAuth: () => ({
+    user: { id: "test-user", auth_disabled: authMockState.authDisabled },
+  }),
 }));
 
 rs.mock("@/core/i18n/hooks", () => ({
@@ -132,6 +138,8 @@ rs.mock("@/core/i18n/hooks", () => ({
           emptyDescription: "Create one for scripts or CI.",
           revokedBadge: "Revoked",
           expiredBadge: "Expired",
+          authDisabledNotice:
+            "Personal access tokens need session sign-in, which this deployment has disabled.",
           neverExpires: "Never expires",
           expires: "Expires",
           created: "Created",
@@ -206,6 +214,7 @@ afterEach(() => {
   patsMockState.revokePending = false;
   patsMockState.revokeMutate = async () => undefined;
   staticModeMockState.enabled = false;
+  authMockState.authDisabled = false;
   toastMockState.error.mockReset();
   toastMockState.success.mockReset();
   cleanup();
@@ -218,6 +227,22 @@ describe("PatSettingsPage", () => {
     renderWithQueryClient(<PatSettingsPage />);
 
     expect(screen.getByText("Not available in demo mode")).toBeDefined();
+    expect(screen.queryByText("Create token")).toBeNull();
+    expect(patsMockState.patsHookCalls).toBe(0);
+    expect(patsMockState.createHookCalls).toBe(0);
+    expect(patsMockState.revokeHookCalls).toBe(0);
+  });
+
+  it("renders a read-only notice without PAT requests when auth is disabled", () => {
+    authMockState.authDisabled = true;
+
+    renderWithQueryClient(<PatSettingsPage />);
+
+    expect(
+      screen.getByText(
+        "Personal access tokens need session sign-in, which this deployment has disabled.",
+      ),
+    ).toBeDefined();
     expect(screen.queryByText("Create token")).toBeNull();
     expect(patsMockState.patsHookCalls).toBe(0);
     expect(patsMockState.createHookCalls).toBe(0);
