@@ -17,6 +17,7 @@ concurrent runs on different repos from clobbering each other's token.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -59,7 +60,8 @@ def test_local_sandbox_env_overlay_reaches_subprocess(monkeypatch: pytest.Monkey
         captured["env"] = env
         return ("", "", 0, False)
 
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(fake_run_posix))
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": "/usr/bin", "EXISTING": "kept"})
 
@@ -82,7 +84,8 @@ def test_local_sandbox_no_env_passes_sanitized_environ(monkeypatch: pytest.Monke
         captured["env"] = env
         return ("", "", 0, False)
 
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(fake_run_posix))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(fake_run_posix))
     monkeypatch.setattr(LocalSandbox, "_get_shell", staticmethod(lambda: "/bin/bash"))
     monkeypatch.setattr(local_sandbox.os, "environ", {"PATH": "/usr/bin", "OPENAI_API_KEY": "sk-leak"})
 
@@ -240,21 +243,20 @@ def test_local_sandbox_rejects_invalid_env_key(monkeypatch: pytest.MonkeyPatch) 
     """
     import deerflow.sandbox.local.local_sandbox as local_sandbox
 
-    fake_run_called = False
+    fake_popen_called = False
 
-    def fake_run(*args, **kwargs):
-        nonlocal fake_run_called
-        fake_run_called = True
-        return SimpleNamespace(stdout="", stderr="", returncode=0)
+    def fake_popen(*args, **kwargs):
+        nonlocal fake_popen_called
+        fake_popen_called = True
 
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(local_sandbox.subprocess, "Popen", fake_popen)
 
     with pytest.raises(ValueError, match="extra_env key"):
         LocalSandbox("local:t").execute_command(
             "echo hi",
             env={"X;rm -rf /mnt/user-data;Y": "v"},
         )
-    assert fake_run_called is False, "subprocess.run must not run when key is invalid"
+    assert fake_popen_called is False, "subprocess.Popen must not run when key is invalid"
 
 
 def test_aio_sandbox_rejects_invalid_env_key() -> None:
