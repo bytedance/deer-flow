@@ -23,6 +23,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+from app.gateway.authz import require_cancel_permission_if
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -35,7 +36,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
-from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY
+from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
@@ -75,6 +76,7 @@ from deerflow.runtime.secret_context import (
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -115,7 +117,10 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
             TOOL_RECEIPT_KEY,
+            TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
+            SUBAGENT_TOOL_RECEIPTS_KEY,
+            SUBAGENT_RECEIPT_VERDICT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -267,6 +272,21 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     return item
 
 
+def _strip_external_delegation_verdict(entry: Any) -> Any:
+    """Remove the runtime-stamped receipt verdict from a caller-supplied
+    delegation-ledger entry.
+
+    ``receipt_verdict`` is server-owned execution evidence stamped at task
+    write-back. Ledger entries are plain dicts, not messages, so the
+    message-metadata stripper never sees them; without this a caller can
+    persist a forged verdict that ``render_delegation_ledger`` would present
+    as fact.
+    """
+    if isinstance(entry, dict) and "receipt_verdict" in entry:
+        return {key: value for key, value in entry.items() if key != "receipt_verdict"}
+    return entry
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Remove server-owned message metadata from caller-supplied state values.
 
@@ -282,7 +302,9 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     """
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
-        if isinstance(value, list):
+        if channel == "delegations" and isinstance(value, list):
+            stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
             stripped[channel] = _strip_external_metadata_from_message_like(value)
@@ -304,12 +326,16 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     validation errors are the right shape for clients to retry against.
 
     ``original_user_content``, dynamic-context reminder markers, the
-    transient view-image context marker, and tool receipts are server-owned.
-    External callers cannot supply them; trusted internal channel calls may
-    preserve metadata they added before invoking this boundary.
+    transient view-image context marker, tool receipts, and delegated receipt
+    metadata/verdicts are server-owned. External callers cannot supply them;
+    trusted internal channel calls may preserve metadata they added before
+    invoking this boundary. The same applies to the ``delegations`` channel:
+    a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
+    stripped before the graph runs.
     """
     if raw_input is None:
         return {}
+    result = raw_input
     messages = raw_input.get("messages")
     if messages and isinstance(messages, list):
         converted: list[Any] = []
@@ -328,8 +354,14 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 converted.append(msg)
         if not trusted_internal:
             converted = [_strip_external_message_metadata(message) for message in converted]
-        return {**raw_input, "messages": converted}
-    return raw_input
+        result = {**raw_input, "messages": converted}
+    if not trusted_internal:
+        delegations = result.get("delegations")
+        if isinstance(delegations, list):
+            cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
+            if cleaned != delegations:
+                result = {**result, "delegations": cleaned}
+    return result
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -1184,6 +1216,15 @@ async def start_run(
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
     """
+    # Cancel-capability gate. interrupt/rollback strategies terminate an already
+    # active run — runs:cancel capability, not runs:create — so a create-only
+    # PAT must not reach them. Enforced here, the single choke point every
+    # run-creation path flows through (HTTP routes and internal launchers
+    # alike), so no entry point can bypass it; regenerate launches pass
+    # multitask_strategy="reject" and are unaffected. Requests without a
+    # stamped auth context (internal/test compositions) skip the gate.
+    require_cancel_permission_if(request, body.multitask_strategy != "reject")
+
     try:
         validate_thread_id(thread_id)
     except ValueError as exc:
@@ -1579,12 +1620,22 @@ async def sse_consumer(
     record: RunRecord,
     request: Request,
     run_mgr: RunManager,
+    *,
+    apply_on_disconnect: bool = True,
 ):
     """Async generator that yields SSE frames from the bridge.
 
-    The ``finally`` block implements ``on_disconnect`` semantics:
+    The ``finally`` block implements ``on_disconnect`` semantics, but only for
+    the stream returned by the *creating* endpoint (``apply_on_disconnect=True``):
+
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
+
+    Join/observer streams pass ``apply_on_disconnect=False``: the creator's
+    cancel-on-disconnect policy expresses the creator's intent for their own
+    connection, and a read-only observer closing a join must not cancel the
+    run (a runs:read-only credential would otherwise cancel without
+    runs:cancel just by disconnecting).
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
@@ -1629,8 +1680,9 @@ async def sse_consumer(
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
-        # cancellation request. Only apply on_disconnect to locally-owned runs.
-        if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        # cancellation request. Only apply on_disconnect to locally-owned runs,
+        # and only on the creator's own stream — never on an observer join.
+        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -1642,6 +1694,12 @@ async def wait_for_run_completion(
     run_mgr: RunManager,
 ) -> bool:
     """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
+
+    Creator-side only, unlike ``sse_consumer``'s observer joins: every caller
+    must be the endpoint that created the run or a path reached only after an
+    explicit, permission-gated cancel. This helper intentionally keeps
+    applying the record's ``on_disconnect`` policy on disconnect — do not
+    wire it to observer surfaces.
 
     The non-streaming ``/wait`` endpoints used to ``await record.task``
     directly with no disconnect handling.  When the client (or an

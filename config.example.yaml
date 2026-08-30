@@ -15,7 +15,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 36
+config_version: 38
 
 # ============================================================================
 # Logging
@@ -184,6 +184,40 @@ models:
   #     extra_body:
   #       thinking:
   #         type: disabled
+
+  # Example: Z.AI GLM-5.3-Flash (required-thinking workaround)
+  #
+  # GLM-5.3-Flash cannot disable thinking and only accepts low/high/max effort.
+  # DeerFlow's current generic UI may request disabled thinking or emit
+  # minimal/medium, so this profile keeps thinking enabled unconditionally and
+  # suppresses generic effort forwarding. Keep the thinking block in the base
+  # extra_body: moving it to when_thinking_enabled would let background calls
+  # synthesize the invalid thinking.type=disabled + reasoning_effort=minimal pair.
+  # clear_thinking=true is intentional for this compatibility workaround: it
+  # avoids requiring exact historical reasoning replay after summarization.
+  #
+  # - name: glm-5.3-flash
+  #   display_name: GLM-5.3-Flash
+  #   use: deerflow.models.patched_deepseek:PatchedChatDeepSeek
+  #   model: glm-5.3-flash
+  #   api_base: https://api.z.ai/api/paas/v4
+  #   api_key: $ZAI_API_KEY
+  #   timeout: 600.0
+  #   max_retries: 2
+  #   temperature: 1.0
+  #   top_p: 0.95
+  #   max_tokens: 131072
+  #   context_window: 1000000
+  #   supports_thinking: true
+  #   supports_reasoning_effort: false
+  #   supports_vision: true
+  #   stream_usage: false
+  #   extra_body:
+  #     thinking:
+  #       type: enabled
+  #       clear_thinking: true
+  #     tool_stream: true
+
   # Example: OpenAI model
   # - name: gpt-4
   #   display_name: GPT-4
@@ -729,6 +763,18 @@ tools:
   #   use: deerflow.community.serper.tools:web_search_tool
   #   max_results: 5   # capped at 10 by the Serper provider
   #   # api_key: $SERPER_API_KEY  # Optional explicit env-var reference
+
+  # Web search tool (uses Serply - Google Search API, requires SERPLY_API_KEY)
+  # Serply returns live Google results and covers Google News and Google Scholar
+  # with the same key. Sign up at https://serply.io (docs: https://serply.io/docs)
+  # - name: web_search
+  #   group: web
+  #   use: deerflow.community.serply.tools:web_search_tool
+  #   max_results: 5                 # Serply accepts 1-100 per request
+  #   # vertical: search             # search (default), news, or scholar
+  #   # gl: us                       # Optional country code for the results
+  #   # hl: en                       # Optional interface language
+  #   # api_key: $SERPLY_API_KEY     # Optional if the env var is set
 
   # Web search tool (uses Brave Search API, requires BRAVE_SEARCH_API_KEY)
   # Brave Search returns results from an independent index. Sign up at
@@ -1436,8 +1482,10 @@ sandbox:
 #   # api_key: $TENKI_API_KEY        # falls back to TENKI_API_KEY / TENKI_AUTH_TOKEN env var
 #   # base_url: https://tenki.cloud  # optional; SDK default when omitted
 #   # image: my-base-image           # optional; Tenki account default base image when omitted
-#   # project_id: proj_...           # optional; auto-selected if the account has exactly one
 #   # workspace_id: ws_...           # optional; auto-selected if the account has exactly one
+#   # Migration: sandbox.project_id is gone — Tenki 1.x removed projects, so scope
+#   # is the workspace alone. Set workspace_id if the account has more than one.
+#   # A leftover project_id is ignored and logs a warning at startup.
 #   # cpu_cores: 2                   # optional per-sandbox vCPUs
 #   # memory_mb: 2048                # optional per-sandbox memory
 #   # replicas: 3                    # active + warm microVM cap per gateway process
@@ -2284,14 +2332,20 @@ run_ownership:
 #
 # stream_bridge:
 #   type: memory                 # single-process only
-#   queue_maxsize: 256           # data events retained per run. A reconnect
+#   queue_maxsize: 256           # data events retained per run (min: 1). A reconnect
 #                                # older than this window receives SSE `gap`.
+#   heartbeat_interval_seconds: 15  # idle interval (max: 86400) between
+#                                   # heartbeats sent to SSE, wait, and internal
+#                                   # stream consumers.
 #
 # stream_bridge:
 #   type: redis                  # recommended for Docker / multi-worker gateway
 #   redis_url: redis://redis:6379/0
-#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN).
+#   queue_maxsize: 256           # data events retained per run (Redis MAXLEN, min: 1).
 #                                # Older valid cursors receive SSE `gap`.
+#   heartbeat_interval_seconds: 15  # idle interval (max: 86400) between
+#                                   # heartbeats sent to SSE, wait, and internal
+#                                   # stream consumers.
 #   stream_ttl_seconds: 86400    # rolling TTL for retained stream buffers.
 #                                # Refreshed on each publish/publish_end; set 0
 #                                # to disable. This is not a run timeout.
@@ -2300,8 +2354,8 @@ run_ownership:
 #                                # before deleting the stream key.
 #   max_connections: 100         # optional pool ceiling. Each live SSE client
 #                                # holds one connection blocked in XREAD ... BLOCK
-#                                # for up to heartbeat_interval (15s), so hundreds
-#                                # of concurrent clients open hundreds of
+#                                # for up to the configured heartbeat interval, so
+#                                # hundreds of concurrent clients open hundreds of
 #                                # connections. Unset = redis-py default (unbounded).
 #
 # NOTE: the redis bridge is fail-hard in v1. Redis.from_url is lazy, so a down

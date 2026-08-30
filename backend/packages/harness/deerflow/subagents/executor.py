@@ -102,6 +102,11 @@ class SubagentResult:
         completed_at: When execution completed.
         ai_messages: List of complete AI messages (as dicts) generated during execution.
         admission_failure: Whether capacity rejected/timed out before execution started.
+        tool_receipts: The child's tool receipts harvested from its terminal
+            message stream (RFC #4651 PR2). ``None`` when the run ended before
+            streaming produced a state (e.g. pre-stream cancellation), when
+            receipts are disabled, or when harvesting failed; an empty list
+            means the stream carried no stamped receipts (zero tool calls).
     """
 
     task_id: str
@@ -117,6 +122,7 @@ class SubagentResult:
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     usage_reported: bool = False
     admission_failure: bool = False
+    tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -131,6 +137,21 @@ class SubagentResult:
             if not self.status.is_terminal:
                 self.token_usage_records = list(records)
 
+    def update_tool_receipts(self, receipts: list[dict[str, Any]] | None) -> None:
+        """Publish receipts from the latest yielded state while still running."""
+        if receipts is None:
+            return
+        with self._state_lock:
+            if not self.status.is_terminal:
+                self.tool_receipts = [dict(receipt) for receipt in receipts]
+
+    def snapshot_tool_receipts(self) -> list[dict[str, Any]] | None:
+        """Copy the latest published receipts for a racing terminal writer."""
+        with self._state_lock:
+            if self.tool_receipts is None:
+                return None
+            return [dict(receipt) for receipt in self.tool_receipts]
+
     def try_set_terminal(
         self,
         status: SubagentStatus,
@@ -142,6 +163,7 @@ class SubagentResult:
         ai_messages: list[dict[str, Any]] | None = None,
         token_usage_records: list[dict[str, int | str | None]] | None = None,
         admission_failure: bool = False,
+        tool_receipts: list[dict[str, Any]] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
 
@@ -166,6 +188,8 @@ class SubagentResult:
                 self.ai_messages = ai_messages
             if token_usage_records is not None:
                 self.token_usage_records = token_usage_records
+            if tool_receipts is not None:
+                self.tool_receipts = [dict(receipt) for receipt in tool_receipts]
             self.admission_failure = admission_failure
             self.completed_at = completed_at or datetime.now()
             self.status = status
@@ -272,6 +296,51 @@ _background_tasks_lock = threading.Lock()
 
 _background_futures: dict[str, Future[SubagentResult]] = {}
 
+
+def _harvest_tool_receipts(
+    final_state: Any,
+    *,
+    prefer_citing_turn: bool = False,
+) -> list[dict[str, Any]] | None:
+    """Harvest the child's tool receipts from its terminal message stream.
+
+    Lazy import: the executor package is imported in cycles with
+    ``deerflow.agents``; resolving ``tool_receipt`` at call time keeps module
+    init order-independent. Failure-isolated: a harvest error can never
+    change the run's outcome — the parent simply gets no receipts.
+    """
+    if not final_state:
+        return None
+    messages = final_state.get("messages") if isinstance(final_state, dict) else None
+    if not messages:
+        return None
+    try:
+        from deerflow.agents.middlewares.tool_receipt import extract_citing_turn_receipts, extract_tool_receipts
+
+        message_list = list(messages)
+        # Completed result text comes from the latest assistant turn even when
+        # a max-turn chunk ends in a ToolMessage. Its bounded ledger remains
+        # authoritative for citation verification. Tool-ended running,
+        # cancelled, or failed evidence instead prefers the latest tool scan so
+        # newly executed calls are not lost merely because no later assistant
+        # turn was produced.
+        citing_messages = message_list if prefer_citing_turn else [message_list[-1]]
+        citing_turn_receipts = extract_citing_turn_receipts(citing_messages) if prefer_citing_turn or isinstance(message_list[-1], AIMessage) else None
+        if prefer_citing_turn:
+            # Missing/malformed completed-turn snapshots fail closed. Falling
+            # back to the current ToolMessage scan can renumber compacted
+            # receipts or reintroduce entries omitted from the model's budget.
+            receipts = citing_turn_receipts
+        else:
+            receipts = citing_turn_receipts if citing_turn_receipts is not None else extract_tool_receipts(message_list)
+        if receipts is None:
+            return None
+        return [dict(receipt) for receipt in receipts]
+    except Exception:
+        logger.warning("Failed to harvest subagent tool receipts", exc_info=True)
+        return None
+
+
 # Persistent event loop for isolated subagent executions triggered from an
 # already-running parent loop. Reusing one long-lived loop avoids creating a
 # fresh loop per execution and then closing async resources bound to it.
@@ -366,13 +435,34 @@ def _submit_to_isolated_loop_in_context(
     context: Context,
     coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
 ) -> Future[SubagentResult]:
-    """Submit a coroutine to the isolated loop while preserving ContextVar state."""
-    return context.run(
-        lambda: asyncio.run_coroutine_threadsafe(
-            coro_factory(),
-            _get_isolated_subagent_loop(),
-        )
-    )
+    """Submit a coroutine to the isolated loop while preserving ContextVar state.
+
+    The loop must be resolved before the coroutine is created: as direct
+    ``run_coroutine_threadsafe(coro_factory(), ...)`` arguments, Python
+    evaluates the coroutine first, so a loop-startup failure would strand a
+    created-but-never-scheduled coroutine (``RuntimeWarning: coroutine ...
+    was never awaited``) holding its captures until collection.
+
+    Scheduling itself can still reject an already-created coroutine — e.g.
+    the loop closes between the lookup above and the ``call_soon_threadsafe``
+    inside ``run_coroutine_threadsafe`` — so a rejected coroutine is closed
+    before the error propagates.
+    """
+
+    def _submit() -> Future[SubagentResult]:
+        loop = _get_isolated_subagent_loop()
+        coroutine = coro_factory()
+        try:
+            return asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except BaseException:
+            # run_coroutine_threadsafe has no cleanup path for this window.
+            # The coroutine has not started (CORO_CREATED), so close() cannot
+            # run any of its body — it only releases the object and its
+            # captures instead of leaving them until collection.
+            coroutine.close()
+            raise
+
+    return context.run(_submit)
 
 
 def _copy_isolated_subagent_context() -> Context:
@@ -502,6 +592,7 @@ class SubagentExecutor:
         """
         self.config = config
         self.app_config = app_config
+        self._resolved_app_config = app_config
         self.parent_model = parent_model
         # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
         # to _create_agent (which already loads app_config) so unit tests can construct
@@ -567,6 +658,12 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
+    def _get_resolved_app_config(self) -> AppConfig:
+        """Return the one AppConfig snapshot used throughout this execution."""
+        if self._resolved_app_config is None:
+            self._resolved_app_config = get_app_config()
+        return self._resolved_app_config
+
     def _create_agent(
         self,
         tools: list[BaseTool] | None = None,
@@ -580,7 +677,7 @@ class SubagentExecutor:
         deferred MCP tool names + catalog hash so the subagent gets the same
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
         """
-        app_config = self.app_config or get_app_config()
+        app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
         model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
@@ -792,7 +889,7 @@ class SubagentExecutor:
         self._assembled_skills = list(skills)
         self._available_skill_names = {skill.name for skill in skills}
 
-        resolved_app_config = self.app_config or get_app_config()
+        resolved_app_config = self._get_resolved_app_config()
 
         from deerflow.skills.describe import build_skill_search_setup, get_skill_index_prompt_section
 
@@ -989,6 +1086,14 @@ class SubagentExecutor:
         processed_message_count = 0
 
         collector: SubagentTokenCollector | None = None
+        final_state = None
+        verification_cfg = getattr(self._get_resolved_app_config(), "verification", None)
+
+        def terminal_receipts(*, prefer_citing_turn: bool = False) -> list[dict[str, Any]] | None:
+            if not getattr(verification_cfg, "receipts_enabled", True):
+                return None
+            return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
+
         try:
             if task_info is not None and task_store is not None:
                 await notify_task_start(
@@ -998,7 +1103,11 @@ class SubagentExecutor:
                     timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
                 )
             if result.cancel_event.is_set():
-                result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    tool_receipts=terminal_receipts(),
+                )
                 return result
 
             state, final_tools, deferred_setup = await self._build_initial_state(task)
@@ -1085,7 +1194,6 @@ class SubagentExecutor:
 
             # Use stream instead of invoke to get real-time updates
             # This allows us to collect AI messages as they are generated
-            final_state = None
 
             # Pre-check: bail out immediately if already cancelled before streaming starts
             if result.cancel_event.is_set():
@@ -1094,10 +1202,18 @@ class SubagentExecutor:
                     SubagentStatus.CANCELLED,
                     error="Cancelled by user",
                     token_usage_records=collector.snapshot_records(),
+                    tool_receipts=terminal_receipts(),
                 )
                 return result
 
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+                # A yielded values chunk is already executed state.  Retain it
+                # before observing cooperative cancellation so terminal receipt
+                # harvesting includes a tool result that completed while the
+                # cancellation request was in flight.
+                final_state = chunk
+                result.update_tool_receipts(terminal_receipts())
+
                 # Cooperative cancellation: check if parent requested stop.
                 # Note: cancellation is only detected at astream iteration boundaries,
                 # so long-running tool calls within a single iteration will not be
@@ -1108,10 +1224,10 @@ class SubagentExecutor:
                         SubagentStatus.CANCELLED,
                         error="Cancelled by user",
                         token_usage_records=collector.snapshot_records(),
+                        tool_receipts=terminal_receipts(),
                     )
                     return result
 
-                final_state = chunk
                 result.update_token_usage_records(collector.snapshot_records())
 
                 # Capture every step message (assistant turns AND tool outputs)
@@ -1133,6 +1249,7 @@ class SubagentExecutor:
                     SubagentStatus.FAILED,
                     error=llm_error,
                     token_usage_records=token_usage_records,
+                    tool_receipts=terminal_receipts(),
                 )
             else:
                 final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
@@ -1150,6 +1267,7 @@ class SubagentExecutor:
                     result=final_result,
                     stop_reason=stop_reason,
                     token_usage_records=token_usage_records,
+                    tool_receipts=terminal_receipts(prefer_citing_turn=True),
                 )
 
         except GraphRecursionError:
@@ -1187,6 +1305,7 @@ class SubagentExecutor:
                     error=llm_error,
                     stop_reason=stop_reason,
                     token_usage_records=records,
+                    tool_receipts=terminal_receipts(),
                 )
             else:
                 messages = (final_state or {}).get("messages", [])
@@ -1203,6 +1322,7 @@ class SubagentExecutor:
                         result=usable_partial,
                         stop_reason=stop_reason,
                         token_usage_records=records,
+                        tool_receipts=terminal_receipts(prefer_citing_turn=True),
                     )
                 else:
                     result.try_set_terminal(
@@ -1210,6 +1330,7 @@ class SubagentExecutor:
                         error=f"Reached max_turns={max_turns}",
                         stop_reason=stop_reason,
                         token_usage_records=records,
+                        tool_receipts=terminal_receipts(),
                     )
 
         except Exception as e:
@@ -1218,6 +1339,7 @@ class SubagentExecutor:
                 SubagentStatus.FAILED,
                 error=str(e),
                 token_usage_records=collector.snapshot_records() if collector is not None else None,
+                tool_receipts=terminal_receipts(),
             )
 
         finally:
@@ -1340,10 +1462,15 @@ class SubagentExecutor:
             self.config.timeout_seconds,
         )
 
+        # Copy the parent context before registering: context copying can
+        # itself fail (callback-manager copy or loop-bound handler filtering),
+        # and a failure after registration would strand a PENDING entry —
+        # the caller never receives an execution_id to poll, and
+        # cleanup_background_task() refuses non-terminal entries.
+        parent_context = _copy_isolated_subagent_context()
+
         with _background_tasks_lock:
             _background_tasks[execution_id] = result
-
-        parent_context = _copy_isolated_subagent_context()
 
         async def run_with_timeout() -> SubagentResult:
             try:
@@ -1356,18 +1483,34 @@ class SubagentExecutor:
                 result.try_set_terminal(
                     SubagentStatus.TIMED_OUT,
                     error=f"Execution timed out after {self.config.timeout_seconds} seconds",
+                    tool_receipts=result.snapshot_tool_receipts(),
                 )
                 return result
             except asyncio.CancelledError:
                 result.cancel_event.set()
-                result.try_set_terminal(SubagentStatus.CANCELLED, error="Cancelled by user")
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    tool_receipts=result.snapshot_tool_receipts(),
+                )
                 return result
             except Exception as exc:
                 logger.exception("[trace=%s] Subagent %s async execution failed", self.trace_id, self.config.name)
                 result.try_set_terminal(SubagentStatus.FAILED, error=str(exc))
                 return result
 
-        execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
+        try:
+            execution_future = _submit_to_isolated_loop_in_context(parent_context, run_with_timeout)
+        except Exception:
+            # Submitting can fail before any coroutine starts (e.g. the
+            # persistent loop failed to spin up). The caller then sees the
+            # exception and never polls this execution_id, and
+            # cleanup_background_task() refuses non-terminal entries — so the
+            # just-registered entry must be dropped here, not left as a
+            # PENDING zombie nothing will ever remove.
+            with _background_tasks_lock:
+                _background_tasks.pop(execution_id, None)
+            raise
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future
 
@@ -1395,12 +1538,14 @@ def request_cancel_background_task(execution_id: str) -> None:
     """
     with _background_tasks_lock:
         result = _background_tasks.get(execution_id)
-        if result is not None:
-            result.cancel_event.set()
-            future = _background_futures.get(execution_id)
-            if future is not None:
-                future.cancel()
-            logger.info("Requested cancellation for background execution %s", execution_id)
+        future = _background_futures.get(execution_id) if result is not None else None
+    if result is not None:
+        result.cancel_event.set()
+        # Future.cancel() may invoke forget_future synchronously; keep it out of
+        # _background_tasks_lock because that callback acquires the same lock.
+        if future is not None:
+            future.cancel()
+        logger.info("Requested cancellation for background execution %s", execution_id)
 
 
 def get_background_task_result(execution_id: str) -> SubagentResult | None:

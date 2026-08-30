@@ -16,7 +16,7 @@ from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
-from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
 
 logger = logging.getLogger(__name__)
 
@@ -133,23 +133,19 @@ class McpTaskToolCaller:
                     raise
             else:
                 session = await pool.get_session(server_name, scope_key, connection)
-            try:
-                return await self._invoke(
-                    session=session,
-                    connection=connection,
-                    server_name=server_name,
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    timeout_seconds=server_config.tool_call_timeout,
-                    session_init_timeout_seconds=None,
-                    persistent_session=True,
-                    interceptors=interceptors,
-                )
-            except Exception:
-                # A dead pooled subprocess must not poison every later status
-                # poll. The next retry recreates this exact scoped session.
-                await pool.close_session(server_name, scope_key)
-                raise
+            return await self._invoke(
+                session=session,
+                pool=pool,
+                scope_key=scope_key,
+                connection=connection,
+                server_name=server_name,
+                tool_name=tool_name,
+                arguments=arguments,
+                timeout_seconds=server_config.tool_call_timeout,
+                session_init_timeout_seconds=None,
+                persistent_session=True,
+                interceptors=interceptors,
+            )
 
         authorization = await self._oauth_token_manager.get_authorization_header(server_name)
         if authorization:
@@ -159,6 +155,8 @@ class McpTaskToolCaller:
             )
         return await self._invoke(
             session=None,
+            pool=None,
+            scope_key=scope_key,
             connection=connection,
             server_name=server_name,
             tool_name=tool_name,
@@ -173,6 +171,8 @@ class McpTaskToolCaller:
         self,
         *,
         session: Any | None,
+        pool: MCPSessionPool | None,
+        scope_key: str,
         connection: dict[str, Any],
         server_name: str,
         tool_name: str,
@@ -191,7 +191,7 @@ class McpTaskToolCaller:
                 call_kwargs["read_timeout_seconds"] = timedelta(seconds=timeout_seconds)
 
             if persistent_session:
-                assert session is not None
+                assert session is not None and pool is not None
                 if request.headers:
                     if isinstance(request.headers, Mapping):
                         call_kwargs["meta"] = {"headers": dict(request.headers)}
@@ -200,7 +200,15 @@ class McpTaskToolCaller:
                             "Ignoring MCP interceptor headers with unsupported type: %s",
                             type(request.headers).__name__,
                         )
-                return await session.call_tool(request.name, request.args, **call_kwargs)
+                return await call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=server_name,
+                    scope_key=scope_key,
+                    tool_name=request.name,
+                    arguments=request.args,
+                    call_kwargs=call_kwargs,
+                )
 
             effective_connection = dict(connection)
             if request.headers:
