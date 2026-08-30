@@ -7,6 +7,7 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.search_time_range import DDGS_TIMELIMIT_BY_TIME_RANGE, SearchTimeRange
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,7 @@ def _search_text(
     region: str | None = DEFAULT_REGION,
     safesearch: str | None = DEFAULT_SAFESEARCH,
     backend: str | list[str] | tuple[str, ...] | None = DEFAULT_BACKEND,
+    time_range: SearchTimeRange | None = None,
 ) -> list[dict]:
     """
     Execute text search using DuckDuckGo.
@@ -100,6 +102,7 @@ def _search_text(
         region: Search region
         safesearch: Safe search level
         backend: DDGS backend(s), e.g. "auto", "duckduckgo", or "duckduckgo,brave"
+        time_range: Optional relative publication/update window
 
     Returns:
         List of search results
@@ -116,13 +119,15 @@ def _search_text(
         backend = _normalize_backend(backend)
         safesearch = _normalize_setting(safesearch, DEFAULT_SAFESEARCH)
         effective_region = _resolve_ddgs_region(query, region, backend)
-        results = ddgs.text(
-            query,
-            region=effective_region,
-            safesearch=safesearch,
-            max_results=max_results,
-            backend=backend,
-        )
+        search_kwargs: dict[str, object] = {
+            "region": effective_region,
+            "safesearch": safesearch,
+            "max_results": max_results,
+            "backend": backend,
+        }
+        if time_range is not None:
+            search_kwargs["timelimit"] = DDGS_TIMELIMIT_BY_TIME_RANGE[time_range]
+        results = ddgs.text(query, **search_kwargs)
         return list(results) if results else []
 
     except Exception as e:
@@ -134,12 +139,14 @@ def _search_text(
 def web_search_tool(
     query: str,
     max_results: int = 5,
+    time_range: SearchTimeRange | None = None,
 ) -> str:
     """Search the web for information. Use this tool to find current information, news, articles, and facts from the internet.
 
     Args:
         query: Search keywords describing what you want to find. Be specific for better results.
         max_results: Maximum number of results to return. Default is 5.
+        time_range: Optional relative publication/update window. Use only when the request requires recent results.
     """
     config = get_app_config().get_tool_config("web_search")
     region = DEFAULT_REGION
@@ -159,6 +166,7 @@ def web_search_tool(
         region=region,
         safesearch=safesearch,
         backend=backend,
+        time_range=time_range,
     )
 
     if not results:
