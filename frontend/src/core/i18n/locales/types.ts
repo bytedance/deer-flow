@@ -223,7 +223,6 @@ export interface Translations {
   sidebar: {
     recentChats: string;
     newChat: string;
-    chats: string;
     demoChats: string;
     agents: string;
     scheduledTasks: string;
@@ -301,6 +300,8 @@ export interface Translations {
 
   // Scheduled tasks
   scheduledTasks: {
+    title: string;
+    description: string;
     scheduleType: { cron: string; once: string };
     preset: {
       label: string;
@@ -313,12 +314,33 @@ export interface Translations {
     fields: {
       minute: string;
       time: string;
+      year: string;
+      month: string;
+      day: string;
       weekday: string;
       dayOfMonth: string;
       cron: string;
       cronPlaceholder: string;
       runAt: string;
       timezone: string;
+    };
+    timezone: {
+      more: string;
+      less: string;
+      common: {
+        UTC: string;
+        "Asia/Shanghai": string;
+        "Asia/Hong_Kong": string;
+        "Asia/Taipei": string;
+        "Asia/Tokyo": string;
+        "Asia/Seoul": string;
+        "Asia/Singapore": string;
+        "Europe/London": string;
+        "Europe/Berlin": string;
+        "America/New_York": string;
+        "America/Chicago": string;
+        "America/Los_Angeles": string;
+      };
     };
     weekdays: {
       mon: string;
@@ -333,10 +355,12 @@ export interface Translations {
     cronHelp: string;
     create: {
       title: string;
+      back: string;
       taskTitle: string;
       prompt: string;
       submit: string;
-      fillRequired: string;
+      invalidOnce: string;
+      sourceMissing: string;
     };
     context: {
       fresh: string;
@@ -346,14 +370,8 @@ export interface Translations {
       reuseNoticeDescription: string;
     };
     filters: {
-      allStatuses: string;
       enabled: string;
       paused: string;
-      completed: string;
-      failed: string;
-      allTypes: string;
-      cron: string;
-      once: string;
     };
     detail: {
       contextMode: string;
@@ -362,12 +380,14 @@ export interface Translations {
       schedule: string;
       nextRun: string;
       lastRun: string;
-      lastRunId: string;
       lastError: string;
       runsCount: string;
       runsCountOne: string;
       noRuns: string;
-      noSelection: string;
+      noTasksTitle: string;
+      noTasksDescription: string;
+      noMatchesTitle: string;
+      noMatchesDescription: string;
       filteredByThread: string;
       loadFailed: string;
     };
@@ -394,6 +414,7 @@ export interface Translations {
       titlePlaceholder: string;
       promptPlaceholder: string;
       submit: string;
+      invalidOnce: string;
     };
     status: {
       enabled: string;
@@ -412,13 +433,6 @@ export interface Translations {
       failed: string;
       skipped: string;
       interrupted: string;
-    };
-    recipes: {
-      label: string;
-      trending: { title: string; desc: string };
-      news: { title: string; desc: string };
-      issues: { title: string; desc: string };
-      weekly: { title: string; desc: string };
     };
   };
 
@@ -489,10 +503,8 @@ export interface Translations {
     officialWebsite: string;
     githubTooltip: string;
     settingsAndMore: string;
-    visitGithub: string;
-    reportIssue: string;
+    github: string;
     contactUs: string;
-    about: string;
     logout: string;
     gatewayUnavailable: string;
     gatewayUnavailableRetrying: string;
@@ -720,6 +732,7 @@ export interface Translations {
       title: string;
       description: string;
       empty: string;
+      loadError: string;
       rawJson: string;
       exportButton: string;
       exportSuccess: string;
@@ -752,27 +765,12 @@ export interface Translations {
       factValidationContent: string;
       factValidationConfidence: string;
       noFacts: string;
-      summaryReadOnly: string;
       memoryFullyEmpty: string;
       factPreviewLabel: string;
       searchPlaceholder: string;
-      filterAll: string;
-      filterFacts: string;
-      filterSummaries: string;
       noMatches: string;
       markdown: {
-        overview: string;
-        userContext: string;
-        work: string;
-        personal: string;
-        topOfMind: string;
-        historyBackground: string;
-        recentMonths: string;
-        earlierContext: string;
-        longTermBackground: string;
-        updatedAt: string;
         facts: string;
-        empty: string;
         table: {
           category: string;
           confidence: string;
@@ -800,12 +798,15 @@ export interface Translations {
       darkDescription: string;
       languageTitle: string;
       languageDescription: string;
+      skinTitle: string;
+      skinDescription: string;
     };
     tools: {
       title: string;
       description: string;
       adminRequired: string;
       empty: string;
+      loadError: string;
     };
     subagents: {
       title: string;
@@ -972,6 +973,7 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      loadError: string;
     };
     notification: {
       title: string;
@@ -1007,6 +1009,13 @@ export interface Translations {
     acknowledge: {
       emptyTitle: string;
       emptyDescription: string;
+    };
+  };
+
+  skins: {
+    classic: {
+      name: string;
+      tagline: string;
     };
   };
 
