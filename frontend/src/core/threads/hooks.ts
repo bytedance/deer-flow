@@ -4,6 +4,7 @@ import { useStream } from "@langchain/langgraph-sdk/react";
 import {
   type QueryClient,
   type InfiniteData,
+  type QueryFilters,
   useInfiniteQuery,
   useMutation,
   useQuery,
@@ -2819,16 +2820,32 @@ function mergeThreadTitle(thread: AgentThread, title: string): AgentThread {
   };
 }
 
+function getThreadSnapshotCacheFilters(threadId: string) {
+  return {
+    search: {
+      queryKey: ["threads", "search"],
+      exact: false,
+    },
+    infiniteSearch: {
+      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
+      exact: false,
+    },
+    metadata: {
+      queryKey: ["thread", "metadata", threadId],
+      exact: false,
+    },
+  } as const;
+}
+
 function setThreadInCaches(
   queryClient: QueryClient,
   threadId: string,
   mapper: (thread: AgentThread) => AgentThread,
 ): void {
+  const filters = getThreadSnapshotCacheFilters(threadId);
+
   queryClient.setQueriesData(
-    {
-      queryKey: ["threads", "search"],
-      exact: false,
-    },
+    filters.search,
     (oldData: Array<AgentThread> | undefined) => {
       if (!oldData) {
         return oldData;
@@ -2839,20 +2856,14 @@ function setThreadInCaches(
     },
   );
   queryClient.setQueriesData(
-    {
-      queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,
-      exact: false,
-    },
+    filters.infiniteSearch,
     (oldData: InfiniteData<AgentThread[]> | undefined) =>
       mapInfiniteThreadsCache(oldData, (thread) =>
         thread.thread_id === threadId ? mapper(thread) : thread,
       ),
   );
   queryClient.setQueriesData(
-    {
-      queryKey: ["thread", "metadata", threadId],
-      exact: false,
-    },
+    filters.metadata,
     (oldData: AgentThread | null | undefined) =>
       oldData ? mapper(oldData) : oldData,
   );
@@ -3234,15 +3245,18 @@ export function useRenameThread() {
       });
     },
     async onSuccess(_, { threadId, title }) {
-      const metadataQuery = {
-        queryKey: ["thread", "metadata", threadId],
-        exact: false,
-      };
+      const filters: QueryFilters[] = Object.values(
+        getThreadSnapshotCacheFilters(threadId),
+      );
 
-      // Prevent a pre-rename metadata request from restoring the stale title.
-      await queryClient.cancelQueries(metadataQuery);
+      // Prevent pre-rename snapshot requests from restoring the stale title.
+      await Promise.all(
+        filters.map((filter) => queryClient.cancelQueries(filter)),
+      );
       setThreadTitleInCaches(queryClient, threadId, title);
-      void queryClient.invalidateQueries(metadataQuery);
+      for (const filter of filters) {
+        void queryClient.invalidateQueries(filter);
+      }
     },
   });
 }

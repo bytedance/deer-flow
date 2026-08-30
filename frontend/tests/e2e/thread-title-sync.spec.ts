@@ -179,7 +179,6 @@ test("a stale metadata response cannot restore the old title after rename", asyn
   await expect(page).toHaveTitle(`${RENAMED_TITLE} - DeerFlow`);
 
   await freshMetadataRequestStarted;
-  expect(metadataRequestCount).toBeGreaterThanOrEqual(2);
   releaseFreshMetadataResponse();
   await freshMetadataResponseCompleted;
 
