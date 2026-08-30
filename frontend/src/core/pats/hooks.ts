@@ -2,7 +2,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 
-import { createPat, revokePat, listPats } from "./api";
+import {
+  createPat,
+  listPats,
+  PatStoreUnavailableError,
+  revokePat,
+} from "./api";
 import type { CreatePatRequest } from "./types";
 
 /**
@@ -20,8 +25,11 @@ export function usePats() {
     queryKey: patQueryKey(user?.id ?? null),
     queryFn: listPats,
     // A 503 (memory backend, no PAT store) is a legitimate deployment state,
-    // not a transient failure worth retrying.
-    retry: false,
+    // not a transient failure worth retrying — everything else (network
+    // blips, 5xx) gets TanStack's default retry instead of collapsing the
+    // list into the error state on the first hiccup.
+    retry: (_failureCount, error) =>
+      !(error instanceof PatStoreUnavailableError),
   });
   return {
     pats: query.data ?? [],
