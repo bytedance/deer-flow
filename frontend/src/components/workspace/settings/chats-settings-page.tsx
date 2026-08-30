@@ -22,9 +22,7 @@ import { formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
 
-export function ChatsSettingsPage({
-  onClose,
-}: { onClose?: () => void } = {}) {
+export function ChatsSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
   const {
     data: infiniteThreads,
