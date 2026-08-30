@@ -16,6 +16,7 @@ the real implementation in isolation.
 
 import asyncio
 import importlib
+import inspect
 import sys
 import threading
 import time
@@ -2168,6 +2169,35 @@ class TestCleanupBackgroundTask:
                 executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
 
         assert factory_calls == []
+
+    def test_submit_helper_closes_coroutine_when_scheduling_rejects_it(self, executor_module):
+        """Scheduling rejection after creation must close the coroutine.
+
+        Resolving the loop before calling the factory covers loop-startup
+        failure, but ``run_coroutine_threadsafe`` can itself raise once the
+        coroutine exists (e.g. the loop closes between the lookup and the
+        internal ``call_soon_threadsafe``). Only ``run_coroutine_threadsafe``
+        is patched: the helper must close the rejected coroutine — otherwise
+        it stays in ``CORO_CREATED`` and re-triggers the never-awaited
+        warning and retained captures the startup fix already guards against.
+        """
+        created = []
+
+        def coro_factory():
+            async def pending():
+                return None  # pragma: no cover - must never run
+
+            coroutine = pending()
+            created.append(coroutine)
+            return coroutine
+
+        with patch.object(executor_module, "_get_isolated_subagent_loop", return_value=object()):
+            with patch.object(executor_module.asyncio, "run_coroutine_threadsafe", side_effect=RuntimeError("Event loop is closed")):
+                with pytest.raises(RuntimeError, match="Event loop is closed"):
+                    executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
+
+        assert len(created) == 1
+        assert inspect.getcoroutinestate(created[0]) is inspect.CORO_CLOSED
 
     def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
         """Test that cleanup removes a COMPLETED task."""

@@ -373,12 +373,25 @@ def _submit_to_isolated_loop_in_context(
     evaluates the coroutine first, so a loop-startup failure would strand a
     created-but-never-scheduled coroutine (``RuntimeWarning: coroutine ...
     was never awaited``) holding its captures until collection.
+
+    Scheduling itself can still reject an already-created coroutine — e.g.
+    the loop closes between the lookup above and the ``call_soon_threadsafe``
+    inside ``run_coroutine_threadsafe`` — so a rejected coroutine is closed
+    before the error propagates.
     """
 
     def _submit() -> Future[SubagentResult]:
         loop = _get_isolated_subagent_loop()
         coroutine = coro_factory()
-        return asyncio.run_coroutine_threadsafe(coroutine, loop)
+        try:
+            return asyncio.run_coroutine_threadsafe(coroutine, loop)
+        except BaseException:
+            # run_coroutine_threadsafe has no cleanup path for this window.
+            # The coroutine has not started (CORO_CREATED), so close() cannot
+            # run any of its body — it only releases the object and its
+            # captures instead of leaving them until collection.
+            coroutine.close()
+            raise
 
     return context.run(_submit)
 
