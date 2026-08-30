@@ -9,19 +9,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from deerflow.authz import sandbox_authz
 from deerflow.config.app_config import AppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox import tools as sandbox_tools
 
 pytestmark = pytest.mark.asyncio
 
 
 async def test_reused_async_sandbox_offloads_config_and_provider_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Config hashing and class discovery stay off-loop; construction does not."""
-    from deerflow.authz import sandbox_authz
-    from deerflow.sandbox import tools as sandbox_tools
-
     probe = tmp_path / "sandbox-authz-probe"
     await asyncio.to_thread(probe.write_text, "probe", encoding="utf-8")
 
