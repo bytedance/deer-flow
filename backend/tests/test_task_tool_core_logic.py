@@ -25,6 +25,7 @@ from deerflow.subagents.status_contract import (
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STOP_REASON_KEY,
     SUBAGENT_TOKEN_USAGE_KEY,
+    SUBAGENT_TOOL_RECEIPTS_KEY,
 )
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -78,6 +79,7 @@ def _make_result(
     error: str | None = None,
     stop_reason: str | None = None,
     token_usage_records: list[dict] | None = None,
+    tool_receipts: list[dict] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
@@ -87,6 +89,7 @@ def _make_result(
         stop_reason=stop_reason,
         token_usage_records=token_usage_records or [],
         usage_reported=False,
+        tool_receipts=tool_receipts,
     )
 
 
@@ -1189,10 +1192,22 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
 
+    receipts = [
+        {
+            "id": "r1",
+            "tool_call_id": "tc-before-poll-timeout",
+            "tool_name": "write_file",
+            "status": "success",
+            "args_sha256": "a" * 16,
+            "output_sha256": "b" * 16,
+            "output_bytes": 3,
+            "created_at": "2026-08-28T00:00:00+00:00",
+        }
+    ]
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[], tool_receipts=receipts),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -1211,6 +1226,7 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     assert message.content.startswith("Task polling timed out after 0 minutes")
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "polling_timed_out"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == message.content
+    assert message.additional_kwargs[SUBAGENT_TOOL_RECEIPTS_KEY] == receipts
     assert events[0]["type"] == "task_started"
     assert events[-1]["type"] == "task_timed_out"
 
@@ -1974,3 +1990,118 @@ async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
 
     assert cleaned == ["exec-gc"]
     assert weak_task() not in task_tool_module._deferred_cleanup_tasks
+
+
+def _receipt_fixture(rid: str = "r1", tool: str = "write_file", status: str = "success") -> dict:
+    return {
+        "id": rid,
+        "tool_call_id": f"tc-{rid}",
+        "tool_name": tool,
+        "status": status,
+        "args_sha256": "a" * 16,
+        "output_sha256": "b" * 16,
+        "output_bytes": 10,
+        "created_at": "2026-08-24T00:00:00+00:00",
+    }
+
+
+def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: list[dict] | None) -> ToolMessage:
+    """Drive the completed branch and return the terminal ToolMessage."""
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result=result_text, tool_receipts=tool_receipts),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    command = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-verify",
+    )
+    return _task_tool_message(command)
+
+
+def test_task_tool_completed_attaches_receipts_and_verdict(monkeypatch):
+    receipts = [_receipt_fixture("r1", "write_file")]
+    message = _run_completed_task_tool(monkeypatch, result_text="saved the report [r1]", tool_receipts=receipts)
+
+    assert message.additional_kwargs["subagent_tool_receipts"] == receipts
+    verdict = message.additional_kwargs["subagent_receipt_verdict"]
+    assert verdict["citation_resolved"] is True
+    assert verdict["resolved"] == ["r1"]
+
+
+def test_task_tool_completed_flags_unknown_citation(monkeypatch):
+    receipts = [_receipt_fixture("r1", "write_file")]
+    message = _run_completed_task_tool(monkeypatch, result_text="uploaded [r9]", tool_receipts=receipts)
+
+    verdict = message.additional_kwargs["subagent_receipt_verdict"]
+    assert verdict["citation_resolved"] is False
+    assert verdict["unknown"] == ["r9"]
+
+
+def test_task_tool_completed_flags_uncited_action_claims(monkeypatch):
+    message = _run_completed_task_tool(monkeypatch, result_text="I wrote the report.", tool_receipts=[])
+
+    verdict = message.additional_kwargs["subagent_receipt_verdict"]
+    assert verdict["no_citation_claims"] is True
+    assert verdict["citation_resolved"] is False
+
+
+def test_task_tool_completed_without_receipts_produces_no_verdict(monkeypatch):
+    # receipts=None means no harvest happened (disabled or pre-stream end):
+    # skip the verdict entirely, keeping disabled deployments pre-PR2.
+    message = _run_completed_task_tool(monkeypatch, result_text="done [r1]", tool_receipts=None)
+
+    assert "subagent_receipt_verdict" not in message.additional_kwargs
+    assert "subagent_tool_receipts" not in message.additional_kwargs
+
+
+def test_task_tool_failed_carries_receipts_without_verdict(monkeypatch):
+    receipts = [_receipt_fixture("r1", "bash", status="error")]
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.FAILED, error="boom", tool_receipts=receipts),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    command = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-failed",
+    )
+    message = _task_tool_message(command)
+    assert message.additional_kwargs["subagent_tool_receipts"] == receipts
+    assert "subagent_receipt_verdict" not in message.additional_kwargs

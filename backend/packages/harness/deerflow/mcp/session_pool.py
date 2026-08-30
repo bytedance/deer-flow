@@ -39,9 +39,77 @@ import threading
 from collections import OrderedDict
 from typing import Any
 
+import anyio
 from mcp import ClientSession
+from mcp.shared.exceptions import McpError
+from mcp.types import CONNECTION_CLOSED
 
 logger = logging.getLogger(__name__)
+
+_MCP_CLOSED_STREAM_ERRORS = (
+    anyio.ClosedResourceError,
+    anyio.BrokenResourceError,
+    anyio.EndOfStream,
+)
+
+
+def _is_mcp_transport_disconnect(error: Exception) -> bool:
+    if isinstance(error, _MCP_CLOSED_STREAM_ERRORS):
+        return True
+    return isinstance(error, McpError) and error.error.code == CONNECTION_CLOSED and error.error.message == "Connection closed"
+
+
+async def _finish_session_cleanup(cleanup: asyncio.Task[Any], server_name: str) -> bool:
+    """Wait for cleanup despite cancellation and report whether it was requested."""
+    cancelled = False
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            cancelled = True
+        except Exception:
+            logger.warning(
+                "Failed to close disconnected MCP session for server '%s'",
+                server_name,
+                exc_info=True,
+            )
+            return cancelled
+
+    if cleanup.cancelled():
+        logger.warning(
+            "Disconnected MCP session cleanup was cancelled for server '%s'",
+            server_name,
+        )
+    else:
+        cleanup_error = cleanup.exception()
+        if cleanup_error is not None:
+            logger.warning(
+                "Failed to close disconnected MCP session for server '%s'",
+                server_name,
+                exc_info=(type(cleanup_error), cleanup_error, cleanup_error.__traceback__),
+            )
+    return cancelled
+
+
+async def call_pooled_session_tool(
+    session: ClientSession,
+    pool: MCPSessionPool,
+    *,
+    server_name: str,
+    scope_key: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    call_kwargs: dict[str, Any],
+) -> Any:
+    """Call a pooled session and evict it only after an explicit disconnect."""
+    try:
+        return await session.call_tool(tool_name, arguments, **call_kwargs)
+    except Exception as error:
+        if _is_mcp_transport_disconnect(error):
+            cleanup = asyncio.create_task(pool.close_session_if_current(server_name, scope_key, session))
+            if await _finish_session_cleanup(cleanup, server_name):
+                raise asyncio.CancelledError
+        raise
 
 
 class MCPSessionPool:

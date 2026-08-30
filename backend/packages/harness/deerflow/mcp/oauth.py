@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
+from deerflow.mcp.headers import apply_header_overrides, header_spellings
 
 logger = logging.getLogger(__name__)
 
@@ -188,13 +189,21 @@ def build_oauth_tool_interceptor(
     if not token_manager.has_oauth_servers():
         return None
 
+    # The servers' static header spellings, so the injected token replaces a
+    # static header spelled 'authorization' at the adapter's case-sensitive
+    # connection merge instead of riding alongside it (see ``mcp/headers.py``).
+    spellings_by_server = {server_name: header_spellings(server_config.headers) for server_name, server_config in extensions_config.get_enabled_mcp_servers().items()}
+
     async def oauth_interceptor(request: Any, handler: Any) -> Any:
         header = await token_manager.get_authorization_header(request.server_name)
         if not header:
             return await handler(request)
 
-        updated_headers = dict(request.headers or {})
-        updated_headers["Authorization"] = header
+        updated_headers = apply_header_overrides(
+            request.headers,
+            {"Authorization": header},
+            spellings=spellings_by_server.get(request.server_name),
+        )
         return await handler(request.override(headers=updated_headers))
 
     return oauth_interceptor
