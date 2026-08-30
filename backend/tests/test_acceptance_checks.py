@@ -441,6 +441,50 @@ class TestTestsPassedLeaf:
             assert leaf["checked"] is False, wrapped
             assert leaf["detail"] == "recorded output is not attributable to the matched segment", wrapped
 
+    def test_redirected_final_segment_output_is_not_test_evidence(self):
+        """PR review: ``<``/``>`` are word characters to the parser, so a
+        redirection is invisible to the matcher — ``pytest tests/ > /dev/null``
+        matches while the real summary went to the target and the recorded
+        tail carries whatever remains."""
+        for command in ("pytest tests/ > /dev/null", "pytest tests/ >> results.log", "pytest tests/ 2> err.log"):
+            executions = [_bash_execution(command, output_tail="3 passed")]
+            verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+            leaf = verdict["leaves"][0]
+            assert leaf["checked"] is False, command
+            assert leaf["detail"] == "matched segment redirects its output; the recorded tail is not test evidence", command
+
+    def test_silent_prefix_with_redirected_run_is_unverified(self):
+        """PR review: the laundering shape — a provably silent prefix plus a
+        redirected run. The fake summary the prefix printed is the only text
+        the tail can hold, so it must not certify the run."""
+        executions = [_bash_execution("source .venv/bin/activate && pytest tests/ > /dev/null", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "matched segment redirects its output; the recorded tail is not test evidence"
+
+    def test_redirected_failing_run_still_fails_on_exit_status(self):
+        """Redirection can only launder output, never the exit status: a
+        failing redirected run stays a recorded failure."""
+        executions = [_bash_execution("pytest tests/ > /dev/null", status="error", output_tail="")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is False
+
+    def test_self_written_activate_script_lends_no_output(self):
+        """PR review: the silent-source allowlist accepts the conventional
+        ``*/bin/activate`` shape only — a file the subagent just wrote named
+        ``./activate`` runs whatever it prints."""
+        executions = [_bash_execution("source ./activate && make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "recorded output is not attributable to the matched segment"
+
     def test_selection_narrowing_extra_flag_is_unprovable(self):
         """PR review: ``pytest -k smoke tests/security`` runs only the
         smoke-selected subset — the summary cannot certify the criterion's
@@ -568,11 +612,52 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False
         assert leaf["detail"] == "no matching bash execution recorded"
 
-    def test_non_negated_target_still_matches_with_ignore_present(self):
+    def test_exclusion_nested_under_the_target_is_unprovable(self):
+        """PR review: ``pytest --ignore tests/security tests`` never ran the
+        security subtree — the passing summary does not cover the criterion's
+        selection, so the match must degrade instead of holding."""
         executions = [_bash_execution("pytest --ignore tests/security tests", output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
 
-        assert verdict["leaves"][0]["holds"] is True
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "matching segment cannot be proven to have executed"
+
+    def test_deselected_sub_path_of_the_target_is_unprovable(self):
+        """PR review: ``pytest tests --deselect tests/unit/test_auth.py`` —
+        the deselected test never ran, so ``3 passed`` does not cover the
+        criterion's ``tests`` selection (a real exit status, a real summary,
+        no forgery needed)."""
+        executions = [_bash_execution("pytest tests --deselect tests/unit/test_auth.py", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_ignored_sub_path_of_a_scoped_target_is_unprovable(self):
+        executions = [_bash_execution("pytest tests/unit --ignore tests/unit/test_slow.py", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/unit"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_glued_deselect_of_a_sub_path_is_unprovable(self):
+        executions = [_bash_execution("pytest tests --deselect=tests/unit/test_auth.py", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_exclusion_of_a_parent_path_is_unprovable(self):
+        """``--ignore tests`` excludes the criterion's ``tests/unit`` target
+        itself — the run cannot certify it."""
+        executions = [_bash_execution("pytest tests/unit --ignore tests", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/unit"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_nodeid_deselect_inside_the_target_is_unprovable(self):
+        executions = [_bash_execution("pytest tests/x.py --deselect tests/x.py::test_flaky", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/x.py"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
 
     def test_negating_option_with_equals_form(self):
         executions = [_bash_execution("pytest --deselect=tests/x.py tests", output_tail="3 passed")]

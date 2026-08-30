@@ -4469,6 +4469,33 @@ class TestBashExecutionHarvest:
         assert [e["command"] for e in result.bash_executions] == ["make test"]
 
     @pytest.mark.anyio
+    async def test_completed_run_with_criteria_but_no_bash_calls_publishes_empty_list(self, classes, base_config, mock_agent, msg, monkeypatch):
+        """PR review: the empty list is observable — "the stream carried no
+        bash-family tool calls" stays distinguishable from the ``None`` cases
+        (no criteria, pre-stream end, harvest failure), the same split
+        ``tool_receipts`` already makes."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        final_state = {"messages": [msg.human("Do something"), msg.ai("Done", "msg-9")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            acceptance_criteria=["tests_passed:make test"],
+        )
+        with (
+            patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+        ):
+            result = await executor._aexecute_admitted("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.bash_executions == []
+
+    @pytest.mark.anyio
     async def test_completed_run_without_criteria_harvests_nothing(self, classes, base_config, mock_agent, msg, monkeypatch):
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]

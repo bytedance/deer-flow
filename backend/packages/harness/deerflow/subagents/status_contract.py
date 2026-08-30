@@ -29,6 +29,13 @@ consumers read the structured facts carried inside
   PR4): the deterministic acceptance-checklist verdict — per-criterion
   ``checked``/``holds`` leaves; unchecked criteria render UNVERIFIED, never
   silently passed.
+
+The shared fixture at ``contracts/subagent_status_contract.json`` pins
+the enum values (``valid_status_values`` / ``valid_stop_reason_values``)
+across Python and TypeScript. ``subagent_acceptance_verdict`` is
+deliberately outside that fixture: it is a validated JSON structure (see
+``validate_acceptance_verdict``), not an enum vocabulary, and no
+TypeScript consumer reads it.
 """
 
 from __future__ import annotations

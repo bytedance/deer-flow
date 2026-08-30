@@ -120,8 +120,8 @@ class SubagentResult:
             execution. Accumulated per chunk (merged by ``tool_call_id``) so
             summarization compacting earlier messages cannot erase a recorded
             execution. ``None`` when the delegation carried no acceptance
-            criteria or the run ended before streaming; an empty list means the
-            stream carried no bash-family tool calls.
+            criteria, the run ended before streaming, or harvesting failed;
+            an empty list means the stream carried no bash-family tool calls.
     """
 
     task_id: str
@@ -167,9 +167,13 @@ class SubagentResult:
         Entries merge by ``tool_call_id`` in first-seen order and are capped to
         the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
         ``final_state`` scan, accumulation survives summarization compacting
-        earlier AI/ToolMessages out of the streamed history.
+        earlier AI/ToolMessages out of the streamed history. ``None`` leaves
+        the field untouched (no evidence this chunk); an empty list still
+        publishes, keeping "the stream carried no bash-family tool calls"
+        distinguishable from "no evidence was collected" (mirrors
+        ``update_tool_receipts``).
         """
-        if not executions:
+        if executions is None:
             return
         with self._state_lock:
             if self.status.is_terminal:

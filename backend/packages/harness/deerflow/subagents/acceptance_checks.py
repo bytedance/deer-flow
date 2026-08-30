@@ -260,7 +260,10 @@ def _is_silent_segment(tokens: list[str]) -> bool:
         return bool(args) and "-p" not in args
     if executable in {"source", "."}:
         # Only the conventional (quiet) venv activation script is accepted.
-        return bool(args) and args[-1].endswith("activate")
+        # Matched by shape (``*/bin/activate``), not by suffix: a file the
+        # subagent just wrote named ``./activate`` or ``deactivate`` must not
+        # lend its output to the recorded tail.
+        return bool(args) and args[-1].endswith("/bin/activate")
     if executable == "unset":
         return bool(args)
     # pushd/popd (print the stack), umask/ulimit (print forms), and every
@@ -294,6 +297,30 @@ def _negated_positions(tokens: list[str]) -> tuple[set[int], set[int]]:
             options.add(index)
             values.add(index)
     return options, values
+
+
+def _negated_value(token: str) -> str:
+    """The exclusion target a negated token names: the bare value as-is, or
+    the part after ``=`` for the glued form (``--deselect=tests/x.py``)."""
+    for option in _NEGATING_OPTION_TOKENS:
+        if token.startswith(f"{option}="):
+            return token.split("=", 1)[1]
+    return token
+
+
+def _negation_overlaps(criterion_token: str, negated_value: str) -> bool:
+    """Whether a negated value overlaps a matched criterion target: equal, or
+    one nested under the other at a path boundary (``tests`` vs
+    ``tests/unit/test_auth.py``) or a pytest nodeid boundary (``tests/x.py``
+    vs ``tests/x.py::test_y``). Overlap means part of the criterion's
+    selection never ran, so the passing summary may not cover it; unrelated
+    exclusions (``--ignore tests/slow`` against ``pytest tests/unit``) do not
+    overlap and keep matching."""
+    a = criterion_token.replace("\\", "/").removeprefix("./").rstrip("/")
+    b = negated_value.replace("\\", "/").removeprefix("./").rstrip("/")
+    if not a or not b:
+        return False
+    return a == b or a.startswith((b + "/", b + "::")) or b.startswith((a + "/", a + "::"))
 
 
 def _normalize_command(command: str) -> str:
@@ -386,7 +413,10 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     After a bare criterion the same extra positional NARROWS the runner's
     default selection (``python -m unittest pkg.OneTest``). Returns
     ``"unprovable"`` when the textual match carries a behavior-changing
-    extra (``pytest -k smoke tests/security``), ``"no_match"`` otherwise.
+    extra (``pytest -k smoke tests/security``) or a negating option excludes
+    the matched target or a sub-path of it (``--deselect
+    tests/unit/test_auth.py`` against ``pytest tests``), ``"no_match"``
+    otherwise.
     """
     expected = _strip_env_assignments(expected)
     actual = _strip_env_assignments(actual)
@@ -410,11 +440,17 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
             index += 1
         if not found:
             return "no_match"
-    # An expected target that is ALSO negated elsewhere in the same command
-    # (``pytest tests/security tests/unit --ignore tests/security``) was
-    # excluded even though a positional occurrence matched — the passing
-    # summary comes from the remaining targets.
-    if {actual[position] for position in consumed if position != 0} & {actual[position] for position in negated}:
+    # An expected target negated elsewhere in the same command was excluded
+    # even though a positional occurrence matched — the passing summary comes
+    # from the remaining targets. The overlap check is by path/nodeid
+    # prefix, not exact token equality: excluding a SUB-PATH of the
+    # criterion's target (``pytest tests --deselect tests/unit/test_auth.py``)
+    # means the excluded tests never ran, so the summary does not cover the
+    # criterion's selection; excluding a PARENT (``pytest tests/unit
+    # --ignore tests``) excludes the target itself. Unrelated exclusions
+    # (``--ignore tests/slow`` against ``pytest tests/unit``) keep matching.
+    negated_values = [_negated_value(actual[position]) for position in negated]
+    if any(_negation_overlaps(actual[position], value) for position in consumed if position != 0 for value in negated_values):
         return "unprovable"
     for position, token in enumerate(actual):
         if position in consumed or position in negated or position in option_positions:
@@ -510,17 +546,41 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
     return "unprovable" if saw_unprovable else "no_match"
 
 
-def _output_attributable(executed_command: str) -> bool:
-    """Whether the recorded output is attributable to the matched final
-    segment: every preceding segment must be provably silent by invocation
-    form. Anything else — ``echo '12 passed'; make test``, or a
-    ``pushd``/``export -p`` that prints — could have emitted the very
-    summary the shape check would read."""
+#: ``<``/``>`` are ordinary word characters to the parser (only ``;&|`` are
+#: punctuation), so a redirection in the matched final segment is invisible
+#: to the matcher: ``pytest tests/ > /dev/null`` still matches, while the
+#: runner's real summary went to the redirection target and the recorded
+#: tail carries whatever remains — text any preceding segment (or nothing)
+#: produced. Any token carrying a redirection char makes the tail
+#: non-attributable. (``&>``/``2>&1`` already degrade upstream: the bare
+#: ``&`` parses as an operator and breaks span/exit attribution.)
+_REDIRECTION_CHAR_RE = re.compile(r"[<>]")
+
+
+def _output_attribution(executed_command: str) -> str | None:
+    """Why the recorded output tail cannot be attributed to the matched
+    final segment, or ``None`` when it can.
+
+    The matched segment is always the command's last (the matcher requires
+    the span to end there). Two channels break attribution:
+
+    - A redirection token in that final segment (``pytest tests/ > log``):
+      the real summary may have gone to the target while the recorded tail
+      carries text from anywhere, so neither a pass nor a fail shape in it
+      is test evidence.
+    - A preceding segment that is not provably silent by invocation form
+      (``echo '12 passed'; make test``, a ``pushd``/``export -p`` that
+      prints): it could have emitted the very summary the shape check reads.
+    """
     parsed = _shell_parse(executed_command)
     if parsed is None:
-        return True  # unparseable commands already fell back to exact equality
+        return None  # unparseable commands already fell back to exact equality
     segments, _ops = parsed
-    return all(_is_silent_segment(segment) for segment in segments[:-1])
+    if any(_REDIRECTION_CHAR_RE.search(token) for token in segments[-1]):
+        return "matched segment redirects its output; the recorded tail is not test evidence"
+    if not all(_is_silent_segment(segment) for segment in segments[:-1]):
+        return "recorded output is not attributable to the matched segment"
+    return None
 
 
 def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None) -> AcceptanceLeaf:
@@ -550,10 +610,10 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         base["detail"] = f"latest matching run recorded status={status or 'unknown'}"
         return base
     output_tail = str(latest.get("output_tail") or "")
-    if not _output_attributable(str(latest.get("command") or "")):
-        # A preceding segment may have printed the summary — neither a pass
-        # nor a fail shape here can be trusted either way.
-        base["detail"] = "recorded output is not attributable to the matched segment"
+    unattributable = _output_attribution(str(latest.get("command") or ""))
+    if unattributable is not None:
+        # Neither a pass nor a fail shape here can be trusted either way.
+        base["detail"] = unattributable
         return base
     if _TEST_FAIL_SHAPE_RE.search(output_tail):
         base["checked"] = True
