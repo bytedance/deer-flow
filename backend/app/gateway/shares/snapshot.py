@@ -250,8 +250,18 @@ def _decoded_reference(value: str) -> str:
     return normalized
 
 
+# Sentence punctuation that regex extraction greedily consumes but that is
+# syntax, not part of the reference: the private-reference terminator must
+# not be defeated by it, and it must survive into the public output.
+_REFERENCE_TRAILING_PUNCTUATION = ".,;:!?)]}\"'"
+
+
+def _trim_reference_punctuation(value: str) -> str:
+    return value.rstrip(_REFERENCE_TRAILING_PUNCTUATION)
+
+
 def _is_private_reference(value: str) -> bool:
-    decoded = _decoded_reference(value).lower()
+    decoded = _trim_reference_punctuation(_decoded_reference(value)).lower()
     return "/mnt/user-data" in decoded or decoded.startswith("mnt/user-data") or re.search(r"/api/threads/[^/\s?#]+/(?:artifacts|uploads)(?:[/\s?#]|$)", decoded) is not None
 
 
@@ -277,14 +287,22 @@ def _neutralize_private_references(text: str) -> str:
         destination = target.split(maxsplit=1)[0] if target else ""
         if not _is_private_reference(destination):
             return
-        label = match.group("label").strip()
+        # The label must come from the original bytes, not the normalized
+        # shadow: a label containing backslashes would otherwise publish
+        # its separator-normalized form (``C:/Users/bob`` for ``C:\Users\bob``).
+        label_begin, label_stop = original_span(match.start("label"), match.end("label"))
+        label = text[label_begin:label_stop].strip()
         begin, stop = original_span(match.start(), match.end())
         edits.append((begin, stop, f"{label} {_PRIVATE_REFERENCE_MARKER}".strip()))
 
     def replace_raw(match: re.Match[str]) -> None:
         if not _is_private_reference(match.group(0)):
             return
-        begin, stop = original_span(match.start(), match.end())
+        # Keep the trailing sentence punctuation out of the cut so the
+        # public text keeps its own ``.``/``,``/``)`` after the marker.
+        kept = _trim_reference_punctuation(match.group(0))
+        stop_index = match.start() + len(kept)
+        begin, stop = original_span(match.start(), stop_index)
         edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
 
     for match in _MARKDOWN_LINK_RE.finditer(normalized):

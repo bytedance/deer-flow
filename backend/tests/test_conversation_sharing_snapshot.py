@@ -483,3 +483,24 @@ async def test_resolve_share_title_neutralizes_private_artifact_reference():
     assert "thread-secret" not in title
     assert "/mnt/user-data" not in title
     assert title == "[private artifact omitted]"
+
+
+def test_trailing_punctuation_no_longer_defeats_reference_redaction():
+    """Sentence punctuation after a private reference must neither defeat
+    classification nor be swallowed by the marker (round-6 P1)."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("Downloaded it from /api/threads/thread-2f9c/artifacts.") == "Downloaded it from [private artifact omitted]."
+    assert neutralize("You can list /api/threads/thread-2f9c/uploads, or fetch files.") == "You can list [private artifact omitted], or fetch files."
+    # Escaped separators with trailing punctuation classify identically.
+    assert neutralize("See \\/api\\/threads\\/thread-2f9c/artifacts.") == "See [private artifact omitted]."
+    # A public URL with trailing punctuation passes through byte-for-byte.
+    assert neutralize("Visit https://example.com/page.") == "Visit https://example.com/page."
+
+
+def test_markdown_labels_keep_original_bytes():
+    """A private-target link whose label contains backslashes publishes the
+    label's ORIGINAL bytes, not the separator-normalized shadow (round-6 P3)."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("[C:\\Users\\\\bob](/api/threads/t1/uploads/x)") == "C:\\Users\\\\bob [private artifact omitted]"
