@@ -1370,6 +1370,12 @@ async def run_agent(
                 await run_manager.evict_finished_run(run_id)
             except Exception:
                 logger.warning("Failed to evict run record %s after finalization", run_id, exc_info=True)
+            except BaseException:
+                # Cancellation unwinding through the tail must not strand the
+                # record with no retry and no marker: hand the eviction to the
+                # manager's tracked background path, then keep unwinding.
+                run_manager.evict_finished_run_soon(run_id)
+                raise
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt

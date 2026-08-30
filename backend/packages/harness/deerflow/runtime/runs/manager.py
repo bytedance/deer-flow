@@ -1934,14 +1934,17 @@ class RunManager:
             return any(r.operation_kind == ThreadOperationKind.run and (r.status in (RunStatus.pending, RunStatus.running) or r.finalizing) for r in self._thread_records_locked(thread_id))
 
     async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
-        """Remove a run record after an optional delay."""
+        """Legacy delayed cleanup, now routed through the guarded eviction path.
+
+        The old implementation removed the record unconditionally, so any
+        caller reintroduced the leak's inverse bug: dropping the only correct
+        terminal snapshot. It now delegates to :meth:`evict_finished_run`,
+        which verifies (and if needed repairs) the durable row first and
+        retains records that cannot be confirmed.
+        """
         if delay > 0:
             await asyncio.sleep(delay)
-        async with self._lock:
-            record = self._runs.pop(run_id, None)
-            if record is not None:
-                self._unindex_run_locked(run_id, record.thread_id)
-        logger.debug("Run record %s cleaned up", run_id)
+        await self.evict_finished_run(run_id)
 
     async def evict_finished_run(self, run_id: str) -> None:
         """Evict a finished run's registry record, event-driven.
@@ -1986,10 +1989,31 @@ class RunManager:
     def _spawn_eviction_retry(self, run_id: str) -> None:
         """Start one deduplicated, strongly referenced eviction retry task."""
         existing = self._eviction_retry_tasks.get(run_id)
-        if existing is not None and not existing.done():
+        if existing is not None and existing is not asyncio.current_task() and not existing.done():
             return
         task = asyncio.create_task(self._retry_eviction_until_durable(run_id))
         task.set_name(f"deerflow-run-record-eviction-retry-{run_id}")
+        self._track_eviction_task(run_id, task)
+
+    def evict_finished_run_soon(self, run_id: str) -> None:
+        """Evict without awaiting, for callers unwinding on cancellation.
+
+        The wrapper occupies the same per-run slot a retry sleeper would, so
+        at most one background eviction effort exists per run; if durability
+        still cannot be confirmed, the wrapper replaces itself with a retry
+        sleeper. No new work is spawned once shutdown has begun.
+        """
+        if self._shutting_down:
+            return
+        existing = self._eviction_retry_tasks.get(run_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(self.evict_finished_run(run_id))
+        task.set_name(f"deerflow-run-record-eviction-{run_id}")
+        self._track_eviction_task(run_id, task)
+
+    def _track_eviction_task(self, run_id: str, task: asyncio.Task[None]) -> None:
+        """Strongly reference *task* as the run's background eviction effort."""
         self._eviction_retry_tasks[run_id] = task
         task.add_done_callback(lambda done, run_id=run_id: self._eviction_retry_done(run_id, done))
 

@@ -15,6 +15,7 @@ import asyncio
 import pytest
 from langchain_core.messages import AIMessage
 
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime import CancelOutcome
 from deerflow.runtime.runs import manager as runs_manager
 from deerflow.runtime.runs.manager import RunManager
@@ -667,3 +668,95 @@ async def test_failed_reread_after_refused_completion_repair_stays_in_retry_life
     assert record.run_id not in run_manager._stalled_evictions
     # Clean up the sleeping retry so the test loop does not outlive it.
     await run_manager.shutdown(timeout=1)
+
+
+@pytest.mark.anyio
+async def test_worker_eviction_happens_after_durable_completion_and_end_frame():
+    """The registry eviction strictly follows the durable terminal write and
+    the stream END frame — never before what finalization owes."""
+    store = MemoryRunStore()
+    events: list[str] = []
+    original_finalize = store.finalize_if_not_cancelled
+
+    async def recording_finalize(run_id, *, status, **kwargs):
+        result = await original_finalize(run_id, status=status, **kwargs)
+        events.append("durable-terminal")
+        return result
+
+    store.finalize_if_not_cancelled = recording_finalize
+
+    class _OrderBridge:
+        async def publish(self, run_id, event, data):
+            return None
+
+        async def publish_end(self, run_id):
+            events.append("publish_end")
+
+        async def cleanup(self, run_id, *, delay=0):
+            return None
+
+    # Take the real CAS terminal path (``finalize_if_not_cancelled``) rather
+    # than the heartbeat-disabled plain ``set_status`` fallback.
+    run_manager = RunManager(store=store, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    original_evict = run_manager.evict_finished_run
+
+    async def recording_evict(run_id):
+        await original_evict(run_id)
+        events.append("evict")
+
+    run_manager.evict_finished_run = recording_evict
+    record = await run_manager.create("thread-1")
+
+    await run_agent(
+        _OrderBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=None),
+        agent_factory=lambda *, config: _OkAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert events.index("durable-terminal") < events.index("publish_end") < events.index("evict")
+
+
+@pytest.mark.anyio
+async def test_cancellation_during_eviction_hands_off_to_background():
+    """A cancellation unwinding through the eviction await must not strand the
+    record: the manager's tracked background path takes over, then the
+    cancellation keeps propagating."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    handed_off: list[str] = []
+
+    async def cancelling_evict(run_id):
+        raise asyncio.CancelledError
+
+    run_manager.evict_finished_run = cancelling_evict
+    run_manager.evict_finished_run_soon = handed_off.append
+    record = await run_manager.create("thread-1")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _OkAgent())
+
+    assert handed_off == [record.run_id]
+    # The record stays registered: its eviction is now the background task's job.
+    assert record.run_id in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_public_cleanup_routes_through_durability_guard():
+    """cleanup() no longer drops a record unconditionally: a stale durable row
+    is repaired from the snapshot first, and the drop follows confirmation."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    await run_manager.cleanup(record.run_id, delay=0)
+
+    row = await store.get(record.run_id)
+    assert row is not None and row["status"] == RunStatus.success.value
+    assert record.run_id not in run_manager._runs
+    # Durable history survives the cleanup-driven eviction.
+    assert await run_manager.get(record.run_id, raise_on_store_error=True) is not None
