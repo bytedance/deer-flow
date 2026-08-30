@@ -165,8 +165,8 @@ feat: add support for Claude 3.5 model
 - Update model factory to handle Claude-specific settings
 - Add tests for new model
 ```
-
 Prefix types:
+
 - `feat:` - New feature
 - `fix:` - Bug fix
 - `docs:` - Documentation
@@ -308,17 +308,21 @@ Configured middleware runs in both the lead-agent and subagent pipelines after
 the built-in middleware and optional loop/token guards, but before the
 terminal-response, safety, and clarification tail. Treat middleware class paths
 as trusted operator configuration because loading one executes Python code.
-Embedded callers can instead pass middleware instances through
+Lead-agent-only embedded callers can instead pass middleware instances through
 `DeerFlowClient(middlewares=[...])` or
-`create_deerflow_agent(extra_middleware=[...])`.
+`create_deerflow_agent(extra_middleware=[...])`. Both embedded APIs affect only
+the lead-agent pipeline; neither forwards middleware to subagents.
 
-Choose the registration path by ownership and placement. The legacy fixed-slot
+Choose the registration path by ownership and placement. The fixed-slot (not deprecated)
 `extensions.middlewares` list is accepted in `config.yaml` and
 `extensions_config.json` (`config.yaml` wins) and applies to both lead and
 subagent pipelines. Packaged extensions registered through the top-level
 `plugins:` list contribute middleware at semantic extension points. Contributor
 code that needs committed, programmatic lead-only wiring can use
-`build_middlewares(..., custom_middlewares=[MyMiddleware()])`.
+`build_middlewares(..., custom_middlewares=[MyMiddleware()])` at the
+`build_middlewares` call in
+`packages/harness/deerflow/agents/lead_agent/agent.py` (reached through
+`make_lead_agent`).
 
 ### Adding New API Endpoints
 

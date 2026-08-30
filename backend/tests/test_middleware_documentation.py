@@ -50,3 +50,10 @@ def test_documented_registration_apis_exist() -> None:
     ExtensionsConfig.model_validate({"middlewares": ["pkg.mod:MyMiddleware"]})
     assert "middlewares" in inspect.signature(DeerFlowClient.__init__).parameters
     assert "extra_middleware" in inspect.signature(create_deerflow_agent).parameters
+
+
+@pytest.mark.parametrize("path", MIDDLEWARE_GUIDES, ids=str)
+def test_embedded_middleware_scope_is_explicit(path: Path) -> None:
+    content = (REPO_ROOT / path).read_text(encoding="utf-8")
+    marker = "这两个嵌入式 API 仅作用于主 Agent 链" if "/zh/" in path.as_posix() else "Both embedded APIs affect only the lead-agent pipeline"
+    assert marker in " ".join(content.split())
