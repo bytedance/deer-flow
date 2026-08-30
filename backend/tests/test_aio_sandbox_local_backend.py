@@ -323,6 +323,7 @@ def test_start_container_brackets_bare_ipv6_bind_override(monkeypatch):
 
 
 def test_start_container_binds_dood_port_to_bridge_gateway(monkeypatch):
+    """Force resolver failure so host DNS cannot bypass the bridge-gateway fallback."""
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,
