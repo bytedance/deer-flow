@@ -25,7 +25,11 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
-import { SkillRequestError } from "@/core/skills/api";
+import {
+  formatSkillSecurityFindings,
+  MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
+  SkillRequestError,
+} from "@/core/skills/api";
 import {
   useEnableSkill,
   useSkills,
@@ -86,11 +90,19 @@ function SkillSettingsList({
     router.push("/workspace/chats/new?mode=skill");
   };
   const handleSkillArchive = async (event: ChangeEvent<HTMLInputElement>) => {
+    if (isUploading) {
+      event.target.value = "";
+      return;
+    }
     const archive = event.target.files?.[0];
     event.target.value = "";
     if (!archive) return;
     if (!archive.name.toLowerCase().endsWith(".skill")) {
       toast.error(t.settings.skills.invalidArchive);
+      return;
+    }
+    if (archive.size > MAX_SKILL_ARCHIVE_UPLOAD_BYTES) {
+      toast.error(t.settings.skills.archiveTooLarge);
       return;
     }
 
@@ -105,6 +117,15 @@ function SkillSettingsList({
     } catch (error) {
       if (error instanceof SkillRequestError && error.isAdminRequired) {
         toast.error(t.settings.skills.installAdminRequired);
+      } else if (error instanceof SkillRequestError && error.status === 413) {
+        toast.error(t.settings.skills.archiveTooLarge);
+      } else if (
+        error instanceof SkillRequestError &&
+        error.findings.length > 0
+      ) {
+        toast.error(error.message, {
+          description: formatSkillSecurityFindings(error.findings),
+        });
       } else {
         toast.error(
           error instanceof Error
@@ -130,6 +151,7 @@ function SkillSettingsList({
             ref={fileInputRef}
             type="file"
             accept=".skill"
+            disabled={isUploading}
             className="sr-only"
             onChange={handleSkillArchive}
           />

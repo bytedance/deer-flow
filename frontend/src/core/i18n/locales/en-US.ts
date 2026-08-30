@@ -1224,6 +1224,7 @@ export const enUS: Translations = {
       installFromFile: "Install .skill",
       installingArchive: "Installing...",
       invalidArchive: "Choose a file with the .skill extension.",
+      archiveTooLarge: "The skill archive must be 100 MiB or smaller.",
       installFailed: "Failed to install the skill archive.",
     },
     notification: {

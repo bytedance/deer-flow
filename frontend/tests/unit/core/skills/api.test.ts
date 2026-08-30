@@ -9,7 +9,11 @@ rs.mock("@/core/config", () => ({
 }));
 
 import { fetch as fetcher } from "@/core/api/fetcher";
-import { uploadSkillArchive } from "@/core/skills/api";
+import {
+  formatSkillSecurityFindings,
+  SkillRequestError,
+  uploadSkillArchive,
+} from "@/core/skills/api";
 
 const mockedFetch = rs.mocked(fetcher);
 
@@ -64,6 +68,68 @@ describe("skills api", () => {
       expect.objectContaining({
         name: "SkillRequestError",
         status: 403,
+      }),
+    );
+  });
+
+  test("preserves structured security findings for the upload UI", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(400, {
+        detail: {
+          message: "Static security scan blocked skill 'demo'",
+          skill_name: "demo",
+          findings: [
+            {
+              rule_id: "python-shell-exec",
+              severity: "HIGH",
+              file: "scripts/run.py",
+              line: 7,
+              message: "Python invokes a shell command.",
+              remediation: "Remove the shell call.",
+            },
+          ],
+        },
+      }),
+    );
+
+    const error = await uploadSkillArchive(
+      new File(["archive"], "demo.skill"),
+    ).catch((caught: unknown) => caught);
+
+    expect(error).toEqual(
+      expect.objectContaining({
+        name: "SkillRequestError",
+        status: 400,
+        skillName: "demo",
+        findings: [
+          expect.objectContaining({
+            rule_id: "python-shell-exec",
+            file: "scripts/run.py",
+            line: 7,
+          }),
+        ],
+      }),
+    );
+    if (!(error instanceof SkillRequestError)) {
+      throw new Error("expected a SkillRequestError");
+    }
+    expect(formatSkillSecurityFindings(error.findings)).toBe(
+      "HIGH python-shell-exec · scripts/run.py:7: Python invokes a shell command. Remove the shell call.",
+    );
+  });
+
+  test("turns an unstructured proxy 413 into a typed request error", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      new Response("", { status: 413, statusText: "" }),
+    );
+
+    await expect(
+      uploadSkillArchive(new File(["archive"], "demo.skill")),
+    ).rejects.toEqual(
+      expect.objectContaining({
+        name: "SkillRequestError",
+        status: 413,
+        message: "HTTP 413",
       }),
     );
   });

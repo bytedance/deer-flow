@@ -1169,6 +1169,7 @@ export const zhCN: Translations = {
       installFromFile: "安装 .skill",
       installingArchive: "正在安装…",
       invalidArchive: "请选择扩展名为 .skill 的文件。",
+      archiveTooLarge: "技能包大小不能超过 100 MiB。",
       installFailed: "安装技能包失败。",
     },
     notification: {

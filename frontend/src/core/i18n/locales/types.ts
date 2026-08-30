@@ -975,6 +975,7 @@ export interface Translations {
       installFromFile: string;
       installingArchive: string;
       invalidArchive: string;
+      archiveTooLarge: string;
       installFailed: string;
     };
     notification: {

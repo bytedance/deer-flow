@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -245,6 +246,46 @@ def test_upload_skill_archive_rejects_oversized_payload(monkeypatch):
     assert "upload limit" in response.json()["detail"]
     assert install_called is False
     assert copy_called is False
+
+
+@pytest.mark.asyncio
+async def test_bounded_skill_archive_stream_rejects_declared_oversize_before_read(monkeypatch):
+    stream_read = False
+
+    class _Request:
+        headers = {"content-length": "5"}
+
+        async def stream(self):
+            nonlocal stream_read
+            stream_read = True
+            yield b"never-read"
+
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_MULTIPART_OVERHEAD_BYTES", 1)
+    stream = skills_router._bounded_skill_archive_request_stream(_Request())
+
+    with pytest.raises(skills_router._SkillArchiveUploadTooLargeError):
+        await anext(stream)
+
+    assert stream_read is False
+
+
+@pytest.mark.asyncio
+async def test_bounded_skill_archive_stream_rejects_chunked_oversize(monkeypatch):
+    class _Request:
+        headers = {}
+
+        async def stream(self):
+            yield b"123"
+            yield b"45"
+
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_MULTIPART_OVERHEAD_BYTES", 1)
+    stream = skills_router._bounded_skill_archive_request_stream(_Request())
+
+    assert await anext(stream) == b"123"
+    with pytest.raises(skills_router._SkillArchiveUploadTooLargeError):
+        await anext(stream)
 
 
 def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):
