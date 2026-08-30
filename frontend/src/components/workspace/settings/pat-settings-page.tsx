@@ -302,7 +302,10 @@ export function PatSettingsPage() {
           }
         }}
       >
-        <DialogContent showCloseButton={created === null && !create.isPending}>
+        <DialogContent
+          showCloseButton={created === null && !create.isPending}
+          className="max-h-[85vh] overflow-y-auto"
+        >
           {created === null ? (
             <>
               <DialogHeader>
@@ -444,7 +447,7 @@ export function PatSettingsPage() {
           if (!open) setRevoking(null);
         }}
       >
-        <DialogContent>
+        <DialogContent className="max-h-[85vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t.settings.tokens.revokeTitle}</DialogTitle>
             <DialogDescription>
