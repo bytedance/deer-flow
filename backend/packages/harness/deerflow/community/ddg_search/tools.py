@@ -18,6 +18,8 @@ DEFAULT_SAFESEARCH = "moderate"
 DEFAULT_WIKIPEDIA_REGION = "us-en"
 
 WIKIPEDIA_BACKENDS = {"auto", "all", "wikipedia"}
+# ddgs 9.14.1: enabled text engines whose implementations honor ``timelimit``.
+# Google and Bing also implement it but are disabled upstream in this release.
 TIME_RANGE_CAPABLE_BACKENDS = ("brave", "duckduckgo", "yahoo")
 DEFAULT_TIME_RANGE_BACKEND = ",".join(TIME_RANGE_CAPABLE_BACKENDS)
 WIKIPEDIA_LANGUAGE_ALIASES = {

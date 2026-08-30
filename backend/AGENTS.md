@@ -285,6 +285,15 @@ When using `make dev` from root, the frontend automatically connects through ngi
 
 ## Key Features
 
+### Web Search Recency
+
+DDG, Brave, Tavily, and SearXNG `web_search` share optional
+`time_range=day|week|month|year`; omission preserves request shape. DDG maps to
+`d|w|m|y`, Brave to `pd|pw|pm|py`, and Tavily/SearXNG pass values unchanged.
+For recency, DDGS 9.14.1 uses only enabled Brave, DuckDuckGo, and Yahoo engines
+that honor `timelimit`: `auto`/`all` resolves to this set, incompatible configured
+engines are removed, and an empty set falls back to it. Re-check on DDGS upgrades.
+
 ### File Upload
 
 Multi-file upload with automatic document conversion:
