@@ -42,8 +42,6 @@ RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS = 30.0
 # durable write is best-effort, so eviction confirms these are present in the
 # store before dropping the record that may hold the only copy.
 _MESSAGE_SUMMARY_FIELDS = frozenset({"last_ai_message", "first_human_message"})
-# Mirrors the SQL store's write-side truncation (persistence/run/sql.py).
-_MESSAGE_SUMMARY_COMPARE_CHARS = 2000
 
 _COMPLETION_FIELDS = (
     "total_input_tokens",
@@ -2099,21 +2097,23 @@ class RunManager:
         """Completion values worth confirming in the store (``None`` skipped)."""
         return {key: getattr(record, key) for key in _COMPLETION_FIELDS if getattr(record, key) is not None}
 
-    @classmethod
-    def _completion_needs_repair(cls, row: dict[str, Any], record: RunRecord) -> bool:
+    def _completion_needs_repair(self, row: dict[str, Any], record: RunRecord) -> bool:
         """Does the durable row miss any completion value the record holds?
 
-        Values are compared in the canonical form a store row can hold: the
-        SQL store truncates message summaries to 2000 characters and stores
-        empty containers as absent keys, so a raw comparison would route
-        every long-message run through the repair path.
+        Message summaries are compared within the owning store's declared
+        preservation prefix (``RunStore.message_summary_max_chars``): a
+        truncating store can only hold that much, so a longer record value is
+        not a mismatch, while a full-preservation store (``None``) compares
+        whole values and detects any divergence. Other fields compare raw,
+        with empty containers treated as absent keys.
         """
-        for key, value in cls._completion_payload(record).items():
-            if key in _MESSAGE_SUMMARY_FIELDS and isinstance(value, str):
-                value = value[:_MESSAGE_SUMMARY_COMPARE_CHARS]
+        prefix = self._store.message_summary_max_chars if self._store is not None else None
+        for key, value in self._completion_payload(record).items():
+            if prefix is not None and key in _MESSAGE_SUMMARY_FIELDS and isinstance(value, str):
+                value = value[:prefix]
             row_value = row.get(key)
-            if key in _MESSAGE_SUMMARY_FIELDS and isinstance(row_value, str):
-                row_value = row_value[:_MESSAGE_SUMMARY_COMPARE_CHARS]
+            if prefix is not None and key in _MESSAGE_SUMMARY_FIELDS and isinstance(row_value, str):
+                row_value = row_value[:prefix]
             if row_value is None and not value:
                 continue
             if row_value != value:
@@ -2176,7 +2176,11 @@ class RunManager:
         # terminal outcome is the durable authority and makes the overlay
         # stale — drop it without republishing our snapshot. Anything else
         # stays unconfirmed and the bounded eviction retry re-runs the repair.
-        row = await self._call_store_with_retry("eviction recheck", run_id, lambda: self._store.get(run_id))
+        try:
+            row = await self._call_store_with_retry("eviction recheck", run_id, lambda: self._store.get(run_id))
+        except Exception:
+            logger.warning("Failed to re-read run %s after a refused completion repair", run_id, exc_info=True)
+            return False
         if row is not None and row.get("status") not in (RunStatus.pending.value, RunStatus.running.value, record.status.value):
             logger.warning("Run %s durably terminalized with a conflicting outcome during eviction repair; dropping the local snapshot", run_id)
             await self._remove_run_record(run_id, expected=record)

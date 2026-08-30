@@ -31,7 +31,16 @@ def _lease_expired_or_null(lease_col, cutoff: datetime):
     return or_(lease_col.is_(None), lease_col < cutoff)
 
 
+#: Write-side truncation for message-summary columns; the eviction
+#: durability comparison reads this through RunStore.message_summary_max_chars.
+MESSAGE_SUMMARY_MAX_CHARS = 2000
+
+
 class RunRepository(RunStore):
+    #: Declared to RunStore consumers so the eviction durability comparison
+    #: never expects more of a row than this store actually writes.
+    message_summary_max_chars = MESSAGE_SUMMARY_MAX_CHARS
+
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
 
@@ -362,9 +371,9 @@ class RunRepository(RunStore):
             "updated_at": datetime.now(UTC),
         }
         if last_ai_message is not None:
-            values["last_ai_message"] = last_ai_message[:2000]
+            values["last_ai_message"] = last_ai_message[:MESSAGE_SUMMARY_MAX_CHARS]
         if first_human_message is not None:
-            values["first_human_message"] = first_human_message[:2000]
+            values["first_human_message"] = first_human_message[:MESSAGE_SUMMARY_MAX_CHARS]
         if error is not None:
             values["error"] = error
         allowed_sources = ["pending", "running"]
@@ -418,9 +427,9 @@ class RunRepository(RunStore):
         if token_usage_by_model is not None:
             values["token_usage_by_model"] = self._safe_json(token_usage_by_model) or {}
         if last_ai_message is not None:
-            values["last_ai_message"] = last_ai_message[:2000]
+            values["last_ai_message"] = last_ai_message[:MESSAGE_SUMMARY_MAX_CHARS]
         if first_human_message is not None:
-            values["first_human_message"] = first_human_message[:2000]
+            values["first_human_message"] = first_human_message[:MESSAGE_SUMMARY_MAX_CHARS]
         async with self._sf() as session:
             await session.execute(update(RunRow).where(RunRow.run_id == run_id, RunRow.status == "running").values(**values))
             await session.commit()

@@ -395,9 +395,13 @@ async def test_eviction_retry_lifecycle_is_deduplicated_and_shutdown_fenced():
 
 @pytest.mark.anyio
 async def test_store_canonicalization_alone_does_not_trigger_repair():
-    """Rows differing only by the store's canonicalization — SQL-side message
-    truncation, empty containers stored as absent keys — are durable as-is;
-    only genuinely missing values take the repair path."""
+    """Rows differing only by the owning store's canonicalization — its
+    declared summary-prefix truncation, empty containers stored as absent
+    keys — are durable as-is; only genuinely missing values repair."""
+
+    class _TruncatingStore(MemoryRunStore):
+        message_summary_max_chars = 2000
+
     store = MemoryRunStore()
     run_manager = RunManager(store=store)
     record = await run_manager.create("thread-1")
@@ -407,14 +411,18 @@ async def test_store_canonicalization_alone_does_not_trigger_repair():
     full_row = {"last_ai_message": "x" * 3000, "token_usage_by_model": {}}
     assert run_manager._completion_needs_repair(full_row, record) is False
 
-    # SQL-canonicalized row: summaries truncated to the write-side limit and
-    # the empty usage dict stored as an absent key.
-    canonical = {"last_ai_message": "x" * 2000}
-    assert run_manager._completion_needs_repair(canonical, record) is False
+    # A full-preservation store detects the truncated row as a divergence.
+    truncated_row = {"last_ai_message": "x" * 2000}
+    assert run_manager._completion_needs_repair(truncated_row, record) is True
+
+    # A store declaring the truncation sees its own canonicalized row — with
+    # the empty usage dict stored as an absent key — as durable.
+    truncating = RunManager(store=_TruncatingStore())
+    assert truncating._completion_needs_repair(truncated_row, record) is False
 
     # A genuinely missing completion value still reports repair.
     record.total_tokens = 5
-    assert run_manager._completion_needs_repair(canonical, record) is True
+    assert truncating._completion_needs_repair(truncated_row, record) is True
 
 
 @pytest.mark.anyio
@@ -601,3 +609,61 @@ async def test_eviction_detects_peer_takeover_between_read_and_repair():
     row = await store.get(record.run_id)
     assert row["status"] == "error"
     assert row.get("total_tokens") is None
+
+
+@pytest.mark.anyio
+async def test_full_preservation_store_detects_summary_divergence_beyond_shared_prefix():
+    """MemoryRunStore stores summaries in full: an older durable summary that
+    shares the record's first 2000 characters is still a mismatch (a global
+    SQL-style prefix comparison would miss the suffix and drop it)."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    shared = "A" * 2500
+    record.last_ai_message = f"{shared}-record"
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    # The durable row is terminal but carries the older summary.
+    row = await store.get(record.run_id)
+    row["status"] = RunStatus.success.value
+    row["last_ai_message"] = f"{shared}-store"
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) is True
+
+    row = await store.get(record.run_id)
+    assert row["last_ai_message"] == f"{shared}-record"
+    assert record.run_id not in run_manager._runs
+
+
+class _FailingRereadStore(_CompletionRefusingStore):
+    """The final re-read after a refused completion repair fails."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._reads = 0
+
+    async def get(self, run_id, *, user_id=None):
+        self._reads += 1
+        if self._reads >= 3:
+            raise OSError("store unavailable")
+        return await super().get(run_id, user_id=user_id)
+
+
+@pytest.mark.anyio
+async def test_failed_reread_after_refused_completion_repair_stays_in_retry_lifecycle():
+    """A refused completion repair followed by a failing re-read falls back
+    into the bounded retry lifecycle instead of escaping ``evict_finished_run``
+    and stranding the record with neither a retry task nor a stalled marker."""
+    store = _FailingRereadStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    store.refuse_completion = True
+
+    await run_manager.evict_finished_run(record.run_id)
+
+    assert record.run_id in run_manager._runs
+    assert record.run_id in run_manager._eviction_retry_tasks
+    assert record.run_id not in run_manager._stalled_evictions
+    # Clean up the sleeping retry so the test loop does not outlive it.
+    await run_manager.shutdown(timeout=1)

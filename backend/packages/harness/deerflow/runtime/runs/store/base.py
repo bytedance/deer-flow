@@ -50,6 +50,13 @@ class RunIdempotencyConflict(RuntimeError):
 
 
 class RunStore(abc.ABC):
+    #: Maximum characters of a message-summary field (``last_ai_message``,
+    #: ``first_human_message``) this store persists verbatim; ``None`` means
+    #: summaries are stored in full. Consumers comparing a record against a
+    #: row must honor this contract: within the prefix values are exact,
+    #: beyond it the store guarantees nothing.
+    message_summary_max_chars: int | None = None
+
     @abc.abstractmethod
     async def put(
         self,
