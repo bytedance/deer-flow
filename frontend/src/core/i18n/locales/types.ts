@@ -839,6 +839,7 @@ export interface Translations {
       emptyTitle: string;
       emptyDescription: string;
       revokedBadge: string;
+      expiredBadge: string;
       neverExpires: string;
       expires: string;
       created: string;

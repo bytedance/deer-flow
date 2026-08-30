@@ -42,7 +42,7 @@ import {
   useRevokePat,
 } from "@/core/pats";
 import { PAT_SCOPES, type PatCreated, type PatSummary } from "@/core/pats";
-import { formatTimeAgo } from "@/core/utils/datetime";
+import { formatDate, formatTimeAgo } from "@/core/utils/datetime";
 
 import { SettingsSection } from "./settings-section";
 
@@ -60,11 +60,17 @@ const DEFAULT_SCOPES = new Set<string>([
   "runs:read",
 ]);
 
+// The repository lists every row regardless of expiry (only credential
+// validation drops expired tokens), so the UI must flag them itself.
+function isExpired(pat: PatSummary): boolean {
+  if (pat.expires_at === null) return false;
+  const parsed = new Date(pat.expires_at);
+  return !Number.isNaN(parsed.getTime()) && parsed.getTime() <= Date.now();
+}
+
 function formatExpiry(pat: PatSummary): string {
   if (pat.expires_at === null) return "";
-  const parsed = new Date(pat.expires_at);
-  if (Number.isNaN(parsed.getTime())) return "";
-  return parsed.toLocaleDateString();
+  return formatDate(pat.expires_at);
 }
 
 export function PatSettingsPage() {
@@ -223,6 +229,10 @@ export function PatSettingsPage() {
                     <Badge variant="secondary">
                       {t.settings.tokens.revokedBadge}
                     </Badge>
+                  ) : isExpired(pat) ? (
+                    <Badge variant="outline">
+                      {t.settings.tokens.expiredBadge}
+                    </Badge>
                   ) : null}
                 </ItemTitle>
                 {/* Metadata and scopes as siblings (not inside
@@ -274,7 +284,10 @@ export function PatSettingsPage() {
         </div>
       )}
 
-      {!storeUnavailable && !error ? (
+      {/* A transient list error (retries exhausted, 5xx, network) hides the
+          list, not the create affordance — creation hits the same store and
+          may well succeed; only the memory-backend 503 means it cannot. */}
+      {!storeUnavailable ? (
         <div className="mt-4">
           <Button
             variant="outline"
@@ -343,6 +356,22 @@ export function PatSettingsPage() {
                       <label
                         key={scope}
                         className="hover:bg-accent/50 flex cursor-pointer items-start justify-between gap-3 rounded-md border p-2"
+                        // Safari/WebKit never implemented label->button click
+                        // forwarding, so the text would be a dead click target
+                        // there. Toggle explicitly and preventDefault so
+                        // engines that DO forward don't fire it twice; clicks
+                        // on the switch itself pass through untouched.
+                        onClick={(event) => {
+                          if (
+                            (event.target as HTMLElement).closest(
+                              "[role=switch]",
+                            )
+                          ) {
+                            return;
+                          }
+                          event.preventDefault();
+                          toggleScope(scope, !scopes.has(scope));
+                        }}
                       >
                         <span className="space-y-0.5">
                           <span className="text-sm font-medium">

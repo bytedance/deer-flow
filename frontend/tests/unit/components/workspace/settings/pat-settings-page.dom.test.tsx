@@ -88,6 +88,7 @@ rs.mock("@/core/i18n/hooks", () => ({
           emptyTitle: "No API tokens yet",
           emptyDescription: "Create one for scripts or CI.",
           revokedBadge: "Revoked",
+          expiredBadge: "Expired",
           neverExpires: "Never expires",
           expires: "Expires",
           created: "Created",
@@ -267,16 +268,14 @@ describe("PatSettingsPage", () => {
     renderWithQueryClient(<PatSettingsPage />);
     fireEvent.click(screen.getByText("Create token"));
 
-    // Label-text click forwarding is browser activation behavior that
-    // happy-dom does not implement, so drive the switches through their
-    // aria-labels instead; turning off the three default-on scopes must
-    // disable submit (the other three start off — clicking them would
-    // re-enable it).
+    // The label toggles explicitly (Safari never implemented label->button
+    // forwarding), so text clicks work everywhere: turning off the three
+    // default-on scopes by clicking their names must disable submit.
     fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
       target: { value: "ci" },
     });
     for (const name of ["Read threads", "Start runs", "Read runs"]) {
-      fireEvent.click(screen.getByRole("switch", { name }));
+      fireEvent.click(screen.getByText(name));
     }
 
     const createButton = screen
@@ -285,5 +284,33 @@ describe("PatSettingsPage", () => {
     expect(
       (createButton as HTMLButtonElement).closest("button")?.disabled,
     ).toBe(true);
+  });
+  it("flags expired tokens and keeps create available on a transient list error", () => {
+    patsMockState.pats = [
+      {
+        id: "pat-1",
+        name: "old-ci",
+        scopes: ["threads:read"],
+        expires_at: "2020-01-01T00:00:00+00:00",
+        last_used_at: null,
+        created_at: "2019-01-01T00:00:00+00:00",
+        revoked_at: null,
+      },
+    ];
+    renderWithQueryClient(<PatSettingsPage />);
+
+    // Expired (but not revoked) tokens carry the Expired badge.
+    expect(screen.getByText("Expired")).toBeDefined();
+    expect(screen.queryByText("Revoked")).toBeNull();
+
+    // A non-503 list error shows the error line but keeps the create
+    // affordance — only the memory-backend 503 removes it.
+    patsMockState.pats = [];
+    patsMockState.error = new Error("boom");
+    cleanup();
+    renderWithQueryClient(<PatSettingsPage />);
+    expect(screen.getByText("boom")).toBeDefined();
+    expect(screen.getByText("Create token")).toBeDefined();
+    cleanup();
   });
 });

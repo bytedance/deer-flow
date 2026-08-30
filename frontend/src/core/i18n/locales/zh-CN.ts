@@ -962,6 +962,7 @@ export const zhCN: Translations = {
       emptyDescription:
         "创建一个令牌，让脚本或 CI 以你的身份调用 DeerFlow API。",
       revokedBadge: "已撤销",
+      expiredBadge: "已过期",
       neverExpires: "永不过期",
       expires: "过期于",
       created: "创建于",

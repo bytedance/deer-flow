@@ -1000,6 +1000,7 @@ export const enUS: Translations = {
       emptyDescription:
         "Create a token to let scripts or CI call the DeerFlow API on your behalf.",
       revokedBadge: "Revoked",
+      expiredBadge: "Expired",
       neverExpires: "Never expires",
       expires: "Expires",
       created: "Created",
