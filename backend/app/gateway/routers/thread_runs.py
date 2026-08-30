@@ -23,7 +23,7 @@ from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -202,6 +202,20 @@ class ThreadTokenUsageResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def require_cancel_permission_when_action(request: Request, action: str | None) -> None:
+    """Conditionally require ``runs:cancel`` for cancel-then-stream requests.
+
+    ``stream_existing_run`` is gated at ``runs:read`` so action-less stream
+    joins keep working with read-only credentials, but its ``action`` branch
+    cancels the run — a separate permission. A read-only PAT (or any read-only
+    credential) must not reach the cancel path, and decorators cannot express
+    query-parameter-conditional permissions, so the check lives here. See
+    ``authz.require_cancel_permission_if`` — the shared primitive for every
+    request dimension that carries cancel capability.
+    """
+    require_cancel_permission_if(request, action is not None)
 
 
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
@@ -993,7 +1007,9 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        # Joins are read-only observation: the creator's cancel-on-disconnect
+        # policy must not fire because an observer closed their connection.
+        sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1024,6 +1040,8 @@ async def stream_existing_run(
     is present the run is cancelled first; the response then streams any
     remaining buffered events so the client observes a clean shutdown.
     """
+    require_cancel_permission_when_action(request, action)
+
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1066,7 +1084,12 @@ async def stream_existing_run(
             return Response(status_code=204 if completed else 202)
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        # Both methods of this handler are join surfaces: a POST carrying an
+        # action cancels explicitly above (already gated by
+        # require_cancel_permission_when_action), and an action-less join is
+        # read-only observation — the creator's cancel-on-disconnect policy
+        # must not fire because a joiner closed their connection.
+        sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

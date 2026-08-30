@@ -7,7 +7,7 @@ from deerflow_extension_api import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPr
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, warn_if_auth_disabled_enabled
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, warn_if_auth_disabled_enabled
 from app.gateway.auth_middleware import AuthMiddleware
 from app.gateway.browser_capability import ensure_browser_runtime_available
 from app.gateway.config import get_gateway_config
@@ -695,15 +695,23 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         if user is None:
             return None
         system_role = getattr(user, "system_role", None)
+        # PAT credentials never carry admin capability (#5041): suppress every
+        # admin signal — both ``is_admin`` and the ``admin`` role — so an
+        # admin-owned PAT cannot regain admin through extension-side
+        # require_admin, mirroring deps.is_admin_user's PAT guard.
+        auth_source = getattr(request.state, "auth_source", None)
+        is_pat = auth_source == AUTH_SOURCE_PAT
+        is_admin = system_role == "admin" and not is_pat
+        roles = () if is_pat and system_role == "admin" else (system_role,) if isinstance(system_role, str) and system_role else ()
         return ExtensionPrincipal(
             user_id=str(user.id),
-            is_admin=system_role == "admin",
-            is_internal=getattr(request.state, "auth_source", None) == AUTH_SOURCE_INTERNAL,
+            is_admin=is_admin,
+            is_internal=auth_source == AUTH_SOURCE_INTERNAL,
             # The host's only role concept is the single system_role column
             # (e.g. "admin", "user") — there is no multi-role system to
             # project, so a set role becomes the one-element tuple rather
             # than reading a "roles" attribute the user model never had.
-            roles=(system_role,) if isinstance(system_role, str) and system_role else (),
+            roles=roles,
         )
 
     setattr(app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, _resolve_extension_principal)

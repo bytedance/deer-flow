@@ -102,6 +102,8 @@ export interface Translations {
     loadFullFile: string;
     loadingFullFile: string;
     previewFailed: string;
+    viewSource: string;
+    missingTarget: string;
   };
 
   // Citations
@@ -517,6 +519,8 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    outlineLabel: string;
+    outlineAttachmentFallback: string;
   };
 
   // Chats

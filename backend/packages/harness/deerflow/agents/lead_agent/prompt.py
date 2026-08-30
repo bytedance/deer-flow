@@ -366,6 +366,29 @@ def _build_subagent_section(
         return ""
     bash_available = "bash" in available_names
 
+    # The verification guidance must follow verification.receipts_enabled: with
+    # receipts disabled, subagent reports carry no receipt citations and the
+    # delegation ledger has no citation line, so telling the lead to expect one
+    # would make legitimate results look uncorroborated.
+    verification_cfg = getattr(app_config, "verification", None) if app_config is not None else None
+    receipts_enabled = getattr(verification_cfg, "receipts_enabled", True)
+    if receipts_enabled:
+        single_verify_step = (
+            "6. Verify the result before synthesizing: the delegation ledger's citation line is execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."
+        )
+        parallel_verify_step = "6. Verify returned results: ledger citation lines are execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."
+    else:
+        single_verify_step = (
+            "6. Verify the result before synthesizing: receipt citations are disabled in this configuration "
+            "(verification.receipts_enabled=false), so reports carry no ledger citation line; rely on verifiable "
+            "handles and spot-check them for load-bearing claims."
+        )
+        parallel_verify_step = (
+            "6. Verify returned results: receipt citations are disabled in this configuration "
+            "(verification.receipts_enabled=false), so reports carry no ledger citation lines; rely on verifiable "
+            "handles and spot-check them for load-bearing claims."
+        )
+
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
     available_subagents = _build_available_subagents_description(available_names, bash_available, app_config=app_config)
@@ -384,12 +407,12 @@ def _build_subagent_section(
 With a per-response limit of 1, delegate only for material specialist or context-isolation benefit. Parallel dispatch cannot reduce wall-clock latency in this configuration."""
         limit_action_guidance = """- When the per-response limit is reached, verify and synthesize the returned result or continue directly."""
         followup_guidance = """- After any delegated result, re-evaluate whether the remaining work still has specialist or context-isolation benefit. Do not chain delegations merely to work around the per-response limit."""
-        workflow = """1. Establish the cheapest credible direct-execution path.
+        workflow = f"""1. Establish the cheapest credible direct-execution path.
 2. Include all negative signals in expected cost.
 3. Compare specialist or context-isolation benefit with all listed costs.
-4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch at most 1 call and stay within the remaining run allowance.
-6. Verify and synthesize the returned result against primary evidence."""
+{single_verify_step}"""
         examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
 - Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
@@ -416,9 +439,10 @@ A single subagent is justified only by material specialist or context-isolation 
         workflow = f"""1. Establish the cheapest credible direct-execution path.
 2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
 3. Compare expected benefit with all listed costs.
-4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
-6. Verify and synthesize returned results. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
+{parallel_verify_step}
+7. Synthesize. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
         examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
