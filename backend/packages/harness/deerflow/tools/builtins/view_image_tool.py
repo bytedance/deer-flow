@@ -74,7 +74,7 @@ def view_image_tool(
     Args:
         image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp, gif.
     """
-    from deerflow.sandbox.exceptions import SandboxRuntimeError
+    from deerflow.sandbox.exceptions import SandboxError
     from deerflow.sandbox.tools import (
         ensure_sandbox_initialized,
         get_thread_data,
@@ -104,14 +104,16 @@ def view_image_tool(
     try:
         validate_local_tool_path(image_path, thread_data, read_only=True)
         if local_runtime:
-            sandbox = ensure_sandbox_initialized(runtime)
-        if local_runtime and _is_allowed_image_virtual_path(image_path, allow_custom_mount=True):
             from deerflow.sandbox.tools import _is_custom_mount_path
 
-            actual_path = sandbox._resolve_path(image_path) if _is_custom_mount_path(image_path) else resolve_and_validate_user_data_path(image_path, thread_data)
+            if _is_custom_mount_path(image_path):
+                sandbox = ensure_sandbox_initialized(runtime)
+                actual_path = sandbox._resolve_path(image_path)
+            else:
+                actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
         else:
             actual_path = resolve_and_validate_user_data_path(image_path, thread_data)
-    except (PermissionError, SandboxRuntimeError) as e:
+    except (PermissionError, SandboxError) as e:
         return Command(
             update={"messages": [ToolMessage(f"Error: {str(e)}", tool_call_id=tool_call_id)]},
         )

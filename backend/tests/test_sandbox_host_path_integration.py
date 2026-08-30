@@ -6,12 +6,14 @@ from unittest.mock import patch
 import pytest
 
 from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
+from deerflow.sandbox.exceptions import SandboxNotFoundError
 from deerflow.sandbox.tools import (
     bash_tool,
     grep_tool,
     read_file_tool,
     validate_local_tool_path,
 )
+from deerflow.tools.builtins.run_host_program_tool import run_host_program_tool
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
 _THREAD_DATA = {
@@ -178,6 +180,119 @@ def test_view_image_tool_reads_image_from_custom_mount(tmp_path) -> None:
 
     assert _message_content(result) == "Successfully read image"
     assert result.update["viewed_images"]["/root/chart.png"]["actual_path"] == str(image_path)
+
+
+def test_view_image_user_data_does_not_acquire_sandbox() -> None:
+    runtime = _runtime()
+    with (
+        patch("deerflow.sandbox.tools.get_thread_data", return_value=_THREAD_DATA),
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch("deerflow.sandbox.tools.normalize_local_tool_path", return_value="/mnt/user-data/uploads/chart.png"),
+        patch("deerflow.sandbox.tools.validate_local_tool_path"),
+        patch("deerflow.sandbox.tools.resolve_and_validate_user_data_path", return_value=r"C:\Users\lichen\chart.png"),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized") as acquire,
+        patch("deerflow.tools.builtins.view_image_tool.Path.exists", return_value=False),
+    ):
+        view_image_tool.func(runtime, r"C:\Users\lichen\chart.png", "call-user-data")
+
+    acquire.assert_not_called()
+
+
+def test_view_image_custom_mount_converts_acquisition_error_to_tool_message() -> None:
+    runtime = _runtime()
+    with (
+        patch("deerflow.sandbox.tools.get_thread_data", return_value=_THREAD_DATA),
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch("deerflow.sandbox.tools.normalize_local_tool_path", return_value="/root/chart.png"),
+        patch("deerflow.sandbox.tools._is_custom_mount_path", return_value=True),
+        patch("deerflow.sandbox.tools.validate_local_tool_path"),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized", side_effect=SandboxNotFoundError()),
+    ):
+        result = view_image_tool.func(runtime, r"C:\Users\lichen\chart.png", "call-custom-error")
+
+    assert _message_content(result) == "Error: Sandbox not found"
+
+
+def test_run_host_program_clamps_model_timeout_to_sandbox_limit() -> None:
+    calls: list[float | None] = []
+
+    class FakeSandbox:
+        id = "local"
+
+        def execute_program(self, program_path, args, *, cwd=None, env=None, timeout=None):
+            calls.append(timeout)
+            return "ok"
+
+    runtime = _runtime()
+    config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+            mounts=_MOUNTS,
+            bash_command_timeout=12,
+        )
+    )
+    with (
+        patch("deerflow.tools.builtins.run_host_program_tool.os.name", "nt"),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=FakeSandbox()),
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
+        patch("deerflow.config.get_app_config", return_value=config),
+    ):
+        result = run_host_program_tool.func(
+            runtime,
+            "运行程序",
+            r"C:\Users\lichen\tools\build.exe",
+            [],
+            None,
+            99,
+        )
+
+    assert result == "ok"
+    assert calls == [12]
+
+
+@pytest.mark.parametrize("timeout", [0, -1])
+def test_run_host_program_rejects_non_positive_timeout(timeout: float) -> None:
+    calls = 0
+
+    class FakeSandbox:
+        id = "local"
+
+        def execute_program(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return "ok"
+
+    runtime = _runtime()
+    config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+            mounts=_MOUNTS,
+            bash_command_timeout=12,
+        )
+    )
+    with (
+        patch("deerflow.tools.builtins.run_host_program_tool.os.name", "nt"),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=FakeSandbox()),
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
+        patch("deerflow.config.get_app_config", return_value=config),
+    ):
+        result = run_host_program_tool.func(
+            runtime,
+            "运行程序",
+            r"C:\Users\lichen\tools\build.exe",
+            [],
+            None,
+            timeout,
+        )
+
+    assert "timeout must be positive" in result
+    assert calls == 0
 
 
 @pytest.mark.parametrize("path", [r"C:\Users\other\secret.txt", r"D:\Users\lichen\secret.txt"])

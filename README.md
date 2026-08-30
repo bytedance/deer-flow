@@ -1250,8 +1250,12 @@ authorizes the path under the configured mount and translates it to `/root`.
 Unconfigured host paths remain denied. When `allow_host_bash: true`, trusted
 Windows LocalSandbox deployments additionally expose `run_host_program` for
 `.exe`, `.cmd`/`.bat`, and `.ps1` programs without changing those programs or
-their configuration files. This runs code on the Gateway host and is not a
-security boundary; remote/container sandbox providers do not expose it.
+their configuration files. A requested timeout must be positive and is capped
+by `sandbox.bash_command_timeout` (600 seconds by default). This runs code on
+the Gateway host and is not a security boundary; remote/container sandbox
+providers do not expose it. Keep mount `container_path` values POSIX-style;
+drive-shaped values such as `/c/projects` are rejected during configuration
+validation.
 
 `AioSandboxProvider` normally detects thread-data mounts from its backend: local
 containers use the mounted gateway directories, while remote/provisioner

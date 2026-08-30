@@ -679,6 +679,10 @@ LocalSandbox 还会提供 `run_host_program`，用于运行 `.exe`、`.cmd`/`.ba
 `.ps1`，但这些程序实际运行在 Gateway 主机上，不具备容器隔离能力；AIO
 或其他远程沙盒不会提供该工具。
 
+`run_host_program` 的超时必须为正数，并且不会超过
+`sandbox.bash_command_timeout`（默认 600 秒）。挂载的 `container_path` 必须
+保持为 POSIX 虚拟路径；像 `/c/projects` 这样的盘符形式会在配置校验阶段被拒绝。
+
 ### Context Engineering
 
 **隔离的 Sub-Agent Context**：每个 sub-agent 都在自己独立的上下文里运行。它看不到主 agent 的上下文，也看不到其他 sub-agents 的上下文。这样做的目的很直接，就是让它只聚焦当前任务，不被无关信息干扰。

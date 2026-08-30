@@ -1,6 +1,7 @@
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -66,6 +67,14 @@ class VolumeMountConfig(BaseModel):
     )
     container_path: str = Field(..., description="Path inside the container")
     read_only: bool = Field(default=False, description="Whether the mount is read-only")
+
+    @field_validator("container_path")
+    @classmethod
+    def _reject_drive_shaped_container_path(cls, value: str) -> str:
+        normalized = value.replace("\\", "/")
+        if re.match(r"^(?:[A-Za-z]:/|/[A-Za-z](?:/|$))", normalized):
+            raise ValueError("container_path must be a POSIX virtual path, not a drive-shaped host path")
+        return value
 
 
 class SandboxConfig(BaseModel):

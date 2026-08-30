@@ -79,6 +79,25 @@ def test_build_custom_mounts_section_explains_windows_host_path_aliases(monkeypa
     assert r"C:\Users\lichen" not in section
 
 
+def test_build_custom_mounts_section_emits_host_program_guidance_once(monkeypatch):
+    mounts = [
+        SimpleNamespace(container_path="/root", host_path=r"C:\Users\lichen", read_only=False),
+        SimpleNamespace(container_path="/tools", host_path=r"D:\Tools", read_only=True),
+    ]
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            mounts=mounts,
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+        )
+    )
+    monkeypatch.setattr(prompt_module.os, "name", "nt")
+
+    section = prompt_module._build_custom_mounts_section(app_config=config)
+
+    assert section.count("Use `run_host_program`") == 1
+
+
 def test_build_custom_mounts_section_uses_explicit_app_config_without_global_read(monkeypatch):
     mounts = [SimpleNamespace(container_path="/home/user/shared", read_only=False)]
     config = SimpleNamespace(sandbox=SimpleNamespace(mounts=mounts))

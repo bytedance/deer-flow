@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from deerflow.config.sandbox_config import VolumeMountConfig
 from deerflow.sandbox.host_path_compat import normalize_host_path, replace_host_paths_in_command
@@ -108,3 +109,12 @@ def test_replace_host_paths_in_command_rejects_unconfigured_host_paths(
 ) -> None:
     with pytest.raises(PermissionError):
         replace_host_paths_in_command(r'echo "C:\Users\lichen2\secret.txt"', mounts)
+
+
+def test_volume_mount_rejects_drive_shaped_container_path() -> None:
+    with pytest.raises(ValidationError, match="drive-shaped"):
+        VolumeMountConfig(
+            host_path="C:/Users/lichen",
+            container_path="/c/projects",
+            read_only=False,
+        )

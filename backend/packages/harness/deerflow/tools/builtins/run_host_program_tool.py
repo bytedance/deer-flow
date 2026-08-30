@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 
 from langchain.tools import tool
@@ -25,6 +26,22 @@ def _normalize_program_argument(value: str) -> str:
 
         return normalize_local_tool_path(value)
     return value
+
+
+def _resolve_program_timeout(requested: float | None, configured: object) -> float:
+    from deerflow.sandbox.local.local_sandbox import DEFAULT_COMMAND_TIMEOUT_SECONDS
+
+    try:
+        configured_timeout = float(configured)
+    except (TypeError, ValueError):
+        configured_timeout = float(DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    if not math.isfinite(configured_timeout) or configured_timeout <= 0:
+        configured_timeout = float(DEFAULT_COMMAND_TIMEOUT_SECONDS)
+    if requested is None:
+        return configured_timeout
+    if not math.isfinite(requested) or requested <= 0:
+        raise ValueError("timeout must be positive and finite")
+    return min(float(requested), configured_timeout)
 
 
 @tool("run_host_program", parse_docstring=True)
@@ -75,12 +92,6 @@ def run_host_program_tool(
         if runtime.state is None or get_thread_data(runtime) is None:
             return "Error: Thread data is not available"
 
-        sandbox = ensure_sandbox_initialized(runtime)
-        if not is_local_sandbox(runtime):
-            return "Error: run_host_program requires LocalSandboxProvider"
-        if not hasattr(sandbox, "execute_program"):
-            return "Error: LocalSandboxProvider does not support native program execution"
-
         normalized_program = normalize_local_tool_path(program_path)
         normalized_args = [_normalize_program_argument(value) for value in (args or [])]
         normalized_cwd = normalize_local_tool_path(cwd) if cwd else None
@@ -93,6 +104,15 @@ def run_host_program_tool(
         if normalized_cwd:
             validate_local_tool_path(normalized_cwd, thread_data, read_only=True)
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
+        sandbox_config = get_app_config().sandbox
+        timeout = _resolve_program_timeout(timeout, getattr(sandbox_config, "bash_command_timeout", None))
+
+        sandbox = ensure_sandbox_initialized(runtime)
+        if not is_local_sandbox(runtime):
+            return "Error: run_host_program requires LocalSandboxProvider"
+        if not hasattr(sandbox, "execute_program"):
+            return "Error: LocalSandboxProvider does not support native program execution"
+
         output = sandbox.execute_program(
             normalized_program,
             normalized_args,
@@ -100,13 +120,14 @@ def run_host_program_tool(
             env=injected_env,
             timeout=timeout,
         )
-        sandbox_config = get_app_config().sandbox
         max_chars = sandbox_config.bash_output_max_chars if sandbox_config else 20000
         return _truncate_bash_output(mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env), max_chars)
     except PermissionError as exc:
         return f"Error: Permission denied: {exc}"
     except FileNotFoundError:
         return f"Error: Program not found: {program_path}"
+    except ValueError as exc:
+        return f"Error: {exc}"
     except Exception as exc:
         return f"Error: Unexpected error running program: {type(exc).__name__}: {exc}"
 

@@ -1009,13 +1009,15 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
 
     lines = []
     host_path_notes = []
+    trusted_local_windows = os.name == "nt" and "LocalSandboxProvider" in str(getattr(config.sandbox, "use", ""))
     for mount in mounts:
         access = "read-only" if mount.read_only else "read-write"
-        lines.append(f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})")
-        if os.name == "nt" and "LocalSandboxProvider" in str(getattr(config.sandbox, "use", "")):
-            host_path_notes.append(f"- In trusted local Windows mode, a host path supplied by the user is accepted when it falls inside this mount and is translated to `{mount.container_path}` automatically")
-            if getattr(config.sandbox, "allow_host_bash", False):
-                host_path_notes.append("- Use `run_host_program` for `.exe`, `.cmd`, `.bat`, or `.ps1` files; it preserves Windows-native argument handling")
+        mount_line = f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})"
+        if trusted_local_windows:
+            mount_line += f" - A host path supplied by the user is accepted when it falls inside this mount and translated to `{mount.container_path}` automatically"
+        lines.append(mount_line)
+    if trusted_local_windows and getattr(config.sandbox, "allow_host_bash", False):
+        host_path_notes.append("- Use `run_host_program` for `.exe`, `.cmd`, `.bat`, or `.ps1` files; it preserves Windows-native argument handling")
 
     mounts_list = "\n".join(lines)
     notes = "\n".join(host_path_notes)
