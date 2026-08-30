@@ -596,6 +596,8 @@ class SubagentExecutor:
                 "oauth_id": self.oauth_id,
                 "is_internal": self.is_internal,
                 "authz_attributes": dict(self.authz_attributes),
+                "user_id": self.user_id,
+                "channel_user_id": self.channel_user_id,
             }
             self.model_name = _authorize_model_name(
                 self.model_name,
@@ -603,7 +605,21 @@ class SubagentExecutor:
                 app_config=app_config,
             )
 
-        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
+        # P1/P2 fix: pass thinking_enabled and reasoning_effort from subagent config
+        # so subagents inherit the same model-behavior settings as their lead persona
+        model_kwargs: dict[str, Any] = {}
+        if self.config.thinking_enabled is not None:
+            model_kwargs["thinking_enabled"] = self.config.thinking_enabled
+        if self.config.reasoning_effort is not None:
+            model_kwargs["reasoning_effort"] = self.config.reasoning_effort
+
+        model = create_chat_model(
+            name=self.model_name,
+            thinking_enabled=self.config.thinking_enabled or False,
+            app_config=app_config,
+            attach_tracing=False,
+            **model_kwargs,
+        )
 
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
