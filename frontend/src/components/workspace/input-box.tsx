@@ -133,6 +133,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ComposerSkillPicker } from "./composer-skill-picker";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -2310,6 +2311,17 @@ export function InputBox({
               className="px-2!"
               disabled={composerLocked}
               uploadLimits={uploadLimits}
+            />
+            <ComposerSkillPicker
+              skills={skills}
+              disabled={composerLocked}
+              onPick={(skill) =>
+                applySkillSuggestion({
+                  name: skill.name,
+                  description: skill.description,
+                  kind: "skill",
+                })
+              }
             />
             <VoiceInputButton
               disabled={composerLocked}

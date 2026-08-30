@@ -166,6 +166,10 @@ export const enUS: Translations = {
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
+    skillPickerLabel: "Skills",
+    skillPickerSearch: "Search skills...",
+    skillPickerEmpty: "No matching skills.",
+    skillPickerGroup: "Skills",
     inputPolish: "Polish input",
     inputPolishing: "Polishing input...",
     inputPolishNoChanges: "This input is already clear.",

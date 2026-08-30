@@ -161,6 +161,15 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
   return query;
 }
 
+// The full list the composer's skill picker offers: every enabled skill that
+// is not shadowed by a reserved slash name. Unlike getMatchingSkillSuggestions
+// this is the unqueried catalog — cmdk does the filtering inside the picker.
+export function getSelectableSkills(skills: Skill[]): Skill[] {
+  return skills.filter(
+    (skill) => skill.enabled && !RESERVED_SLASH_SKILL_NAMES.has(skill.name),
+  );
+}
+
 export function getMatchingSkillSuggestions(
   skills: Skill[],
   query: string,
