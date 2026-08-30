@@ -1017,7 +1017,7 @@ def test_sandbox_id_matches_shared_identity():
     assert TenkiSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
 
 
-def test_search_preserves_trailing_space_in_filename() -> None:
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
     # "notes.txt " (trailing space) is a legal Linux filename; find prints it
     # verbatim, one entry per line, so a per-line strip() corrupts the name.
     box = TenkiSandbox("sb", _FakeSandbox())
