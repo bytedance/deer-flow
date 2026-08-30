@@ -23,6 +23,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+from app.gateway.authz import require_cancel_permission_if
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -1215,6 +1216,15 @@ async def start_run(
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
     """
+    # Cancel-capability gate. interrupt/rollback strategies terminate an already
+    # active run — runs:cancel capability, not runs:create — so a create-only
+    # PAT must not reach them. Enforced here, the single choke point every
+    # run-creation path flows through (HTTP routes and internal launchers
+    # alike), so no entry point can bypass it; regenerate launches pass
+    # multitask_strategy="reject" and are unaffected. Requests without a
+    # stamped auth context (internal/test compositions) skip the gate.
+    require_cancel_permission_if(request, body.multitask_strategy != "reject")
+
     try:
         validate_thread_id(thread_id)
     except ValueError as exc:
@@ -1610,12 +1620,22 @@ async def sse_consumer(
     record: RunRecord,
     request: Request,
     run_mgr: RunManager,
+    *,
+    apply_on_disconnect: bool = True,
 ):
     """Async generator that yields SSE frames from the bridge.
 
-    The ``finally`` block implements ``on_disconnect`` semantics:
+    The ``finally`` block implements ``on_disconnect`` semantics, but only for
+    the stream returned by the *creating* endpoint (``apply_on_disconnect=True``):
+
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
+
+    Join/observer streams pass ``apply_on_disconnect=False``: the creator's
+    cancel-on-disconnect policy expresses the creator's intent for their own
+    connection, and a read-only observer closing a join must not cancel the
+    run (a runs:read-only credential would otherwise cancel without
+    runs:cancel just by disconnecting).
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
@@ -1660,8 +1680,9 @@ async def sse_consumer(
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
-        # cancellation request. Only apply on_disconnect to locally-owned runs.
-        if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        # cancellation request. Only apply on_disconnect to locally-owned runs,
+        # and only on the creator's own stream — never on an observer join.
+        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -1673,6 +1694,12 @@ async def wait_for_run_completion(
     run_mgr: RunManager,
 ) -> bool:
     """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
+
+    Creator-side only, unlike ``sse_consumer``'s observer joins: every caller
+    must be the endpoint that created the run or a path reached only after an
+    explicit, permission-gated cancel. This helper intentionally keeps
+    applying the record's ``on_disconnect`` policy on disconnect — do not
+    wire it to observer surfaces.
 
     The non-streaming ``/wait`` endpoints used to ``await record.task``
     directly with no disconnect handling.  When the client (or an

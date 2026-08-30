@@ -13,7 +13,6 @@ The provider itself handles:
 import asyncio
 import atexit
 import contextlib
-import hashlib
 import logging
 import os
 import signal
@@ -21,7 +20,6 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 
 try:
     import fcntl
@@ -42,6 +40,8 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -67,9 +67,6 @@ DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in
 DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
-THREAD_LOCK_EXECUTOR_WORKERS = min(32, (os.cpu_count() or 1) + 4)
-_THREAD_LOCK_EXECUTOR = ThreadPoolExecutor(max_workers=THREAD_LOCK_EXECUTOR_WORKERS, thread_name_prefix="sandbox-lock-wait")
-atexit.register(_THREAD_LOCK_EXECUTOR.shutdown, wait=False, cancel_futures=True)
 
 
 class SandboxBeingDestroyedError(RuntimeError):
@@ -121,36 +118,6 @@ def _open_lock_file(lock_path):
     return open(lock_path, "a", encoding="utf-8")
 
 
-async def _acquire_thread_lock_async(lock: threading.Lock) -> None:
-    """Acquire a threading.Lock without polling or using the default executor."""
-    loop = asyncio.get_running_loop()
-    acquire_future = loop.run_in_executor(_THREAD_LOCK_EXECUTOR, lock.acquire, True)
-
-    try:
-        acquired = await asyncio.shield(acquire_future)
-    except asyncio.CancelledError:
-        acquire_future.add_done_callback(lambda task: _release_cancelled_lock_acquire(lock, task))
-        raise
-
-    if not acquired:
-        raise RuntimeError("Failed to acquire sandbox thread lock")
-
-
-def _release_cancelled_lock_acquire(lock: threading.Lock, task: asyncio.Future[bool]) -> None:
-    """Release a lock acquired after its awaiting coroutine was cancelled."""
-    if task.cancelled():
-        return
-
-    try:
-        acquired = task.result()
-    except Exception as e:
-        logger.warning(f"Cancelled sandbox lock acquisition finished with error: {e}")
-        return
-
-    if acquired:
-        lock.release()
-
-
 class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     """Sandbox provider that manages containers running the AIO sandbox.
 
@@ -189,7 +156,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._sandboxes: dict[str, AioSandbox] = {}  # sandbox_id -> AioSandbox instance
         self._sandbox_infos: dict[str, SandboxInfo] = {}  # sandbox_id -> SandboxInfo (for destroy)
         self._thread_sandboxes: dict[tuple[str, str], str] = {}  # (user_id, thread_id) -> sandbox_id
-        self._thread_locks: dict[tuple[str, str], threading.Lock] = {}  # (user_id, thread_id) -> in-process lock
+        self._acquire_serializer: AcquireSerializer[tuple[str, str]] = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
@@ -754,7 +721,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         reused under the new 16-character identity. They remain eligible for
         normal orphan cleanup while the first new-version acquire cold-starts.
         """
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
     def _assert_active_identity_available_locked(
         self,
@@ -1306,14 +1273,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # ── Thread locking (in-process) ──────────────────────────────────────
 
-    def _get_thread_lock(self, thread_id: str, user_id: str) -> threading.Lock:
-        """Get or create an in-process lock for a specific user/thread scope."""
-        key = self._thread_key(thread_id, user_id)
-        with self._lock:
-            if key not in self._thread_locks:
-                self._thread_locks[key] = threading.Lock()
-            return self._thread_locks[key]
-
     def _sandbox_id_for_thread(self, thread_id: str | None, user_id: str | None) -> str:
         """Return deterministic IDs for thread sandboxes and random IDs otherwise."""
         return self._deterministic_sandbox_id(thread_id, self._effective_acquire_user_id(user_id)) if thread_id else str(uuid.uuid4())[:8]
@@ -1803,11 +1762,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
-            thread_lock = self._get_thread_lock(thread_id, effective_user_id)
-            with thread_lock:
+            with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
-        else:
-            return self._acquire_internal(thread_id, user_id=effective_user_id)
+        return self._acquire_internal(thread_id, user_id=effective_user_id)
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
@@ -1818,13 +1775,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
-            thread_lock = self._get_thread_lock(thread_id, effective_user_id)
-            await _acquire_thread_lock_async(thread_lock)
-            try:
+            async with self._acquire_serializer.hold_async(self._thread_key(thread_id, effective_user_id)):
                 return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
-            finally:
-                thread_lock.release()
-
         return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
 
     def _acquire_internal(self, thread_id: str | None, *, user_id: str) -> str:
@@ -2234,6 +2186,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # lease stuck in `del:`.
             self._release_ownership(sandbox_id)
 
+    def reset(self) -> None:
+        """Release process-local acquire workers when this instance is detached."""
+        self._acquire_serializer.close()
+
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
         with self._lock:
@@ -2271,3 +2227,5 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._ownership.close()
         except Exception as e:
             logger.warning(f"Error closing sandbox ownership store during shutdown: {e}")
+
+        self._acquire_serializer.close()

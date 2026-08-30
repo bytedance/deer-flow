@@ -16,6 +16,7 @@ the real implementation in isolation.
 
 import asyncio
 import importlib
+import inspect
 import sys
 import threading
 import time
@@ -2081,6 +2082,122 @@ class TestCleanupBackgroundTask:
         executor = importlib.import_module("deerflow.subagents.executor")
 
         return _patch_default_get_app_config(importlib.reload(executor))
+
+    def test_execute_async_removes_entry_when_submit_fails(self, executor_module, classes, base_config):
+        """A failed submit must not leave a PENDING entry nothing will ever poll.
+
+        The registry entry is created before the coroutine is submitted to the
+        isolated loop. When submission itself raises (e.g. the loop failed to
+        start), the caller sees the exception and never polls — and
+        ``cleanup_background_task`` refuses non-terminal entries — so the fix
+        must drop the entry on the submit-failure path.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="submit-failure-trace",
+        )
+
+        def failing_submit(_context, _coro_factory):
+            raise RuntimeError("isolated subagent event loop failed to start")
+
+        with patch.object(executor_module, "_submit_to_isolated_loop_in_context", side_effect=failing_submit):
+            with pytest.raises(RuntimeError, match="isolated subagent event loop"):
+                executor.execute_async("Task")
+
+        leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "submit-failure-trace"]
+        assert leftovers == []
+
+    def test_execute_async_registers_nothing_when_context_copy_fails(self, executor_module, classes, base_config):
+        """A context-copy failure must not leave a PENDING entry either.
+
+        ``_copy_isolated_subagent_context`` (callback-manager copy or
+        loop-bound handler filtering) can raise before the coroutine is ever
+        submitted. The registry entry must not exist at that point yet —
+        the caller gets no execution_id to poll, and
+        ``cleanup_background_task`` refuses non-terminal entries, so a
+        registration before the copy would strand the same permanent
+        PENDING entry the submit-failure path already guards against.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="context-copy-failure-trace",
+        )
+
+        def failing_context_copy():
+            raise RuntimeError("callback manager copy failed")
+
+        with patch.object(executor_module, "_copy_isolated_subagent_context", side_effect=failing_context_copy):
+            with pytest.raises(RuntimeError, match="callback manager copy"):
+                executor.execute_async("Task")
+
+        leftovers = [r for r in executor_module.list_background_tasks() if r.trace_id == "context-copy-failure-trace"]
+        assert leftovers == []
+
+    def test_submit_helper_skips_coroutine_creation_when_loop_startup_fails(self, executor_module):
+        """Loop-startup failure must not strand an unscheduled coroutine.
+
+        Exercises the real ``_submit_to_isolated_loop_in_context`` (only the
+        loop getter is patched) rather than mocking the whole helper: the
+        loop must be resolved before the coroutine is created. If the
+        coroutine factory ran first, the created coroutine would be neither
+        scheduled nor closed — ``RuntimeWarning: coroutine ... was never
+        awaited`` — retaining its captures until collection.
+        """
+        factory_calls = []
+
+        def coro_factory():
+            factory_calls.append("created")
+
+            async def never_scheduled():  # pragma: no cover - must not run
+                return None
+
+            return never_scheduled()
+
+        def failing_loop():
+            raise RuntimeError("Timed out starting isolated subagent event loop")
+
+        with patch.object(executor_module, "_get_isolated_subagent_loop", side_effect=failing_loop):
+            with pytest.raises(RuntimeError, match="Timed out starting"):
+                executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
+
+        assert factory_calls == []
+
+    def test_submit_helper_closes_coroutine_when_scheduling_rejects_it(self, executor_module):
+        """Scheduling rejection after creation must close the coroutine.
+
+        Resolving the loop before calling the factory covers loop-startup
+        failure, but ``run_coroutine_threadsafe`` can itself raise once the
+        coroutine exists (e.g. the loop closes between the lookup and the
+        internal ``call_soon_threadsafe``). Only ``run_coroutine_threadsafe``
+        is patched: the helper must close the rejected coroutine — otherwise
+        it stays in ``CORO_CREATED`` and re-triggers the never-awaited
+        warning and retained captures the startup fix already guards against.
+        """
+        created = []
+
+        def coro_factory():
+            async def pending():
+                return None  # pragma: no cover - must never run
+
+            coroutine = pending()
+            created.append(coroutine)
+            return coroutine
+
+        with patch.object(executor_module, "_get_isolated_subagent_loop", return_value=object()):
+            with patch.object(executor_module.asyncio, "run_coroutine_threadsafe", side_effect=RuntimeError("Event loop is closed")):
+                with pytest.raises(RuntimeError, match="Event loop is closed"):
+                    executor_module._submit_to_isolated_loop_in_context(executor_module.copy_context(), coro_factory)
+
+        assert len(created) == 1
+        assert inspect.getcoroutinestate(created[0]) is inspect.CORO_CLOSED
 
     def test_cleanup_removes_terminal_completed_task(self, executor_module, classes):
         """Test that cleanup removes a COMPLETED task."""
