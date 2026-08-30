@@ -151,7 +151,7 @@ make stop       # Stop all services
 make install            # Install backend dependencies
 make dev                # Run Gateway API with runtime-safe reload (port 8001)
 make gateway            # Run Gateway API only (port 8001)
-make test               # Run offline backend tests (excludes live external-API tests)
+make test               # Run offline backend tests (excludes live and blocking-I/O tests)
 make test-live          # Explicitly run live DeerFlowClient tests with real APIs
 make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
 make lint               # Lint with ruff

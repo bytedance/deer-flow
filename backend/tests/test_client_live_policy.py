@@ -129,6 +129,7 @@ def test_make_targets_keep_default_tests_offline_and_support_live_opt_in() -> No
     live_command = _dry_run_make_target("test-live")
 
     assert 'pytest -m "not live"' in default_command
+    assert "--ignore=tests/blocking_io" in default_command
     assert "tests/" in default_command
     assert LIVE_OPT_IN not in default_command
 
