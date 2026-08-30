@@ -403,6 +403,52 @@ class TestCheckWebSearch:
 
 
 # ---------------------------------------------------------------------------
+# check_x_search
+# ---------------------------------------------------------------------------
+
+
+class TestCheckXSearch:
+    def test_optional_tool_is_skipped_when_absent(self, tmp_path):
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools: []\n")
+
+        result = doctor.check_x_search(cfg)
+
+        assert result.status == "skip"
+
+    def test_xquik_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("XQUIK_API_KEY", "xq-test")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: x_search\n    use: deerflow.community.xquik.tools:x_search_tool\n")
+
+        result = doctor.check_x_search(cfg)
+
+        assert result.status == "ok"
+        assert "xquik" in result.detail
+
+    def test_xquik_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("XQUIK_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: x_search\n    use: deerflow.community.xquik.tools:x_search_tool\n")
+
+        result = doctor.check_x_search(cfg)
+
+        assert result.status == "warn"
+        assert "XQUIK_API_KEY" in (result.fix or "")
+
+    def test_xquik_inline_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("XQUIK_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: x_search\n    use: deerflow.community.xquik.tools:x_search_tool\n    api_key: inline-key\n")
+
+        result = doctor.check_x_search(cfg)
+
+        assert result.status == "warn"
+        assert "literal api_key set in config" in result.detail
+        assert "XQUIK_API_KEY" in (result.fix or "")
+
+
+# ---------------------------------------------------------------------------
 # check_web_fetch
 # ---------------------------------------------------------------------------
 

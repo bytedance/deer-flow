@@ -459,7 +459,15 @@ def check_web_search(config_path: Path) -> CheckResult:
     return check_web_tool(config_path, tool_name="web_search", label="web search configured")
 
 
-def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckResult:
+def check_x_search(config_path: Path) -> CheckResult:
+    return check_web_tool(
+        config_path, tool_name="x_search", label="X search configured", optional=True
+    )
+
+
+def check_web_tool(
+    config_path: Path, *, tool_name: str, label: str, optional: bool = False
+) -> CheckResult:
     """Warn (not fail) if a web capability is not configured."""
     if not config_path.exists():
         return CheckResult(label, "skip")
@@ -475,6 +483,10 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
 
         tool_entries = [t for t in data.get("tools", []) if t.get("name") == tool_name]
         if not tool_entries:
+            if optional:
+                return CheckResult(
+                    label, "skip", f"optional {tool_name} tool not configured"
+                )
             return CheckResult(
                 label,
                 "warn",
@@ -509,6 +521,9 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "brave": "BRAVE_SEARCH_API_KEY",
                 "infoquest": "INFOQUEST_API_KEY",
                 "serper": "SERPER_API_KEY",
+            },
+            "x_search": {
+                "xquik": "XQUIK_API_KEY",
             },
             "web_capture": {
                 "browserless": "BROWSERLESS_TOKEN",
@@ -761,6 +776,7 @@ def main() -> int:
     # ── Web Capabilities ─────────────────────────────────────────────────────
     search_checks = [
         check_web_search(config_path),
+        check_x_search(config_path),
         check_web_fetch(config_path),
         check_web_capture(config_path),
         check_image_search(config_path),

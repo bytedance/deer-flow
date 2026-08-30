@@ -849,6 +849,15 @@ tools:
   #   # api_key: $CRW_API_KEY
   #   # base_url: https://fastcrw.com/api   # default cloud; set to e.g. http://localhost:3000 for self-host
 
+  # Structured X post search (uses Xquik, requires XQUIK_API_KEY)
+  # Enable this alongside web_search when the agent needs X-native Latest/Top
+  # ordering, author handles, timestamps, post URLs, and engagement metrics.
+  # - name: x_search
+  #   group: web
+  #   use: deerflow.community.xquik.tools:x_search_tool
+  #   max_results: 5               # Clamped to 1-100
+  #   api_key: $XQUIK_API_KEY
+
   # Web fetch tool (uses Browserless - headless Chrome, self-hosted or cloud)
   # Browserless renders pages with a real headless Chrome, ideal for JavaScript-heavy
   # sites and SPAs. Deploy your own: https://github.com/browserless/browserless

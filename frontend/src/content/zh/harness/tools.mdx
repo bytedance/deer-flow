@@ -194,6 +194,27 @@ GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper
   </Tabs.Tab>
 </Tabs>
 
+### X 帖子搜索
+
+当 Agent 需要结构化的 X/Twitter 帖子结果，而不是通用网页索引结果时，可在
+`web_search` 旁启用 `x_search`：
+
+```yaml
+tools:
+  - name: x_search
+    group: web
+    use: deerflow.community.xquik.tools:x_search_tool
+    max_results: 5
+    api_key: $XQUIK_API_KEY
+```
+
+该工具支持按时间排序的 `Latest` 搜索和按互动量排序的 `Top` 搜索。结果包含
+帖子正文、作者账号、时间戳、URL 和互动指标。使用时需要
+[Xquik](https://xquik.com) API Key，不需要安装额外依赖。结果数量上限为 100。
+
+Xquik is an independent third-party service. Not affiliated with X Corp.
+"Twitter" and "X" are trademarks of X Corp.
+
 ### 网页内容抓取
 
 <Tabs items={["Jina AI（默认）", "Browserless", "Exa", "GroundRoute"]}>

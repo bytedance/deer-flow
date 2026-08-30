@@ -200,6 +200,28 @@ Install: `cd backend && uv add 'deerflow-harness[groundroute]'`
   </Tabs.Tab>
 </Tabs>
 
+### X post search
+
+Add `x_search` alongside `web_search` when an agent needs structured X/Twitter
+post results rather than general web-index matches:
+
+```yaml
+tools:
+  - name: x_search
+    group: web
+    use: deerflow.community.xquik.tools:x_search_tool
+    max_results: 5
+    api_key: $XQUIK_API_KEY
+```
+
+The tool supports chronological `Latest` and engagement-ranked `Top` search.
+Results include post text, author handles, timestamps, URLs, and engagement
+metrics. It requires an [Xquik](https://xquik.com) API key and adds no extra
+dependency. The result limit is capped at 100.
+
+Xquik is an independent third-party service. Not affiliated with X Corp.
+"Twitter" and "X" are trademarks of X Corp.
+
 ### Web fetch (page content extraction)
 
 <Tabs items={["Jina AI (default)", "Browserless", "Exa", "InfoQuest", "Firecrawl", "GroundRoute"]}>
