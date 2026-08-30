@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import weakref
 from contextlib import suppress
+from contextvars import ContextVar
 from types import SimpleNamespace
 from typing import Annotated, Any, NotRequired, TypedDict
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -716,6 +718,189 @@ async def test_run_agent_schedules_terminal_run_record_cleanup():
 
 
 @pytest.mark.anyio
+async def test_run_agent_closes_stream_when_abort_breaks_iteration():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-stream-close")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class CloseTrackingStream:
+        def __init__(self) -> None:
+            self.yielded = False
+            self.closed = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.yielded:
+                raise StopAsyncIteration
+            self.yielded = True
+            record.abort_event.set()
+            return {"messages": []}
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    stream = CloseTrackingStream()
+
+    class DummyAgent:
+        def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            return stream
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+        stream_modes=["values"],
+    )
+
+    assert stream.closed is True
+    assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.anyio
+async def test_terminal_cleanup_tasks_do_not_inherit_run_context():
+    marker: ContextVar[str | None] = ContextVar("run_cleanup_marker", default=None)
+    seen: dict[str, str | None] = {}
+    bridge_cleaned = asyncio.Event()
+    manager_cleaned = asyncio.Event()
+
+    class CleanupTrackingRunManager(RunManager):
+        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+            seen["manager"] = marker.get()
+            await super().cleanup(run_id, delay=0)
+            manager_cleaned.set()
+
+    class CleanupTrackingBridge:
+        async def publish(self, *args, **kwargs) -> None:
+            pass
+
+        async def publish_end(self, run_id: str) -> None:
+            pass
+
+        async def cleanup(self, run_id: str, *, delay: float = 0) -> None:
+            seen["bridge"] = marker.get()
+            bridge_cleaned.set()
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    run_manager = CleanupTrackingRunManager()
+    record = await run_manager.create("thread-contextless-cleanup")
+    token = marker.set("run-context")
+    try:
+        await run_agent(
+            CleanupTrackingBridge(),
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+        await asyncio.wait_for(
+            asyncio.gather(bridge_cleaned.wait(), manager_cleaned.wait()),
+            timeout=1,
+        )
+    finally:
+        marker.reset(token)
+
+    assert seen == {"bridge": None, "manager": None}
+
+
+@pytest.mark.anyio
+async def test_terminal_cycle_collection_is_coalesced_and_contextless(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    marker: ContextVar[str | None] = ContextVar("terminal_gc_marker", default=None)
+    seen: list[str | None] = []
+    loop = asyncio.get_running_loop()
+    collected = asyncio.Event()
+
+    def collect() -> int:
+        seen.append(marker.get())
+        collected.set()
+        return 7
+
+    monkeypatch.setattr(worker_module, "_TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(worker_module, "_terminal_cycle_collection_last_at", 0.0)
+    monkeypatch.setattr(worker_module.gc, "collect", collect)
+    with worker_module._terminal_cycle_collection_guard:
+        worker_module._terminal_cycle_collection_scheduled_loops.discard(loop)
+
+    token = marker.set("run-context")
+    try:
+        worker_module._schedule_terminal_cycle_collection()
+        worker_module._schedule_terminal_cycle_collection()
+        await asyncio.wait_for(collected.wait(), timeout=1)
+    finally:
+        marker.reset(token)
+
+    assert seen == [None]
+
+
+@pytest.mark.anyio
+async def test_run_agent_releases_terminal_runtime_callbacks():
+    from deerflow.runtime.journal import RunJournal
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-runtime-release")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    captured: dict[str, Any] = {}
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, stream_mode, subgraphs
+            captured["config"] = config
+            callbacks = config.get("callbacks") or []
+            captured["journal"] = next(callback for callback in callbacks if isinstance(callback, RunJournal))
+            yield {"messages": []}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            event_store=MemoryRunEventStore(),
+        ),
+        agent_factory=lambda **_kwargs: DummyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    stream_config = captured["config"]
+    journal = captured["journal"]
+    assert "__pregel_runtime" not in stream_config["configurable"]
+    assert "__run_journal" not in stream_config["context"]
+    assert journal not in (stream_config.get("callbacks") or [])
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._progress_reporter is None
+
+    journal_ref = weakref.ref(journal)
+    captured.clear()
+    del journal
+    await asyncio.sleep(0)
+    assert journal_ref() is None
+
+
+@pytest.mark.anyio
 async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context():
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
@@ -759,7 +944,7 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
             )
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            captured["context"] = config["context"]
+            captured["pre_existing_message_ids"] = config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
             yield {"messages": []}
 
     def factory(*, config):
@@ -775,8 +960,7 @@ async def test_run_agent_threads_pre_existing_message_ids_into_runtime_context()
         config={},
     )
 
-    context = captured["context"]
-    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"h1", "a1"})
+    assert captured["pre_existing_message_ids"] == frozenset({"h1", "a1"})
 
 
 @pytest.mark.anyio
@@ -856,7 +1040,7 @@ async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snap
 
     class DummyAgent:
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            captured["context"] = config["context"]
+            captured["pre_existing_message_ids"] = config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
             yield {"messages": []}
 
     def factory(*, config):
@@ -872,8 +1056,7 @@ async def test_run_agent_overrides_spoofed_pre_existing_message_ids_without_snap
         config={"context": {CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: {"spoofed"}}},
     )
 
-    context = captured["context"]
-    assert context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
+    assert captured["pre_existing_message_ids"] == frozenset()
 
 
 @pytest.mark.anyio

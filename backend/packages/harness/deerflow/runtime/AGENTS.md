@@ -57,6 +57,8 @@ The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
 the number of required IDs, whichever is larger; missing exact runs use targeted
 `get()` calls.
 
+**Terminal run cleanup explicitly breaks graph-scoped references while preserving the existing `RunRecord` grace period.** Every `agent.astream()` iterator is closed in `_stream_once`, including abort/exception/early-break paths. After durable finalization and the terminal stream marker, `run_agent()` calls `RunJournal.close()`, removes the journal, `__pregel_runtime`, and internal runtime-context values from every runnable config, and drops local graph/payload references. `RunJournal.flush()` clears its `_pending_progress_task` after awaiting or cancelling it; `close()` then detaches the event store/progress reporter and clears callback bookkeeping. `RunManager.cleanup(run_id)` retains the process-local `RunRecord`, completed task, and request payload for its default 300-second local join/status window before releasing them. Durable history remains in `RunStore`; `StreamBridge` data keeps its separate 60-second late-subscriber window, and both cleanup coroutines run in a fresh empty `contextvars.Context`. A contextless full cyclic-GC pass, coalesced to at most once every 10 seconds, bounds the lifetime of unreachable LangGraph callback/loop cycles without collecting once per run.
+
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types
 - `runtime/checkpoint_state.py` — `CheckpointStateAccessor`, `build_state_mutation_graph`, `RollbackPoint`

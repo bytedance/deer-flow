@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import inspect
 import logging
 import os
 import sys
 import threading
+import time
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -91,6 +94,123 @@ logger = logging.getLogger(__name__)
 
 _checkpoint_locks_guard = threading.Lock()
 _checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+
+# Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
+# instances in unreachable reference cycles. They are collectable, but a busy
+# Gateway may promote those cycles into older GC generations faster than the
+# automatic collector revisits them, producing a rising post-GC heap floor.
+# Coalesce terminal full collections so the cycles have a bounded lifetime
+# without paying for a stop-the-world collection on every run.
+_TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS = 10.0
+_terminal_cycle_collection_guard = threading.Lock()
+_terminal_cycle_collection_last_at = time.monotonic()
+_terminal_cycle_collection_scheduled_loops: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
+
+
+def _create_contextless_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Schedule terminal housekeeping without retaining the run's ContextVars."""
+    return asyncio.create_task(coro, context=Context())
+
+
+def _schedule_terminal_cycle_collection() -> None:
+    """Coalesce full cyclic-GC passes after completed LangGraph runs."""
+    loop = asyncio.get_running_loop()
+    with _terminal_cycle_collection_guard:
+        if loop in _terminal_cycle_collection_scheduled_loops:
+            return
+        elapsed = time.monotonic() - _terminal_cycle_collection_last_at
+        delay = max(0.0, _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS - elapsed)
+        _terminal_cycle_collection_scheduled_loops.add(loop)
+
+    def _collect() -> None:
+        global _terminal_cycle_collection_last_at
+
+        with _terminal_cycle_collection_guard:
+            _terminal_cycle_collection_scheduled_loops.discard(loop)
+            now = time.monotonic()
+            if now - _terminal_cycle_collection_last_at < _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS:
+                return
+            _terminal_cycle_collection_last_at = now
+
+        started_at = time.perf_counter()
+        collected = gc.collect()
+        logger.debug(
+            "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+            collected,
+            time.perf_counter() - started_at,
+        )
+
+    # A blank Context prevents the timer itself from retaining the completed
+    # run. The loop owns the TimerHandle; the WeakSet never keeps a test or
+    # short-lived embedded-client event loop alive.
+    loop.call_later(delay, _collect, context=Context())
+
+
+async def _close_agent_stream(stream: Any) -> None:
+    """Close a LangGraph stream deterministically after completion or early exit."""
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _remove_callback(config: dict[str, Any], handler: Any) -> None:
+    callbacks = config.get("callbacks")
+    if isinstance(callbacks, list):
+        callbacks[:] = [callback for callback in callbacks if callback is not handler]
+        return
+    remove_handler = getattr(callbacks, "remove_handler", None)
+    if callable(remove_handler):
+        try:
+            remove_handler(handler)
+        except Exception:
+            logger.debug("could not detach terminal callback", exc_info=True)
+
+
+def _release_run_scoped_references(
+    configs: list[dict[str, Any]],
+    runtime_context: dict[str, Any] | None,
+    journal: Any | None,
+) -> None:
+    """Remove worker-owned graph references once durable finalization is done."""
+    internal_context_keys = {
+        "__run_journal",
+        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    }
+    try:
+        from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+        internal_context_keys.add(EXTENSION_SNAPSHOT_CONTEXT_KEY)
+    except Exception:
+        pass
+    try:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        internal_context_keys.add(EXTENSION_TASK_STORE_KEY)
+    except Exception:
+        pass
+
+    seen_configs: set[int] = set()
+    handlers = [journal] if journal is not None else []
+    for runnable_config in configs:
+        if not isinstance(runnable_config, dict) or id(runnable_config) in seen_configs:
+            continue
+        seen_configs.add(id(runnable_config))
+        configurable = runnable_config.get("configurable")
+        if isinstance(configurable, dict):
+            configurable.pop("__pregel_runtime", None)
+        context = runnable_config.get("context")
+        if isinstance(context, dict):
+            for key in internal_context_keys:
+                context.pop(key, None)
+        for handler in handlers:
+            _remove_callback(runnable_config, handler)
+
+    if isinstance(runtime_context, dict):
+        for key in internal_context_keys:
+            runtime_context.pop(key, None)
 
 
 @asynccontextmanager
@@ -618,6 +738,11 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    runtime_ctx: dict[str, Any] | None = None
+    runtime: Any | None = None
+    agent: Any | None = None
+    runnable_configs: list[dict[str, Any]] = [config]
+    goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
@@ -868,6 +993,7 @@ async def run_agent(
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         initial_runnable_config = RunnableConfig(**config)
+        runnable_configs.append(initial_runnable_config)
 
         def _continuation_runnable_config() -> RunnableConfig:
             continuation_config = dict(config)
@@ -876,7 +1002,9 @@ async def run_agent(
             configurable.pop("checkpoint_id", None)
             configurable.pop("checkpoint_map", None)
             continuation_config["configurable"] = configurable
-            return RunnableConfig(**continuation_config)
+            continuation = RunnableConfig(**continuation_config)
+            runnable_configs.append(continuation)
+            return continuation
 
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
@@ -933,6 +1061,7 @@ async def run_agent(
                 # captured for rollback.
                 pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
                 initial_runnable_config = RunnableConfig(**config)
+                runnable_configs.append(initial_runnable_config)
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
@@ -967,8 +1096,6 @@ async def run_agent(
         # the finally block so buffered steps survive abort/exception paths too.
         subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
 
-        goal_evaluator_model: Any | None = None
-
         def _get_goal_evaluator_model() -> Any:
             nonlocal goal_evaluator_model
             if goal_evaluator_model is None:
@@ -986,45 +1113,65 @@ async def run_agent(
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
-                        async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
-                            if record.abort_event.is_set():
-                                logger.info("Run %s abort requested — stopping", run_id)
-                                break
-                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                            sse_event = _lg_mode_to_sse_event(single_mode)
-                            await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                            if single_mode == "custom":
-                                await subagent_events.add(chunk)
+                        stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
+                        try:
+                            async for chunk in stream:
+                                if record.abort_event.is_set():
+                                    logger.info("Run %s abort requested — stopping", run_id)
+                                    break
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                sse_event = _lg_mode_to_sse_event(single_mode)
+                                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                                if single_mode == "custom":
+                                    await subagent_events.add(chunk)
+                        finally:
+                            close_error = sys.exception()
+                            try:
+                                await _close_agent_stream(stream)
+                            except Exception:
+                                if close_error is None:
+                                    raise
+                                logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
                         return
                     # Multiple modes or subgraphs: astream yields tuples
-                    async for item in agent.astream(
+                    stream = agent.astream(
                         input_payload,
                         config=stream_config,
                         stream_mode=lg_modes,
                         subgraphs=stream_subgraphs,
-                    ):
-                        if record.abort_event.is_set():
-                            logger.info("Run %s abort requested — stopping", run_id)
-                            break
+                    )
+                    try:
+                        async for item in stream:
+                            if record.abort_event.is_set():
+                                logger.info("Run %s abort requested — stopping", run_id)
+                                break
 
-                        mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                        if mode is None:
-                            continue
+                            mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                            if mode is None:
+                                continue
 
-                        if not namespace:
-                            # Only root-graph frames may decide the parent run's error
-                            # fallback: a delegated subagent's marked fallback is the
-                            # executor's to map (task_failed), not this run's.
-                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                        await _publish_stream_item(
-                            bridge=bridge,
-                            run_id=run_id,
-                            mode=mode,
-                            chunk=chunk,
-                            namespace=namespace,
-                            file_tool_chunk_batcher=file_tool_chunk_batcher,
-                            subagent_events=subagent_events,
-                        )
+                            if not namespace:
+                                # Only root-graph frames may decide the parent run's error
+                                # fallback: a delegated subagent's marked fallback is the
+                                # executor's to map (task_failed), not this run's.
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            await _publish_stream_item(
+                                bridge=bridge,
+                                run_id=run_id,
+                                mode=mode,
+                                chunk=chunk,
+                                namespace=namespace,
+                                file_tool_chunk_batcher=file_tool_chunk_batcher,
+                                subagent_events=subagent_events,
+                            )
+                    finally:
+                        close_error = sys.exception()
+                        try:
+                            await _close_agent_stream(stream)
+                        except Exception:
+                            if close_error is None:
+                                raise
+                            logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
@@ -1353,12 +1500,41 @@ async def run_agent(
         if record.finalizing:
             await run_manager.set_finalizing(run_id, False)
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
-        # Keep the terminal record briefly for local join/cancellation paths, then
-        # release its completed task and request payload from the process-local
-        # registry. Durable run history remains available through RunStore.
-        asyncio.create_task(run_manager.cleanup(run_id))
+        try:
+            await bridge.publish_end(run_id)
+        finally:
+            if journal is not None:
+                try:
+                    await journal.close()
+                except Exception:
+                    logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
+            _release_run_scoped_references(
+                runnable_configs,
+                runtime_ctx,
+                journal,
+            )
+            # Drop graph and per-run payload references before the terminal
+            # worker task itself becomes collectable.
+            agent = None
+            accessor = None
+            runtime = None
+            runtime_ctx = None
+            rollback_point = None
+            subagent_events = None
+            goal_evaluator_model = None
+            task_store = None
+            task_info = None
+            pre_run_workspace_snapshot = None
+            delivery_content = None
+            produced_output_paths = None
+            graph_input = {}
+
+        _create_contextless_task(bridge.cleanup(run_id, delay=60))
+        # Preserve the existing five-minute grace period for local join/status
+        # paths, then release the terminal record, completed task, and request
+        # payload. Durable run history remains available through RunStore.
+        _create_contextless_task(run_manager.cleanup(run_id))
+        _schedule_terminal_cycle_collection()
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt

@@ -4,6 +4,7 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 """
 
 import asyncio
+import weakref
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -17,6 +18,38 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 def test_run_journal_is_marked_as_loop_bound():
     assert RunJournal.deerflow_loop_bound is True
+
+
+@pytest.mark.anyio
+async def test_close_flushes_and_detaches_runtime_dependencies():
+    class ProgressReporter:
+        async def __call__(self, snapshot):
+            del snapshot
+
+    store = MemoryRunEventStore()
+    reporter = ProgressReporter()
+    store_ref = weakref.ref(store)
+    reporter_ref = weakref.ref(reporter)
+    journal = RunJournal(
+        "r-close",
+        "t-close",
+        store,
+        progress_reporter=reporter,
+        flush_threshold=100,
+    )
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    await journal.close()
+
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._progress_reporter is None
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+    del store, reporter
+    await asyncio.sleep(0)
+    assert store_ref() is None
+    assert reporter_ref() is None
 
 
 @pytest.fixture
@@ -996,12 +1029,23 @@ class TestProgressSnapshots:
             parent_run_id=None,
             tags=["lead_agent"],
         )
+        pending_task = j._pending_progress_task
+        assert pending_task is not None
+        pending_task_ref = weakref.ref(pending_task)
 
         await asyncio.wait_for(j.flush(), timeout=0.2)
 
         assert snapshots[-1]["total_tokens"] == 15
         assert snapshots[-1]["llm_call_count"] == 1
         assert snapshots[-1]["last_ai_message"] == "First"
+        assert j._pending_progress_task is None
+
+        # The journal must not keep the cancelled task (and its traceback
+        # frame) alive until cyclic GC. Dropping this last local reference
+        # should release it immediately.
+        del pending_task
+        await asyncio.sleep(0)
+        assert pending_task_ref() is None
 
 
 class TestChatModelStartHumanMessage:
