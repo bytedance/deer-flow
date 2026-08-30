@@ -36,6 +36,10 @@ const PatStoreUnavailableError = rs.hoisted(() => {
   };
 });
 
+rs.mock("@/core/auth/AuthProvider", () => ({
+  useAuth: () => ({ user: { id: "test-user" } }),
+}));
+
 rs.mock("@/core/i18n/hooks", () => ({
   useI18n: () => ({
     t: {

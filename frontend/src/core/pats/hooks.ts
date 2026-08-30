@@ -1,13 +1,23 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import { useAuth } from "@/core/auth/AuthProvider";
+
 import { createPat, revokePat, listPats } from "./api";
 import type { CreatePatRequest } from "./types";
 
-export const PATS_QUERY_KEY = ["pats"] as const;
+/**
+ * PAT summaries are per-account data: the key carries the authenticated
+ * user's id so signing out and back in as a different user within the cache
+ * retention window can never surface the previous account's tokens.
+ */
+export function patQueryKey(userId: string | null) {
+  return ["pats", userId ?? "anonymous"] as const;
+}
 
 export function usePats() {
+  const { user } = useAuth();
   const query = useQuery({
-    queryKey: PATS_QUERY_KEY,
+    queryKey: patQueryKey(user?.id ?? null),
     queryFn: listPats,
     // A 503 (memory backend, no PAT store) is a legitimate deployment state,
     // not a transient failure worth retrying.
@@ -22,9 +32,18 @@ export function usePats() {
 
 export function useCreatePat() {
   const client = useQueryClient();
+  const { user } = useAuth();
   return useMutation({
     mutationFn: (request: CreatePatRequest) => createPat(request),
-    onSuccess: () => client.invalidateQueries({ queryKey: PATS_QUERY_KEY }),
+    onSuccess: () => {
+      // Deliberately NOT returned: TanStack awaits promises returned from
+      // onSuccess, which would keep the mutation pending through the list
+      // refetch and delay (or, on a hung refetch, strand) the show-once
+      // token the caller is waiting on.
+      void client.invalidateQueries({
+        queryKey: patQueryKey(user?.id ?? null),
+      });
+    },
     // The mutation result carries the show-once token; once the observer is
     // done with it there is no reason for the MutationCache to keep a copy
     // for the default 5-minute gc window.
@@ -34,8 +53,13 @@ export function useCreatePat() {
 
 export function useRevokePat() {
   const client = useQueryClient();
+  const { user } = useAuth();
   return useMutation({
     mutationFn: (patId: string) => revokePat(patId),
-    onSuccess: () => client.invalidateQueries({ queryKey: PATS_QUERY_KEY }),
+    onSuccess: () => {
+      void client.invalidateQueries({
+        queryKey: patQueryKey(user?.id ?? null),
+      });
+    },
   });
 }

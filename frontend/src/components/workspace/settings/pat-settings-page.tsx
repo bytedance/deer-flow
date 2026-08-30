@@ -31,11 +31,12 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { UnauthorizedError } from "@/core/api/errors";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   PatStoreUnavailableError,
-  PATS_QUERY_KEY,
+  patQueryKey,
   useCreatePat,
   usePats,
   useRevokePat,
@@ -69,6 +70,7 @@ function formatExpiry(pat: PatSummary): string {
 export function PatSettingsPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const { pats, isLoading, error } = usePats();
   const create = useCreatePat();
   const revoke = useRevokePat();
@@ -146,7 +148,9 @@ export function PatSettingsPage() {
         // instead of a stale list plus a still-open form.
         closeCreateDialog();
         toast.error(t.settings.tokens.unavailableTitle);
-        void queryClient.invalidateQueries({ queryKey: PATS_QUERY_KEY });
+        void queryClient.invalidateQueries({
+          queryKey: patQueryKey(user?.id ?? null),
+        });
         return;
       }
       toast.error(err instanceof Error ? err.message : String(err));
