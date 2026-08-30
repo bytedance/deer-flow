@@ -112,7 +112,7 @@ class Paths:
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
         ├── users/{user_id}/
-        │   ├── USER.md       <-- per-user profile (injected into that user's agents)
+        │   ├── USER.md       <-- per-user profile (storage/retrieval via the user-profile routes)
         │   ├── agents/...    <-- per-user custom agents (current layout)
         │   ├── skills/...    <-- per-user custom skills
         │   └── threads/
