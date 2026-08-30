@@ -82,6 +82,41 @@ def test_summarize_percentiles_are_monotonic_and_within_observed_range() -> None
     assert summary["latency_max_ms"] == 100.0  # the largest input, in ms
 
 
+def test_summarize_percentiles_match_hand_computed_nearest_rank_values() -> None:
+    """Exact p50/p95/p99 for a small, hand-computable distribution -- the
+    monotonicity test above can't catch a bug where p95 and p99 both
+    collapse to the same (wrong) value, since max <= max still holds.
+
+    latencies here are 1ms..20ms. The reviewer's finding: the old
+    `int(len(latencies) * p)` used directly as a zero-based index put both
+    p95 and p99 at index 19 -- the maximum -- for any 20-sample run.
+    checkpoint_bench_common.percentile's (n-1)*p/100 nearest-rank
+    interpolation, reused here, keeps them distinct from the max.
+    """
+    latencies = [0.001 * i for i in range(1, 21)]  # 1ms..20ms
+    workers = [{"worker_id": 0, "results": [_result(True, latency) for latency in latencies]}]
+    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=20)
+
+    assert summary["latency_p50_ms"] == 10.5
+    assert summary["latency_p95_ms"] == 19.05
+    assert summary["latency_p99_ms"] == 19.81
+    assert summary["latency_max_ms"] == 20.0
+    # the specific bug: p95 and p99 must NOT both equal the max
+    assert summary["latency_p95_ms"] != summary["latency_max_ms"]
+    assert summary["latency_p99_ms"] != summary["latency_max_ms"]
+
+
+def test_summarize_percentiles_match_hand_computed_values_at_documented_sample_size() -> None:
+    """Same shape of check at the documented default sample size (100 ops)."""
+    latencies = [0.001 * i for i in range(1, 101)]  # 1ms..100ms
+    workers = [{"worker_id": 0, "results": [_result(True, latency) for latency in latencies]}]
+    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=100)
+
+    assert summary["latency_p50_ms"] == 50.5
+    assert summary["latency_p95_ms"] == 95.05
+    assert summary["latency_p99_ms"] == 99.01
+
+
 def test_summarize_handles_empty_results_without_crashing() -> None:
     """All workers crashed -- no ops completed at all. Percentiles must
     degrade to None rather than raising (e.g. dividing by zero, or

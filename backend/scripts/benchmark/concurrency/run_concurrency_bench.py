@@ -40,6 +40,13 @@ from uuid import uuid4
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(BACKEND_DIR))
 
+# checkpoint_bench_common.py is a sibling script folder, not a package (see
+# its own docstring) -- same sys.path-insert-then-import pattern
+# bench_channels.py/bench_production.py already use for it, reused here so
+# percentile() has one correct implementation instead of two.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "checkpoint"))
+from checkpoint_bench_common import percentile  # noqa: E402
+
 WORKER_SCRIPT = Path(__file__).parent / "worker.py"
 # The orchestrator itself is already running under the correct interpreter
 # (`uv run python ...`, per this file's own usage docstring above) -- reuse
@@ -120,11 +127,33 @@ async def drop_isolated_schema(pg_url: str, pg_schema: str) -> None:
 def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: float, known_emails: list[str], pg_url: str, pg_schema: str):
     emails_arg = ",".join(known_emails)
     procs = []
-    t_start = time.perf_counter()
     for wid in range(n_workers):
         cmd = PYTHON + [str(WORKER_SCRIPT), backend, str(wid), str(ops_per_worker), str(read_ratio), emails_arg, pg_url, pg_schema]
-        p = subprocess.Popen(cmd, cwd=str(BACKEND_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        p = subprocess.Popen(cmd, cwd=str(BACKEND_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         procs.append(p)
+
+    # Start barrier: wait for every worker to print READY (connection
+    # established, right before its own timed loop -- see worker.py) before
+    # starting the wall clock or releasing any of them. Otherwise wall_time
+    # is measured from BEFORE any worker was even spawned, so it absorbs N
+    # processes' staggered Python-startup + connection-establishment cost
+    # (conn_time_s already measures that per-worker) and lets early workers
+    # run ahead of ones still starting -- not a controlled N-worker
+    # contention measurement. A worker that crashes before printing READY
+    # closes its stdout, so readline() returns "" rather than hanging;
+    # run_workers() below reports that same worker as crashed via its
+    # nonzero returncode either way.
+    for p in procs:
+        p.stdout.readline()
+
+    t_start = time.perf_counter()
+    for p in procs:
+        try:
+            p.stdin.write("GO\n")
+            p.stdin.flush()
+            p.stdin.close()
+        except (BrokenPipeError, ValueError):
+            pass  # worker already exited -- nothing to release
 
     worker_outputs = []
     for p in procs:
@@ -158,10 +187,15 @@ def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: 
         err_types[key] = err_types.get(key, 0) + 1
 
     def pct(p):
+        # p is a 0..1 fraction here (0.50/0.95/0.99); checkpoint_bench_common's
+        # percentile() takes 0..100 and already does correct nearest-rank
+        # interpolation ((n-1)*percentile/100, not int(n*p) used directly as
+        # an index -- that off-by-one made p95/p99 both resolve to the max
+        # for any sample of 20 or fewer values, and for the documented
+        # 100-sample default).
         if not latencies:
             return None
-        idx = min(len(latencies) - 1, int(len(latencies) * p))
-        return latencies[idx]
+        return percentile(latencies, p * 100)
 
     return {
         "n_workers": n_workers,

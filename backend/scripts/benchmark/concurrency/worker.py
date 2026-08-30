@@ -112,6 +112,18 @@ async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float
     conn_time = time.perf_counter() - t_conn0
     repo = SQLiteUserRepository(sf)
 
+    # Signal ready, then block for the orchestrator's start signal, before
+    # touching the operation loop's timer. Without this, each worker starts
+    # its timed loop as soon as ITS OWN imports+connection finish -- so the
+    # orchestrator's wall_time (started before any worker was even spawned)
+    # includes N staggered process-startup costs, and early workers run
+    # ahead of workers that are still starting. This makes every worker
+    # cross the same starting line together, so wall_time measures actual
+    # concurrent execution instead of startup skew (see run_workers() in
+    # run_concurrency_bench.py for the other half of this handshake).
+    print("READY", flush=True)
+    sys.stdin.readline()
+
     results = []
     n_reads = read_count(n_ops, read_ratio)
     for i in range(n_ops):
