@@ -248,6 +248,9 @@ class MyMiddleware(AgentMiddleware[AgentState]):
         return None
 ```
 
+Lifecycle hooks can return a dictionary of state updates, which LangChain merges
+into the agent state, or `None` when they only observe state.
+
 For operator-managed deployments, register a zero-argument class by import path:
 
 ```yaml

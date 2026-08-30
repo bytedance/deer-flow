@@ -312,7 +312,7 @@ class ExtensionsConfig(BaseModel):
 
     middlewares: list[str] = Field(
         default_factory=list,
-        description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
+        description="AgentMiddleware class paths loaded into the lead-agent and subagent middleware chains. Each entry uses 'module.path:ClassName'.",
     )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,

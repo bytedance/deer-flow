@@ -41,8 +41,8 @@ logging:
 # lead-only vs subagent-only configuration is not expressible yet. Treat these
 # files as trusted operator config because middleware classes execute code.
 # Uncomment this block to define middlewares in config.yaml. Leaving it commented
-# lets extensions_config.json remain the source of truth for this legacy
-# config-declared middleware list. Packaged plugins use the `plugins:` block below.
+# lets extensions_config.json remain the source of truth for this fixed-slot
+# (not deprecated) middleware list. Packaged plugins use the `plugins:` block below.
 # extensions:
 #   middlewares:
 #     - my_company.deerflow_middlewares:DomainGuardMiddleware

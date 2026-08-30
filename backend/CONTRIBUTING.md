@@ -296,6 +296,9 @@ class MyMiddleware(AgentMiddleware[AgentState]):
         return None
 ```
 
+Lifecycle hooks can return a dictionary of state updates, which LangChain merges
+into the agent state, or `None` when they only observe state.
+
 2. Register the zero-argument middleware class in `config.yaml`:
 
 ```yaml
