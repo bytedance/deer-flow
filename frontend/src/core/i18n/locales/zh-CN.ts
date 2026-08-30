@@ -973,8 +973,6 @@ export const zhCN: Translations = {
         "撤销立即生效：使用此令牌的 API 调用将从现在起失败。此操作无法撤销。",
       revokeConfirm: "撤销令牌",
       revoked: "令牌已撤销",
-      navAwayConfirm:
-        "令牌正在创建或仅显示一次,离开后将无法恢复。确定离开此页面吗?",
       unavailableTitle: "API 令牌不可用",
       unavailableDescription:
         "个人访问令牌需要配置数据库后端（SQLite 或 PostgreSQL）。当前部署使用内存后端。",

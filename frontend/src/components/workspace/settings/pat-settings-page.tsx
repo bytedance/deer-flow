@@ -99,36 +99,6 @@ export function PatSettingsPage() {
     return () => window.removeEventListener("beforeunload", warnUnrecoverable);
   }, [created, create.isPending]);
 
-  // beforeunload cannot see client-side navigation: an in-app link
-  // (sidebar, thread list, …) unmounts this component with the same
-  // unrecoverable loss and no browser prompt. Intercept internal anchor
-  // navigation in the capture phase while the only token copy is at stake.
-  useEffect(() => {
-    if (created === null && !create.isPending) return;
-    const guardInAppNavigation = (event: MouseEvent) => {
-      const target = event.target as HTMLElement | null;
-      const anchor = target?.closest?.("a[href]");
-      if (!anchor) return;
-      const href = anchor.getAttribute("href");
-      if (
-        !href ||
-        href.startsWith("#") ||
-        href.startsWith("http") ||
-        anchor.getAttribute("target") === "_blank" ||
-        anchor.hasAttribute("download")
-      ) {
-        return;
-      }
-      if (!window.confirm(t.settings.tokens.navAwayConfirm)) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    };
-    document.addEventListener("click", guardInAppNavigation, true);
-    return () =>
-      document.removeEventListener("click", guardInAppNavigation, true);
-  }, [created, create.isPending, t]);
-
   function resetCreateForm() {
     setName("");
     setScopes(new Set(DEFAULT_SCOPES));

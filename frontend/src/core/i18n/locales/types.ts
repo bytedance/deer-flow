@@ -850,7 +850,6 @@ export interface Translations {
       revokeConfirm: string;
       revoked: string;
       unavailableTitle: string;
-      navAwayConfirm: string;
       unavailableDescription: string;
       loadError: string;
     };
