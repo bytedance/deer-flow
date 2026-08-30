@@ -27,6 +27,11 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import {
+  draftFromScheduledTask,
+  getSessionDuplicateDraftStorage,
+  writeDuplicateDraft,
+} from "@/core/scheduled-tasks/duplicate-draft";
+import {
   useUpdateScheduledTask,
   useDeleteScheduledTask,
   usePauseScheduledTask,
@@ -211,25 +216,15 @@ export default function ScheduledTasksPage() {
     if (!selectedTask) {
       return;
     }
-    const params = new URLSearchParams();
-    params.set(
-      "title",
-      `${selectedTask.title}${st.actions.duplicateTitleSuffix}`,
+    writeDuplicateDraft(
+      getSessionDuplicateDraftStorage(),
+      selectedTask.id,
+      draftFromScheduledTask(selectedTask, st.actions.duplicateTitleSuffix),
     );
-    params.set("prompt", selectedTask.prompt);
-    params.set("context_mode", selectedTask.context_mode);
-    if (selectedTask.thread_id) {
-      params.set("thread_id", selectedTask.thread_id);
-    }
-    params.set("schedule_type", selectedTask.schedule_type);
-    if (typeof selectedTask.schedule_spec.cron === "string") {
-      params.set("cron", selectedTask.schedule_spec.cron);
-    }
-    if (typeof selectedTask.schedule_spec.run_at === "string") {
-      params.set("run_at", selectedTask.schedule_spec.run_at);
-    }
-    if (selectedTask.timezone) {
-      params.set("timezone", selectedTask.timezone);
+    const params = new URLSearchParams();
+    params.set("from", selectedTask.id);
+    if (threadId) {
+      params.set("thread_id", threadId);
     }
     setDetailOpen(false);
     router.push(`/workspace/scheduled-tasks/new?${params.toString()}`);

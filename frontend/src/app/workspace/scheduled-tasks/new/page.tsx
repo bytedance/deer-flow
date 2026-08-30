@@ -1,8 +1,9 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeftIcon, CalendarClock, TriangleAlertIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -13,7 +14,17 @@ import {
   type ScheduleValue,
 } from "@/components/workspace/scheduled-task-schedule-input";
 import { useI18n } from "@/core/i18n/hooks";
+import { fetchScheduledTasks } from "@/core/scheduled-tasks/api";
+import {
+  clearDuplicateDraft,
+  draftFromScheduledTask,
+  getSessionDuplicateDraftStorage,
+  readDuplicateDraft,
+  resolveCreateContextMode,
+  type DuplicateDraft,
+} from "@/core/scheduled-tasks/duplicate-draft";
 import { useCreateScheduledTask } from "@/core/scheduled-tasks/hooks";
+import type { ScheduledTask } from "@/core/scheduled-tasks/types";
 
 function ReuseThreadNotice({
   title,
@@ -31,44 +42,121 @@ function ReuseThreadNotice({
   );
 }
 
+function scheduleFromDraft(draft: DuplicateDraft): ScheduleValue {
+  const spec = draft.schedule_spec as { cron?: string; run_at?: string };
+  if (draft.schedule_type === "once") {
+    return {
+      schedule_type: "once",
+      schedule_spec: spec.run_at ? { run_at: spec.run_at } : {},
+      timezone: draft.timezone ?? "",
+    };
+  }
+  return {
+    schedule_type: "cron",
+    schedule_spec: { cron: spec.cron ?? "0 9 * * *" },
+    timezone: draft.timezone ?? "",
+  };
+}
+
 export default function NewScheduledTaskPage() {
   const { t } = useI18n();
   const router = useRouter();
   const searchParams = useSearchParams();
+  const queryClient = useQueryClient();
+  const sourceTaskId = searchParams.get("from");
   const initialThreadId = searchParams.get("thread_id");
-  const initialTitle = searchParams.get("title") ?? "";
-  const initialPrompt = searchParams.get("prompt") ?? "";
   const initialContextMode = searchParams.get("context_mode");
-  const initialScheduleType = searchParams.get("schedule_type");
-  const initialCron = searchParams.get("cron");
-  const initialRunAt = searchParams.get("run_at");
-  const initialTimezone = searchParams.get("timezone");
   const st = t.scheduledTasks;
   const createTask = useCreateScheduledTask();
   const [contextMode, setContextMode] = useState<
     "fresh_thread_per_run" | "reuse_thread"
-  >(
-    initialContextMode === "reuse_thread" || initialThreadId
-      ? "reuse_thread"
-      : "fresh_thread_per_run",
+  >(() =>
+    resolveCreateContextMode({
+      contextModeParam: initialContextMode,
+      threadIdParam: sourceTaskId ? null : initialThreadId,
+    }),
   );
-  const [targetThreadId, setTargetThreadId] = useState(initialThreadId ?? "");
-  const [title, setTitle] = useState(initialTitle);
-  const [prompt, setPrompt] = useState(initialPrompt);
-  const [createSchedule, setCreateSchedule] = useState<ScheduleValue>(() => {
-    if (initialScheduleType === "once") {
-      return {
-        schedule_type: "once",
-        schedule_spec: initialRunAt ? { run_at: initialRunAt } : {},
-        timezone: initialTimezone ?? "",
+  const [targetThreadId, setTargetThreadId] = useState(
+    sourceTaskId ? "" : (initialThreadId ?? ""),
+  );
+  const [title, setTitle] = useState("");
+  const [prompt, setPrompt] = useState("");
+  const [createSchedule, setCreateSchedule] = useState<ScheduleValue>({
+    schedule_type: "cron",
+    schedule_spec: { cron: "0 9 * * *" },
+    timezone: "",
+  });
+  const [sourceStatus, setSourceStatus] = useState<
+    "idle" | "loading" | "ready" | "missing"
+  >(sourceTaskId ? "loading" : "idle");
+
+  const applyDraft = (draft: DuplicateDraft) => {
+    setTitle(draft.title);
+    setPrompt(draft.prompt);
+    setContextMode(draft.context_mode);
+    setTargetThreadId(draft.thread_id ?? "");
+    setCreateSchedule(scheduleFromDraft(draft));
+    setSourceStatus("ready");
+  };
+
+  useEffect(() => {
+    if (!sourceTaskId) {
+      return;
+    }
+    let cancelled = false;
+    const applyIfCurrent = (draft: DuplicateDraft) => {
+      if (!cancelled) {
+        applyDraft(draft);
+      }
+    };
+
+    const sessionDraft = readDuplicateDraft(
+      getSessionDuplicateDraftStorage(),
+      sourceTaskId,
+    );
+    if (sessionDraft) {
+      applyIfCurrent(sessionDraft);
+      clearDuplicateDraft(getSessionDuplicateDraftStorage(), sourceTaskId);
+      return () => {
+        cancelled = true;
       };
     }
-    return {
-      schedule_type: "cron",
-      schedule_spec: { cron: initialCron ?? "0 9 * * *" },
-      timezone: initialTimezone ?? "",
+
+    const cached = queryClient
+      .getQueryData<ScheduledTask[]>(["scheduled-tasks"])
+      ?.find((task) => task.id === sourceTaskId);
+    if (cached) {
+      applyIfCurrent(
+        draftFromScheduledTask(cached, st.actions.duplicateTitleSuffix),
+      );
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    void fetchScheduledTasks()
+      .then((tasks) => {
+        const found = tasks.find((task) => task.id === sourceTaskId);
+        if (!found) {
+          if (!cancelled) {
+            setSourceStatus("missing");
+          }
+          return;
+        }
+        applyIfCurrent(
+          draftFromScheduledTask(found, st.actions.duplicateTitleSuffix),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSourceStatus("missing");
+        }
+      });
+
+    return () => {
+      cancelled = true;
     };
-  });
+  }, [queryClient, sourceTaskId, st.actions.duplicateTitleSuffix]);
 
   const listHref = initialThreadId
     ? `/workspace/scheduled-tasks?thread_id=${encodeURIComponent(initialThreadId)}`
@@ -124,6 +212,11 @@ export default function NewScheduledTaskPage() {
               <p className="text-muted-foreground text-sm">{st.description}</p>
             </div>
           </div>
+          {sourceStatus === "missing" && (
+            <div className="text-destructive text-sm">
+              {st.create.sourceMissing}
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
@@ -170,6 +263,11 @@ export default function NewScheduledTaskPage() {
             placeholder={st.create.prompt}
           />
           <ScheduledTaskScheduleInput
+            key={
+              sourceTaskId
+                ? `${sourceTaskId}:${createSchedule.schedule_type}:${JSON.stringify(createSchedule.schedule_spec)}`
+                : "new"
+            }
             initial={createSchedule}
             onChange={setCreateSchedule}
           />
@@ -190,6 +288,8 @@ export default function NewScheduledTaskPage() {
             <Button
               onClick={handleCreate}
               disabled={
+                sourceStatus === "loading" ||
+                sourceStatus === "missing" ||
                 !title ||
                 !prompt ||
                 (!createSchedule.schedule_spec.cron &&

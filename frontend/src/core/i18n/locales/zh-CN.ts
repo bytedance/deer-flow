@@ -424,6 +424,7 @@ export const zhCN: Translations = {
       prompt: "提示词",
       submit: "新建",
       invalidOnce: "请输入有效的日期和时间",
+      sourceMissing: "无法加载要复制的任务。",
     },
     context: {
       fresh: "新线程",

@@ -229,6 +229,8 @@ test("duplicate fills the create form without creating a task", async ({
     .getByRole("button", { name: "Duplicate" })
     .click();
   await page.waitForURL("**/workspace/scheduled-tasks/new**");
+  await expect(page).toHaveURL(/[?&]from=task-copy-source/);
+  expect(new URL(page.url()).searchParams.has("prompt")).toBe(false);
 
   const createForm = page.getByTestId("scheduled-task-create-form");
   await expect(createForm.getByPlaceholder("Task title")).toHaveValue(
@@ -245,6 +247,55 @@ test("duplicate fills the create form without creating a task", async ({
   );
   await expect(createForm.getByPlaceholder("Task title")).toBeFocused();
   expect(createRequests).toBe(0);
+});
+
+test("duplicating a fresh-thread task keeps isolated runs", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, {
+    threads: [],
+    scheduledTasks: [
+      {
+        id: "task-fresh-copy",
+        thread_id: "thread-last-run",
+        context_mode: "fresh_thread_per_run",
+        title: "Nightly digest",
+        prompt: "Write a digest",
+        schedule_type: "cron",
+        schedule_spec: { cron: "0 9 * * *" },
+        timezone: "UTC",
+        status: "enabled",
+        next_run_at: "2026-08-28T09:00:00Z",
+        last_run_at: null,
+        last_run_id: null,
+        last_thread_id: "thread-last-run",
+        last_error: null,
+        run_count: 1,
+        created_at: "2026-08-01T00:00:00Z",
+        updated_at: "2026-08-01T00:00:00Z",
+      },
+    ],
+  });
+
+  await page.goto("/workspace/scheduled-tasks");
+  await page.getByTestId("scheduled-task-item-task-fresh-copy").click();
+  await page
+    .getByTestId("scheduled-task-detail")
+    .getByRole("button", { name: "Duplicate" })
+    .click();
+  await page.waitForURL("**/workspace/scheduled-tasks/new**");
+
+  const createForm = page.getByTestId("scheduled-task-create-form");
+  await expect(createForm.getByPlaceholder("Task title")).toHaveValue(
+    "Nightly digest (Copy)",
+  );
+  await expect(createForm.getByPlaceholder("Prompt")).toHaveValue(
+    "Write a digest",
+  );
+  await expect(
+    createForm.getByRole("button", { name: "Fresh thread" }),
+  ).toHaveAttribute("data-variant", "default");
+  await expect(createForm.getByPlaceholder("Thread ID")).toHaveCount(0);
 });
 
 test("reuse-thread tasks explain their context and busy-thread queue behavior", async ({

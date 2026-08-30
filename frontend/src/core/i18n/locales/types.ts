@@ -360,6 +360,7 @@ export interface Translations {
       prompt: string;
       submit: string;
       invalidOnce: string;
+      sourceMissing: string;
     };
     context: {
       fresh: string;
