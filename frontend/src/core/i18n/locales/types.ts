@@ -967,6 +967,10 @@ export interface Translations {
       title: string;
       description: string;
       createSkill: string;
+      installSkill: string;
+      installingSkill: string;
+      installSuccess: (skillName: string) => string;
+      installFailed: string;
       emptyTitle: string;
       emptyDescription: string;
       emptyButton: string;
