@@ -505,6 +505,7 @@ def test_upload_files_does_not_sync_non_local_sandbox_when_conversion_fails(tmp_
     provider.get.assert_called_once_with("aio-1")
     sandbox.update_file.assert_not_called()
     assert not (thread_uploads_dir / "report.pdf").exists()
+    assert not (thread_uploads_dir / "report.md").exists()
 
 
 def test_make_file_sandbox_writable_adds_write_bits_for_regular_files(tmp_path):
@@ -1292,4 +1293,83 @@ def test_upload_files_failed_conversion_does_not_push_the_next_companion_to_suff
     assert result.files[0].markdown_file is None
     assert result.files[1].markdown_file == "notes.md"
     assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM:notes.pdf"
+    assert not (thread_uploads_dir / "notes_1.md").exists()
+
+
+def test_upload_files_convert_raise_releases_reserved_companion_name(tmp_path):
+    """A convert that raises must not leave a 0-byte stem.md occupying the name."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=RuntimeError("conversion failed"))),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.run(
+                call_unwrapped(
+                    uploads.upload_files,
+                    "thread-local",
+                    request=MagicMock(),
+                    files=[UploadFile(filename="notes.docx", file=BytesIO(b"DOCX"))],
+                    config=SimpleNamespace(),
+                )
+            )
+
+    assert exc_info.value.status_code == 500
+    assert not (thread_uploads_dir / "notes.md").exists()
+
+
+def test_upload_files_convert_cancellation_releases_reserved_companion_name(tmp_path):
+    """Cancelled convert must drop the empty reservation so a later same-stem convert can use it."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(uploads, "convert_file_to_markdown", AsyncMock(side_effect=asyncio.CancelledError)),
+    ):
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                call_unwrapped(
+                    uploads.upload_files,
+                    "thread-local",
+                    request=MagicMock(),
+                    files=[UploadFile(filename="notes.docx", file=BytesIO(b"DOCX"))],
+                    config=SimpleNamespace(),
+                )
+            )
+
+    assert not (thread_uploads_dir / "notes.md").exists()
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=_fake_convert_honoring_output_path({"notes.pdf": "FROM_PDF"})),
+        ),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename="notes.pdf", file=BytesIO(b"PDF"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file == "notes.md"
+    assert (thread_uploads_dir / "notes.md").read_text(encoding="utf-8") == "FROM_PDF"
     assert not (thread_uploads_dir / "notes_1.md").exists()

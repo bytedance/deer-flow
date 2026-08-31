@@ -428,25 +428,28 @@ async def upload_files(
                 provisional_md_name = Path(safe_filename).with_suffix(".md").name
                 unique_md_name = await run_file_io(reserve_unique_filename, uploads_dir, provisional_md_name, seen_filenames)
                 md_output = file_path.with_name(unique_md_name)
-                md_path = await convert_file_to_markdown(file_path, output_path=md_output)
-                if md_path:
-                    written_paths.append(md_path)
-                    md_virtual_path = upload_virtual_path(md_path.name)
+                md_path = None
+                try:
+                    md_path = await convert_file_to_markdown(file_path, output_path=md_output)
+                    if md_path:
+                        written_paths.append(md_path)
+                        md_virtual_path = upload_virtual_path(md_path.name)
 
-                    if sync_to_sandbox:
-                        sandbox_sync_targets.append((md_path, md_virtual_path))
+                        if sync_to_sandbox:
+                            sandbox_sync_targets.append((md_path, md_virtual_path))
 
-                    file_info["markdown_file"] = md_path.name
-                    file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
-                    file_info["markdown_virtual_path"] = md_virtual_path
-                    file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                    await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
-                    recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
-                else:
-                    # Conversion failed and wrote nothing, so drop the empty
-                    # reservation; holding it would rename a later same-stem
-                    # upload against a name nothing occupies.
-                    await run_file_io(release_reserved_filename, uploads_dir, unique_md_name, seen_filenames)
+                        file_info["markdown_file"] = md_path.name
+                        file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                        file_info["markdown_virtual_path"] = md_virtual_path
+                        file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                        await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
+                        recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
+                finally:
+                    if md_path is None:
+                        # Convert returned None, raised, or was cancelled.
+                        # Unlink here (sync) so a CancelledError cannot skip an
+                        # awaited run_file_io and leave a 0-byte name occupied.
+                        release_reserved_filename(uploads_dir, unique_md_name, seen_filenames)
 
             uploaded_files.append(file_info)
 

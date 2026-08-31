@@ -2389,6 +2389,47 @@ class TestUploads:
             assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM:a.pdf"
             assert not (uploads_dir / "a_1.md").exists()
 
+    def test_upload_files_convert_cancellation_releases_reserved_companion_name(self, client):
+        """Cancelled convert must drop the empty reservation so a later same-stem convert can use it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            docx = tmp_path / "a.docx"
+            pdf = tmp_path / "a.pdf"
+            docx.write_bytes(b"DOCX")
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("FROM_PDF", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=asyncio.CancelledError),
+            ):
+                with pytest.raises(asyncio.CancelledError):
+                    client.upload_files("thread-1", [docx])
+
+            assert not (uploads_dir / "a.md").exists()
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["success"] is True
+            assert result["files"][0]["markdown_file"] == "a.md"
+            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM_PDF"
+            assert not (uploads_dir / "a_1.md").exists()
+
     def test_list_uploads(self, client):
         with tempfile.TemporaryDirectory() as tmp:
             uploads_dir = Path(tmp)
@@ -3194,6 +3235,7 @@ class TestScenarioEdgeCases:
             assert result["files"][0]["filename"] == "doc.pdf"
             assert "markdown_file" not in result["files"][0]  # Conversion failed gracefully
             assert (uploads_dir / "doc.pdf").exists()  # File still uploaded
+            assert not (uploads_dir / "doc.md").exists()
 
 
 # ---------------------------------------------------------------------------

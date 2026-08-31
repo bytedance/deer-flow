@@ -1588,40 +1588,43 @@ class DeerFlowClient:
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
                     unique_md_name = reserve_unique_filename(uploads_dir, provisional_md_name, seen_names)
                     md_output = dest.with_name(unique_md_name)
+                    md_path = None
                     try:
-                        if conversion_pool is not None:
-                            md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
-                        else:
-                            md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
-                    except Exception:
-                        logger.warning(
-                            "Failed to convert %s to markdown",
-                            src_path.name,
-                            exc_info=True,
-                        )
-                        md_path = None
-
-                    if md_path is not None:
-                        info["markdown_file"] = md_path.name
-                        info["markdown_path"] = str(uploads_dir / md_path.name)
-                        info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
-                        info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                        # Sidecar is advisory: the companion is already on disk and
-                        # stem fallback still resolves it for this session. Do not
-                        # fail the whole upload (this path has no rollback).
                         try:
-                            record_companion_mapping(uploads_dir, dest_name, md_path.name)
-                        except (OSError, FileNotFoundError):
+                            if conversion_pool is not None:
+                                md_path = conversion_pool.submit(_convert_in_thread, dest, md_output).result()
+                            else:
+                                md_path = asyncio.run(convert_file_to_markdown(dest, output_path=md_output))
+                        except Exception:
                             logger.warning(
-                                "Failed to record companion mapping for %s",
-                                dest_name,
+                                "Failed to convert %s to markdown",
+                                src_path.name,
                                 exc_info=True,
                             )
-                    else:
-                        # Conversion failed and wrote nothing, so drop the
-                        # empty reservation; holding it would rename a later
-                        # same-stem upload against a name nothing occupies.
-                        release_reserved_filename(uploads_dir, unique_md_name, seen_names)
+                            md_path = None
+
+                        if md_path is not None:
+                            info["markdown_file"] = md_path.name
+                            info["markdown_path"] = str(uploads_dir / md_path.name)
+                            info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
+                            info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                            # Sidecar is advisory: the companion is already on disk and
+                            # stem fallback still resolves it for this session. Do not
+                            # fail the whole upload (this path has no rollback).
+                            try:
+                                record_companion_mapping(uploads_dir, dest_name, md_path.name)
+                            except (OSError, FileNotFoundError):
+                                logger.warning(
+                                    "Failed to record companion mapping for %s",
+                                    dest_name,
+                                    exc_info=True,
+                                )
+                    finally:
+                        if md_path is None:
+                            # Convert returned None, raised, or was cancelled.
+                            # Holding the empty reservation would rename a later
+                            # same-stem upload against a name nothing occupies.
+                            release_reserved_filename(uploads_dir, unique_md_name, seen_names)
 
                 uploaded_files.append(info)
         finally:
