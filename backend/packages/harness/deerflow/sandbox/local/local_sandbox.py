@@ -93,19 +93,21 @@ class ResolvedPath(NamedTuple):
 
 
 _CMD_META_CHARS = frozenset('&|<>()^%!"')
+_CMD_UNSAFE_ARG_CHARS = frozenset('%^"')
 
 
 def _quote_cmd_argument(value: str) -> str:
     """Quote one argv value for the explicit ``cmd /c`` wrapper.
 
     ``subprocess.list2cmdline`` follows CommandLineToArgvW rules, not cmd.exe
-    parsing rules. Rejecting cmd metacharacters is the safest contract here:
-    callers can still pass spaces and ordinary punctuation without handing a
-    user-controlled argument a second command language.
+    parsing rules. Quote shell metacharacters so they remain one argument, but
+    reject characters that cmd.exe expands or interprets before quoting can
+    make them inert. Parentheses, ampersands, pipes, and redirection symbols
+    are therefore quoted rather than rejected.
     """
-    if any(char in _CMD_META_CHARS or ord(char) < 32 for char in value):
-        raise PermissionError("cmd.exe arguments may not contain shell metacharacters: & | < > ( ) ^ % !")
-    return f'"{value}"' if any(char.isspace() for char in value) or not value else value
+    if any(char in _CMD_UNSAFE_ARG_CHARS or ord(char) < 32 for char in value):
+        raise PermissionError("cmd.exe arguments may not contain %, ^, or quote/control characters")
+    return f'"{value}"' if not value or any(char.isspace() or char in _CMD_META_CHARS for char in value) else value
 
 
 def _build_cmd_invocation(args: list[str]) -> str:

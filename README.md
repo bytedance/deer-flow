@@ -1260,8 +1260,9 @@ Windows configuration validation.
 
 This host-path alias is intentionally Windows-only. POSIX local deployments
 continue to use the configured virtual `container_path` in tool arguments.
-For `.cmd`/`.bat` program paths, the Windows wrapper rejects `%` and `^` because
-`cmd.exe` expands or interprets those characters before launch.
+For `.cmd`/`.bat` program paths and arguments, the Windows wrapper rejects `%`,
+`^`, quotes, and control characters because `cmd.exe` expands or interprets
+those characters before launch; other shell metacharacters are quoted.
 
 `AioSandboxProvider` normally detects thread-data mounts from its backend: local
 containers use the mounted gateway directories, while remote/provisioner

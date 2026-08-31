@@ -142,7 +142,7 @@ def test_execute_program_rejects_unsafe_cmd_program_path(component: str, monkeyp
         sandbox.execute_program(f"/root/{component}/build.cmd")
 
 
-def test_execute_program_rejects_cmd_metacharacter_arguments(monkeypatch) -> None:
+def test_execute_program_rejects_unsafe_cmd_arguments(monkeypatch) -> None:
     monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     shell_path = r"C:\Windows\System32\cmd.exe"
     monkeypatch.setattr(
@@ -152,8 +152,37 @@ def test_execute_program_rejects_cmd_metacharacter_arguments(monkeypatch) -> Non
     )
     sandbox = LocalSandbox("t", [_MOUNT])
 
-    with pytest.raises(PermissionError, match="shell metacharacters"):
-        sandbox.execute_program("/root/tools/build.cmd", ["safe&injected"])
+    with pytest.raises(PermissionError, match="cmd.exe arguments may not contain"):
+        sandbox.execute_program("/root/tools/build.cmd", ["100% complete"])
+
+
+def test_execute_program_quotes_cmd_arguments_with_safe_metacharacters(monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    calls: list[list[str] | str] = []
+
+    def fake_run(args, timeout, env=None, *, cwd=None):
+        calls.append(args)
+        return "ok", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    shell_path = r"C:\Windows\System32\cmd.exe"
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: shell_path))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    sandbox.execute_program("/root/tools/build.cmd", ["--out", "/root/Program Files (x86)/out.log", "safe&value"])
+
+    expected_program = _windows_path(str(_LAUNCHER_ROOT / "tools" / "build.cmd"))
+    expected_output = str((_LAUNCHER_ROOT / "Program Files (x86)" / "out.log").resolve())
+    expected_command = " ".join(
+        [
+            "call",
+            local_sandbox._quote_cmd_program_path(expected_program),
+            "--out",
+            local_sandbox._quote_cmd_argument(expected_output),
+            '"safe&value"',
+        ]
+    )
+    assert calls == [f'{shell_path} /d /s /c "{expected_command}"']
 
 
 def test_execute_program_quotes_cmd_arguments_with_spaces(monkeypatch) -> None:
