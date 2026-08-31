@@ -497,7 +497,7 @@ class ScheduledTaskRepository:
         *,
         error: str,
         now: datetime,
-    ) -> None:
+    ) -> bool:
         """Finalise a stuck ``once`` task parent to match its latest run outcome.
 
         success -> completed, failed -> failed, interrupted -> cancelled,
