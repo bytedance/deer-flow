@@ -1103,16 +1103,16 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
     """
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
 
-    config = get_extensions_config()
-
-    servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in config.mcp_servers.items()}
+    raw_servers = await asyncio.to_thread(_load_raw_mcp_server_responses)
+    servers = {name: _mask_server_config(server) for name, server in raw_servers.items()}
     return McpConfigResponse(mcp_servers=servers)
 
 
 def _validate_extensions_config_candidate(raw_data: dict) -> None:
-    """Reject a runtime-invalid candidate before it can replace the file."""
+    """Reject a runtime-invalid candidate without changing its placeholders."""
     try:
-        ExtensionsConfig.model_validate(raw_data)
+        resolved_data = ExtensionsConfig.resolve_env_variables(raw_data)
+        ExtensionsConfig.model_validate(resolved_data)
     except ValidationError as exc:
         errors = exc.errors(include_url=False, include_input=False)
         summary = "; ".join(f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}" for error in errors)
@@ -1186,8 +1186,8 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         # Reload the Gateway configuration and update the global cache. The
         # agent runtime lives in Gateway, so this keeps API reads and tool
         # execution aligned after extensions_config.json changes.
-        reloaded_config = reload_extensions_config()
-        return reloaded_config.mcp_servers
+        reload_extensions_config()
+        return _mcp_server_responses_from_raw(config_data)
 
 
 def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
@@ -1226,11 +1226,12 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
             )
 
         raw_server["enabled"] = body.enabled
+        _validate_extensions_config_candidate(raw_data)
         atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("MCP server %s enabled state updated to %s", body.server_name, body.enabled)
-        reloaded_config = reload_extensions_config()
-        return reloaded_config.mcp_servers
+        reload_extensions_config()
+        return _mcp_server_responses_from_raw(raw_data)
 
 
 def _mcp_config_path(*, create: bool) -> Path:
@@ -1270,6 +1271,22 @@ def _raw_mcp_servers(raw_data: dict) -> dict[str, dict]:
     return raw_servers
 
 
+def _mcp_server_responses_from_raw(raw_data: dict) -> dict[str, McpServerConfigResponse]:
+    """Build editable API models without expanding environment placeholders."""
+    return {name: McpServerConfigResponse.model_validate(server) for name, server in _raw_mcp_servers(raw_data).items()}
+
+
+def _load_raw_mcp_server_responses() -> dict[str, McpServerConfigResponse]:
+    """Read editable MCP server definitions under the shared config lock."""
+    config_path = ExtensionsConfig.resolve_config_path()
+    if config_path is None:
+        return {}
+
+    with extensions_config_write_lock, extensions_config_file_lock(config_path):
+        raw_data = _load_raw_extensions_config(config_path, create=False)
+        return _mcp_server_responses_from_raw(raw_data)
+
+
 def _ensure_skills_key(raw_data: dict) -> None:
     if isinstance(raw_data.get("skills"), dict):
         return
@@ -1299,7 +1316,8 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
         atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("Added MCP servers: %s", ", ".join(body.mcp_servers))
-        return reload_extensions_config().mcp_servers
+        reload_extensions_config()
+        return _mcp_server_responses_from_raw(raw_data)
 
 
 def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
@@ -1327,7 +1345,8 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("Updated MCP server: %s", body.server_name)
-        return reload_extensions_config().mcp_servers
+        reload_extensions_config()
+        return _mcp_server_responses_from_raw(raw_data)
 
 
 def _apply_mcp_server_delete(body: McpServerDeleteRequest) -> dict:
@@ -1344,10 +1363,12 @@ def _apply_mcp_server_delete(body: McpServerDeleteRequest) -> dict:
 
         del raw_servers[body.server_name]
         raw_data["mcpServers"] = raw_servers
+        _validate_extensions_config_candidate(raw_data)
         atomic_write_extensions_config(config_path, raw_data)
 
         logger.info("Deleted MCP server: %s", body.server_name)
-        return reload_extensions_config().mcp_servers
+        reload_extensions_config()
+        return _mcp_server_responses_from_raw(raw_data)
 
 
 @router.post(

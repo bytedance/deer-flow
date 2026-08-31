@@ -28,6 +28,7 @@ from app.gateway.routers.mcp import (
     McpServerStateUpdateRequest,
     _mask_server_config,
     _merge_preserving_secrets,
+    _validate_extensions_config_candidate,
     _validate_mcp_update_request,
     create_mcp_servers,
     delete_mcp_server,
@@ -1337,6 +1338,182 @@ async def test_new_server_writes_validate_extensions_constraints_before_writing(
     assert exc_info.value.status_code == 400
     assert "server name" in exc_info.value.detail
     assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+def test_candidate_validation_uses_environment_expanded_values(monkeypatch):
+    monkeypatch.setenv("CODEX_PR_5022_ON_MISSING", "passthrough")
+    raw_data = {
+        "mcpServers": {
+            "target": {
+                "type": "http",
+                "url": "https://example.invalid/mcp",
+                "user_auth": {
+                    "on_missing": "$CODEX_PR_5022_ON_MISSING",
+                },
+            }
+        },
+        "skills": {},
+    }
+
+    _validate_extensions_config_candidate(raw_data)
+
+    assert raw_data["mcpServers"]["target"]["user_auth"]["on_missing"] == "$CODEX_PR_5022_ON_MISSING"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "bulk", "targeted"])
+async def test_mcp_writes_validate_environment_expanded_candidate_before_writing(operation, monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "target": {
+                "type": "http",
+                "url": "https://old.example/mcp",
+            }
+        },
+        "skills": {"research": {"enabled": False}},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.delenv("CODEX_PR_5022_UNSET_TOOLSET", raising=False)
+
+    def load_config_like_production():
+        return ExtensionsConfig.from_file(str(config_path))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", load_config_like_production)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config_like_production)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    invalid_after_expansion = McpServerConfigResponse(
+        type="http",
+        url="https://new.example/mcp",
+        task_toolsets=[
+            {
+                "name": "$CODEX_PR_5022_UNSET_TOOLSET",
+                "submit_tool": "submit",
+                "status_tool": "status",
+                "cancel_tool": "cancel",
+            }
+        ],
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        if operation == "create":
+            await create_mcp_servers(
+                _request_with_role("admin"),
+                McpConfigUpdateRequest(mcp_servers={"added": invalid_after_expansion}),
+            )
+        elif operation == "bulk":
+            await update_mcp_configuration(
+                _request_with_role("admin"),
+                McpConfigUpdateRequest(mcp_servers={"target": invalid_after_expansion}),
+            )
+        else:
+            await update_mcp_server(
+                _request_with_role("admin"),
+                McpServerConfigUpdateRequest(server_name="target", server=invalid_after_expansion),
+            )
+
+    assert exc_info.value.status_code == 400
+    assert "at least 1 character" in exc_info.value.detail
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["state", "delete"])
+async def test_state_and_delete_validate_expanded_document_before_writing(operation, monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "target": {
+                "enabled": True,
+                "type": "http",
+                "url": "https://target.example/mcp",
+            },
+            "invalid-sibling": {
+                "type": "http",
+                "url": "https://sibling.example/mcp",
+                "task_toolsets": [
+                    {
+                        "name": "$CODEX_PR_5022_UNSET_SIBLING_TOOLSET",
+                        "submit_tool": "submit",
+                        "status_tool": "status",
+                        "cancel_tool": "cancel",
+                    }
+                ],
+            },
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.delenv("CODEX_PR_5022_UNSET_SIBLING_TOOLSET", raising=False)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.from_file(str(config_path)))
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        if operation == "state":
+            await update_mcp_server_state(
+                _request_with_role("admin"),
+                McpServerStateUpdateRequest(server_name="target", enabled=False),
+            )
+        else:
+            await delete_mcp_server(
+                _request_with_role("admin"),
+                McpServerDeleteRequest(server_name="target"),
+            )
+
+    assert exc_info.value.status_code == 400
+    assert "at least 1 character" in exc_info.value.detail
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
+async def test_get_and_targeted_put_preserve_environment_placeholders_outside_secret_fields(monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    placeholder = "$CODEX_PR_5022_EDITOR_TOKEN"
+    original = {
+        "mcpServers": {
+            "target": {
+                "type": "stdio",
+                "command": "npx",
+                "args": ["--api-key", placeholder],
+                "env": {"MCP_TOKEN": placeholder},
+                "provider_note": placeholder,
+            }
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+    monkeypatch.setenv("CODEX_PR_5022_EDITOR_TOKEN", "resolved-editor-secret")
+
+    def load_config_like_production():
+        return ExtensionsConfig.from_file(str(config_path))
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", load_config_like_production)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", load_config_like_production)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    get_response = await get_mcp_configuration(_request_with_role("admin"))
+    editable = get_response.mcp_servers["target"]
+    assert editable.args == ["--api-key", placeholder]
+    assert editable.env == {"MCP_TOKEN": "***"}
+    assert editable.model_extra == {"provider_note": placeholder}
+
+    update_response = await update_mcp_server(
+        _request_with_role("admin"),
+        McpServerConfigUpdateRequest(server_name="target", server=editable),
+    )
+
+    returned = update_response.mcp_servers["target"]
+    assert returned.args == ["--api-key", placeholder]
+    assert returned.env == {"MCP_TOKEN": "***"}
+    assert returned.model_extra == {"provider_note": placeholder}
+    persisted = json.loads(config_path.read_text(encoding="utf-8"))["mcpServers"]["target"]
+    assert persisted["args"] == ["--api-key", placeholder]
+    assert persisted["env"] == {"MCP_TOKEN": placeholder}
+    assert persisted["provider_note"] == placeholder
 
 
 @pytest.mark.asyncio
