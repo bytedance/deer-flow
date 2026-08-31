@@ -106,6 +106,12 @@ export interface Translations {
     missingTarget: string;
   };
 
+  artifactArchive: {
+    downloadCurrent: (count: number) => string;
+    currentVersionNotice: string;
+    downloadFailed: string;
+  };
+
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;

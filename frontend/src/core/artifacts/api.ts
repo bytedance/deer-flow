@@ -1,11 +1,16 @@
 import { fetch } from "@/core/api/fetcher";
 
-import { urlOfArtifact } from "./utils";
+import { urlOfArtifact, urlOfArtifactArchive } from "./utils";
 
 export interface ArtifactUpdateResponse {
   path: string;
   sha256: string;
   size: number;
+}
+
+export interface ArtifactArchiveDownload {
+  blob: Blob;
+  filename: string;
 }
 
 export class ArtifactRequestError extends Error {
@@ -51,4 +56,28 @@ export async function updateArtifactContent({
     );
   }
   return response.json() as Promise<ArtifactUpdateResponse>;
+}
+
+export async function downloadArtifactArchive({
+  threadId,
+  runId,
+}: {
+  threadId: string;
+  runId: string;
+}): Promise<ArtifactArchiveDownload> {
+  const response = await fetch(urlOfArtifactArchive({ threadId, runId }), {
+    method: "POST",
+  });
+  if (!response.ok) {
+    throw new ArtifactRequestError(
+      response.status,
+      await readErrorDetail(response),
+    );
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const filename = /filename="([^"]+)"/.exec(disposition)?.[1];
+  return {
+    blob: await response.blob(),
+    filename: filename ?? `artifacts-${runId}.zip`,
+  };
 }

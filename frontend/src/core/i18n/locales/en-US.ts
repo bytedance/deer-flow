@@ -128,6 +128,14 @@ export const enUS: Translations = {
     missingTarget: "This link does not say which artifact to display.",
   },
 
+  artifactArchive: {
+    downloadCurrent: (count) =>
+      `Download current versions (${count} ${count === 1 ? "file" : "files"})`,
+    currentVersionNotice:
+      "The file list comes from this response. Contents are the current versions and may have changed.",
+    downloadFailed: "Failed to download artifact archive.",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) =>

@@ -125,6 +125,13 @@ export const zhCN: Translations = {
     missingTarget: "该链接没有指明要展示哪个文件。",
   },
 
+  artifactArchive: {
+    downloadCurrent: (count) => `下载当前版本（${count} 个文件）`,
+    currentVersionNotice:
+      "文件列表来自此回复；内容为当前版本，可能已发生变化。",
+    downloadFailed: "文件压缩包下载失败。",
+  },
+
   // Citations
   citations: {
     sourcesSummary: (count) => `使用了 ${count} 个来源`,

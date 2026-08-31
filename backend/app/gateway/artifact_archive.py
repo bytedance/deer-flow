@@ -1,0 +1,222 @@
+"""Fail-closed ZIP construction for files presented by one run."""
+
+from __future__ import annotations
+
+import os
+import stat
+import tempfile
+import time
+import unicodedata
+import zipfile
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import BinaryIO
+
+from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
+
+_VIRTUAL_PREFIX = "mnt/user-data/outputs/"
+_EDIT_TEMP_PREFIX = ".artifact-edit-"
+_WINDOWS_INVALID_CHARS = frozenset('<>:"|?*')
+_WINDOWS_DEVICE_NAMES = frozenset({"con", "prn", "aux", "nul"} | {f"com{number}" for number in range(1, 10)} | {f"lpt{number}" for number in range(1, 10)})
+MAX_FILES = 50
+MAX_FILE_BYTES = 50 * 1024 * 1024
+MAX_TOTAL_BYTES = 100 * 1024 * 1024
+MAX_ENTRY_BYTES = 1024
+BUILD_TIMEOUT_SECONDS = 60.0
+_CHUNK_BYTES = 1024 * 1024
+
+
+class ArtifactArchiveError(ValueError):
+    def __init__(self, detail: str, status_code: int = 409) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class ArtifactArchiveResult:
+    file: BinaryIO
+    size: int
+    member_count: int
+    input_bytes: int
+
+
+@dataclass(frozen=True)
+class _ArchiveMember:
+    path: Path
+    entry: str
+    initial: os.stat_result
+    components: tuple[tuple[Path, int, int], ...]
+
+
+def _reject() -> ArtifactArchiveError:
+    return ArtifactArchiveError("The files listed by this response are not available for archive download")
+
+
+def _too_large(detail: str) -> ArtifactArchiveError:
+    return ArtifactArchiveError(detail, 413)
+
+
+def _check_deadline(deadline: float) -> None:
+    if time.monotonic() > deadline:
+        raise ArtifactArchiveError("Artifact archive creation timed out", 503)
+
+
+def _member(
+    root: Path,
+    virtual_path: str,
+    reserved: frozenset[str],
+    deadline: float,
+) -> _ArchiveMember:
+    _check_deadline(deadline)
+    if not virtual_path or virtual_path.startswith("//") or "\\" in virtual_path or "\x00" in virtual_path:
+        raise _reject()
+    stripped = virtual_path.removeprefix("/")
+    if not stripped.startswith(_VIRTUAL_PREFIX):
+        raise _reject()
+
+    parts = stripped.removeprefix(_VIRTUAL_PREFIX).split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise _reject()
+    if any(any(char in _WINDOWS_INVALID_CHARS for char in part) or part.endswith((" ", ".")) or part.split(".", 1)[0].rstrip().casefold() in _WINDOWS_DEVICE_NAMES for part in parts):
+        raise _reject()
+    if any(any(unicodedata.category(char).startswith("C") for char in part) for part in parts):
+        raise _reject()
+    if any(part.casefold() in reserved or part.casefold().startswith(_EDIT_TEMP_PREFIX) for part in parts):
+        raise _reject()
+    if any(part.casefold().endswith(".skill") for part in parts[:-1]):
+        raise _reject()
+
+    entry = "/".join(parts)
+    if len(entry.encode()) > MAX_ENTRY_BYTES:
+        raise _too_large("An artifact path is too long to include in an archive")
+
+    candidate = root.joinpath(*parts)
+    current = root
+    components: list[tuple[Path, int, int]] = []
+    try:
+        for part in parts:
+            _check_deadline(deadline)
+            current /= part
+            metadata = os.lstat(current)
+            if stat.S_ISLNK(metadata.st_mode):
+                raise _reject()
+            components.append((current, metadata.st_dev, metadata.st_ino))
+        initial = os.lstat(candidate)
+        if not stat.S_ISREG(initial.st_mode):
+            raise _reject()
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except ArtifactArchiveError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise _reject() from exc
+    _check_deadline(deadline)
+    return _ArchiveMember(resolved, entry, initial, tuple(components))
+
+
+def _copy_member(
+    archive: zipfile.ZipFile,
+    member: _ArchiveMember,
+    deadline: float,
+    remaining_total_bytes: int,
+) -> int:
+    _check_deadline(deadline)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(member.path, flags)
+    except OSError as exc:
+        raise _reject() from exc
+
+    try:
+        _check_deadline(deadline)
+        before = os.fstat(descriptor)
+        identity = (before.st_dev, before.st_ino)
+        if not stat.S_ISREG(before.st_mode) or identity != (member.initial.st_dev, member.initial.st_ino):
+            raise _reject()
+        if before.st_size > MAX_FILE_BYTES:
+            raise _too_large(f"Each archived artifact must be at most {MAX_FILE_BYTES} bytes")
+        if before.st_size > remaining_total_bytes:
+            raise _too_large(f"Archived artifacts must total at most {MAX_TOTAL_BYTES} bytes")
+
+        info = zipfile.ZipInfo(member.entry)
+        info.create_system = 0
+        info.compress_type = zipfile.ZIP_STORED
+        remaining = before.st_size
+        with archive.open(info, "w", force_zip64=False) as destination:
+            while remaining:
+                _check_deadline(deadline)
+                chunk = os.read(descriptor, min(_CHUNK_BYTES, remaining))
+                if not chunk:
+                    raise _reject()
+                destination.write(chunk)
+                remaining -= len(chunk)
+            if os.read(descriptor, 1):
+                raise _reject()
+
+        _check_deadline(deadline)
+        after = os.fstat(descriptor)
+        if (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise _reject()
+        try:
+            for component, device, inode in member.components:
+                current = os.lstat(component)
+                if stat.S_ISLNK(current.st_mode) or (current.st_dev, current.st_ino) != (device, inode):
+                    raise _reject()
+        except OSError as exc:
+            raise _reject() from exc
+        return before.st_size
+    finally:
+        os.close(descriptor)
+
+
+def build_artifact_archive(
+    outputs_dir: Path,
+    virtual_paths: Iterable[str],
+    *,
+    extra_reserved_dir_names: Iterable[str] = (),
+) -> ArtifactArchiveResult:
+    deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
+    try:
+        root = outputs_dir.resolve(strict=True)
+    except OSError as exc:
+        raise _reject() from exc
+    if not root.is_dir():
+        raise _reject()
+    _check_deadline(deadline)
+
+    paths = list(dict.fromkeys(virtual_paths))
+    if not paths:
+        raise _reject()
+    if len(paths) > MAX_FILES:
+        raise _too_large(f"An artifact archive can contain at most {MAX_FILES} files")
+
+    reserved = frozenset(name.casefold() for name in {BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME, *extra_reserved_dir_names})
+    members = [_member(root, path, reserved, deadline) for path in paths]
+    collision_keys = [unicodedata.normalize("NFC", member.entry).casefold() for member in members]
+    if len(collision_keys) != len(set(collision_keys)):
+        raise _reject()
+
+    sizes = [member.initial.st_size for member in members]
+    if any(size > MAX_FILE_BYTES for size in sizes):
+        raise _too_large(f"Each archived artifact must be at most {MAX_FILE_BYTES} bytes")
+    if sum(sizes) > MAX_TOTAL_BYTES:
+        raise _too_large(f"Archived artifacts must total at most {MAX_TOTAL_BYTES} bytes")
+
+    _check_deadline(deadline)
+    output = tempfile.TemporaryFile("w+b")
+    try:
+        if hasattr(os, "fchmod"):
+            os.fchmod(output.fileno(), 0o600)
+        input_bytes = 0
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_STORED, allowZip64=False) as archive:
+            for member in members:
+                input_bytes += _copy_member(archive, member, deadline, MAX_TOTAL_BYTES - input_bytes)
+        _check_deadline(deadline)
+        size = output.tell()
+        output.seek(0)
+        return ArtifactArchiveResult(output, size, len(members), input_bytes)
+    except Exception:
+        output.close()
+        raise
