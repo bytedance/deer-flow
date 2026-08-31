@@ -436,10 +436,10 @@ def test_sqlite_round_trip_new_fields():
 
 
 def test_create_user_duplicate_primary_key_is_not_misreported_as_oauth(tmp_path):
-    """A duplicate `id` (primary-key violation, unrelated to OAuth) must not
-    be reported as "OAuth account already linked" -- the exact false
-    positive a substring check on str(exc) produces, since the wrapper's
-    text always names oauth_provider/oauth_id as INSERT columns."""
+    """A duplicate `id` (primary-key violation, unrelated to OAuth) must be
+    reported as neither an OAuth conflict nor an email conflict: it names
+    neither `oauth` (the false positive a substring check on str(exc)
+    produces) nor `second@test.com` (an address that is not registered)."""
     import asyncio
 
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
@@ -462,7 +462,38 @@ def test_create_user_duplicate_primary_key_is_not_misreported_as_oauth(tmp_path)
             duplicate_id = User(id=shared_id, email="second@test.com", password_hash="h", system_role="user")
             with pytest.raises(ValueError) as exc_info:
                 await repo.create_user(duplicate_id)
-            assert "OAuth" not in str(exc_info.value), f"primary-key violation misreported as an OAuth conflict: {exc_info.value}"
+            message = str(exc_info.value)
+            assert "OAuth" not in message, f"primary-key violation misreported as an OAuth conflict: {message}"
+            assert "second@test.com" not in message, f"primary-key violation misreported as an email conflict: {message}"
+            assert "User already exists" in message
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
+def test_create_user_duplicate_email_race_still_reports_email(tmp_path):
+    """An email collision that reaches the DB (the pre-check bypassed to
+    simulate the concurrent-insert race) must still get the email-specific
+    message, not the neutral fallback."""
+    import asyncio
+
+    from app.gateway.auth.repositories import sqlite as sqlite_repo
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        url = f"sqlite+aiosqlite:///{tmp_path}/scratch.db"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            await repo.create_user(User(email="race@test.com", password_hash="h", system_role="user"))
+
+            racing = User(email="race@test.com", password_hash="h", system_role="user")
+            with patch.object(sqlite_repo.AsyncSession, "scalar", return_value=None):
+                with pytest.raises(ValueError, match="Email already registered: race@test.com"):
+                    await repo.create_user(racing)
         finally:
             await close_engine()
 
@@ -496,35 +527,52 @@ def test_create_user_real_oauth_conflict_still_reported_correctly(tmp_path):
     asyncio.run(_run())
 
 
-# _is_oauth_identity_violation is a pure function of the driver exception --
-# the two tests above already cover the SQLite branch end-to-end (real
-# engine, real IntegrityError). The Postgres/asyncpg branch (constraint_name)
-# had ZERO non-skipped coverage: its only guard,
-# test_oauth_identity_uniqueness_enforced_end_to_end, needs a real Postgres
-# and is skipped in CI (no workflow sets DEERFLOW_TEST_POSTGRES_URL). These
-# pin both arms with stub driver errors -- no DB of either kind required --
-# so a future rename of OAUTH_IDENTITY_INDEX_NAME or a change to the
-# fallback message check has a non-opt-in test to break.
-def test_is_oauth_identity_violation_matches_postgres_constraint_name():
+# The IntegrityError classification helpers are pure functions of the driver
+# exception -- the end-to-end tests above cover the SQLite branch (real engine,
+# real IntegrityError). The Postgres/asyncpg branch needs a real Postgres and
+# its only e2e guard, test_oauth_identity_uniqueness_enforced_end_to_end, is
+# skipped in CI (no workflow sets DEERFLOW_TEST_POSTGRES_URL). The stubs below
+# pin it with no DB of either kind.
+#
+# The shape matters: SQLAlchemy's asyncpg dialect does NOT hand us the asyncpg
+# error as `exc.orig`. It re-raises its own AsyncAdapt_asyncpg_dbapi
+# .IntegrityError (pgcode/sqlstate only) `from` the real asyncpg error, so
+# `constraint_name` lives on `exc.orig.__cause__`, not `exc.orig`.
+def _pg_integrity_error(constraint_name: str):
+    """A stub in the shape SQLAlchemy's asyncpg dialect actually produces:
+    the `orig` wrapper carries no constraint_name; the real driver error
+    (which does) is its `__cause__`."""
     from types import SimpleNamespace
 
+    wrapper = SimpleNamespace(pgcode="23505", sqlstate="23505")
+    wrapper.__cause__ = SimpleNamespace(constraint_name=constraint_name)
+    return SimpleNamespace(orig=wrapper)
+
+
+def test_driver_constraint_name_reads_from_asyncpg_cause_chain():
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _driver_constraint_name
+
+    assert _driver_constraint_name(_pg_integrity_error("users_pkey")) == "users_pkey"
+    # No cause, no constraint_name anywhere -> None (SQLite path).
+    assert _driver_constraint_name(SimpleNamespace(orig=SimpleNamespace())) is None
+
+
+def test_is_oauth_identity_violation_matches_postgres_constraint_name():
     from app.gateway.auth.repositories.sqlite import _is_oauth_identity_violation
     from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME
 
-    exc = SimpleNamespace(orig=SimpleNamespace(constraint_name=OAUTH_IDENTITY_INDEX_NAME))
-    assert _is_oauth_identity_violation(exc) is True
+    assert _is_oauth_identity_violation(_pg_integrity_error(OAUTH_IDENTITY_INDEX_NAME)) is True
 
 
 def test_is_oauth_identity_violation_rejects_other_postgres_constraints():
     """A primary-key (or any other) constraint name on the SAME table must
-    not be misclassified as the OAuth index -- this is the Postgres-side
-    equivalent of the SQLite primary-key-violation regression test above."""
-    from types import SimpleNamespace
-
+    not be misclassified as the OAuth index -- the Postgres-side equivalent
+    of the SQLite primary-key-violation regression test above."""
     from app.gateway.auth.repositories.sqlite import _is_oauth_identity_violation
 
-    exc = SimpleNamespace(orig=SimpleNamespace(constraint_name="users_pkey"))
-    assert _is_oauth_identity_violation(exc) is False
+    assert _is_oauth_identity_violation(_pg_integrity_error("users_pkey")) is False
 
 
 def test_is_oauth_identity_violation_matches_sqlite_message():
@@ -549,6 +597,43 @@ def test_is_oauth_identity_violation_rejects_sqlite_email_violation():
     orig = sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
     exc = SimpleNamespace(orig=orig)
     assert _is_oauth_identity_violation(exc) is False
+
+
+def test_is_email_violation_matches_both_backends():
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _EMAIL_UNIQUE_CONSTRAINT_NAME, _is_email_violation
+
+    assert _is_email_violation(_pg_integrity_error(_EMAIL_UNIQUE_CONSTRAINT_NAME)) is True
+    sqlite = SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.email"))
+    assert _is_email_violation(sqlite) is True
+
+
+def test_is_email_violation_rejects_primary_key_and_oauth():
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _is_email_violation
+
+    assert _is_email_violation(_pg_integrity_error("users_pkey")) is False
+    assert (
+        _is_email_violation(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) is False
+    )
+
+
+def test_violated_constraint_extracts_name_from_both_backends():
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _violated_constraint
+
+    assert _violated_constraint(_pg_integrity_error("users_pkey")) == "users_pkey"
+    assert (
+        _violated_constraint(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id")))
+        == "users.id"
+    )
+    assert _violated_constraint(SimpleNamespace(orig=RuntimeError("opaque driver error"))) is None
 
 
 def test_update_user_raises_when_row_concurrently_deleted(tmp_path):

@@ -23,36 +23,81 @@ from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
+# SQLAlchemy leaves the ``email`` column's ``unique=True`` constraint unnamed,
+# so Postgres auto-names it ``<table>_<column>_key``.
+_EMAIL_UNIQUE_CONSTRAINT_NAME = "users_email_key"
+
+
+def _driver_constraint_name(exc: IntegrityError) -> str | None:
+    """The violated constraint's name from the driver exception, or ``None``
+    when the driver does not expose one.
+
+    ``exc.orig`` is NOT the raw driver error. SQLAlchemy's asyncpg dialect
+    re-raises a plain ``AsyncAdapt_asyncpg_dbapi.IntegrityError`` built from a
+    rendered string and carrying only ``pgcode``/``sqlstate``
+    (``sqlalchemy/dialects/postgresql/asyncpg.py::_handle_exception``); the
+    real ``asyncpg.UniqueViolationError`` — the one with ``constraint_name`` —
+    survives as ``exc.orig.__cause__`` (``raise translated_error from error``).
+    aiosqlite exposes no constraint name at all. Check the wrapper, then its
+    cause.
+    """
+    for obj in (exc.orig, getattr(exc.orig, "__cause__", None)):
+        name = getattr(obj, "constraint_name", None)
+        if name:
+            return str(name)
+    return None
+
 
 def _is_oauth_identity_violation(exc: IntegrityError) -> bool:
     """Distinguish the ``idx_users_oauth_identity`` (oauth_provider, oauth_id)
     unique-index violation from any OTHER ``IntegrityError`` reaching this
     commit (a duplicate primary key, or a duplicate-email race that slipped
-    past the pre-check above) by inspecting the DRIVER exception
-    (``exc.orig``), never the SQLAlchemy wrapper's ``str(exc)``.
+    past the pre-check above).
 
-    ``str(exc)`` always embeds the full failed INSERT statement text, whose
-    column list names ``oauth_provider``/``oauth_id`` on every call
-    regardless of which constraint actually fired — a substring check on it
-    misclassifies every commit-time ``IntegrityError`` on this table as an
-    OAuth conflict. Reproduced directly on SQLite: inserting a different
-    email with an already-used ``id`` (a primary-key violation, nothing to
-    do with OAuth) raised "OAuth account already linked: None/None".
+    Never uses the SQLAlchemy wrapper's ``str(exc)``: it embeds the full
+    failed INSERT statement, whose column list names
+    ``oauth_provider``/``oauth_id`` on every call regardless of which
+    constraint fired, so a substring check on it misclassifies every
+    commit-time ``IntegrityError`` on this table as an OAuth conflict
+    (reproduced on SQLite: a duplicate ``id`` raised "OAuth account already
+    linked: None/None").
 
-    Postgres (asyncpg): the driver exception carries the violated
-    constraint's real name via ``constraint_name`` — compare against
-    ``idx_users_oauth_identity`` from ``deerflow.persistence.user.model``.
-    SQLite: the driver exposes no structured constraint name, only a
-    message naming the violated column(s) directly (``"UNIQUE constraint
+    Postgres: match :data:`OAUTH_IDENTITY_INDEX_NAME` against the driver
+    constraint name (see :func:`_driver_constraint_name`). SQLite: no
+    structured name, only a message naming the columns (``"UNIQUE constraint
     failed: users.oauth_provider, users.oauth_id"``) — require BOTH oauth
-    column names present, not a bare "oauth" substring.
+    column names, not a bare "oauth" substring.
     """
-    orig = exc.orig
-    constraint_name = getattr(orig, "constraint_name", None)
-    if constraint_name is not None:
-        return constraint_name == OAUTH_IDENTITY_INDEX_NAME
-    message = str(orig).lower()
+    name = _driver_constraint_name(exc)
+    if name is not None:
+        return name == OAUTH_IDENTITY_INDEX_NAME
+    message = str(exc.orig).lower()
     return "oauth_provider" in message and "oauth_id" in message
+
+
+def _is_email_violation(exc: IntegrityError) -> bool:
+    """True when ``exc`` is the ``users.email`` uniqueness violation, using the
+    same driver-exception inspection as :func:`_is_oauth_identity_violation`
+    (never ``str(exc)``, whose INSERT text names every column)."""
+    name = _driver_constraint_name(exc)
+    if name is not None:
+        return name == _EMAIL_UNIQUE_CONSTRAINT_NAME
+    return "users.email" in str(exc.orig).lower()
+
+
+def _violated_constraint(exc: IntegrityError) -> str | None:
+    """Best-effort name of the constraint behind ``exc``, for a diagnostic that
+    does not pin an unattributed violation on a specific column. Uses the
+    driver constraint name where available, else the column(s) SQLite names in
+    its message (``"UNIQUE constraint failed: users.id"``)."""
+    name = _driver_constraint_name(exc)
+    if name:
+        return name
+    marker = "constraint failed: "
+    message = str(exc.orig)
+    if marker in message:
+        return message.split(marker, 1)[1].splitlines()[0].strip() or None
+    return None
 
 
 def _normalize_email(email: str) -> str:
@@ -136,15 +181,25 @@ class SQLiteUserRepository(UserRepository):
             except IntegrityError as exc:
                 await session.rollback()
                 # The email pre-check above already ruled out an email
-                # collision under normal (non-racing) conditions, so most
-                # IntegrityErrors reaching here are idx_users_oauth_identity
-                # firing instead -- but not all (see
-                # _is_oauth_identity_violation's own docstring for the
-                # reproduced counter-example). Inspect the actual violated
-                # constraint rather than assuming.
+                # collision under normal (non-racing) conditions, so
+                # IntegrityErrors reaching here are usually
+                # idx_users_oauth_identity -- but not always (a duplicate
+                # primary key, or an email collision that raced past the
+                # pre-check). Attribute the failure to the constraint that
+                # actually fired instead of assuming any one of them.
                 if _is_oauth_identity_violation(exc):
                     raise ValueError(f"OAuth account already linked: {user.oauth_provider}/{user.oauth_id}") from exc
-                raise ValueError(f"Email already registered: {user.email}") from exc
+                if _is_email_violation(exc):
+                    # A duplicate address that got past the pre-check: a
+                    # concurrent insert of the same email.
+                    raise ValueError(f"Email already registered: {user.email}") from exc
+                # Neither uniqueness constraint we message specifically (in
+                # practice a duplicate id). Don't dress it up as an email
+                # conflict for an address that isn't registered.
+                constraint = _violated_constraint(exc)
+                raise ValueError(
+                    f"User already exists (constraint: {constraint})" if constraint else "User already exists"
+                ) from exc
         return user
 
     async def get_user_by_id(self, user_id: str) -> User | None:
