@@ -8,6 +8,7 @@ configured virtual mount path.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -69,7 +70,7 @@ def _canonical_host_path(path: str) -> tuple[str, bool]:
 
 def _canonical_container_path(path: str, original: str) -> str:
     normalized = path.replace("\\", "/")
-    if re.match(r"^(?:[A-Za-z]:/|/[A-Za-z](?:/|$))", normalized):
+    if re.match(r"^[A-Za-z]:/", normalized) or (os.name == "nt" and re.match(r"^/[A-Za-z](?:/|$)", normalized)):
         raise _permission_error(original, "container_path must not be drive-shaped")
     if not normalized.startswith("/"):
         raise _permission_error(original, "container_path must be absolute")

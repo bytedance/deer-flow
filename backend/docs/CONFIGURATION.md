@@ -700,8 +700,9 @@ files. Its optional model-supplied timeout must be positive and is capped by
 execution, not an isolation boundary; use it only for trusted single-user
 deployments. AIO, E2B, provisioner, and other remote sandbox providers do not
 run Windows host programs. Keep every mount `container_path` as a POSIX virtual
-path; drive-shaped values such as `/c/projects` are rejected during config
-validation.
+path. Drive-prefixed values such as `C:/projects` are rejected on every OS;
+slash-prefixed single-letter roots such as `/c/projects` are rejected during
+Windows configuration validation but remain valid POSIX roots on POSIX hosts.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`

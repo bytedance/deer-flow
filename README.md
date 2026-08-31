@@ -1254,8 +1254,9 @@ their configuration files. A requested timeout must be positive and is capped
 by `sandbox.bash_command_timeout` (600 seconds by default). This runs code on
 the Gateway host and is not a security boundary; remote/container sandbox
 providers do not expose it. Keep mount `container_path` values POSIX-style;
-drive-shaped values such as `/c/projects` are rejected during configuration
-validation.
+drive-prefixed values such as `C:/projects` are rejected on every OS, while
+slash-prefixed single-letter roots such as `/c/projects` are rejected only by
+Windows configuration validation.
 
 This host-path alias is intentionally Windows-only. POSIX local deployments
 continue to use the configured virtual `container_path` in tool arguments.

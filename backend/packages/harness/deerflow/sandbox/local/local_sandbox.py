@@ -120,6 +120,10 @@ def _resolve_program_argument(sandbox: "LocalSandbox", value: str) -> str:
     return sandbox._resolve_path(value) if sandbox._find_path_mapping(value) else value
 
 
+def _is_windows_native_program_platform() -> bool:
+    return os.name == "nt"
+
+
 class LocalSandbox(Sandbox):
     @staticmethod
     def _shell_name(shell: str) -> str:
@@ -597,7 +601,7 @@ class LocalSandbox(Sandbox):
         ``-File`` mode; executables are launched directly with ``shell=False``.
         """
         _validate_extra_env(env)
-        if os.name != "nt":
+        if not _is_windows_native_program_platform():
             raise RuntimeError("Windows native program execution is only available on Windows")
 
         program_mapping = self._find_path_mapping(program_path)

@@ -112,9 +112,42 @@ def test_replace_host_paths_in_command_rejects_unconfigured_host_paths(
 
 
 def test_volume_mount_rejects_drive_shaped_container_path() -> None:
-    with pytest.raises(ValidationError, match="drive-shaped"):
-        VolumeMountConfig(
-            host_path="C:/Users/lichen",
-            container_path="/c/projects",
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("deerflow.config.sandbox_config.os.name", "nt")
+        with pytest.raises(ValidationError, match="drive-shaped"):
+            VolumeMountConfig(
+                host_path="C:/Users/lichen",
+                container_path="/c/projects",
+                read_only=False,
+            )
+
+
+def test_volume_mount_allows_single_letter_posix_root_on_non_windows() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("deerflow.config.sandbox_config.os.name", "posix")
+        mount = VolumeMountConfig(
+            host_path="/tmp",
+            container_path="/d/data",
             read_only=False,
         )
+
+    assert mount.container_path == "/d/data"
+
+
+def test_volume_mount_rejects_drive_path_on_non_windows() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("deerflow.config.sandbox_config.os.name", "posix")
+        with pytest.raises(ValidationError, match="drive-shaped"):
+            VolumeMountConfig(
+                host_path="/tmp",
+                container_path="C:/projects",
+                read_only=False,
+            )
+
+
+def test_normalize_host_path_preserves_single_letter_posix_container_root() -> None:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr("deerflow.config.sandbox_config.os.name", "posix")
+        monkeypatch.setattr("deerflow.sandbox.host_path_compat.os.name", "posix")
+        mount = VolumeMountConfig(host_path="/tmp", container_path="/d/data", read_only=False)
+        assert normalize_host_path("/tmp/report.txt", mount) == "/d/data/report.txt"

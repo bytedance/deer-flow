@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib
 import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,12 +13,22 @@ from deerflow.config.sandbox_config import SandboxConfig, VolumeMountConfig
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.tools.builtins.run_host_program_tool import run_host_program_tool
 
+run_host_program_module = importlib.import_module("deerflow.tools.builtins.run_host_program_tool")
+
+_LAUNCHER_ROOT = Path(__file__).resolve().parent / ".launcher-mount"
 _MOUNT = PathMapping(
     container_path="/root",
-    local_path=r"C:\Users\lichen",
+    local_path=str(_LAUNCHER_ROOT),
     read_only=False,
 )
 _MOUNTS = [
+    VolumeMountConfig(
+        host_path=str(_LAUNCHER_ROOT),
+        container_path="/root",
+        read_only=False,
+    )
+]
+_WINDOWS_MOUNTS = [
     VolumeMountConfig(
         host_path=r"C:\Users\lichen",
         container_path="/root",
@@ -25,8 +37,12 @@ _MOUNTS = [
 ]
 
 
+def _windows_path(path: str) -> str:
+    return str(Path(path).resolve()).replace("/", "\\")
+
+
 def test_execute_program_launches_exe_without_shell(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[tuple[list[str], float, dict[str, str] | None, str | None]] = []
 
     def fake_run(args, timeout, env=None, *, cwd=None):
@@ -46,17 +62,17 @@ def test_execute_program_launches_exe_without_shell(monkeypatch) -> None:
     assert result == "ok"
     assert len(calls) == 1
     args, timeout, _env, cwd = calls[0]
-    assert [value.casefold() if isinstance(value, str) and ":\\" in value else value for value in args] == [
-        r"C:\Users\lichen\tools\app.exe".casefold(),
+    assert args == [
+        _windows_path(str(_LAUNCHER_ROOT / "tools" / "app.exe")),
         "--config",
-        r"C:\Users\lichen\config.tfx-dms".casefold(),
+        _windows_path(str(_LAUNCHER_ROOT / "config.tfx-dms")),
     ]
     assert timeout == 7
-    assert cwd.casefold() == r"C:\Users\lichen\tools".casefold()
+    assert cwd == _windows_path(str(_LAUNCHER_ROOT / "tools"))
 
 
 def test_execute_program_resolves_virtual_path_embedded_in_key_value_arg(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []
 
     def fake_run(args, timeout, env=None, *, cwd=None):
@@ -68,11 +84,11 @@ def test_execute_program_resolves_virtual_path_embedded_in_key_value_arg(monkeyp
 
     sandbox.execute_program("/root/tools/app.exe", ["--config=/root/config.tfx-dms"])
 
-    assert calls[0][1].casefold() == r"--config=C:\Users\lichen\config.tfx-dms".casefold()
+    assert calls[0][1] == f"--config={_windows_path(str(_LAUNCHER_ROOT / 'config.tfx-dms'))}"
 
 
 def test_execute_program_uses_cmd_call_for_cmd_files(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []
 
     def fake_run(args, timeout, env=None, *, cwd=None):
@@ -80,25 +96,29 @@ def test_execute_program_uses_cmd_call_for_cmd_files(monkeypatch) -> None:
         return "ok", "", 0, False
 
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    shell_path = r"C:\Windows\System32\cmd.exe"
     monkeypatch.setattr(
         LocalSandbox,
         "_find_first_available_shell",
-        staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"),
+        staticmethod(lambda candidates: shell_path),
     )
     sandbox = LocalSandbox("t", [_MOUNT])
 
     sandbox.execute_program("/root/tools/build.cmd", ["--release"])
 
     assert isinstance(calls[0], str)
-    assert calls[0].casefold() == r'C:\Windows\System32\cmd.exe /d /s /c "call C:\Users\lichen\tools\build.cmd --release"'.casefold()
+    expected_program = _windows_path(str(_LAUNCHER_ROOT / "tools" / "build.cmd"))
+    expected_command = local_sandbox._build_cmd_invocation(["call", expected_program, "--release"])
+    assert calls[0] == f'{shell_path} /d /s /c "{expected_command}"'
 
 
 def test_execute_program_rejects_cmd_metacharacter_arguments(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    shell_path = r"C:\Windows\System32\cmd.exe"
     monkeypatch.setattr(
         LocalSandbox,
         "_find_first_available_shell",
-        staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"),
+        staticmethod(lambda candidates: shell_path),
     )
     sandbox = LocalSandbox("t", [_MOUNT])
 
@@ -107,7 +127,7 @@ def test_execute_program_rejects_cmd_metacharacter_arguments(monkeypatch) -> Non
 
 
 def test_execute_program_quotes_cmd_arguments_with_spaces(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []
 
     def fake_run(args, timeout, env=None, *, cwd=None):
@@ -124,7 +144,7 @@ def test_execute_program_quotes_cmd_arguments_with_spaces(monkeypatch) -> None:
 
 
 def test_execute_program_requires_a_mapped_program_path(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: ("ok", "", 0, False)))
     sandbox = LocalSandbox("t", [_MOUNT])
 
@@ -133,7 +153,7 @@ def test_execute_program_requires_a_mapped_program_path(monkeypatch) -> None:
 
 
 def test_execute_program_uses_powershell_file_for_ps1(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []
 
     def fake_run(args, timeout, env=None, *, cwd=None):
@@ -155,9 +175,9 @@ def test_execute_program_uses_powershell_file_for_ps1(monkeypatch) -> None:
             r"C:\Program Files\PowerShell\7\pwsh.exe",
             "-NoProfile",
             "-File",
-            r"C:\Users\lichen\tools\build.ps1".replace("tools", "Tools"),
+            _windows_path(str(_LAUNCHER_ROOT / "tools" / "build.ps1")),
             "-Config",
-            r"C:\Users\lichen\config.tfx-dms",
+            _windows_path(str(_LAUNCHER_ROOT / "config.tfx-dms")),
         ]
     ]
 
@@ -185,8 +205,9 @@ def test_execute_program_runs_a_real_powershell_file(tmp_path) -> None:
     assert "powershell-ok" in output
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows host-path compatibility")
 def test_run_host_program_tool_normalizes_host_paths_before_launch(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[tuple[str, list[str], str | None]] = []
 
     class FakeSandbox:
@@ -213,7 +234,7 @@ def test_run_host_program_tool_normalizes_host_paths_before_launch(monkeypatch) 
         patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=FakeSandbox()),
         patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
         patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
-        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_WINDOWS_MOUNTS),
         patch("deerflow.config.get_app_config", return_value=config),
     ):
         result = run_host_program_tool.func(
@@ -235,8 +256,9 @@ def test_run_host_program_tool_normalizes_host_paths_before_launch(monkeypatch) 
     ]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows host-path compatibility")
 def test_run_host_program_tool_rejects_program_outside_custom_mount(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "local"}, "thread_data": {}},
         context={"thread_id": "thread-1"},
@@ -246,7 +268,7 @@ def test_run_host_program_tool_rejects_program_outside_custom_mount(monkeypatch)
         patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=SimpleNamespace(execute_program=lambda *args, **kwargs: "ok")),
         patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
         patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
-        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_WINDOWS_MOUNTS),
     ):
         result = run_host_program_tool.func(runtime, "运行程序", r"C:\Windows\System32\whoami.exe")
 
@@ -254,7 +276,7 @@ def test_run_host_program_tool_rejects_program_outside_custom_mount(monkeypatch)
 
 
 def test_run_host_program_tool_rejects_unsupported_extension(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(run_host_program_module, "_is_windows_host_program_platform", lambda: True)
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "local"}, "thread_data": {}},
         context={"thread_id": "thread-1"},
@@ -266,7 +288,7 @@ def test_run_host_program_tool_rejects_unsupported_extension(monkeypatch) -> Non
         patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
         patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
     ):
-        result = run_host_program_tool.func(runtime, "运行程序", r"C:\Users\lichen\tools\build.py")
+        result = run_host_program_tool.func(runtime, "运行程序", "/root/tools/build.py")
 
     assert "Only .exe, .cmd, .bat, and .ps1" in result
 
@@ -297,7 +319,7 @@ def test_trusted_local_windows_runtime_exposes_native_program_tool(monkeypatch) 
 
 
 def test_execute_program_rejects_unmapped_cwd(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "nt")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: ("ok", "", 0, False)))
     sandbox = LocalSandbox("t", [_MOUNT])
 
@@ -306,7 +328,7 @@ def test_execute_program_rejects_unmapped_cwd(monkeypatch) -> None:
 
 
 def test_execute_program_rejects_non_windows(monkeypatch) -> None:
-    monkeypatch.setattr(local_sandbox.os, "name", "posix")
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: False)
     sandbox = LocalSandbox("t", [_MOUNT])
 
     with pytest.raises(RuntimeError, match="only available on Windows"):

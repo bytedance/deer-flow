@@ -28,6 +28,10 @@ def _normalize_program_argument(value: str) -> str:
     return value
 
 
+def _is_windows_host_program_platform() -> bool:
+    return os.name == "nt"
+
+
 def _resolve_program_timeout(requested: float | None, configured: object) -> float:
     from deerflow.sandbox.local.local_sandbox import DEFAULT_COMMAND_TIMEOUT_SECONDS
 
@@ -83,7 +87,7 @@ def run_host_program_tool(
             validate_local_tool_path,
         )
 
-        if os.name != "nt":
+        if not _is_windows_host_program_platform():
             return "Error: run_host_program is only available on Windows"
         if not is_local_sandbox(runtime) and not uses_local_sandbox_provider():
             return "Error: run_host_program requires LocalSandboxProvider"

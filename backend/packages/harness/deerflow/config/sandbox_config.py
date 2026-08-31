@@ -1,3 +1,4 @@
+import os
 import re
 from typing import Literal
 
@@ -72,7 +73,7 @@ class VolumeMountConfig(BaseModel):
     @classmethod
     def _reject_drive_shaped_container_path(cls, value: str) -> str:
         normalized = value.replace("\\", "/")
-        if re.match(r"^(?:[A-Za-z]:/|/[A-Za-z](?:/|$))", normalized):
+        if re.match(r"^[A-Za-z]:/", normalized) or (os.name == "nt" and re.match(r"^/[A-Za-z](?:/|$)", normalized)):
             raise ValueError("container_path must be a POSIX virtual path, not a drive-shaped host path")
         return value
 
