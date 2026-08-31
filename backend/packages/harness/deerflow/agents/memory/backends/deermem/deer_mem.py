@@ -307,6 +307,25 @@ class DeerMem(MemoryManager):
         if mark is not None:
             mark(user_id=user_id, agent_name=agent_name)
 
+    def clear_agent_deleted(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+    ) -> None:
+        """Remove a deleted-agent tombstone when a same-named agent is (re)created.
+
+        Mirrors ``mark_agent_deleted`` (issue #3364): the marker would otherwise
+        skip every memory write for the recreated agent forever. Forwards to the
+        storage backend; no-op when no marker exists.
+        """
+        storage = self._storage
+        if storage is None:
+            return
+        clear = getattr(storage, "clear_agent_deleted", None)
+        if clear is not None:
+            clear(user_id=user_id, agent_name=agent_name)
+
     def _prepare_update(
         self,
         messages: list[Any],

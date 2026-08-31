@@ -1002,6 +1002,44 @@ def test_apply_changes_skips_when_agent_deleted_and_marked(tmp_path) -> None:
     assert result["upsertedFacts"] == []
 
 
+def test_clear_agent_deleted_allows_recreated_agent_to_save(tmp_path) -> None:
+    """issue #3364 review: an unbounded tombstone would permanently skip every
+    memory write for a deleted-then-recreated same-named agent. Clearing the
+    marker on re-create must restore memory writes."""
+    from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+
+    config = DeerMemConfig(storage_path=str(tmp_path))
+    storage = FileMemoryStorage(config=config)
+
+    memory = {
+        "version": "1.0",
+        "revision": 0,
+        "lastUpdated": "",
+        "user": {},
+        "history": {},
+        "facts": [{"id": "f1", "content": "x"}],
+    }
+
+    # Delete-and-mark agent-a (as the agent-deletion path does).
+    storage.mark_agent_deleted(user_id="alice", agent_name="agent-a")
+    marker = tmp_path / "users" / "alice" / ".deleted-agents" / "agent-a.marker"
+    assert marker.exists()
+
+    # Agent directory for a freshly created agent is bootstrapped by its first
+    # memory write; before creation the agent directory does not exist yet.
+    agent_dir = tmp_path / "users" / "alice" / "agents" / "agent-a"
+    assert not agent_dir.exists()
+
+    # Recreate the agent: the creation path clears the marker first.
+    storage.clear_agent_deleted(user_id="alice", agent_name="agent-a")
+    assert not marker.exists()
+
+    # The recreated agent's first memory write now persists.
+    ok = storage.save(memory, "agent-a", user_id="alice")
+    assert ok is True
+    assert (agent_dir / "facts").exists()
+
+
 def test_save_bootstraps_when_agent_never_existed(tmp_path) -> None:
     """Bootstrap caveat: an agent that never had a store dir is NOT marked
     deleted, so its first memory write must still create the directory."""

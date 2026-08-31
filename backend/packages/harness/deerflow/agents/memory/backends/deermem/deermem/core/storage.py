@@ -753,6 +753,23 @@ class FileMemoryStorage(MemoryStorage):
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("", encoding="utf-8")
 
+    def clear_agent_deleted(self, *, user_id: str | None = None, agent_name: str | None = None) -> None:
+        """Remove the tombstone marker for an agent that was (re)created.
+
+        The agent-creation path calls this after a deleted agent's directory
+        is recreated (issue #3364): an unbounded marker would permanently
+        skip every memory write for a same-named agent. No-op when no marker
+        exists, so fresh agents are unaffected.
+        """
+        if agent_name is None:
+            return
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        marker = self._deleted_agent_marker(path, agent_name)
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+
     def _scope_signature(self, path: Path, agent_name: str | None) -> tuple[Any, ...]:
         """Track supported writes without scanning the agent's fact files.
 

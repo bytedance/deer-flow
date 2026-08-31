@@ -21,7 +21,7 @@ from deerflow.config.app_config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import AgentExistsError, get_agent_store
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["agents"])
@@ -340,12 +340,36 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         return _agent_config_to_response(agent_cfg, include_soul=True, user_id=user_id)
 
     try:
-        return await asyncio.to_thread(_create_agent)
+        response = await asyncio.to_thread(_create_agent)
     except AgentExistsError:
         raise HTTPException(status_code=409, detail=f"Agent '{normalized_name}' already exists")
     except Exception as e:
         logger.error(f"Failed to create agent '{request.name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to create agent: {str(e)}")
+
+    # A deleted-and-recreated agent may still carry a tombstone marker from the
+    # prior deletion; clear it so the freshly created agent's memory works again
+    # (an unbounded marker would skip every memory write forever, issue #3364).
+    if get_memory_config().enabled:
+        try:
+            from deerflow.agents.memory import get_memory_manager
+
+            # Mirrors the delete path's candidate set so we clear whatever bucket
+            # the deletion marked (raw effective id plus any runtime-resolved id).
+            candidate_ids: set[str] = {user_id}
+            try:
+                candidate_ids.add(resolve_runtime_user_id(None))
+            except Exception:
+                pass
+            manager = await asyncio.to_thread(get_memory_manager)
+            clear = getattr(manager, "clear_agent_deleted", None)
+            if clear is not None:
+                for candidate_id in candidate_ids:
+                    clear(user_id=candidate_id, agent_name=normalized_name)
+        except Exception as e:
+            logger.warning(f"Failed to clear deleted marker for agent '{normalized_name}': {e}")
+
+    return response
 
 
 @router.put(
@@ -552,6 +576,18 @@ async def delete_agent(name: str) -> None:
     user_id = get_effective_user_id()
     store = get_agent_store()
 
+    # Enqueue-side user ids go through resolve_runtime_user_id() (runtime
+    # server_info / langgraph auth / runtime context), which can differ from the
+    # raw get_effective_user_id() value in authenticated deployments. Build the
+    # candidate set once and reuse it for BOTH the pending-update discard and the
+    # tombstone marker (issue #3364 review) so neither can silently match the
+    # wrong user bucket.
+    candidate_ids: set[str] = {user_id}
+    try:
+        candidate_ids.add(resolve_runtime_user_id(None))
+    except Exception:
+        pass
+
     if get_memory_config().enabled:
         try:
             # Cancel any pending debounced memory writes for this agent before
@@ -563,18 +599,6 @@ async def delete_agent(name: str) -> None:
             manager = await asyncio.to_thread(get_memory_manager)
             discard = getattr(manager, "discard_pending_updates", None)
             if discard is not None:
-                # Enqueue-side user ids go through resolve_runtime_user_id()
-                # (runtime server_info / langgraph auth / runtime context), which
-                # can differ from the raw get_effective_user_id() value in
-                # authenticated deployments. Discard under both candidate ids so
-                # the filter cannot silently match nothing.
-                from deerflow.runtime.user_context import resolve_runtime_user_id
-
-                candidate_ids: set[str] = {user_id}
-                try:
-                    candidate_ids.add(resolve_runtime_user_id(None))
-                except Exception:
-                    pass
                 for candidate_id in candidate_ids:
                     discard(user_id=candidate_id, agent_name=name)
         except Exception as e:
@@ -610,7 +634,10 @@ async def delete_agent(name: str) -> None:
             manager = await asyncio.to_thread(get_memory_manager)
             mark = getattr(manager, "mark_agent_deleted", None)
             if mark is not None:
-                mark(user_id=user_id, agent_name=name)
+                # Reuse the candidate set built above (before store.delete) so the
+                # marker lands in every user bucket a late write may resolve to.
+                for candidate_id in candidate_ids:
+                    mark(user_id=candidate_id, agent_name=name)
         except Exception as e:
             logger.warning(f"Failed to mark agent '{name}' deleted in memory storage: {e}")
 
