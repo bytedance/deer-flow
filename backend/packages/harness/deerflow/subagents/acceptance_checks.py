@@ -24,7 +24,8 @@ Leaf families:
   ``env -i`` shell on remote providers — absolute-path utilities a
   poisoned persistent session cannot steer, no content opens so a FIFO
   cannot block, regular-file type required, containment canonicalized
-  against the literal mount root); above ``_FILE_CONTENT_READ_CAP_BYTES``
+  against the canonical mount root, matching what the provider's own
+  read path resolves); above ``_FILE_CONTENT_READ_CAP_BYTES``
   the leaf answers from the size alone, at or below it the full read
   runs, and when the size cannot be established the leaf degrades to
   UNVERIFIED — never an unbounded read.
@@ -194,6 +195,30 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
     return None
 
 
+#: Remote size-probe script (POSIX sh, positional params: ``$1`` path,
+#: ``$2`` mount root). Answers a bare byte count for a regular file, or one
+#: of ``NOFILE`` / ``UNREADABLE`` / ``NONREGULAR`` / ``ESCAPED``. Everything
+#: runs from a fresh ``env -i`` shell with absolute-path utilities, so a
+#: completed subagent's shell state cannot steer it; ``stat`` never opens
+#: content, so a FIFO cannot block. Containment is canonicalized: the file's
+#: ``realpath`` must stay under the mount root's ``realpath``. The canonical
+#: root — not the literal spelling — is the reference because e2b and Tenki
+#: realize ``/mnt/user-data`` as a symlink to the home dir by default; a
+#: canonical root is also exactly what the provider's own read path
+#: resolves, so the probe and the later read-back stay consistent. A
+#: leaf-level symlink is rejected outright by the non-dereferencing
+#: ``stat -c %F``; an intermediate dir-link escape under a sane root still
+#: lands outside the canonical root (ESCAPED).
+_SIZE_PROBE_INNER_SCRIPT = (
+    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
+    't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
+    '[ "$t" = "regular file" ] || { echo NONREGULAR; exit 0; }; '
+    'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
+    'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
+    'case $p in "$r"/*) /usr/bin/stat -c %s -- "$p" ;; *) echo ESCAPED ;; esac'
+)
+
+
 def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> int | None:
     """Bounded byte size of the resolved file, else ``None`` when it cannot be
     established without reading content.
@@ -208,17 +233,22 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
     marker env also routes AIO off its persistent shell onto a fresh
     per-call session), no content opens (``stat`` only, so a FIFO cannot
     block the parent for the provider's idle timeout), a regular-file type
-    requirement, and canonicalized containment against the literal mount
-    root (neither a final-component symlink nor a swapped parent directory
-    — including the root itself — can redirect the stat outside shared
-    storage). Outcomes are rendered in the probe's own words (``NOFILE`` /
+    requirement, and canonicalized containment: the file's ``realpath``
+    must stay under the mount root's ``realpath`` — the reference is
+    canonical because e2b and Tenki realize ``/mnt/user-data`` as a symlink
+    to the home dir by default, and a canonical root is exactly what the
+    provider's own read path resolves, so probe and read-back stay
+    consistent. A final-component symlink is rejected outright
+    (``stat -c %F`` without dereference); an intermediate dir-link escape
+    under a sane root lands outside the canonical root (``ESCAPED``).
+    Outcomes are rendered in the probe's own words (``NOFILE`` /
     ``UNREADABLE`` / ``NONREGULAR`` / ``ESCAPED``), never parsed from
     provider error text. Only a bare integer is a size; every other outcome
     is ``None`` and the caller degrades to UNVERIFIED rather than
     performing an unbounded read. Residual: a root-privileged subagent
-    replacing the container's own binaries is only answerable by
-    provider-side metadata APIs, which the sandbox contract does not
-    expose.
+    (replacing the container's own binaries, or remounting the storage
+    root) is only answerable by provider-side metadata APIs, which the
+    sandbox contract does not expose.
 
     Non-regular local entries (directories, fifos) and mount-mapped virtual
     paths the parent cannot resolve to a host path yield ``None``. The size
@@ -240,22 +270,9 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
             stat_result = os.stat(host_path)
             return stat_result.st_size if stat.S_ISREG(stat_result.st_mode) else None
         sandbox = ensure_sandbox_initialized(runtime)
-        root = "/".join(resolved.split("/")[:4])  # the literal /mnt/user-data/{workspace|outputs} mount root
-        inner = (
-            '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
-            't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
-            '[ "$t" = "regular file" ] || { echo NONREGULAR; exit 0; }; '
-            # Containment is provable only against a canonical mount root: if
-            # the root (or any parent) was swapped for a symlink, its
-            # canonical form differs from the literal mount path and no
-            # reference for containment exists — ESCAPED, never a size.
-            'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
-            '[ "$r" = "$2" ] || { echo ESCAPED; exit 0; }; '
-            'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
-            'case $p in "$2"/*) /usr/bin/stat -c %s -- "$p" ;; *) echo ESCAPED ;; esac'
-        )
+        root = "/".join(resolved.split("/")[:4])  # the /mnt/user-data/{workspace|outputs} mount root
         output = sandbox.execute_command(
-            f"/usr/bin/env -i /bin/sh -c {shlex.quote(inner)} probe {shlex.quote(resolved)} {shlex.quote(root)}",
+            f"/usr/bin/env -i /bin/sh -c {shlex.quote(_SIZE_PROBE_INNER_SCRIPT)} probe {shlex.quote(resolved)} {shlex.quote(root)}",
             env={"_DEERFLOW_SIZE_PROBE": "1"},
         )
     except FileNotFoundError:

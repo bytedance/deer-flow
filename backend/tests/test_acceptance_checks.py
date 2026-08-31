@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shlex
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -511,6 +514,96 @@ class TestProbeFileSize:
         workspace.mkdir(parents=True)
         os.mkfifo(workspace / "pipe")
         assert _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/pipe", {"workspace_path": str(workspace)}) is None
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="the probe script targets GNU coreutils (Linux sandboxes)")
+class TestProbeInnerScriptRealLayouts:
+    """The composed probe command, executed for real against on-disk layouts —
+    including the symlinked ``/mnt/user-data`` prefix e2b and Tenki bootstrap
+    by default. A canned-output ``execute_command`` stub cannot see these
+    (PR review: literal-root equality made every remote file leaf UNVERIFIED
+    there)."""
+
+    def _run_probe(self, path: str, root: str) -> str:
+        from deerflow.subagents.acceptance_checks import _SIZE_PROBE_INNER_SCRIPT
+
+        command = f"/usr/bin/env -i /bin/sh -c {shlex.quote(_SIZE_PROBE_INNER_SCRIPT)} probe {shlex.quote(path)} {shlex.quote(root)}"
+        return subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_real_directory_mount_root(self, tmp_path):
+        """AIO/BoxLite/OpenSandbox layout: a genuine mount directory."""
+        outputs = tmp_path / "mnt" / "user-data" / "outputs"
+        outputs.mkdir(parents=True)
+        (outputs / "report.md").write_text("hello", encoding="utf-8")
+        assert self._run_probe(str(outputs / "report.md"), str(outputs)) == "5"
+
+    def test_symlinked_mount_prefix(self, tmp_path):
+        """e2b/Tenki default layout: ``/mnt/user-data`` is a symlink to the
+        home dir — the canonical root still contains the canonical file."""
+        home_outputs = tmp_path / "home" / "user" / "outputs"
+        home_outputs.mkdir(parents=True)
+        (home_outputs / "report.md").write_text("hello", encoding="utf-8")
+        (tmp_path / "mnt").mkdir()
+        (tmp_path / "mnt" / "user-data").symlink_to(tmp_path / "home" / "user")
+        assert self._run_probe(str(tmp_path / "mnt" / "user-data" / "outputs" / "report.md"), str(tmp_path / "mnt" / "user-data" / "outputs")) == "5"
+
+    def test_final_component_symlink_is_nonregular(self, tmp_path):
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        outside = tmp_path / "outside.md"
+        outside.write_text("x", encoding="utf-8")
+        (outputs / "stolen.md").symlink_to(outside)
+        assert self._run_probe(str(outputs / "stolen.md"), str(outputs)) == "NONREGULAR"
+
+    def test_fifo_is_nonregular_without_blocking(self, tmp_path):
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        os.mkfifo(outputs / "pipe")
+        assert self._run_probe(str(outputs / "pipe"), str(outputs)) == "NONREGULAR"
+
+    def test_missing_file_is_nofile(self, tmp_path):
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        assert self._run_probe(str(outputs / "gone.md"), str(outputs)) == "NOFILE"
+
+    def test_intermediate_dir_link_escape_is_escaped(self, tmp_path):
+        """A directory symlink in the middle of the path (root itself sane)
+        resolves outside the canonical root."""
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "x.md").write_text("x", encoding="utf-8")
+        (outputs / "linked").symlink_to(outside)
+        assert self._run_probe(str(outputs / "linked" / "x.md"), str(outputs)) == "ESCAPED"
+
+    def test_probe_file_size_end_to_end_through_a_real_shell(self, tmp_path, monkeypatch):
+        """The full glue — root extraction, quoting, marker env, output
+        parsing — against the real script running in a real fresh shell,
+        with the fake sandbox mapping virtual paths like a provider mount."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        (outputs / "report.md").write_text("hello", encoding="utf-8")
+        mapping = {
+            "/mnt/user-data/outputs/report.md": str(outputs / "report.md"),
+            "/mnt/user-data/outputs/gone.md": str(outputs / "gone.md"),
+            "/mnt/user-data/outputs": str(outputs),
+        }
+
+        class _RealShellSandbox:
+            def execute_command(self, command, **kwargs):
+                assert kwargs.get("env") == {"_DEERFLOW_SIZE_PROBE": "1"}
+                for virtual, host in sorted(mapping.items(), key=lambda kv: -len(kv[0])):
+                    command = command.replace(virtual, host)
+                return subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout
+
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _RealShellSandbox())
+        runtime = SimpleNamespace(state=None)  # not local → remote probe path
+        assert _probe_file_size(runtime, "/mnt/user-data/outputs/report.md", None) == 5
+        with pytest.raises(FileNotFoundError):
+            _probe_file_size(runtime, "/mnt/user-data/outputs/gone.md", None)
 
 
 class TestTestsPassedLeaf:
