@@ -1,4 +1,8 @@
-import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
+import {
+  COMPOSER_BUILTIN_COMMAND_NAMES,
+  RESERVED_SLASH_SKILL_NAMES,
+  type Skill,
+} from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
   findSuggestionTemplatePlaceholder,
@@ -167,14 +171,12 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
 // Composer builtin commands own their names the same way reserved names do
 // (a skill literally named `compact` would submit as the compact command, not
 // the skill), so both sets are excluded.
-const COMPOSER_BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
-  "goal",
-  "compact",
-]);
 
 export function getSelectableSkills(
   skills: Skill[],
-  builtinCommandNames: ReadonlySet<string> = COMPOSER_BUILTIN_COMMAND_NAMES,
+  builtinCommandNames: ReadonlySet<string> = new Set(
+    COMPOSER_BUILTIN_COMMAND_NAMES,
+  ),
 ): Skill[] {
   return skills.filter(
     (skill) =>

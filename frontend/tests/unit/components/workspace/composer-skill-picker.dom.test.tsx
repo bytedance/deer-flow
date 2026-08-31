@@ -9,6 +9,7 @@ rs.mock("@/core/i18n/hooks", () => ({
     t: {
       inputBox: {
         skillPickerLabel: "Skills",
+        skillPickerDescription: "Pick a skill to attach to your next message.",
         skillPickerSearch: "Search skills...",
         skillPickerEmpty: "No matching skills.",
         skillPickerGroup: "Skills",
@@ -39,6 +40,12 @@ describe("ComposerSkillPicker", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Skills" }));
 
+    // The sr-only DialogDescription must actually render — renaming or
+    // dropping the i18n key should fail here, not silently empty the
+    // dialog's accessible description.
+    expect(
+      screen.getByText("Pick a skill to attach to your next message."),
+    ).toBeDefined();
     expect(screen.getByText("/data-analysis")).toBeDefined();
     expect(screen.getByText("/web-design")).toBeDefined();
     // Disabled skills never appear in the picker.
