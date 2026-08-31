@@ -388,11 +388,11 @@ class TestProbeFileSize:
 
     @staticmethod
     def _install_sandbox(monkeypatch, output=None, raises=None):
-        captured: list[str] = []
+        captured: list[tuple[str, dict]] = []
 
         class _Sandbox:
             def execute_command(self, command, **kwargs):
-                captured.append(command)
+                captured.append((command, kwargs))
                 if raises is not None:
                     raise raises
                 return output
@@ -405,7 +405,36 @@ class TestProbeFileSize:
 
         captured = self._install_sandbox(monkeypatch, output="  12345\n")
         assert _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None) == 12345
-        assert "wc -c < " in captured[0]
+        command, _kwargs = captured[0]
+        assert command.startswith("/usr/bin/env -i /bin/sh -c ")
+        assert "/mnt/user-data/outputs/big.csv" in command
+        assert "/mnt/user-data/outputs" in command
+
+    def test_probe_runs_outside_subagent_controlled_shell_state(self, monkeypatch):
+        """PR review (P1): the completed subagent controlled the sandbox's
+        persistent shell — a ``function wc { echo 50001; }`` or poisoned PATH
+        must not forge a size. The probe therefore runs a fresh ``env -i``
+        shell with absolute-path utilities (function/alias/PATH/locale-proof),
+        never opens content (no ``wc`` redirection a FIFO could block), and
+        carries the marker env that routes AIO off the persistent session."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        captured = self._install_sandbox(monkeypatch, output="50001")
+        _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None)
+        command, kwargs = captured[0]
+        assert command.startswith("/usr/bin/env -i /bin/sh -c ")
+        assert " wc " not in command and "wc -c" not in command  # metadata only: a FIFO cannot block the probe
+        assert "/usr/bin/stat" in command and "/usr/bin/realpath" in command
+        assert kwargs.get("env") == {"_DEERFLOW_SIZE_PROBE": "1"}  # routes AIO to a fresh per-call session
+
+    @pytest.mark.parametrize("output", ("NONREGULAR", "ESCAPED"))
+    def test_rejected_renderings_are_not_a_size(self, monkeypatch, output):
+        """Symlinks, fifos, directories, and containment escapes (a swapped
+        parent directory, root included) all degrade to UNVERIFIED."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, output=output)
+        assert _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None) is None
 
     def test_nofile_marker_raises_file_not_found(self, monkeypatch):
         """A missing remote file must keep its deterministic not-holds — the
@@ -471,6 +500,17 @@ class TestProbeFileSize:
         workspace = tmp_path / "user-data" / "workspace"
         (workspace / "subdir").mkdir(parents=True)
         assert _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/subdir", {"workspace_path": str(workspace)}) is None
+
+    @pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-only")
+    def test_local_fifo_is_not_a_size(self, tmp_path):
+        """A FIFO is never opened (stat is metadata-only) and its non-regular
+        type degrades the leaf to UNVERIFIED."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        workspace = tmp_path / "user-data" / "workspace"
+        workspace.mkdir(parents=True)
+        os.mkfifo(workspace / "pipe")
+        assert _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/pipe", {"workspace_path": str(workspace)}) is None
 
 
 class TestTestsPassedLeaf:
