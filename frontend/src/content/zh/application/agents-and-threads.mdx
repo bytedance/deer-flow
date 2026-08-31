@@ -51,7 +51,7 @@ curl -X POST http://localhost:8001/api/agents \
 
 ### Agent 名称
 
-创建 Agent 时，需要提供唯一的 ASCII `name`。该名称用于 API、路由和文件路径，必须匹配 `^[A-Za-z0-9-]+$`，后端会以小写形式存储它。
+创建 Agent 时，需要提供在每位用户范围内唯一的 ASCII `name`。该名称用于 API、路由和文件路径，必须匹配 `^[A-Za-z0-9-]+$`，后端会以小写形式存储它。
 
 创建 Agent 前，可以调用 `/api/agents/check?name={name}` 验证名称并检查它是否可用。
 

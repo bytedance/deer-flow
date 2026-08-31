@@ -94,11 +94,20 @@ describe("documentation content links", () => {
         "utf8",
       ),
     );
+    const customAgentDocs = [
+      ...customAgentApiDocs,
+      ...DOC_LANGUAGES.map((lang) =>
+        readFileSync(join(CONTENT_ROOT, lang, "harness/lead-agent.mdx"), "utf8"),
+      ),
+    ];
+
+    for (const source of customAgentDocs) {
+      expect(source).toContain("agents_api.enabled");
+      expect(source).not.toContain("display_name");
+    }
 
     for (const source of customAgentApiDocs) {
-      expect(source).toContain("agents_api.enabled");
       expect(source).toContain("^[A-Za-z0-9-]+$");
-      expect(source).not.toMatch(/["']display_name["']\s*:/);
     }
 
     const chineseApiGuide = readFileSync(
