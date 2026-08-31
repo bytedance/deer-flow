@@ -118,3 +118,16 @@ def _bind_address(mapping: str) -> str | None:
 
     # ADDR:HOST:CONTAINER -> bound; HOST:CONTAINER or CONTAINER -> unbound.
     return segments[0] if len(segments) >= 3 else None
+
+
+def test_dev_compose_env_files_are_optional():
+    """Missing .env files must not fail `docker compose -f docker/docker-compose-dev.yaml`."""
+    compose = yaml.safe_load(COMPOSE_PATHS["dev"].read_text(encoding="utf-8"))
+    expected = {
+        "provisioner": "../.env",
+        "frontend": "../frontend/.env",
+        "gateway": "../.env",
+    }
+    for service_name, path in expected.items():
+        entries = compose["services"][service_name]["env_file"]
+        assert entries == [{"path": path, "required": False}], f"{service_name} env_file must be optional; got: {entries!r}"

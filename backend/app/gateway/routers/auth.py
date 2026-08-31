@@ -31,6 +31,7 @@ from app.gateway.auth.oidc_state import (
     get_state_cookie,
     set_state_cookie,
 )
+from app.gateway.auth.pat import PAT_MAX_NAME_LENGTH
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
@@ -391,11 +392,18 @@ async def change_password(request: Request, response: Response, body: ChangePass
     - Re-issues session cookie with new token_version
     """
     from app.gateway.auth.password import hash_password_async, verify_password_async
-    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_PAT
 
     user = await get_current_user_from_request(request)
 
-    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_AUTH_DISABLED:
+    if getattr(request.state, "auth_source", None) in {AUTH_SOURCE_PAT, AUTH_SOURCE_AUTH_DISABLED}:
+        # PAT-authenticated callers must not alter auth state (#4849 point 6);
+        # auth-disabled mode has no passwords to change.
+        if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Password changes require interactive session authentication",
+            )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(
@@ -448,6 +456,130 @@ async def get_me(request: Request):
         needs_setup=user.needs_setup,
         oauth_provider=user.oauth_provider,
     )
+
+
+# ── Personal Access Tokens (#4849) ────────────────────────────────────────
+
+
+def require_session_source(request: Request) -> None:
+    """Reject non-session credentials from auth-state-altering routes.
+
+    PAT-authenticated callers must not manage PATs or change passwords
+    (#4849 point 6): a leaked automation token could otherwise mint fresh
+    long-lived credentials or lock out the human owner.
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+
+    if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint requires interactive session authentication")
+
+
+class PATCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=PAT_MAX_NAME_LENGTH)
+    scopes: list[str] = Field(min_length=1)
+    expires_in_days: int | None = Field(default=None, ge=1, le=365)  # None = never expires
+
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_non_empty_name(cls, value: str) -> str:
+        # A whitespace-only name passes min_length but would persist as an
+        # empty label; the trimmed value is what gets stored and shown.
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("PAT name must contain at least one non-whitespace character")
+        return stripped
+
+
+class PATCreatedResponse(BaseModel):
+    """Create response — ``token`` is the raw show-once credential."""
+
+    id: str
+    name: str
+    scopes: list[str]
+    expires_at: str | None
+    created_at: str
+    token: str
+
+
+class PATSummaryResponse(BaseModel):
+    id: str
+    name: str
+    scopes: list[str]
+    expires_at: str | None
+    last_used_at: str | None
+    created_at: str
+    revoked_at: str | None
+
+
+def _pat_summary(record: dict) -> PATSummaryResponse:
+    return PATSummaryResponse(
+        id=str(record["id"]),
+        name=str(record["name"]),
+        scopes=list(record.get("scopes") or []),
+        expires_at=str(record["expires_at"]) if record.get("expires_at") else None,
+        last_used_at=str(record["last_used_at"]) if record.get("last_used_at") else None,
+        created_at=str(record["created_at"]),
+        revoked_at=str(record["revoked_at"]) if record.get("revoked_at") else None,
+    )
+
+
+@router.post("/pats", status_code=status.HTTP_201_CREATED, response_model=PATCreatedResponse, dependencies=[Depends(require_session_source)])
+async def create_pat(request: Request, body: PATCreateRequest):
+    """Create a personal access token for the session user.
+
+    The raw token is returned exactly once and cannot be retrieved again;
+    only its SHA-256 digest is persisted.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.gateway.auth.pat import generate_pat_token, pat_token_digest, validate_scopes
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    try:
+        scopes = validate_scopes(body.scopes)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    token = generate_pat_token()
+    expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days) if body.expires_in_days is not None else None
+    record = await get_pat_repo(request).create(
+        user_id=str(user.id),
+        name=body.name.strip(),
+        scopes=scopes,
+        token_digest=pat_token_digest(token),
+        expires_at=expires_at,
+    )
+    return PATCreatedResponse(
+        id=str(record["id"]),
+        name=str(record["name"]),
+        scopes=list(record.get("scopes") or []),
+        expires_at=str(record["expires_at"]) if record.get("expires_at") else None,
+        created_at=str(record["created_at"]),
+        token=token,
+    )
+
+
+@router.get("/pats", response_model=list[PATSummaryResponse], dependencies=[Depends(require_session_source)])
+async def list_pats(request: Request):
+    """List the session user's tokens. Never returns digests or raw tokens."""
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    records = await get_pat_repo(request).list_for_user(str(user.id))
+    return [_pat_summary(record) for record in records]
+
+
+@router.delete("/pats/{pat_id}", response_model=MessageResponse, dependencies=[Depends(require_session_source)])
+async def revoke_pat(request: Request, pat_id: str):
+    """Revoke one of the session user's tokens. Revocation is immediate."""
+    from app.gateway.deps import get_pat_repo
+
+    user = await get_current_user_from_request(request)
+    revoked = await get_pat_repo(request).revoke(pat_id, str(user.id))
+    if not revoked:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
+    return MessageResponse(message="Token revoked")
 
 
 # Per-IP cache: ip → (timestamp, result_dict).

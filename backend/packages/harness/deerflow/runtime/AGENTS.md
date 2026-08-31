@@ -1,3 +1,7 @@
+### Stream Bridge Heartbeats
+
+Memory and Redis bridges take their default idle heartbeat cadence from the startup-only `stream_bridge.heartbeat_interval_seconds` setting. Keep the default on the bridge instance so SSE, `/wait`, and internal subscribers stay aligned; an explicit `subscribe(..., heartbeat_interval=...)` remains a per-subscription override.
+
 ### Checkpoint Channel Modes (`full` / `delta`)
 
 Checkpointer storage runs in one of two channel modes, selected by `checkpoint_channel_mode` in `config.yaml` (default `full`). `delta` mode adopts LangGraph 1.2's `DeltaChannel` for `messages`: checkpoints store a sentinel + per-step writes instead of the full message list, so storage/serde grows O(N) instead of O(N²) in turns. All checkpointer backends (memory/sqlite/postgres) serve both modes unchanged — the semantics live in the compiled graph's channel table, not in the saver.
@@ -19,6 +23,39 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 **Wholesale state replacement uses a state-only mutation graph + `Overwrite`.** `update_state` values pass through channel reducers (`add_messages` merge in full, append in delta), so replacing reducer values requires `Overwrite` rather than an ordinary update. Full-mode rollback and context compaction replace `messages`; delta resume and delta rollback replace every materialized channel and reset current-head-only channels to their schema default (or `None`). These writes go through `build_state_mutation_graph(as_node, mode, state_schema)`, and `state_schema` MUST be the thread's effective schema (`graph_state_schema(assistant_graph)`), because the base-ThreadState fallback silently discards written channels contributed by custom `AgentMiddleware.state_schema`. Channels absent from a full-mode fork write inherit the parent's channel blobs, so middleware channels survive rollback/compaction (locked by `test_rollback_preserves_middleware_contributed_channels` and `test_compact_thread_context_preserves_middleware_contributed_channels`). The compiled mutation graph has one no-op node (entry = finish) whose checkpoint machinery (channels/versions/metadata) is identical to the agent graph's but schedules no pending tasks, so the restored/compacted head stays idle instead of re-triggering the agent. Never hand-write checkpoints via `checkpointer.aput` for this; raw writers elsewhere must preserve checkpoint parentage — severed ancestry breaks delta replay (see `runtime/runs/worker.py` writer parenting and `checkpoint_patches.py`).
 
 **Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
+
+**Targeted run-event attribution** (`runtime/events/store/`):
+`RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
+contract. Its default implementation walks `list_messages()` backward in
+1000-row pages, preserves the first page's high-watermark through the exclusive
+`before_seq` cursor, and raises when a full page has no safe progressing `seq`.
+Memory and database stores use that bounded path; the JSONL store overrides it
+with one complete thread-log read because each JSONL page would otherwise
+rescan every run file. The default and JSONL paths share the public
+`normalize_message_ids()` and `match_ai_message_run_id()` helpers from
+`events/store/base.py`. Database owner filtering is inherited on every page.
+Callers may use a missing key as proof that no valid AI event exists only after
+an ordinary return, never after an exception. A caller that crosses a run or
+checkpoint-write admission boundary must repeat the complete audit after
+admission; a pre-admission exact hit can be superseded by a later event just as
+a pre-admission miss can become an exact hit.
+
+Gateway `POST /api/threads/{id}/history` uses that lookup to migrate legacy AI
+messages. An exhaustive miss preserves the human-boundary fallback; an
+incomplete lookup removes unproven synthesized IDs. Its metadata-only
+write-on-read cache stores `run_message_ids` for every audited AI ID (including
+exhaustive misses) plus required `run_durations`; duration presence alone does
+not prove attribution. Historical `body.before` reads write the audit to the
+head, and the merge may retain IDs no longer in materialized history, which
+readers ignore. Migration must acquire the durable `checkpoint_write`
+reservation, then repeat the whole message audit and batch-reload required run
+rows before persisting. Post-admission exact hits replace foreground exact or
+boundary mappings, and recomputed final durations replace foreground snapshots.
+Successful workers keep their durable run row active through the final duration
+checkpoint write, so a peer migration cannot enter during terminalization.
+The first `RunManager.list_by_thread()` hydration page uses a 100-row floor or
+the number of required IDs, whichever is larger; missing exact runs use targeted
+`get()` calls.
 
 **Where things live**:
 - `runtime/checkpoint_mode.py` — mode + snapshot-frequency freeze, marker injection, delta detection, compatibility gate, both error types

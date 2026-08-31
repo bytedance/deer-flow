@@ -124,6 +124,8 @@ export const enUS: Translations = {
     loadingFullFile: "Loading full file...",
     previewFailed:
       "This file could not be previewed. You can still download it.",
+    viewSource: "View source",
+    missingTarget: "This link does not say which artifact to display.",
   },
 
   // Citations
@@ -345,6 +347,37 @@ export const enUS: Translations = {
     },
   },
 
+  subagentBatches: {
+    label: "Batches",
+    title: "Subagent batches",
+    description: "Durable, restart-safe work for many independent items.",
+    workerUnavailable:
+      "The batch worker is not running. Historical batches remain available in read-only mode.",
+    empty: "No subagent batches yet",
+    emptyHint: "Explicit batch_task submissions in this chat will appear here.",
+    loadFailed: "Couldn't load subagent batches",
+    active: "Active",
+    recent: "Recent",
+    pause: "Pause",
+    resume: "Resume",
+    cancel: "Cancel",
+    retryItem: "Retry",
+    exportResults: "Export JSONL",
+    viewItems: "View items",
+    hideItems: "Hide items",
+    itemsFailed: "Couldn't load batch items",
+    progress: (completed, total) => `${completed} of ${total} terminal`,
+    limits: (live, running) => `Live ${live} · running ${running}`,
+    status: {
+      queued: "Queued",
+      running: "Running",
+      paused: "Paused",
+      completed: "Completed",
+      failed: "Failed",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: {
@@ -391,6 +424,9 @@ export const enUS: Translations = {
       fresh: "Fresh thread",
       reuse: "Reuse thread",
       threadIdPlaceholder: "Thread ID",
+      reuseNoticeTitle: "Uses this thread's conversation history",
+      reuseNoticeDescription:
+        "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
     filters: {
       allStatuses: "All statuses",
@@ -424,6 +460,8 @@ export const enUS: Translations = {
       pause: "Pause",
       resume: "Resume",
       trigger: "Trigger now",
+      duplicate: "Duplicate",
+      duplicateTitleSuffix: " (Copy)",
       delete: "Delete",
     },
     deleteConfirm:
@@ -452,6 +490,7 @@ export const enUS: Translations = {
     runTrigger: { scheduled: "scheduled", manual: "manual" },
     runStatus: {
       queued: "Queued",
+      launching: "Launching",
       running: "Running",
       success: "Success",
       failed: "Failed",
@@ -583,11 +622,14 @@ export const enUS: Translations = {
     branchFailed: "Failed to branch conversation.",
     streamReplayGap:
       "Some live updates expired. The conversation was restored from saved state.",
+    outlineLabel: "Conversation outline",
+    outlineAttachmentFallback: "Image or file message",
   },
 
   // Chats
   chats: {
     searchChats: "Search chats",
+    branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
     loadMoreToSearch: "Load more to search older conversations",
     loadingMore: "Loading more...",
     loadOlderChats: "Load older chats",
@@ -1179,6 +1221,11 @@ export const enUS: Translations = {
       adminRequired: "Admin privileges are required to manage agent skills.",
       installAdminRequired:
         "Admin privileges are required to install agent skills.",
+      installFromFile: "Install .skill",
+      installingArchive: "Installing...",
+      invalidArchive: "Choose a file with the .skill extension.",
+      archiveTooLarge: "The skill archive must be 100 MiB or smaller.",
+      installFailed: "Failed to install the skill archive.",
     },
     notification: {
       title: "Notification",
