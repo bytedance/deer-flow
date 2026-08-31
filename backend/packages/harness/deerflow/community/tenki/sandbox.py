@@ -1,6 +1,7 @@
 """``TenkiSandbox`` — DeerFlow :class:`Sandbox` backed by a Tenki cloud sandbox.
 
-Tenki's Python SDK (``tenki-sandbox``) is synchronous, so — unlike
+Tenki's Python SDK (the ``tenki`` distribution, which ships the
+``tenki_sandbox`` module) is synchronous, so — unlike
 ``community/boxlite`` — this adapter calls the SDK directly with no event-loop
 bridge. File transport uses Tenki's native ``sandbox.fs`` API (``read_text`` /
 ``read_stream`` / ``write_stream`` / ``mkdir`` / ``stat``), which is binary-safe
@@ -13,7 +14,7 @@ Tenki base image works.
 
 The Tenki SDK is not imported at module load (only its exception *class names*
 are matched, as strings), so importing this package never requires
-``tenki-sandbox`` to be installed — it is needed only once the provider is
+``tenki`` to be installed — it is needed only once the provider is
 selected and a sandbox is actually created.
 """
 
@@ -52,7 +53,7 @@ DEFAULT_TENKI_HOME_DIR = "/home/tenki"
 _STREAM_CHUNK = 1024 * 1024
 
 # Tenki SDK exception *class names* that mean the remote session is gone for
-# good — matched as strings so this module imports without ``tenki-sandbox``.
+# good — matched as strings so this module imports without ``tenki``.
 # A terminated/not-found/closed session is unrecoverable; the provider drops it
 # and rebuilds on the next call. This is only the named-error half of the rule:
 # _is_terminal_failure ALSO treats the builtin ConnectionError / BrokenPipeError

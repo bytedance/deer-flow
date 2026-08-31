@@ -519,6 +519,7 @@ sandbox:
    home_dir: /home/user             # /mnt/user-data is remapped under this directory
    idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
    replicas: 3                      # max concurrent sandboxes per gateway process
+   mount_upload_deadline_seconds: 120  # per-sandbox time budget for mount uploads (seconds)
    ownership:                       # use Redis when more than one gateway shares E2B
      type: redis
      redis_url: $REDIS_URL
@@ -564,6 +565,11 @@ Notes specific to `E2BSandboxProvider`:
   `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
+- `mount_upload_deadline_seconds` sets the per-sandbox time budget for mount
+  uploads. The provider checks it before each mount, during directory preflight,
+  and before each SDK write. The deadline does not interrupt active filesystem or
+  E2B SDK calls. Omitting the key preserves the 120-second default. Values below
+  1 are clamped to 1; non-numeric or null values fall back to the default.
 
 **OpenSandbox Remote Sandbox** (runs code through an OpenSandbox deployment):
 

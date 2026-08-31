@@ -490,6 +490,18 @@ export function isAssistantMessageGroupStreaming(
   });
 }
 
+// `deriveStableMessageGroups` preserves the identity of a settled group's
+// `messages` array across streaming chunks, so caching on that array lets the
+// message list re-render per chunk without re-running the derivation for
+// every settled turn (#5094). For string-content turns the saved work is the
+// reverse/filter/map traversal and its allocations — the regex/trim split
+// itself is already cached per message by `inlineReasoningCache`; for
+// array-content turns `extractContentFromMessage` has no lower-level cache,
+// so this also skips its O(bytes) map/join/trim re-run. Settled group arrays
+// are treated as immutable everywhere else, so the same reference always
+// yields the same result.
+const assistantTurnCopyDataCache = new WeakMap<Message[], string>();
+
 export function getAssistantTurnCopyData(
   messages: Message[],
   { isStreaming = false }: { isStreaming?: boolean } = {},
@@ -498,7 +510,12 @@ export function getAssistantTurnCopyData(
     return null;
   }
 
-  return (
+  const cached = assistantTurnCopyDataCache.get(messages);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const copyData =
     [...messages]
       .reverse()
       .filter((message) => message.type === "ai")
@@ -511,8 +528,11 @@ export function getAssistantTurnCopyData(
           ? content
           : (extractReasoningContentFromMessage(message) ?? "");
       })
-      .find((content) => content.length > 0) ?? null
-  );
+      .find((content) => content.length > 0) ?? null;
+  if (copyData !== null) {
+    assistantTurnCopyDataCache.set(messages, copyData);
+  }
+  return copyData;
 }
 
 export function getMessageCopyData(message: Message) {

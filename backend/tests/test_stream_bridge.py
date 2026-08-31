@@ -10,7 +10,7 @@ import anyio
 import pytest
 from pydantic import ValidationError
 
-from deerflow.config.stream_bridge_config import StreamBridgeConfig, set_stream_bridge_config
+from deerflow.config.stream_bridge_config import MAX_HEARTBEAT_INTERVAL_SECONDS, StreamBridgeConfig, set_stream_bridge_config
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
 
 # RedisStreamBridge is no longer re-exported from deerflow.runtime (redis is an
@@ -212,6 +212,19 @@ async def test_heartbeat(bridge: MemoryStreamBridge):
     await asyncio.wait_for(consumer(), timeout=2.0)
     assert len(received) == 1
     assert received[0] is HEARTBEAT_SENTINEL
+
+
+@pytest.mark.anyio
+async def test_memory_bridge_uses_configured_default_heartbeat():
+    """A subscriber may omit its override and inherit the bridge setting."""
+    bridge = MemoryStreamBridge(queue_maxsize=256, heartbeat_interval=0.01)
+    run_id = "run-configured-heartbeat"
+    bridge._get_or_create_stream(run_id)
+
+    entry = await asyncio.wait_for(anext(bridge.subscribe(run_id)), timeout=1.0)
+
+    assert entry is HEARTBEAT_SENTINEL
+    assert bridge.heartbeat_interval == 0.01
 
 
 @pytest.mark.anyio
@@ -947,11 +960,77 @@ async def test_redis_blocking_wakeup_error_gives_up_after_max_retries():
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "heartbeat_interval",
+    [
+        True,
+        False,
+        0,
+        -1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        MAX_HEARTBEAT_INTERVAL_SECONDS + 1,
+    ],
+)
+def test_stream_bridge_config_rejects_invalid_heartbeat_interval(heartbeat_interval):
+    with pytest.raises(ValidationError):
+        StreamBridgeConfig(heartbeat_interval_seconds=heartbeat_interval)
+
+
+def test_stream_bridge_config_accepts_numeric_heartbeat_string():
+    config = StreamBridgeConfig(heartbeat_interval_seconds="2.5")
+
+    assert config.heartbeat_interval_seconds == 2.5
+
+
+@pytest.mark.parametrize("heartbeat_interval", [True, MAX_HEARTBEAT_INTERVAL_SECONDS + 1])
+def test_memory_bridge_rejects_invalid_default_heartbeat(heartbeat_interval):
+    with pytest.raises(ValueError, match="heartbeat_interval"):
+        MemoryStreamBridge(heartbeat_interval=heartbeat_interval)
+
+
+@pytest.mark.anyio
+async def test_redis_bridge_rejects_oversized_subscription_heartbeat_before_io():
+    fake = _FakeRedis()
+
+    async def fail_if_called(*_args, **_kwargs):
+        pytest.fail("Redis I/O must not start for an invalid heartbeat interval")
+
+    fake.xrange = fail_if_called
+    bridge = RedisStreamBridge(redis_url="redis://fake", client=fake)
+
+    with pytest.raises(ValueError, match="heartbeat_interval"):
+        await anext(
+            bridge.subscribe(
+                "redis-run-oversized-heartbeat",
+                heartbeat_interval=MAX_HEARTBEAT_INTERVAL_SECONDS + 1,
+            )
+        )
+
+
 @pytest.mark.anyio
 async def test_make_stream_bridge_defaults():
     """make_stream_bridge() with no config yields a MemoryStreamBridge."""
     async with make_stream_bridge() as bridge:
         assert isinstance(bridge, MemoryStreamBridge)
+        assert bridge.heartbeat_interval == 15.0
+
+
+@pytest.mark.anyio
+async def test_make_stream_bridge_passes_memory_heartbeat():
+    set_stream_bridge_config(
+        StreamBridgeConfig(
+            type="memory",
+            heartbeat_interval_seconds=2.5,
+        )
+    )
+    try:
+        async with make_stream_bridge() as bridge:
+            assert isinstance(bridge, MemoryStreamBridge)
+            assert bridge.heartbeat_interval == 2.5
+    finally:
+        set_stream_bridge_config(None)
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1240,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
         StreamBridgeConfig(
             type="redis",
             redis_url="redis://fake:6379/0",
+            heartbeat_interval_seconds=2.5,
             max_connections=50,
             stream_ttl_seconds=42,
         )
@@ -1168,6 +1248,7 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
     try:
         async with make_stream_bridge() as bridge:
             assert isinstance(bridge, RedisStreamBridge)
+            assert bridge.heartbeat_interval == 2.5
             assert bridge._stream_ttl_seconds == 42
         assert captured["max_connections"] == 50
         assert captured["decode_responses"] is True

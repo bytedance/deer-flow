@@ -1,30 +1,44 @@
-"""Provider factory — resolves and constructs the configured AuthorizationProvider.
+"""Provider factory — discovers and constructs the configured provider.
 
-This is the single entry point for creating an authorization provider from
-``AuthorizationConfig``. It does not cache instances (Phase 1B resolves once
-per agent build and passes the same instance to Layer 1 and Layer 2).
+The two-phase API lets async callers offload class-path discovery/import while
+constructing loop-affine providers on their running event loop. The synchronous
+``resolve_authorization_provider`` convenience function composes both phases.
+Instances are not cached (Phase 1B resolves once per agent build and passes the
+same instance to Layer 1 and Layer 2).
 """
 
 from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
 
 from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config.authorization_config import AuthorizationConfig
 from deerflow.reflection import resolve_variable
 
 
-def resolve_authorization_provider(
+@dataclass(frozen=True, slots=True)
+class AuthorizationProviderSpec:
+    """A discovered provider class and its constructor inputs."""
+
+    class_path: str
+    provider_cls: type[Any]
+    kwargs: dict[str, Any]
+
+
+def resolve_authorization_provider_spec(
     config: AuthorizationConfig,
-) -> AuthorizationProvider | None:
-    """Resolve the authorization provider from config.
+) -> AuthorizationProviderSpec | None:
+    """Discover a provider class without constructing the provider.
 
     Returns:
-        A constructed ``AuthorizationProvider`` instance, or ``None`` if
-        authorization is disabled.
+        Constructor inputs for the configured provider, or ``None`` if
+        authorization is disabled. This discovery phase may import a custom
+        module and is safe to offload from an async event loop.
 
     Raises:
         ValueError: If ``enabled`` is True but no provider is configured,
-            or if the class path is invalid / construction fails / the
-            instance does not satisfy the ``AuthorizationProvider`` Protocol.
+            or if the class path is invalid.
     """
     if not config.enabled:
         return None
@@ -39,13 +53,24 @@ def resolve_authorization_provider(
         raise ValueError(f"Failed to resolve authorization provider class '{class_path}': {err}") from err
 
     kwargs = dict(config.provider.config) if config.provider.config else {}
+    return AuthorizationProviderSpec(class_path=class_path, provider_cls=provider_cls, kwargs=kwargs)
+
+
+def construct_authorization_provider(
+    spec: AuthorizationProviderSpec | None,
+    config: AuthorizationConfig,
+) -> AuthorizationProvider | None:
+    """Construct and validate a previously discovered provider spec."""
+    if spec is None:
+        return None
+
     try:
-        instance = provider_cls(**kwargs)
+        instance = spec.provider_cls(**spec.kwargs)
     except Exception as err:
-        raise ValueError(f"Failed to construct authorization provider '{class_path}': {err}") from err
+        raise ValueError(f"Failed to construct authorization provider '{spec.class_path}': {err}") from err
 
     if not isinstance(instance, AuthorizationProvider):
-        raise ValueError(f"Authorization provider '{class_path}' does not satisfy the AuthorizationProvider Protocol")
+        raise ValueError(f"Authorization provider '{spec.class_path}' does not satisfy the AuthorizationProvider Protocol")
 
     from deerflow.authz.rbac import RbacAuthorizationProvider
 
@@ -53,6 +78,13 @@ def resolve_authorization_provider(
         try:
             instance.validate_role(config.default_role, field="authorization.default_role")
         except ValueError as err:
-            raise ValueError(f"Invalid authorization default_role for provider '{class_path}': {err}") from err
+            raise ValueError(f"Invalid authorization default_role for provider '{spec.class_path}': {err}") from err
 
     return instance
+
+
+def resolve_authorization_provider(
+    config: AuthorizationConfig,
+) -> AuthorizationProvider | None:
+    """Discover, construct, and validate the configured provider synchronously."""
+    return construct_authorization_provider(resolve_authorization_provider_spec(config), config)

@@ -2105,3 +2105,59 @@ def test_task_tool_failed_carries_receipts_without_verdict(monkeypatch):
     message = _task_tool_message(command)
     assert message.additional_kwargs["subagent_tool_receipts"] == receipts
     assert "subagent_receipt_verdict" not in message.additional_kwargs
+
+
+def _capture_executor_call(monkeypatch, **call_kwargs):
+    """Run task_tool with a dummy executor and return (executor_kwargs, prompt)."""
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            captured["prompt"] = prompt
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    kwargs = {
+        "runtime": _make_runtime(),
+        "description": "test",
+        "prompt": "do the work",
+        "subagent_type": "general-purpose",
+        "tool_call_id": "tc-criteria",
+    }
+    kwargs.update(call_kwargs)
+    _run_task_tool(**kwargs)
+    return captured["executor_kwargs"], captured["prompt"]
+
+
+def test_task_tool_forwards_acceptance_criteria_to_executor(monkeypatch):
+    """RFC #4651 PR3: criteria travel via the executor constructor; the
+    executor appends them to the subagent's task HumanMessage as untrusted
+    data at state-build time. The delegated prompt itself stays free of
+    criteria so the tool never dictates the channel."""
+    criteria = ["file:../outputs/report.md non-empty", "tests_passed:make test"]
+
+    executor_kwargs, delegated_prompt = _capture_executor_call(monkeypatch, acceptance_criteria=criteria)
+
+    assert executor_kwargs["acceptance_criteria"] == criteria
+    assert "<acceptance_criteria>" not in delegated_prompt
+
+
+def test_task_tool_forwards_no_criteria_by_default(monkeypatch):
+    executor_kwargs, delegated_prompt = _capture_executor_call(monkeypatch)
+
+    assert executor_kwargs["acceptance_criteria"] is None
+    assert "<acceptance_criteria>" not in delegated_prompt
