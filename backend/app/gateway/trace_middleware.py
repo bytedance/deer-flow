@@ -64,15 +64,21 @@ class TraceMiddleware:
                 # ``generate_trace_id``), which makes the raw latin-1 header
                 # encoding safe.
                 if not response_started:
+                    body = b"Internal Server Error"
                     await send(
                         {
                             "type": "http.response.start",
                             "status": 500,
+                            # content-length keeps the framing byte-identical
+                            # to the ServerErrorMiddleware response this
+                            # replaces; without it the ASGI server picks
+                            # (chunked on HTTP/1.1, close-delimited on 1.0).
                             "headers": [
                                 (b"content-type", b"text/plain; charset=utf-8"),
+                                (b"content-length", str(len(body)).encode("latin-1")),
                                 (TRACE_ID_HEADER.encode("latin-1"), trace_id.encode("latin-1")),
                             ],
                         }
                     )
-                    await send({"type": "http.response.body", "body": b"Internal Server Error"})
+                    await send({"type": "http.response.body", "body": body})
                 raise

@@ -150,6 +150,11 @@ def test_unhandled_exception_500_carries_trace_header() -> None:
 
     assert response.status_code == 500
     assert response.headers[TRACE_ID_HEADER] == "trace-from-upstream"
+    # Byte-identical to the ServerErrorMiddleware response it replaces: an
+    # explicit content-length, not server-chosen framing (chunked on HTTP/1.1,
+    # close-delimited on HTTP/1.0).
+    assert response.text == "Internal Server Error"
+    assert response.headers["content-length"] == str(len(b"Internal Server Error"))
 
 
 def test_unhandled_exception_500_carries_generated_trace_header() -> None:
