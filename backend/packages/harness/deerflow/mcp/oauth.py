@@ -116,13 +116,16 @@ class OAuthTokenManager:
         """Render the Authorization value, refusing one the transport would echo.
 
         The token endpoint's response is not this process's to control: an
-        ``access_token`` or ``token_type`` carrying a newline (or any byte the
-        transport refuses) reaches httpx/h11, which raise with the full value in
-        the message, and ``ToolErrorHandlingMiddleware`` copies that message into
-        a model-visible ToolMessage. Failing closed here keeps the token out of
+        ``access_token`` or ``token_type`` carrying a newline reaches h11, which
+        raises with the full value in the message, and
+        ``ToolErrorHandlingMiddleware`` copies that message into a
+        model-visible ToolMessage. Failing closed here keeps the token out of
         the prompt, the checkpoint, and traces, at the one boundary every caller
         goes through -- the tool interceptor, the initial discovery headers, and
-        the durable task path all read their value from here.
+        the durable task path all read their value from here. A token outside
+        ASCII fails earlier, inside httpx, with only the offending character in
+        the message; that one is refused for a deliverable error rather than for
+        secrecy.
 
         The rendered value is what gets checked, not the two fields separately,
         because the rendered value is what the transport sees. An

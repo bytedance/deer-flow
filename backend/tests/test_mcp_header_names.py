@@ -126,8 +126,10 @@ def test_validator_mirrors_the_mcp_http_client_encoding_boundary():
     ``str`` header values as ASCII at construction time. A value the validator
     accepts must construct that client; the canonical counter-example — a
     Latin-1 high byte h11 itself would happily send — must be flagged by the
-    validator, because httpx raises ``UnicodeEncodeError`` before h11 runs
-    (and that exception repeats the offending value).
+    validator, because httpx raises ``UnicodeEncodeError`` before h11 runs.
+    That exception names the offending character rather than the credential, so
+    what the denial buys here is an actionable error instead of an encode
+    failure raised from inside the client.
     """
     from mcp.shared._httpx_utils import create_mcp_http_client
 

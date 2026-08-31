@@ -348,10 +348,12 @@ def test_passthrough_still_injects_the_secrets_that_are_present():
 #
 # A secret that cannot travel as an HTTP header value (trailing newline from
 # reading a token file, CR/LF, characters outside ASCII) must be rejected
-# here, before it reaches the HTTP client: h11 renders the full value into its
-# LocalProtocolError message, ToolErrorHandlingMiddleware copies that message
-# into a model-visible ToolMessage, and the secret lands in the prompt, the
-# checkpoint, and traces — everywhere this module promises it never goes.
+# here, before it reaches the HTTP client. On the line break and whitespace
+# cases h11 renders the full value into its LocalProtocolError message,
+# ToolErrorHandlingMiddleware copies that message into a model-visible
+# ToolMessage, and the secret lands in the prompt, the checkpoint, and traces —
+# everywhere this module promises it never goes. Non-ASCII fails earlier,
+# inside httpx, with only the offending character in the message.
 # ---------------------------------------------------------------------------
 
 

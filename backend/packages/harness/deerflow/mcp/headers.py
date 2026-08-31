@@ -18,12 +18,17 @@ the static entry instead of duplicating it.
 Every path that writes a value into an MCP request header checks it with
 :func:`illegal_header_value_reason` first — both credential interceptors, the
 OAuth token manager, and ``build_server_params`` for the operator's static
-headers. httpx encodes ``str`` header values as
-ASCII and h11 rejects line breaks and surrounding whitespace, and both render
-the *full value* into the exception message — which ``ToolErrorHandlingMiddleware`` then
-copies into a model-visible ToolMessage, putting the secret in the prompt,
-the checkpoint, and traces. Rejecting up front keeps the error message to the
-credential's name.
+headers.
+
+The two halves of that boundary fail differently, and only one of them leaks.
+h11 rejects line breaks and surrounding whitespace with the *full value* in its
+message, ``ToolErrorHandlingMiddleware`` copies that into a model-visible
+ToolMessage, and the credential lands in the prompt, the checkpoint, and
+traces. That is the leak this check exists to stop. httpx encodes ``str``
+values as ASCII and raises ``UnicodeEncodeError``, whose message names only the
+offending character and its position, so at most one character escapes;
+refusing that value up front buys an actionable error rather than an encode
+failure raised from inside the client.
 """
 
 from __future__ import annotations

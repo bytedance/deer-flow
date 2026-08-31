@@ -121,12 +121,12 @@ def build_user_scoped_auth_interceptor(extensions_config: ExtensionsConfig) -> A
             )
 
         # A credential the transport would refuse (trailing newline from a
-        # token file or a CRLF env-file, non-ASCII) must be rejected here:
-        # httpx/h11 render the full value into their exception message, which
-        # ToolErrorHandlingMiddleware copies into a model-visible ToolMessage.
-        # Always denied, regardless of on_missing — the user *is* mapped, so
-        # falling back to the discovery credential would silently run the call
-        # under the shared authority.
+        # token file or a CRLF env-file, non-ASCII) must be rejected here. On
+        # the line break and whitespace cases h11 renders the full value into
+        # its exception message, which ToolErrorHandlingMiddleware copies into
+        # a model-visible ToolMessage. Always denied, regardless of on_missing
+        # — the user *is* mapped, so falling back to the discovery credential
+        # would silently run the call under the shared authority.
         reason = illegal_header_value_reason(credential)
         if reason is not None:
             logger.warning(

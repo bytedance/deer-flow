@@ -37,8 +37,9 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
         # Add headers if present
         if config.headers:
             # A statically configured value the transport would refuse gets the
-            # same treatment as a request-scoped one: httpx and h11 render the
-            # full value into their exception, which reaches the model through
+            # same treatment as a request-scoped one: h11 renders the full
+            # value into its exception on a line break or surrounding
+            # whitespace, which reaches the model through
             # ToolErrorHandlingMiddleware. These values are API keys often
             # enough to be worth refusing here, where build_servers_config
             # already drops just this server and logs the reason.

@@ -30,10 +30,13 @@ tenant's authority. ``on_missing: "passthrough"`` is the explicit opt-out.
 
 A resolved value the transport would refuse (line break, surrounding
 whitespace, non-ASCII — see ``mcp/headers.py``) is always denied, regardless
-of ``on_missing``: the HTTP client's own rejection renders the full value into
-its exception message, which would otherwise travel into a model-visible tool
-error and the trace, and a passthrough fallback would run the call under the
-shared discovery credential even though the caller did supply a key.
+of ``on_missing``. h11 renders the full value into its exception message when
+it refuses a line break or surrounding whitespace, and that message would
+otherwise travel into a model-visible tool error and the trace; the non-ASCII
+case fails inside httpx instead, which names only the offending character, so
+denying it here buys an actionable error rather than secrecy. Either way a
+passthrough fallback would run the call under the shared discovery credential
+even though the caller did supply a key.
 """
 
 from __future__ import annotations
@@ -148,14 +151,15 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
                 missing.append(secret_key)
                 continue
             # A value the transport would refuse (trailing newline from reading
-            # a token file, CR/LF, non-ASCII) must be rejected *here*: httpx
-            # and h11 render the full value into their exception message, and
-            # ToolErrorHandlingMiddleware copies that message into a
-            # model-visible ToolMessage — putting the secret in the prompt, the
-            # checkpoint, and traces, everywhere this module promises it never
-            # goes. Always denied, regardless of on_missing: the key is present,
-            # so falling back to the discovery credential would silently run
-            # this tenant's call under the shared authority.
+            # a token file, CR/LF, non-ASCII) must be rejected *here*. h11
+            # renders the full value into its exception message on the line
+            # break and whitespace cases, and ToolErrorHandlingMiddleware
+            # copies that message into a model-visible ToolMessage — putting
+            # the secret in the prompt, the checkpoint, and traces, everywhere
+            # this module promises it never goes. Always denied, regardless of
+            # on_missing: the key is present, so falling back to the discovery
+            # credential would silently run this tenant's call under the shared
+            # authority.
             reason = illegal_header_value_reason(value)
             if reason is not None:
                 illegal[secret_key] = reason

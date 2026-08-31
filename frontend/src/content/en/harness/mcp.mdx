@@ -213,9 +213,9 @@ conversation:
 - A value that cannot travel as an HTTP header — a stray newline picked up when
   reading a token from a file, leading/trailing whitespace, characters outside
   ASCII — is always rejected, regardless of `on_missing`. The error names the
-  offending key but never repeats the value; without this check the HTTP
-  client's own rejection would echo the full credential into a model-visible
-  tool error.
+  offending key but never repeats the value; without this check a newline or
+  stray whitespace would reach the HTTP client, whose rejection echoes the full
+  credential into a model-visible tool error.
 - For a server declaring several sources, precedence is static `headers` <
   `oauth` < `user_auth` < `headers_from_context`: the value chosen for this one
   request is the most specific, so it wins.

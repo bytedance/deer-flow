@@ -97,10 +97,10 @@ def test_build_server_params_rejects_unsupported_transport():
 def test_build_server_params_rejects_illegal_header_value(value: str, reason: str):
     """A statically configured value the transport would refuse is denied here.
 
-    httpx and h11 render the full value into their exception message, which
-    ToolErrorHandlingMiddleware turns into a model-visible ToolMessage. These
-    values are API keys often enough that the denial names the header and the
-    reason instead.
+    h11 renders the full value into its exception message on a line break or
+    surrounding whitespace, which ToolErrorHandlingMiddleware turns into a
+    model-visible ToolMessage. These values are API keys often enough that the
+    denial names the header and the reason instead.
     """
     config = McpServerConfig(type="http", url="https://example.com/mcp", headers={"Authorization": value})
 

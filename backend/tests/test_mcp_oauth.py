@@ -619,9 +619,9 @@ def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(mon
 # --- Illegal header values ---------------------------------------------------
 #
 # What the token endpoint returns is not this process's to control. An
-# access_token or token_type carrying a newline reaches httpx/h11, which raise
-# with the full value in the message, and ToolErrorHandlingMiddleware copies
-# that message into a model-visible ToolMessage. Every one of these asserts the
+# access_token or token_type carrying a newline reaches h11, which raises with
+# the full value in the message, and ToolErrorHandlingMiddleware copies that
+# message into a model-visible ToolMessage. Every one of these asserts the
 # token never appears in what the caller sees.
 
 
