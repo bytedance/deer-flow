@@ -1,3 +1,6 @@
+import asyncio
+
+import pytest
 from fastapi import FastAPI
 from fastapi.responses import Response, StreamingResponse
 from starlette.testclient import TestClient
@@ -127,3 +130,70 @@ def test_trace_header_rejects_crafted_c1_control_and_generates_fresh_id() -> Non
     returned = response.headers[TRACE_ID_HEADER]
     assert returned != crafted_decoded
     assert all(0x20 <= ord(ch) <= 0x7E for ch in returned), returned
+
+
+def test_unhandled_exception_500_carries_trace_header() -> None:
+    """Starlette's ServerErrorMiddleware sits outside every user middleware and
+    emits unhandled-exception 500s through the raw send, so those responses
+    never pass the header-writing wrapper -- yet the 500 for a server bug is
+    exactly the response a user most needs to correlate with a log line. The
+    middleware must ship its own 500 carrying the id before re-raising."""
+    app = _make_app()
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("server bug")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/boom", headers={TRACE_ID_HEADER: "trace-from-upstream"})
+
+    assert response.status_code == 500
+    assert response.headers[TRACE_ID_HEADER] == "trace-from-upstream"
+
+
+def test_unhandled_exception_500_carries_generated_trace_header() -> None:
+    app = _make_app()
+
+    @app.get("/boom")
+    async def boom() -> None:
+        raise RuntimeError("server bug")
+
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/boom")
+
+    assert response.status_code == 500
+    returned = response.headers[TRACE_ID_HEADER]
+    assert returned
+    assert all(0x20 <= ord(ch) <= 0x7E for ch in returned), returned
+
+
+def test_midstream_exception_propagates_without_second_response_start() -> None:
+    """An exception after ``http.response.start`` keeps propagating unchanged:
+    a second response start cannot be sent, and the already-written header
+    stands on the one that was."""
+    sent: list[dict] = []
+
+    async def failing_app(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"partial", "more_body": True})
+        raise RuntimeError("mid-stream bug")
+
+    async def record(message) -> None:
+        sent.append(message)
+
+    middleware = TraceMiddleware(failing_app)
+    scope = {"type": "http", "method": "GET", "path": "/", "headers": []}
+
+    async def scenario() -> None:
+        with pytest.raises(RuntimeError, match="mid-stream bug"):
+            await middleware(scope, None, record)
+
+    asyncio.run(scenario())
+
+    starts = [message for message in sent if message["type"] == "http.response.start"]
+    assert len(starts) == 1
+    assert starts[0]["status"] == 200
+    header_names = {name.lower() for name, _ in starts[0]["headers"]}
+    assert TRACE_ID_HEADER.lower().encode("latin-1") in header_names

@@ -23,6 +23,12 @@ class TraceMiddleware:
     finished response, which covers SSE and other streaming responses without
     consuming the body. ``CORS_EXPOSED_HEADERS`` lists it so split-origin
     browser clients can read it back.
+
+    Unhandled exceptions get their own 500 here rather than in Starlette's
+    ``ServerErrorMiddleware``: that middleware sits outside every user
+    middleware and emits through the raw send, so its 500 -- the one response
+    a user most needs to correlate with a log line -- would be the only one
+    without the header.
     """
 
     def __init__(self, app: ASGIApp):
@@ -36,10 +42,37 @@ class TraceMiddleware:
         incoming_trace_id = Headers(scope=scope).get(TRACE_ID_HEADER)
 
         with request_trace_context(incoming_trace_id) as trace_id:
+            response_started = False
 
             async def send_with_trace(message: Message) -> None:
+                nonlocal response_started
                 if message["type"] == "http.response.start":
+                    response_started = True
                     MutableHeaders(scope=message)[TRACE_ID_HEADER] = trace_id
                 await send(message)
 
-            await self.app(scope, receive, send_with_trace)
+            try:
+                await self.app(scope, receive, send_with_trace)
+            except Exception:
+                # Before the response has started, ship a plain 500 carrying
+                # the header and re-raise: the outer ServerErrorMiddleware sees
+                # the response already started and only re-raises too, so the
+                # server's exception logging is untouched. Mid-stream failures
+                # propagate unchanged -- a second response start cannot be
+                # sent, and the already-written header stands. The id is
+                # printable ASCII by construction (``normalize_trace_id`` /
+                # ``generate_trace_id``), which makes the raw latin-1 header
+                # encoding safe.
+                if not response_started:
+                    await send(
+                        {
+                            "type": "http.response.start",
+                            "status": 500,
+                            "headers": [
+                                (b"content-type", b"text/plain; charset=utf-8"),
+                                (TRACE_ID_HEADER.encode("latin-1"), trace_id.encode("latin-1")),
+                            ],
+                        }
+                    )
+                    await send({"type": "http.response.body", "body": b"Internal Server Error"})
+                raise
