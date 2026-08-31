@@ -426,6 +426,20 @@ This section accumulates work toward the **2.1.0** milestone
   CORS-safelisted, so split-origin browser clients — the ones that cannot read
   the Gateway's logs either — could not read the correlation id they are meant
   to quote in a bug report. ([#XXXX])
+- **gateway:** Keep `X-Trace-Id` on unhandled-exception 500s. Starlette's
+  `ServerErrorMiddleware` emits those through the raw send outside every user
+  middleware, so the 500 for a server bug — the response most in need of
+  correlation — was the only one shipped without the id. `TraceMiddleware` now
+  sends its own 500 carrying the header before re-raising; the server's
+  exception logging is untouched and mid-stream failures propagate unchanged.
+  ([#XXXX])
+- **gateway:** Strip a forged `deerflow_trace_id` from the persisted request
+  echo. `body.config` is stored verbatim as `runs.kwargs_json` and served back
+  by the runs API, so a forged id in `config.metadata` or `config.context`
+  survived on that one surface while every other carried the real id.
+  `redact_config_secrets` now drops the key from both containers, and
+  `build_run_config` merges run metadata onto a copy so the server-stamped id
+  can no longer be written through into the caller's request body. ([#XXXX])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
