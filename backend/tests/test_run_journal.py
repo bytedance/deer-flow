@@ -85,6 +85,29 @@ async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
     assert [event["event_type"] for event in events] == ["middleware:test"]
 
 
+@pytest.mark.anyio
+async def test_close_without_flush_discards_buffer_and_detaches_runtime_dependencies():
+    class TrackingRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            return await super().put_batch(events)
+
+    store = TrackingRunEventStore()
+    journal = RunJournal("r-close-discard", "t-close-discard", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    await journal.close(flush=False)
+
+    assert store.put_batch_calls == 0
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+
+
 @pytest.fixture
 def journal_setup():
     store = MemoryRunEventStore()

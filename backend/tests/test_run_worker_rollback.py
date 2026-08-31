@@ -24,6 +24,7 @@ from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.journal import RunJournal
 from deerflow.runtime.runs.manager import CancelOutcome, ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -3458,3 +3459,55 @@ async def test_worker_skips_execution_and_finalization_after_ownership_loss():
     thread_store.update_status.assert_not_awaited()
     on_run_completed.assert_not_awaited()
     bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_worker_discards_buffered_journal_events_after_ownership_loss(monkeypatch):
+    """A fenced worker detaches its journal without appending buffered events."""
+
+    class TrackingRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            return await super().put_batch(events)
+
+    journals: list[RunJournal] = []
+
+    class BufferedRunJournal(RunJournal):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.record_middleware("buffered", name="test", hook="after", action="record", changes={})
+            journals.append(self)
+
+    monkeypatch.setattr("deerflow.runtime.journal.RunJournal", BufferedRunJournal)
+
+    event_store = TrackingRunEventStore()
+    run_manager = RunManager()
+    record = await run_manager.create("thread-lease-lost-buffered")
+    record.ownership_lost = True
+    record.abort_event.set()
+    record.status = RunStatus.error
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=event_store),
+        agent_factory=MagicMock(side_effect=AssertionError("fenced worker started the agent")),
+        graph_input={"messages": []},
+        config={},
+    )
+
+    assert event_store.put_batch_calls == 0
+    assert len(journals) == 1
+    assert journals[0]._closed is True
+    assert journals[0]._store is None
+    assert journals[0]._buffer == []

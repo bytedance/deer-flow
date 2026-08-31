@@ -1527,7 +1527,7 @@ async def run_agent(
             try:
                 if journal is not None:
                     try:
-                        await journal.close()
+                        await journal.close(flush=not record.ownership_lost)
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
