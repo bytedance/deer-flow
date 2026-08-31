@@ -422,6 +422,10 @@ This section accumulates work toward the **2.1.0** milestone
   id is now stamped once at the trust boundary, `config.context` is closed off
   the same way, and a thread's own metadata is no longer seeded with the
   run-scoped id of whichever run created it. ([#XXXX])
+- **gateway:** Expose `X-Trace-Id` in `Access-Control-Expose-Headers`. It is not
+  CORS-safelisted, so split-origin browser clients — the ones that cannot read
+  the Gateway's logs either — could not read the correlation id they are meant
+  to quote in a bug report. ([#XXXX])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead

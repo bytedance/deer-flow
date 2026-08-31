@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.responses import Response, StreamingResponse
 from starlette.testclient import TestClient
 
+from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS
 from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.trace_context import TRACE_ID_HEADER, get_current_trace_id
 
@@ -37,6 +38,12 @@ def test_every_response_carries_a_trace_id() -> None:
 
     assert response.headers[TRACE_ID_HEADER]
     assert response.json()["trace_id"] == response.headers[TRACE_ID_HEADER]
+
+
+def test_trace_id_header_is_exposed_to_split_origin_clients() -> None:
+    """Not CORS-safelisted, so a browser client on a separate origin cannot
+    read the id it is meant to quote in a bug report unless it is listed."""
+    assert TRACE_ID_HEADER in CORS_EXPOSED_HEADERS
 
 
 def test_trace_header_inherits_inbound_value_and_binds_context() -> None:
