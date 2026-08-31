@@ -132,6 +132,32 @@ def test_trace_header_rejects_crafted_c1_control_and_generates_fresh_id() -> Non
     assert all(0x20 <= ord(ch) <= 0x7E for ch in returned), returned
 
 
+def test_create_app_wires_trace_middleware_into_the_real_stack(monkeypatch) -> None:
+    """Every other case here pins the middleware's behavior on a hand-built
+    app; this one pins the wiring. ``create_app()`` must install
+    ``TraceMiddleware`` itself — dropping that ``add_middleware`` line (or
+    short-circuiting above it) would strip the header and the ambient id that
+    the run-record stamp and enhanced log records derive from, while every
+    hand-wired suite still passed."""
+    import app.gateway.app as app_module
+    import deerflow.extensions as extensions_module
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.extensions import reset_loaded_extensions
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    monkeypatch.setattr(app_module, "get_app_config", lambda: AppConfig(sandbox=SandboxConfig(use="test")))
+    monkeypatch.setattr(extensions_module, "load_extensions", lambda plugins: (ExtensionRegistry().build(), []))
+    try:
+        client = TestClient(app_module.create_app())
+        response = client.get("/health", headers={TRACE_ID_HEADER: "wired-through-create-app"})
+    finally:
+        reset_loaded_extensions()
+
+    assert response.status_code == 200
+    assert response.headers[TRACE_ID_HEADER] == "wired-through-create-app"
+
+
 def test_unhandled_exception_500_carries_trace_header() -> None:
     """Starlette's ServerErrorMiddleware sits outside every user middleware and
     emits unhandled-exception 500s through the raw send, so those responses
