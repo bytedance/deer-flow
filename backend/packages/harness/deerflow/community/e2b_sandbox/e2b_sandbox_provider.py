@@ -21,6 +21,7 @@ provider fields during startup.
       reconciliation_max_pages: 10
       reconciliation_max_items: 200
       reconciliation_max_seconds: 15
+      mount_upload_deadline_seconds: 120   # mount upload pass deadline; default: 120
       ownership:
         type: redis                    # shares ownership and capacity across Gateways
         redis_url: redis://redis:6379/0
@@ -36,7 +37,6 @@ from __future__ import annotations
 
 import asyncio
 import atexit
-import hashlib
 import json
 import logging
 import os
@@ -46,6 +46,7 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -58,7 +59,9 @@ from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -110,8 +113,8 @@ _MAX_MOUNT_PASS_FILES = 2000
 _MOUNT_PASS_DEADLINE_SECONDS = 120
 
 
-def _mount_deadline_reason() -> str:
-    return f"time budget {_MOUNT_PASS_DEADLINE_SECONDS}s"
+def _mount_deadline_reason(deadline_seconds: int) -> str:
+    return f"time budget {deadline_seconds}s"
 
 
 class _MountPassLimitExceeded(Exception):
@@ -121,6 +124,7 @@ class _MountPassLimitExceeded(Exception):
 @dataclass
 class _MountUploadBudget:
     deadline: float
+    deadline_seconds: int
     attempted_bytes: int = 0
     attempted_files: int = 0
     completed_bytes: int = 0
@@ -132,7 +136,7 @@ class _MountUploadBudget:
 
     def check_deadline(self) -> None:
         if self.expired:
-            raise _MountPassLimitExceeded(_mount_deadline_reason())
+            raise _MountPassLimitExceeded(_mount_deadline_reason(self.deadline_seconds))
 
 
 # Metadata keys we attach to every sandbox so we can discover ours via
@@ -150,6 +154,7 @@ E2B_EXTRA_CONFIG_KEYS = frozenset(
         "api_key",
         "domain",
         "home_dir",
+        "mount_upload_deadline_seconds",
         "reconciliation_grace_seconds",
         "reconciliation_interval_seconds",
         "reconciliation_max_items",
@@ -191,9 +196,9 @@ class E2BSandboxProvider(SandboxProvider):
         self._sandboxes: dict[str, E2BSandbox] = {}
         # (user_id, thread_id) -> sandbox id for fast in-process lookup.
         self._thread_sandboxes: dict[tuple[str, str], str] = {}
-        # Per-(user,thread) lock to serialise acquire() and release() state
+        # Per-(user,thread) serializer for acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
-        self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._acquire_serializer: AcquireSerializer[tuple[str, str]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
@@ -328,6 +333,7 @@ class E2BSandboxProvider(SandboxProvider):
                 0.1,
                 float(_opt("reconciliation_max_seconds", DEFAULT_RECONCILIATION_MAX_SECONDS)),
             ),
+            "mount_upload_deadline_seconds": self._resolve_mount_upload_deadline(_opt),
         }
 
     @staticmethod
@@ -339,6 +345,28 @@ class E2BSandboxProvider(SandboxProvider):
             else:
                 resolved[key] = "" if value is None else str(value)
         return resolved
+
+    @staticmethod
+    def _resolve_mount_upload_deadline(_opt: Callable[[str, Any], Any]) -> int:
+        raw = _opt("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        if raw is None:
+            return _MOUNT_PASS_DEADLINE_SECONDS
+        try:
+            value = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(
+                "E2BSandboxProvider: non-numeric mount_upload_deadline_seconds=%r; falling back to %ds",
+                raw,
+                _MOUNT_PASS_DEADLINE_SECONDS,
+            )
+            return _MOUNT_PASS_DEADLINE_SECONDS
+        if value < 1:
+            logger.warning(
+                "E2BSandboxProvider: invalid mount_upload_deadline_seconds=%d; clamping to 1",
+                value,
+            )
+            return 1
+        return value
 
     def _get_sandbox_cls(self) -> type[E2BClientSandbox]:
         """Return the e2b SDK Sandbox class."""
@@ -356,7 +384,12 @@ class E2BSandboxProvider(SandboxProvider):
 
     @staticmethod
     def _stable_seed(thread_id: str, user_id: str) -> str:
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+        """Warm-pool lookup seed derived from user/thread scope.
+
+        For E2B this value is the warm-pool lookup seed, not the
+        provider-issued remote id (RFC #4741 §6).
+        """
+        return derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
 
     def _metadata_matches_capacity_ledger(
         self,
@@ -412,19 +445,10 @@ class E2BSandboxProvider(SandboxProvider):
                     sig_name,
                 )
 
-    def _get_thread_lock(self, thread_id: str, user_id: str) -> threading.Lock:
-        key = self._thread_key(thread_id, user_id)
-        with self._lock:
-            lock = self._thread_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._thread_locks[key] = lock
-            return lock
-
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
-            with self._get_thread_lock(thread_id, effective_user_id):
+            with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
 
@@ -1801,7 +1825,11 @@ class E2BSandboxProvider(SandboxProvider):
 
     def _apply_mounts(self, client: E2BClientSandbox, *, user_id: str | None = None) -> None:
         started_at = time.monotonic()
-        budget = _MountUploadBudget(deadline=started_at + _MOUNT_PASS_DEADLINE_SECONDS)
+        deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        budget = _MountUploadBudget(
+            deadline=started_at + deadline_seconds,
+            deadline_seconds=deadline_seconds,
+        )
 
         def warn_pass_stopped(reason: str) -> None:
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -1838,7 +1866,7 @@ class E2BSandboxProvider(SandboxProvider):
 
         for host_path, container_path, read_only in mounts:
             if budget.expired:
-                warn_pass_stopped(_mount_deadline_reason())
+                warn_pass_stopped(_mount_deadline_reason(deadline_seconds))
                 break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
@@ -2343,7 +2371,7 @@ class E2BSandboxProvider(SandboxProvider):
             return
 
         user_id, thread_id = thread_key
-        with self._get_thread_lock(thread_id, user_id):
+        with self._acquire_serializer.hold(self._thread_key(thread_id, user_id)):
             self._release_internal(sandbox_id)
 
     def _release_internal(self, sandbox_id: str) -> None:
@@ -2505,7 +2533,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._remote_ops_in_progress.clear()
             self._unowned_remote_ops_in_progress.clear()
             self._thread_sandboxes.clear()
-            self._thread_locks.clear()
+            self._acquire_serializer.close()
             self._owned_sandbox_ids.clear()
             self._acquire_inflight.clear()
             self._orphan_first_seen.clear()

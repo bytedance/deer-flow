@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from _router_auth_helpers import call_unwrapped
 from fastapi import HTTPException
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint, uuid6
@@ -251,8 +252,8 @@ def test_run_wait_readers_return_materialized_final_values() -> None:
                 return_value=(accessor, snapshot.config),
             ),
         ):
-            thread_result = await thread_runs.wait_run.__wrapped__("thread-1", body, request)
-            stateless_result = await runs.stateless_wait(body, request)
+            thread_result = await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
+            stateless_result = await call_unwrapped(runs.stateless_wait, body, request)
         return thread_result, stateless_result
 
     thread_result, stateless_result = asyncio.run(_scenario())
@@ -303,8 +304,8 @@ def test_run_wait_readers_preserve_terminal_error_without_checkpoint() -> None:
                 return_value=(accessor, snapshot.config),
             ),
         ):
-            thread_result = await thread_runs.wait_run.__wrapped__("thread-1", body, request)
-            stateless_result = await runs.stateless_wait(body, request)
+            thread_result = await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
+            stateless_result = await call_unwrapped(runs.stateless_wait, body, request)
         return thread_result, stateless_result
 
     thread_result, stateless_result = asyncio.run(_scenario())
@@ -340,7 +341,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
                     side_effect=RuntimeError("graph construction failed"),
                 ),
             ):
-                return await thread_runs.wait_run.__wrapped__("thread-1", body, request)
+                return await call_unwrapped(thread_runs.wait_run, "thread-1", body, request)
 
         with (
             patch.object(runs, "get_stream_bridge", return_value=object()),
@@ -352,7 +353,7 @@ def test_run_wait_readers_preserve_terminal_error_when_accessor_builder_fails(ro
                 side_effect=RuntimeError("graph construction failed"),
             ),
         ):
-            return await runs.stateless_wait(body, request)
+            return await call_unwrapped(runs.stateless_wait, body, request)
 
     result = asyncio.run(_scenario())
 
