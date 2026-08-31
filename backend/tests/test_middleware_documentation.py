@@ -160,3 +160,17 @@ def test_runtime_sanitization_and_budget_order_is_explicit(path: Path) -> None:
     )
     positions = [content.index(marker) for marker in markers]
     assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("frontend/src/content/en/harness/middlewares.mdx"),
+        Path("frontend/src/content/zh/harness/middlewares.mdx"),
+    ),
+    ids=str,
+)
+def test_subagent_callout_does_not_overstate_lead_only_scope(path: Path) -> None:
+    content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    marker = "记忆、标题生成和澄清等其他 Lead Agent 专属中间件不会在子 Agent 链中运行。" if "/zh/" in path.as_posix() else "other Lead-Agent-specific middlewares such as memory, title generation, and clarification do not run there."
+    assert marker in content

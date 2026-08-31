@@ -18,7 +18,7 @@ import { Callout } from "nextra/components";
 这种设计使 Agent 核心保持简单稳定，同时允许丰富的可组合行为分层叠加。
 
 <Callout type="info">
-  每个子 Agent 运行各自的 Agent 循环，并拥有自己的中间件链。下方的循环检测、token 预算和摘要压缩防护已镜像到子 Agent 链（#3875）；其余中间件为 Lead Agent 专属（如记忆、标题生成、澄清）。参见[子 Agent → 失控行为防护](/docs/harness/subagents#失控行为防护)。
+  每个子 Agent 运行各自的 Agent 循环，并拥有自己的中间件链。下方的循环检测、token 预算和摘要压缩防护已镜像到子 Agent 链（#3875）；记忆、标题生成和澄清等其他 Lead Agent 专属中间件不会在子 Agent 链中运行。参见[子 Agent → 失控行为防护](/docs/harness/subagents#失控行为防护)。
 </Callout>
 
 ## 链的工作方式

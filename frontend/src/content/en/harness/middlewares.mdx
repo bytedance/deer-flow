@@ -20,8 +20,8 @@ This design keeps the agent core simple and stable while allowing rich, composab
 <Callout type="info">
   Each subagent runs its own agent loop and gets its own middleware chain. The
   loop-detection, token-budget, and summarization guards below are mirrored on
-  the subagent chain (#3875); the other middlewares are Lead-Agent-specific
-  (e.g. memory, title generation, clarification). See
+  the subagent chain (#3875); other Lead-Agent-specific middlewares such as
+  memory, title generation, and clarification do not run there. See
   [Subagents → Runaway guards](/docs/harness/subagents#runaway-guards).
 </Callout>
 
