@@ -13,6 +13,7 @@ The provider itself handles:
 import asyncio
 import atexit
 import contextlib
+import hashlib
 import logging
 import os
 import signal

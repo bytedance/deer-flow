@@ -16,6 +16,9 @@ class SandboxProvider(ABC):
 
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
+    # Capability for enforcing a lead Agent's physical skill view across the
+    # provider's current Agent-accessible tool surface. Host-backed providers
+    # must return False whenever shell access can bypass managed path mappings.
     supports_agent_skill_isolation: bool = False
 
     @abstractmethod

@@ -7,6 +7,7 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
+from deerflow.sandbox.security import is_host_bash_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +62,26 @@ class LocalSandboxProvider(SandboxProvider):
     next ``acquire``; the evicted thread's next ``acquire`` rebuilds a fresh
     sandbox (losing only its ``_agent_written_paths`` reverse-resolve hint,
     which gracefully degrades read_file output).
+
+    The managed ``/mnt/skills`` projection is a logical boundary, not a host
+    filesystem security boundary. When host bash is enabled, a subprocess can
+    address canonical host paths without going through ``PathMapping``. The
+    provider therefore advertises Agent skill isolation only while host bash
+    remains disabled.
     """
 
     uses_thread_data_mounts = True
     needs_upload_permission_adjustment = False
-    supports_agent_skill_isolation = True
+
+    @property
+    def supports_agent_skill_isolation(self) -> bool:
+        """Whether the current tool surface can enforce the managed view."""
+        try:
+            return not is_host_bash_allowed()
+        except Exception:
+            # An unreadable config must not turn a host-process provider into
+            # an isolation boundary by accident.
+            return False
 
     def __init__(self, max_cached_threads: int = DEFAULT_MAX_CACHED_THREAD_SANDBOXES):
         """Initialize the local sandbox provider with static path mappings.

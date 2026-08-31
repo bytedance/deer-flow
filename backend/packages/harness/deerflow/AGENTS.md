@@ -98,8 +98,10 @@ does not interrupt active filesystem or E2B SDK calls.
 The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
 
 For policy-scoped turns, clearing the four managed remote skill categories and
-uploading their prepared projection is one per-user/thread critical section,
-shared with acquire and release. A second policy sync cannot reset the remote
+uploading their prepared projection is one per-user/thread/skills-root critical
+section, shared with acquire and release. The provider snapshots that canonical
+root at startup and carries it through warm-pool identity and E2B metadata; a VM
+from another root is never adopted. A second policy sync cannot reset the remote
 tree until the first upload pass has completed.
 
 An invalid mount does not block later mounts.

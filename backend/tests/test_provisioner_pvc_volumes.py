@@ -841,6 +841,27 @@ class TestLarkCliBrokerSidecar:
         assert len(sidecars) == 1
         sidecar = sidecars[0]
         assert sidecar.image == "deer-flow/lark-cli-broker:v1.0.65"
+        assert sidecar.args == ["serve"]
+        # Credentials mounted into the sidecar only.
+        sidecar_mount_order = [m.mount_path for m in sidecar.volume_mounts]
+        sidecar_mounts = {m.mount_path: m for m in sidecar.volume_mounts}
+        sidecar_paths = set(sidecar_mounts)
+        assert provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH in sidecar_paths
+        assert provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH in sidecar_paths
+        assert provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH in sidecar_paths
+        assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH].read_only is True
+        assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH].read_only is False
+        assert sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH) < sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH)
+
+        # Sandbox container: runtime shim mount + broker URL env, NO config/data.
+        sandbox = pod.spec.containers[0]
+        sandbox_paths = {m.mount_path for m in sandbox.volume_mounts}
+        assert provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH in sandbox_paths
+        assert "/mnt/integrations/lark-cli/config" not in sandbox_paths
+        assert "/mnt/integrations/lark-cli/config/locks" not in sandbox_paths
+        assert "/mnt/integrations/lark-cli/data" not in sandbox_paths
+        env = {e.name: e.value for e in (sandbox.env or [])}
+        assert env.get("DEERFLOW_LARK_BROKER_URL") == provisioner_module.LARK_BROKER_URL
 
     def test_custom_skills_root_is_compatible_with_broker_credentials(
         self,
@@ -876,27 +897,6 @@ class TestLarkCliBrokerSidecar:
             provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH,
             provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH,
         }
-        assert sidecar.args == ["serve"]
-        # Credentials mounted into the sidecar only.
-        sidecar_mount_order = [m.mount_path for m in sidecar.volume_mounts]
-        sidecar_mounts = {m.mount_path: m for m in sidecar.volume_mounts}
-        sidecar_paths = set(sidecar_mounts)
-        assert provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH in sidecar_paths
-        assert provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH in sidecar_paths
-        assert provisioner_module.LARK_BROKER_SIDECAR_DATA_PATH in sidecar_paths
-        assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH].read_only is True
-        assert sidecar_mounts[provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH].read_only is False
-        assert sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_CONFIG_PATH) < sidecar_mount_order.index(provisioner_module.LARK_BROKER_SIDECAR_LOCKS_PATH)
-
-        # Sandbox container: runtime shim mount + broker URL env, NO config/data.
-        sandbox = pod.spec.containers[0]
-        sandbox_paths = {m.mount_path for m in sandbox.volume_mounts}
-        assert provisioner_module.LARK_CLI_RUNTIME_CONTAINER_PATH in sandbox_paths
-        assert "/mnt/integrations/lark-cli/config" not in sandbox_paths
-        assert "/mnt/integrations/lark-cli/config/locks" not in sandbox_paths
-        assert "/mnt/integrations/lark-cli/data" not in sandbox_paths
-        env = {e.name: e.value for e in (sandbox.env or [])}
-        assert env.get("DEERFLOW_LARK_BROKER_URL") == provisioner_module.LARK_BROKER_URL
 
     def test_broker_supersedes_init_container(self, provisioner_module):
         """Both images set + both flags on → broker wins (shim init, sidecar)."""

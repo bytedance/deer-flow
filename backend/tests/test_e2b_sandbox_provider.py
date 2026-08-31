@@ -245,7 +245,15 @@ class FakeOwnershipStore:
         return None
 
 
-def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_policy: str = "wait", acquire_timeout: int = 30, burst_limit: int = 0) -> Any:
+def _make_provider(
+    *,
+    replicas: int = 3,
+    idle_timeout: int = 1800,
+    overflow_policy: str = "wait",
+    acquire_timeout: int = 30,
+    burst_limit: int = 0,
+    skills_container_path: str = "/mnt/skills",
+) -> Any:
     """Build a ``E2BSandboxProvider`` instance bypassing ``__init__``."""
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
@@ -281,6 +289,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
         "template": "code-interpreter-v1",
         "domain": None,
         "home_dir": "/home/user",
+        "skills_container_path": skills_container_path,
         "idle_timeout": idle_timeout,
         "replicas": replicas,
         "overflow_policy": overflow_policy,
@@ -634,7 +643,6 @@ def test_sync_agent_skills_serializes_reset_and_upload_for_same_thread(
     ],
 )
 def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
-    monkeypatch,
     tmp_path,
     container_path,
 ):
@@ -648,13 +656,9 @@ def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
         legacy=root / "legacy",
         integrations=root / "integrations",
     )
-    monkeypatch.setattr(
-        mod,
-        "get_app_config",
-        lambda: SimpleNamespace(skills=SimpleNamespace(container_path=container_path)),
-    )
     client = FakeClient(sandbox_id="sandbox-1")
     provider = _make_provider()
+    provider._config["skills_container_path"] = container_path
     provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
         id="sandbox-1",
         client=client,
@@ -1302,6 +1306,7 @@ def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, caplog, r
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
 
     class FakeConfig:
+        skills = SimpleNamespace(container_path="/mnt/skills")
         sandbox = SimpleNamespace(
             model_extra={"mount_upload_deadline_seconds": raw},
             api_key="test-key",
@@ -1517,9 +1522,9 @@ def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:
     )
 
 
-def test_thread_key_returns_user_thread_tuple():
+def test_thread_key_includes_the_provider_skills_root():
     p = _make_provider()
-    assert p._thread_key("t1", "u1") == ("u1", "t1")
+    assert p._thread_key("t1", "u1") == ("u1", "t1", "/mnt/skills")
 
 
 def test_sandbox_id_falls_back_when_client_id_is_none():
@@ -1531,6 +1536,7 @@ def test_sandbox_id_falls_back_when_client_id_is_none():
 
 def test_stable_seed_is_deterministic_and_user_scoped():
     p = _make_provider()
+    custom_root = _make_provider(skills_container_path="/custom-skills")
     s_a = p._stable_seed("t1", "u1")
     s_b = p._stable_seed("t1", "u1")
     s_other_user = p._stable_seed("t1", "u2")
@@ -1538,6 +1544,7 @@ def test_stable_seed_is_deterministic_and_user_scoped():
     assert s_a == s_b
     assert s_a != s_other_user
     assert s_a != s_other_thread
+    assert s_a != custom_root._stable_seed("t1", "u1")
 
 
 def test_is_sandbox_gone_error_matches_known_signatures():
@@ -1756,7 +1763,7 @@ def test_refresh_owned_leases_reclaims_lapsed_lease():
     client = FakeClient(sandbox_id="sb-lapsed")
     sandbox = _make_sandbox(client, sandbox_id="sb-lapsed")
     p._sandboxes["sb-lapsed"] = sandbox
-    p._thread_sandboxes[("u1", "t1")] = "sb-lapsed"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-lapsed"
     p._owned_sandbox_ids.add("sb-lapsed")
 
     p._refresh_owned_leases()
@@ -1771,7 +1778,8 @@ def test_refresh_owned_leases_forgets_peer_owned_sandbox():
     client = FakeClient(sandbox_id="sb-lost")
     sandbox = _make_sandbox(client, sandbox_id="sb-lost")
     p._sandboxes["sb-lost"] = sandbox
-    p._thread_sandboxes[("u1", "t1")] = "sb-lost"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-lost"
     p._owned_sandbox_ids.add("sb-lost")
     p._ownership = FakeOwnershipStore(
         {"sb-lost": ("owner-peer", "own")},
@@ -1781,7 +1789,7 @@ def test_refresh_owned_leases_forgets_peer_owned_sandbox():
     p._refresh_owned_leases()
 
     assert p.get("sb-lost") is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
     assert "sb-lost" not in p._owned_sandbox_ids
     assert client.closed is True
 
@@ -1791,7 +1799,7 @@ def test_reuse_in_process_sandbox_returns_cached_id_on_healthy_reuse():
     client = FakeClient()
     sb = _make_sandbox(client, sandbox_id="sb-1")
     p._sandboxes["sb-1"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-1"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-1"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid == "sb-1"
@@ -1804,12 +1812,13 @@ def test_reuse_in_process_sandbox_evicts_dead_sandbox():
     sb = _make_sandbox(client, sandbox_id="sb-dead")
     sb._dead = True
     p._sandboxes["sb-dead"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-dead"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
     assert "sb-dead" not in p._sandboxes
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
 
 
 def test_reuse_in_process_sandbox_evicts_when_ping_fails():
@@ -1817,7 +1826,7 @@ def test_reuse_in_process_sandbox_evicts_when_ping_fails():
     client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
     sb = _make_sandbox(client, sandbox_id="sb-stale")
     p._sandboxes["sb-stale"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-stale"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-stale"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
@@ -1827,10 +1836,11 @@ def test_reuse_in_process_sandbox_evicts_when_ping_fails():
 
 def test_reuse_in_process_sandbox_cleans_dangling_mapping():
     p = _make_provider()
-    p._thread_sandboxes[("u1", "t1")] = "ghost"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "ghost"
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
 
 
 def test_reuse_in_process_sandbox_returns_none_when_no_mapping():
@@ -1847,7 +1857,7 @@ def test_reclaim_warm_pool_sandbox_happy_path(monkeypatch):
     sid = p._reclaim_warm_pool_sandbox("t1", user_id="u1")
     assert sid == "sb-warm"
     assert "sb-warm" in p._sandboxes
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-warm"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-warm"
     assert "sb-warm" not in p._warm_pool
     assert [c[0] for c in fake_cls.connect_calls] == ["sb-warm"]
 
@@ -1936,15 +1946,40 @@ class _FakePaginator:
         return page
 
 
-def _info(sandbox_id: str, user_id: str, thread_id: str):
+def _info(
+    sandbox_id: str,
+    user_id: str,
+    thread_id: str,
+    *,
+    skills_container_path: str = "/mnt/skills",
+):
     return SimpleNamespace(
         sandbox_id=sandbox_id,
         metadata={
             "deer_flow_provider": "e2b_sandbox_provider",
             "deer_flow_user": user_id,
             "deer_flow_thread": thread_id,
+            "deer_flow_skills_root": skills_container_path,
         },
     )
+
+
+def test_discover_remote_sandbox_rejects_a_different_skills_root(monkeypatch):
+    p = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-old-root", "u1", "t1")]
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert fake_cls.connect_calls == []
+
+
+def test_create_metadata_records_the_snapshotted_skills_root(monkeypatch):
+    provider = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+
+    provider.acquire("t1", user_id="u1")
+
+    assert fake_cls.create_calls[0]["metadata"]["deer_flow_skills_root"] == "/custom-skills"
 
 
 def test_discover_remote_sandbox_walks_paginator(monkeypatch):
@@ -1959,7 +1994,7 @@ def test_discover_remote_sandbox_walks_paginator(monkeypatch):
 
     sid = p._discover_remote_sandbox("t1", user_id="u1")
     assert sid == "sb-match"
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-match"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-match"
 
 
 def test_discover_remote_sandbox_accepts_legacy_list(monkeypatch):
@@ -1982,7 +2017,7 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     fake_cls.connect_factory = lambda _sid, **_kw: client
 
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert p._thread_key("t1", "u1") not in p._thread_sandboxes
     assert client.closed is True
 
 
@@ -2002,7 +2037,7 @@ def test_discover_remote_sandbox_tries_later_candidate_when_first_is_dead(monkey
 
     assert p._discover_remote_sandbox("t1", user_id="u1") == "sb-b-live"
     assert dead.closed is True
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-b-live"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-b-live"
     assert "sb-b-live" in p._owned_sandbox_ids
 
 
@@ -2148,7 +2183,7 @@ def test_reconcile_adopts_canonical_after_restart_loses_local_state(monkeypatch)
     stats = p._reconcile_remote_sandboxes(now=100.0)
 
     assert stats.adopted == 1
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-existing"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-existing"
     assert "sb-existing" in p._owned_sandbox_ids
 
 
@@ -2219,6 +2254,33 @@ def test_reconcile_kills_metadata_orphan_only_after_ttl(monkeypatch):
     assert client.killed is True
 
 
+def test_reconcile_never_adopts_an_old_skills_root_and_reaps_it_after_grace(
+    monkeypatch,
+):
+    provider = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    fake_cls.list_return = [
+        _info(
+            "sb-old-root",
+            "u1",
+            "t1",
+            skills_container_path="/mnt/skills",
+        )
+    ]
+    client = FakeClient(sandbox_id="sb-old-root")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    provider._config["reconciliation_grace_seconds"] = 5.0
+
+    first = provider._reconcile_remote_sandboxes(now=100.0)
+    second = provider._reconcile_remote_sandboxes(now=106.0)
+
+    assert first.adopted == 0
+    assert first.deferred == 1
+    assert provider._thread_key("t1", "u1") not in provider._thread_sandboxes
+    assert second.killed == 1
+    assert client.killed is True
+
+
 def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
@@ -2237,7 +2299,7 @@ def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeyp
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert client.killed is True
     assert client.closed is True
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert p._thread_key("t1", "u1") not in p._thread_sandboxes
 
 
 def test_discovery_claims_ownership_before_bootstrap_cleanup(monkeypatch):
@@ -2371,7 +2433,14 @@ def test_e2b_config_accepts_documented_reconciliation_fields(monkeypatch, caplog
         reconciliation_max_seconds=15,
     )
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
-    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=config,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         provider._load_config()
@@ -2387,7 +2456,14 @@ def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
         overflo_policy="reject",
     )
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
-    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=config,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         provider._load_config()
@@ -2579,13 +2655,14 @@ def test_release_dead_sandbox_skips_warm_pool(monkeypatch):
     sb = _make_sandbox(client, sandbox_id="sb-dead")
     sb._dead = True
     p._sandboxes["sb-dead"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-dead"
 
     p.release("sb-dead")
 
     assert "sb-dead" not in p._warm_pool, "dead sandbox must not be parked"
     assert "sb-dead" not in p._sandboxes
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
     assert client.killed is True, "release of dead sandbox must kill the remote VM"
 
 
@@ -2596,7 +2673,7 @@ def test_release_healthy_sandbox_parks_in_warm_pool(monkeypatch, tmp_path):
     client = FakeClient(commands=cmds)
     sb = _make_sandbox(client, sandbox_id="sb-warm-1")
     p._sandboxes["sb-warm-1"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-warm-1"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-warm-1"
 
     p.release("sb-warm-1")
 
@@ -2613,7 +2690,7 @@ def test_acquire_waits_for_same_thread_release_transition(monkeypatch):
     client = FakeClient(sandbox_id="sb-release-race")
     sandbox = _make_sandbox(client)
     provider._sandboxes[sandbox.id] = sandbox
-    provider._thread_sandboxes[("user-1", "thread-1")] = sandbox.id
+    provider._thread_sandboxes[provider._thread_key("thread-1", "user-1")] = sandbox.id
 
     sync_started = threading.Event()
     allow_sync_to_finish = threading.Event()
@@ -2661,7 +2738,7 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
     client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
     sb = _make_sandbox(client, sandbox_id="sb-died-during-sync")
     p._sandboxes["sb-died-during-sync"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-died-during-sync"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-died-during-sync"
 
     p.release("sb-died-during-sync")
 
@@ -3458,10 +3535,19 @@ def test_discovery_uses_sdk_query_and_tracks_without_reserving(monkeypatch) -> N
             "deer_flow_provider": "e2b_sandbox_provider",
             "deer_flow_user": "user-a",
             "deer_flow_thread": "thread-a",
+            "deer_flow_skills_root": "/mnt/skills",
             "deer_flow_capacity_ledger": store.key,
         },
     )
-    expected_query = {key: entry.metadata[key] for key in ("deer_flow_provider", "deer_flow_user", "deer_flow_thread")}
+    expected_query = {
+        key: entry.metadata[key]
+        for key in (
+            "deer_flow_provider",
+            "deer_flow_user",
+            "deer_flow_thread",
+            "deer_flow_skills_root",
+        )
+    }
     sdk.list_return = SimpleNamespace(
         has_next=False,
         next_items=lambda: [entry] if sdk.list_calls[-1]["query"].metadata == expected_query else [],
@@ -4605,6 +4691,7 @@ def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u2",
                 "deer_flow_thread": "t2",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4630,6 +4717,7 @@ def test_discovery_reports_shutdown_without_killing_remote_vm(monkeypatch, caplo
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4667,6 +4755,7 @@ def test_discovery_bootstrap_kill_failure_retains_reserved_slot(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4701,6 +4790,7 @@ def test_shutdown_does_not_retry_kill_for_unowned_discovery_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4745,6 +4835,7 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4792,5 +4883,10 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
 def test_stable_seed_matches_shared_identity():
     from deerflow.sandbox.identity import derive_sandbox_scope_token
 
-    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
-    assert mod.E2BSandboxProvider._stable_seed("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    provider = _make_provider(skills_container_path="/custom-skills")
+    base_scope = derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    expected = hashlib.sha256(
+        f"{base_scope}\0/custom-skills".encode(),
+    ).hexdigest()[:16]
+
+    assert provider._stable_seed("t-1", "u-1") == expected
