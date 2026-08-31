@@ -1,8 +1,11 @@
+import { fileURLToPath } from "node:url";
+
 /**
  * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially useful
  * for Docker builds.
  */
 import "./src/env.js";
+import { getAllowedDevOrigins } from "./src/dev-origins.js";
 
 function getInternalServiceURL(envKey, fallbackURL) {
   const configured = process.env[envKey]?.trim();
@@ -24,7 +27,11 @@ const config = {
     locales: ["en", "zh"],
     defaultLocale: "en",
   },
+  turbopack: {
+    root: fileURLToPath(new URL(".", import.meta.url)),
+  },
   devIndicators: false,
+  allowedDevOrigins: getAllowedDevOrigins(),
   async rewrites() {
     const rewrites = [];
     const gatewayURL = getInternalServiceURL(

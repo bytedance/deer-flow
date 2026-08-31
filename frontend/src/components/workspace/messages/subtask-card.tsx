@@ -7,7 +7,7 @@ import {
   WrenchIcon,
   XCircleIcon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   ChainOfThought,
@@ -20,9 +20,14 @@ import { ShineBorder } from "@/components/ui/shine-border";
 import { useI18n } from "@/core/i18n/hooks";
 import { hasToolCalls } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
-import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
-import { streamdownPluginsWithWordAnimation } from "@/core/streamdown";
-import { SafeStreamdown } from "@/core/streamdown/components";
+import {
+  streamdownPluginsWithoutRawHtml,
+  streamdownWordAnimation,
+} from "@/core/streamdown";
+import {
+  SafeStreamdown,
+  toStreamdownComponents,
+} from "@/core/streamdown/components";
 import type { Subtask } from "@/core/tasks";
 import { fetchSubtaskSteps } from "@/core/tasks/api";
 import { useSubtask, useUpdateSubtask } from "@/core/tasks/context";
@@ -53,29 +58,36 @@ export function SubtaskCard({
   threadId?: string;
   runId?: string;
   isLoading: boolean;
-  fallbackTask?: Subtask;
+  fallbackTask: Subtask;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(true);
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(isLoading);
-  const liveTask = useSubtask(taskId);
-  const task = resolveRenderedSubtask(liveTask, fallbackTask);
+  const task = resolveRenderedSubtask(useSubtask(taskId), fallbackTask)!;
   const { models, tokenUsageEnabled } = useModels();
   const updateSubtask = useUpdateSubtask();
+  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
+  const tokenLabel = tokenUsageEnabled
+    ? formatSubtaskTokenUsage(task.usage)
+    : undefined;
+  const runtimeUsageLabel = tokenUsageEnabled
+    ? tokenLabel
+      ? `${tokenLabel} ${t.tokenUsage.label}`
+      : task.status === "in_progress"
+        ? t.tokenUsage.collecting
+        : t.tokenUsage.unavailableShort
+    : undefined;
 
   // The card shows the subagent's step timeline (#3779): its reasoning turns
   // (AI text) interleaved with the tools it ran (by name). See stepsForDisplay
   // for what is kept/dropped.
-  const displaySteps = task ? stepsForDisplay(task.steps, task.status) : [];
+  const displaySteps = stepsForDisplay(task.steps, task.status);
 
   // Backfill step history on expand for historical runs (#3779). Live runs
   // already have steps from SSE, so the `steps.length` guard skips the fetch.
-  const stepsCount = task?.steps?.length ?? 0;
-  const taskStatus = task?.status;
-  const hasTask = task !== undefined;
+  const stepsCount = task.steps?.length ?? 0;
   const backfilledRef = useRef(false);
   useEffect(() => {
-    if (!hasTask || collapsed || backfilledRef.current || stepsCount > 0) {
+    if (collapsed || backfilledRef.current || stepsCount > 0) {
       return;
     }
     if (!threadId || !runId) {
@@ -92,33 +104,16 @@ export function SubtaskCard({
         // Allow a retry on the next expand if the fetch failed.
         backfilledRef.current = false;
       });
-  }, [collapsed, hasTask, stepsCount, threadId, runId, taskId, updateSubtask]);
-
-  const icon =
-    taskStatus === "completed" ? (
-      <CheckCircleIcon className="size-3" />
-    ) : taskStatus === "failed" ? (
-      <XCircleIcon className="size-3 text-red-500" />
-    ) : taskStatus === "in_progress" ? (
-      <Loader2Icon className="size-3 animate-spin" />
-    ) : null;
-
-  if (!task) {
-    return null;
-  }
-
-  const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
-  const tokenLabel = tokenUsageEnabled
-    ? formatSubtaskTokenUsage(task.usage)
-    : undefined;
-  const runtimeUsageLabel = tokenUsageEnabled
-    ? tokenLabel
-      ? `${tokenLabel} ${t.tokenUsage.label}`
-      : task.status === "in_progress"
-        ? t.tokenUsage.collecting
-        : t.tokenUsage.unavailableShort
-    : undefined;
-
+  }, [collapsed, stepsCount, threadId, runId, taskId, updateSubtask]);
+  const icon = useMemo(() => {
+    if (task.status === "completed") {
+      return <CheckCircleIcon className="size-3" />;
+    } else if (task.status === "failed") {
+      return <XCircleIcon className="size-3 text-red-500" />;
+    } else if (task.status === "in_progress") {
+      return <Loader2Icon className="size-3 animate-spin" />;
+    }
+  }, [task.status]);
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
@@ -208,8 +203,10 @@ export function SubtaskCard({
             <ChainOfThoughtStep
               label={
                 <SafeStreamdown
-                  {...streamdownPluginsWithWordAnimation}
-                  components={{ a: CitationLink }}
+                  {...streamdownPluginsWithoutRawHtml}
+                  animated={streamdownWordAnimation}
+                  components={toStreamdownComponents({ a: CitationLink })}
+                  isAnimating={isLoading}
                 >
                   {task.prompt}
                 </SafeStreamdown>
@@ -234,11 +231,7 @@ export function SubtaskCard({
                     (step.tool_name ?? t.subtasks[task.status])
                   ) : (
                     <div className="text-muted-foreground line-clamp-3 text-sm">
-                      <MarkdownContent
-                        content={step.text}
-                        isLoading={false}
-                        rehypePlugins={rehypePlugins}
-                      />
+                      <MarkdownContent content={step.text} isLoading={false} />
                     </div>
                   )
                 }
@@ -255,11 +248,7 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 label={
                   task.result ? (
-                    <MarkdownContent
-                      content={task.result}
-                      isLoading={false}
-                      rehypePlugins={rehypePlugins}
-                    />
+                    <MarkdownContent content={task.result} isLoading={false} />
                   ) : null
                 }
               ></ChainOfThoughtStep>

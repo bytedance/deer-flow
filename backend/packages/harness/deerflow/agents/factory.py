@@ -1,13 +1,14 @@
 """Pure-argument factory for DeerFlow agents.
 
-``create_deerflow_agent`` accepts plain Python arguments — no YAML files, no
-global singletons.  It is the SDK-level entry point sitting between the raw
+``create_deerflow_agent`` accepts plain Python arguments — it does not load
+YAML or install process-global runtime dependencies. It is the SDK-level entry
+point sitting between the raw
 ``langchain.agents.create_agent`` primitive and the config-driven
 ``make_lead_agent`` application factory.
 
-Note: the factory assembly itself is config-free, but some injected runtime
-components (e.g. ``task_tool`` for subagent) may still read global config at
-invocation time.  Full config-free runtime is a Phase 2 goal.
+Direct callers that need an isolated native-subagent capacity or a durable
+batch worker pass a caller-owned ``SubagentRuntime`` explicitly. When omitted,
+subagent tools retain their application-compatible process-global fallback.
 """
 
 from __future__ import annotations
@@ -22,7 +23,8 @@ from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
-from deerflow.agents.thread_state import ThreadState
+from deerflow.agents.thread_state import adapt_state_schema_for_mode, get_thread_state_schema, normalize_middleware_state_schemas
+from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.tools.builtins import ask_clarification_tool
 
 if TYPE_CHECKING:
@@ -32,6 +34,7 @@ if TYPE_CHECKING:
     from langgraph.graph.state import CompiledStateGraph
 
     from deerflow.config.memory_config import MemoryConfig
+    from deerflow.subagents.runtime import SubagentRuntime
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +73,17 @@ def create_deerflow_agent(
     extra_middleware: list[AgentMiddleware] | None = None,
     plan_mode: bool = False,
     state_schema: type | None = None,
+    checkpoint_channel_mode: CheckpointChannelMode = "full",
+    checkpoint_snapshot_frequency: int | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
     name: str = "default",
+    subagent_runtime: SubagentRuntime | None = None,
 ) -> CompiledStateGraph:
     """Create a DeerFlow agent from plain Python arguments.
 
-    The factory assembly itself reads no config files.  Some injected runtime
-    components (e.g. ``task_tool``) may still depend on global config at
-    invocation time — see Phase 2 roadmap for full config-free runtime.
+    The factory assembly itself reads no config files. Pass ``subagent_runtime``
+    when direct SDK-created graphs must share an explicit native-subagent
+    capacity or caller-managed durable batch worker.
 
     Parameters
     ----------
@@ -99,10 +105,25 @@ def create_deerflow_agent(
         Enable TodoMiddleware for task tracking.
     state_schema:
         LangGraph state type.  Defaults to ``ThreadState``.
+    checkpoint_channel_mode:
+        Checkpoint representation for accumulating channels.  Defaults to the
+        full-state compatibility schema.  ``"delta"`` requires the guarded
+        persistence paths (mode markers + compatibility gate) and is therefore
+        rejected when combined with *checkpointer* in this factory; without a
+        checkpointer the graph is ephemeral and delta is allowed.
+    checkpoint_snapshot_frequency:
+        DeltaChannel snapshot cadence for ``"delta"`` mode.  ``None`` uses the
+        process-frozen value, falling back to the config default.  Ignored in
+        ``"full"`` mode.
     checkpointer:
         Optional persistence backend.
     name:
         Agent name (passed to middleware that cares, e.g. ``MemoryMiddleware``).
+    subagent_runtime:
+        Explicit process runtime shared by direct SDK-created graphs. Required
+        only when the caller needs non-default native-subagent capacity or a
+        caller-managed durable batch worker without Gateway/DeerFlowClient
+        startup. Requires ``features.subagent`` to be enabled.
 
     Raises
     ------
@@ -111,15 +132,27 @@ def create_deerflow_agent(
     """
     if middleware is not None and features is not None:
         raise ValueError("Cannot specify both 'middleware' and 'features'.  Use one or the other.")
+    if checkpoint_channel_mode == "delta" and checkpointer is not None:
+        raise ValueError(
+            "create_deerflow_agent does not support checkpoint_channel_mode='delta' with a checkpointer: "
+            "persisted graphs built here bypass checkpoint mode marker injection and the fail-closed "
+            "compatibility gate (see deerflow.runtime.checkpoint_mode), so a mixed-mode store would "
+            "silently corrupt thread state.  Use the guarded application paths (make_lead_agent or "
+            "DeerFlowClient) for delta persistence; delta without a checkpointer is ephemeral and allowed."
+        )
     if middleware is not None and extra_middleware:
         raise ValueError("Cannot use 'extra_middleware' with 'middleware' (full takeover).")
+    if subagent_runtime is not None and (middleware is not None or features is None or features.subagent is False):
+        raise ValueError("subagent_runtime requires features.subagent to be enabled; it cannot be used with middleware full takeover")
+    if subagent_runtime is not None and subagent_runtime.batch_config is not None and subagent_runtime.batch_submitter is None:
+        raise RuntimeError("The explicit durable batch worker is not running; await subagent_runtime.start() or enter it with 'async with' before calling create_deerflow_agent")
     if extra_middleware:
         for mw in extra_middleware:
             if not isinstance(mw, AgentMiddleware):
                 raise TypeError(f"extra_middleware items must be AgentMiddleware instances, got {type(mw).__name__}")
 
     effective_tools: list[BaseTool] = list(tools or [])
-    effective_state = state_schema or ThreadState
+    effective_state = get_thread_state_schema(checkpoint_channel_mode, checkpoint_snapshot_frequency) if state_schema is None else adapt_state_schema_for_mode(state_schema, checkpoint_channel_mode, checkpoint_snapshot_frequency)
 
     if middleware is not None:
         effective_middleware = list(middleware)
@@ -130,6 +163,7 @@ def create_deerflow_agent(
             name=name,
             plan_mode=plan_mode,
             extra_middleware=extra_middleware or [],
+            subagent_runtime=subagent_runtime,
         )
         # Deduplicate by tool name — user-provided tools take priority.
         existing_names = {t.name for t in effective_tools}
@@ -137,6 +171,12 @@ def create_deerflow_agent(
             if t.name not in existing_names:
                 effective_tools.append(t)
                 existing_names.add(t.name)
+
+    effective_middleware = normalize_middleware_state_schemas(
+        effective_middleware,
+        checkpoint_channel_mode,
+        checkpoint_snapshot_frequency,
+    )
 
     return create_agent(
         model=model,
@@ -160,6 +200,7 @@ def _assemble_from_features(
     name: str = "default",
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
+    subagent_runtime: SubagentRuntime | None = None,
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Build an ordered middleware chain + extra tools from *feat*.
 
@@ -248,6 +289,7 @@ def _assemble_from_features(
 
             memory_cfg: MemoryConfig = feat.memory_config or get_memory_config()
             if should_use_memory_tools(memory_cfg):
+                from deerflow.agents.memory.manager import backend_requires_passive_writes_in_tool_mode
                 from deerflow.agents.memory.tools import get_memory_tools
 
                 existing_names = {tool.name for tool in extra_tools}
@@ -257,8 +299,10 @@ def _assemble_from_features(
                         continue
                     extra_tools.append(memory_tool)
                     existing_names.add(memory_tool.name)
-                # MemoryMiddleware is intentionally NOT appended in tool mode.
-                # The model drives memory via tools instead of passive middleware.
+                if backend_requires_passive_writes_in_tool_mode(memory_cfg.manager_class):
+                    from deerflow.agents.middlewares.memory_middleware import MemoryMiddleware
+
+                    chain.append(MemoryMiddleware(agent_name=name, memory_config=memory_cfg))
             else:
                 if memory_cfg.mode == "tool" and not memory_cfg.enabled:
                     logger.warning("memory.mode is 'tool' but memory.enabled is false; memory tools will not be registered.")
@@ -286,11 +330,47 @@ def _assemble_from_features(
             chain.append(feat.subagent)
         else:
             from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
+            from deerflow.config.subagents_config import DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+            from deerflow.subagents.capacity import configured_subagent_max_running
 
-            chain.append(SubagentLimitMiddleware())
+            max_concurrent = subagent_runtime.config.max_running if subagent_runtime is not None else configured_subagent_max_running()
+            max_total = subagent_runtime.max_total_per_run if subagent_runtime is not None else DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN
+            chain.append(
+                SubagentLimitMiddleware(
+                    max_concurrent=max_concurrent,
+                    max_total=max_total,
+                )
+            )
         from deerflow.tools.builtins import task_tool
 
-        extra_tools.append(task_tool)
+        if subagent_runtime is None:
+            extra_tools.append(task_tool)
+        else:
+            from deerflow.tools.builtins.task_tool import bind_task_tool
+
+            extra_tools.append(
+                bind_task_tool(
+                    subagent_runtime.execution_capacity,
+                    app_config=subagent_runtime.app_config,
+                )
+            )
+
+        if subagent_runtime is not None and subagent_runtime.batch_submitter is not None:
+            from deerflow.tools.builtins.batch_task_tool import bind_batch_tools
+
+            extra_tools.extend(
+                bind_batch_tools(
+                    submitter_provider=lambda: subagent_runtime.batch_submitter,
+                    app_config=subagent_runtime.app_config,
+                )
+            )
+        elif subagent_runtime is None:
+            from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+
+            if is_subagent_batch_runtime_available():
+                from deerflow.tools.builtins import batch_status, batch_task, cancel_batch
+
+                extra_tools.extend((batch_task, batch_status, cancel_batch))
 
     # --- [12] LoopDetection ---
     if feat.loop_detection is not False:

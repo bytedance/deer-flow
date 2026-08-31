@@ -64,7 +64,9 @@ def _history_record(*, action: str, file_path: str, prev_content: str | None, ne
 
 
 async def _scan_or_raise(content: str, *, executable: bool, location: str, static_findings: list[StaticFinding] | None = None) -> dict[str, Any]:
-    result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
+    # In-graph: the graph root already attached tracing (see the INVARIANT in
+    # agents/lead_agent/agent.py), so the scan model must not attach it again.
+    result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [], attach_tracing=False)
     if result.decision == "block":
         raise ValueError(f"Security scan blocked the write: {result.reason}")
     if executable and result.decision != "allow":
@@ -240,11 +242,7 @@ async def _skill_manage_impl(
             await _to_thread(skill_storage.ensure_custom_skill_is_editable, name)
             if path is None:
                 raise ValueError("path is required for remove_file.")
-            target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
-            if not await _to_thread(target.exists):
-                raise FileNotFoundError(f"Supporting file '{path}' not found for skill '{name}'.")
-            prev_content = await _to_thread(target.read_text, encoding="utf-8")
-            await _to_thread(target.unlink)
+            prev_content = await _to_thread(skill_storage.remove_custom_skill_file, name, path)
             await _to_thread(
                 skill_storage.append_history,
                 name,

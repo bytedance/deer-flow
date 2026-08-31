@@ -167,6 +167,8 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
         return {}
 
     pricing: dict[str, _ModelPricing] = {}
+    pricing_currency: str | None = None
+    pricing_currency_model: str | None = None
     for model_cfg in models or []:
         raw = getattr(model_cfg, "pricing", None)
         if not isinstance(raw, dict):
@@ -181,8 +183,20 @@ def _build_pricing_map() -> dict[str, _ModelPricing]:
             continue
         if input_price <= 0 and output_price <= 0:
             continue
-        currency = str(raw.get("currency") or "USD").upper()
-        entry = _ModelPricing(input_price, output_price, currency, cache_hit_price)
+        model_currency = str(raw.get("currency") or "USD").strip().upper() or "USD"
+        if pricing_currency is None:
+            pricing_currency = model_currency
+            pricing_currency_model = model_cfg.name
+        elif model_currency != pricing_currency:
+            logger.warning(
+                "console: disabling cost reporting because model pricing mixes currencies (%s on %s, %s on %s)",
+                pricing_currency,
+                pricing_currency_model,
+                model_currency,
+                model_cfg.name,
+            )
+            return {}
+        entry = _ModelPricing(input_price, output_price, model_currency, cache_hit_price)
         for key in (model_cfg.name, getattr(model_cfg, "model", None)):
             if key:
                 pricing.setdefault(key, entry)
@@ -272,7 +286,9 @@ async def console_stats(request: Request) -> ConsoleStatsResponse:
     """Return the dashboard's headline counters."""
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
-    run_where = (RunRow.user_id == user_id,) if user_id else ()
+    run_where = (RunRow.operation_kind == "run",)
+    if user_id:
+        run_where += (RunRow.user_id == user_id,)
     thread_where = (ThreadMetaRow.user_id == user_id,) if user_id else ()
 
     pricing = _build_pricing_map()
@@ -347,7 +363,14 @@ async def console_runs(
     sf = _session_factory_or_503()
     user_id = await get_current_user(request)
 
-    stmt = select(RunRow, ThreadMetaRow.display_name).join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True).order_by(RunRow.created_at.desc(), RunRow.run_id.desc()).limit(limit + 1).offset(offset)
+    stmt = (
+        select(RunRow, ThreadMetaRow.display_name)
+        .join(ThreadMetaRow, ThreadMetaRow.thread_id == RunRow.thread_id, isouter=True)
+        .where(RunRow.operation_kind == "run")
+        .order_by(RunRow.created_at.desc(), RunRow.run_id.desc())
+        .limit(limit + 1)
+        .offset(offset)
+    )
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
     if status:
@@ -415,7 +438,7 @@ async def console_usage(
     start_local = today_local - timedelta(days=days - 1)
     window_start_utc = datetime.combine(start_local, time.min, tzinfo=UTC) - tz_delta
 
-    stmt = select(RunRow).where(RunRow.created_at >= window_start_utc)
+    stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.created_at >= window_start_utc)
     if user_id:
         stmt = stmt.where(RunRow.user_id == user_id)
 

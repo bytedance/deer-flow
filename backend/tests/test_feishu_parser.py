@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from app.channels import feishu as feishu_module
 from app.channels.commands import KNOWN_CHANNEL_COMMANDS
 from app.channels.feishu import FeishuChannel
 from app.channels.message_bus import (
@@ -17,6 +18,7 @@ from app.channels.message_bus import (
     OutboundMessage,
 )
 from app.channels.store import ChannelStore
+from deerflow.uploads.manager import PathTraversalError
 
 
 def _pending(
@@ -42,6 +44,36 @@ def _run(coro):
         return loop.run_until_complete(coro)
     finally:
         loop.close()
+
+
+def _feishu_file_response(filename: str, content: bytes):
+    response = MagicMock()
+    response.success.return_value = True
+    response.file = BytesIO(content)
+    response.file_name = filename
+    return response
+
+
+def _feishu_stream_response(filename: str, stream):
+    response = MagicMock()
+    response.success.return_value = True
+    response.file = stream
+    response.file_name = filename
+    return response
+
+
+def _feishu_file_channel(*responses):
+    channel = FeishuChannel(MessageBus(), {"app_id": "test", "app_secret": "test"})
+    channel._GetMessageResourceRequest = MagicMock()
+    builder = MagicMock()
+    builder.message_id.return_value = builder
+    builder.file_key.return_value = builder
+    builder.type.return_value = builder
+    builder.build.return_value = object()
+    channel._GetMessageResourceRequest.builder.return_value = builder
+    channel._api_client = MagicMock()
+    channel._api_client.im.v1.message_resource.get.side_effect = responses
+    return channel
 
 
 def test_feishu_on_message_plain_text():
@@ -159,25 +191,12 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
     async def go():
         from deerflow.config.paths import Paths
 
-        bus = MessageBus()
-        channel = FeishuChannel(bus, {"app_id": "test", "app_secret": "test"})
-        channel._GetMessageResourceRequest = MagicMock()
-        builder = MagicMock()
-        builder.message_id.return_value = builder
-        builder.file_key.return_value = builder
-        builder.type.return_value = builder
-        builder.build.return_value = object()
-        channel._GetMessageResourceRequest.builder.return_value = builder
-
-        response = MagicMock()
-        response.success.return_value = True
-        response.file = BytesIO(b"file-bytes")
-        response.file_name = "report.md"
-        channel._api_client = MagicMock()
-        channel._api_client.im.v1.message_resource.get.return_value = response
+        channel = _feishu_file_channel(_feishu_file_response("report.md", b"file-bytes"))
 
         provider = MagicMock()
-        provider.acquire.return_value = "aio-1"
+        provider.uses_thread_data_mounts = False
+        provider.acquire.side_effect = AssertionError("receive_file must use acquire_async")
+        provider.acquire_async = AsyncMock(return_value="aio-1")
         sandbox = MagicMock()
         provider.get.return_value = sandbox
 
@@ -189,8 +208,241 @@ def test_feishu_receive_file_syncs_sandbox_with_explicit_user_id(tmp_path, monke
 
         assert virtual_path == "/mnt/user-data/uploads/report.md"
         assert (tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads" / "report.md").read_bytes() == b"file-bytes"
-        provider.acquire.assert_called_once_with("thread-1", user_id="ou-user")
+        provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
         sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report.md", b"file-bytes")
+
+    _run(go())
+
+
+def test_feishu_receive_file_preserves_duplicate_filenames(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        channel = _feishu_file_channel(
+            _feishu_file_response("report.txt", b"FIRST"),
+            _feishu_file_response("report.txt", b"SECOND"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: Paths(base_dir=tmp_path))
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        first = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+        second = await channel._receive_single_file("message-2", "file-2", "file", "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert first == "/mnt/user-data/uploads/report.txt"
+        assert second == "/mnt/user-data/uploads/report_1.txt"
+        assert (uploads / "report.txt").read_bytes() == b"FIRST"
+        assert (uploads / "report_1.txt").read_bytes() == b"SECOND"
+
+    _run(go())
+
+
+def test_feishu_receive_file_does_not_follow_planted_symlink(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        victim = tmp_path / "victim.txt"
+        victim.write_bytes(b"SAFE")
+        (uploads / "report.txt").symlink_to(victim)
+
+        channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.txt"
+        assert victim.read_bytes() == b"SAFE"
+        assert (uploads / "report_1.txt").read_bytes() == b"PAYLOAD"
+
+    _run(go())
+
+
+def test_feishu_receive_file_reserves_dangling_symlink_name(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        missing_target = tmp_path / "missing.txt"
+        (uploads / "report.txt").symlink_to(missing_target)
+
+        channel = _feishu_file_channel(_feishu_file_response("report.txt", b"PAYLOAD"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.txt"
+        assert not missing_target.exists()
+        assert (uploads / "report_1.txt").read_bytes() == b"PAYLOAD"
+
+    _run(go())
+
+
+def test_feishu_receive_file_syncs_unique_path_to_remote_sandbox(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        (uploads / "report.md").write_bytes(b"OLDER")
+
+        channel = _feishu_file_channel(_feishu_file_response("report.md", b"NEWER"))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = False
+        provider.acquire_async = AsyncMock(return_value="aio-1")
+        sandbox = MagicMock()
+        provider.get.return_value = sandbox
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "/mnt/user-data/uploads/report_1.md"
+        assert (uploads / "report.md").read_bytes() == b"OLDER"
+        assert (uploads / "report_1.md").read_bytes() == b"NEWER"
+        provider.acquire_async.assert_awaited_once_with("thread-1", user_id="ou-user")
+        sandbox.update_file.assert_called_once_with("/mnt/user-data/uploads/report_1.md", b"NEWER")
+
+    _run(go())
+
+
+def test_feishu_receive_file_path_traversal_failure_is_per_attachment(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path)
+        channel = _feishu_file_channel(
+            _feishu_file_response("bad.txt", b"BAD"),
+            _feishu_file_response("ok.txt", b"OK"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        real_write = feishu_module.write_upload_file_no_symlink
+        call_count = 0
+
+        def flaky_write(base_dir, filename, data):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise PathTraversalError("Path traversal detected")
+            return real_write(base_dir, filename, data)
+
+        monkeypatch.setattr(feishu_module, "write_upload_file_no_symlink", flaky_write)
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text="[file] then [file]",
+            thread_ts="message-1",
+            files=[{"file_key": "file-1"}, {"file_key": "file-2"}],
+        )
+
+        result = await channel.receive_file(msg, "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert result.text == "Failed to obtain the [file] then /mnt/user-data/uploads/ok.txt"
+        assert (uploads / "ok.txt").read_bytes() == b"OK"
+
+    _run(go())
+
+
+def test_feishu_receive_file_runtime_resolve_failure_is_per_attachment(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        real_paths = Paths(base_dir=tmp_path)
+
+        class FlakyPaths:
+            def __init__(self):
+                self.resolve_calls = 0
+
+            def ensure_thread_dirs(self, thread_id, *, user_id=None):
+                return real_paths.ensure_thread_dirs(thread_id, user_id=user_id)
+
+            def sandbox_uploads_dir(self, thread_id, *, user_id=None):
+                uploads = real_paths.sandbox_uploads_dir(thread_id, user_id=user_id)
+
+                class UploadsDirProxy:
+                    def resolve(inner_self):
+                        self.resolve_calls += 1
+                        if self.resolve_calls == 1:
+                            raise RuntimeError("symlink loop")
+                        return uploads.resolve()
+
+                return UploadsDirProxy()
+
+        paths = FlakyPaths()
+        channel = _feishu_file_channel(
+            _feishu_file_response("bad.txt", b"BAD"),
+            _feishu_file_response("ok.txt", b"OK"),
+        )
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        msg = InboundMessage(
+            channel_name="feishu",
+            chat_id="chat_1",
+            user_id="user_1",
+            text="[file] then [file]",
+            thread_ts="message-1",
+            files=[{"file_key": "file-1"}, {"file_key": "file-2"}],
+        )
+
+        result = await channel.receive_file(msg, "thread-1", user_id="ou-user")
+
+        uploads = tmp_path / "users" / "ou-user" / "threads" / "thread-1" / "user-data" / "uploads"
+        assert result.text == "Failed to obtain the [file] then /mnt/user-data/uploads/ok.txt"
+        assert (uploads / "ok.txt").read_bytes() == b"OK"
+
+    _run(go())
+
+
+def test_feishu_receive_file_rejects_oversized_resource(tmp_path, monkeypatch):
+    async def go():
+        from deerflow.config.paths import Paths
+
+        class TrackingStream:
+            def __init__(self):
+                self.requested_size = None
+
+            def read(self, size=-1):
+                self.requested_size = size
+                return b"12345"
+
+        stream = TrackingStream()
+        paths = Paths(base_dir=tmp_path)
+        paths.ensure_thread_dirs("thread-1", user_id="ou-user")
+        uploads = paths.sandbox_uploads_dir("thread-1", user_id="ou-user")
+        channel = _feishu_file_channel(_feishu_stream_response("large.txt", stream))
+        provider = MagicMock()
+        provider.uses_thread_data_mounts = True
+        monkeypatch.setattr("app.channels.feishu.FEISHU_MAX_INBOUND_FILE_BYTES", 4)
+        monkeypatch.setattr("app.channels.feishu.get_paths", lambda: paths)
+        monkeypatch.setattr("app.channels.feishu.get_sandbox_provider", lambda: provider)
+
+        virtual_path = await channel._receive_single_file("message-1", "file-1", "file", "thread-1", user_id="ou-user")
+
+        assert virtual_path == "Failed to obtain the [file]"
+        assert stream.requested_size == 5
+        assert list(uploads.iterdir()) == []
 
     _run(go())
 
@@ -679,3 +931,53 @@ def test_feishu_treats_unknown_slash_text_as_chat(text):
 
         mock_make_inbound.assert_called_once()
         assert mock_make_inbound.call_args[1]["msg_type"].value == "chat", f"{text!r} should be classified as CHAT"
+
+
+@pytest.mark.parametrize("text", ["@_user_1 /goal ship it", "@bot  /status", "@_user_1 @_user_2 /new"])
+def test_feishu_leading_mention_before_command_classifies_and_strips(text):
+    """Feishu group chats deliver "@bot /goal" with the mention left in the text
+    (im.message.group_at_msg requires @bot). It must classify as COMMAND and the
+    inbound must carry the bare command so ChannelManager parses it."""
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": text})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "command", f"{text!r} should be classified as COMMAND"
+        assert not mock_make_inbound.call_args[1]["text"].startswith("@"), "leading mention must be stripped for dispatch"
+
+
+def test_feishu_leading_mention_before_chat_keeps_mention():
+    """A mentioned non-command stays CHAT and keeps the mention so the agent still
+    sees who was addressed (only the command path is stripped)."""
+    bus = MessageBus()
+    config = {"app_id": "test", "app_secret": "test"}
+    channel = FeishuChannel(bus, config)
+
+    event = MagicMock()
+    event.event.message.chat_id = "chat_1"
+    event.event.message.message_id = "msg_1"
+    event.event.message.root_id = None
+    event.event.sender.sender_id.open_id = "user_1"
+    event.event.message.content = json.dumps({"text": "@_user_1 please summarise this"})
+
+    with pytest.MonkeyPatch.context() as m:
+        mock_make_inbound = MagicMock()
+        m.setattr(channel, "_make_inbound", mock_make_inbound)
+        channel._on_message(event)
+
+        mock_make_inbound.assert_called_once()
+        assert mock_make_inbound.call_args[1]["msg_type"].value == "chat"
+        assert mock_make_inbound.call_args[1]["text"] == "@_user_1 please summarise this"

@@ -3,9 +3,9 @@
 Previously ``read_file`` only sliced when BOTH ``start_line`` and ``end_line``
 were supplied; a lone ``start_line`` (or lone ``end_line``) was silently ignored
 and the whole file was returned. These tests pin the one-sided range contract:
-tail-from-start, head-to-end, clamping of ``start_line=0``, and clean error
-strings for an inverted range or a start beyond EOF (instead of an empty/garbage
-slice).
+tail-from-start, head-to-end, rejection of non-positive line numbers, and clean
+error strings for an inverted range or a start beyond EOF (instead of an
+empty/garbage slice).
 """
 
 from pathlib import Path
@@ -54,9 +54,16 @@ def test_only_end_line_returns_head_up_to_that_line(tmp_path, monkeypatch) -> No
     assert result == "line1\nline2"
 
 
-def test_start_line_zero_is_clamped_to_first_line(tmp_path, monkeypatch) -> None:
+def test_start_line_zero_returns_clean_error(tmp_path, monkeypatch) -> None:
     result = _read(tmp_path, monkeypatch, start_line=0)
-    assert result == _FIVE_LINES
+    assert "start_line must be >= 1" in result
+    assert "line1" not in result
+
+
+def test_start_line_negative_returns_clean_error(tmp_path, monkeypatch) -> None:
+    result = _read(tmp_path, monkeypatch, start_line=-1)
+    assert "start_line must be >= 1" in result
+    assert "line5" not in result
 
 
 def test_start_line_greater_than_end_line_returns_clean_error(tmp_path, monkeypatch) -> None:

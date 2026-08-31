@@ -17,6 +17,7 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
     "description",
     "license",
     "allowed-tools",
+    "argument-hint",
     "required-secrets",
     "secrets-autonomous",
     "metadata",
@@ -56,6 +57,10 @@ def split_skill_markdown(content: str) -> tuple[SkillMarkdownParts | None, str |
 
     if not isinstance(metadata, dict):
         return None, "Frontmatter must be a YAML dictionary"
+
+    # YAML permits non-string keys, but downstream validation expects field
+    # names to be strings.
+    metadata = {str(key): value for key, value in metadata.items()}
 
     return (
         SkillMarkdownParts(

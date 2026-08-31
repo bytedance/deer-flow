@@ -282,6 +282,39 @@ test("preserves existing head elements when injecting scroll restoration", () =>
   );
 });
 
+test("does not mistake <header> for <head> when injecting the base href", () => {
+  // Agent-generated fragments often have no <head> but open with <header>;
+  // the base must then be prepended so assets before the tag resolve too.
+  const html =
+    '<img src="logo.png"><header class="top">Report</header><main>content</main>';
+
+  const result = appendHtmlPreviewBaseHref(
+    html,
+    "/demo/threads/thread-1/user-data/outputs/report.html",
+    "http://localhost/workspace/chats/thread-1",
+  );
+
+  expect(result).toBe(
+    '<base href="http://localhost/demo/threads/thread-1/user-data/outputs/">' +
+      html,
+  );
+});
+
+test("injects the base href inside an attributed <head> tag", () => {
+  const html =
+    '<!doctype html><html><head lang="en"><meta charset="utf-8"></head><body>x</body></html>';
+
+  const result = appendHtmlPreviewBaseHref(
+    html,
+    "/demo/threads/thread-1/user-data/outputs/report.html",
+    "http://localhost/workspace/chats/thread-1",
+  );
+
+  expect(result).toContain(
+    '<head lang="en"><base href="http://localhost/demo/threads/thread-1/user-data/outputs/">',
+  );
+});
+
 test("does not duplicate HTML scroll restoration script", () => {
   const html = appendHtmlPreviewScrollRestoration(
     "<html><body>x</body></html>",

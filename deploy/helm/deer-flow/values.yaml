@@ -27,7 +27,21 @@ image:
 gateway:
   replicas: 1               # Safe default. Postgres + the Redis stream bridge are
                             # wired, but multi-replica needs issue #3948's run-control
-                            # work (cancel/dedup/reconcile) — see README "Gateway replicas".
+                            # work (cancel/dedup/reconcile). Scheduler multi_instance
+                             # recovery is safe only when its config prerequisites are met;
+                             # max_concurrent_runs is shared across Pods in that mode.
+  # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
+  # shutdown work: channel stop (~5s) + memory queue drain
+  # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
+  # to 30s, which SIGKILLs the memory drain mid-flight and silently re-introduces
+  # the memory loss that shutdown_flush is fixing. Raise this when you raise the
+  # memory timeout. See gateway-deployment.yaml + README "Graceful shutdown".
+  terminationGracePeriodSeconds: 45
+  # preStop hook sleep (seconds) before SIGTERM, so the Service/ingress
+  # deregisters the pod and in-flight HTTP requests drain before graceful
+  # shutdown begins (which runs the memory queue drain). 0 disables the hook.
+  # Counts against terminationGracePeriodSeconds.
+  preStopSleepSeconds: 5
   resources:
     requests:
       cpu: 200m
@@ -82,10 +96,17 @@ provisioner:
       memory: 512Mi
   # -- AIO-compatible sandbox container image used for sandbox Pods.
   sandboxImage: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
-  # -- Host the gateway uses to reach sandbox NodePorts. Empty (default) falls
-  #    back to the provisioner pod's node IP via the Kubernetes downward API,
-  #    which routes on most clusters because a NodePort is exposed on every
-  #    node. Set explicitly only when pod->node-IP traffic is blocked by your
+  # -- Service type for per-sandbox Services. `ClusterIP` (default) exposes
+  #    sandboxes only inside the cluster via Service DNS - correct for the
+  #    in-cluster gateway and avoids binding the code-execution surface on
+  #    every node's interfaces. `NodePort` is the Docker-Compose/hybrid escape
+  #    hatch (used when the gateway is not in K8s); pair with `nodeHost`.
+  sandboxServiceType: "ClusterIP"
+  # -- Host the gateway uses to reach sandbox NodePorts. Only consulted when
+  #    `sandboxServiceType: NodePort`. Empty (default) falls back to the
+  #    provisioner pod's node IP via the Kubernetes downward API, which routes
+  #    on most clusters because a NodePort is exposed on every node. Set
+  #    explicitly only when pod->node-IP traffic is blocked by your
   #    CNI/network policy. In Docker Compose this is `host.docker.internal`.
   nodeHost: ""
   # -- Sandbox container port (must match the sandboxImage's listening port).
@@ -179,8 +200,9 @@ redis:
     existingSecret: ""
 
 # -- Persistent volume for runtime state (.deer-flow): sqlite DB, memory,
-#    custom agents, and per-thread user-data. Also mounted (PVC mode) into
-#    provisioner-spawned sandbox Pods.
+#    custom agents, mutable extensions_config.json, and per-thread user-data.
+#    Also mounted (PVC mode) into provisioner-spawned sandbox Pods. When
+#    disabled, Gateway runtime state uses a pod-local emptyDir instead.
 persistence:
   home:
     enabled: true
@@ -221,7 +243,7 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 24
+  config_version: 38
   log_level: info
 
   models: []
@@ -246,6 +268,8 @@ config: |
     # resolved by the harness before the config is instantiated.
     backend: postgres
     postgres_url: $DATABASE_URL
+    pool_recycle: 300
+    command_timeout: 30
 
   # The LangGraph Store (cross-thread memory + thread list) reads this legacy
   # `checkpointer:` section — it does NOT fall back to `database:` the way the
@@ -266,6 +290,12 @@ config: |
   memory:
     storage_path: memory.json
 
+  verification:
+    receipts_enabled: true
+    receipts_render_mode: "delegation_only"
+    judge_enabled: false
+    judge_model_name: null
+
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash
   # tools run inside the AIO sandbox configured above. The web tools
@@ -277,8 +307,30 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    # - name: knowledge  # Enable with the RAGFlow tool below.
 
   tools:
+    # Optional tenant-shared, read-only RAGFlow retrieval. Put RAGFLOW_API_KEY
+    # in `secrets`. `datasets` is an optional stable-ID allowlist; omit it to
+    # search all tenant-visible datasets. An explicit empty list is invalid.
+    # Empty datasets are skipped; remaining
+    # datasets are grouped by embedding model with up to four parallel retrieval
+    # requests and one global `page_size` limit. Multi-group scores are omitted
+    # because they are not comparable. The Agent cannot see the IDs.
+    # - name: knowledge_search
+    #   group: knowledge
+    #   use: deerflow.community.ragflow.tools:knowledge_search_tool
+    #   base_url: http://ragflow:9380
+    #   api_key: $RAGFLOW_API_KEY
+    #   datasets:  # Optional operator-controlled allowlist
+    #     - 0123456789abcdef0123456789abcdef
+    #   timeout: 30
+    #   page_size: 8
+    #   similarity_threshold: 0.2
+    #   vector_similarity_weight: 0.3
+    #   top_k: 256
+    #   max_chars_per_chunk: 800
+    #   max_total_chars: 8000
     - name: web_search
       group: web
       use: deerflow.community.ddg_search.tools:web_search_tool
@@ -315,6 +367,10 @@ config: |
       group: bash
       use: deerflow.sandbox.tools:bash_tool
 
-# -- DeerFlow extensions_config.json content (MCP servers + skill state).
+# -- Initial DeerFlow extensions_config.json content (MCP servers + skill
+#    state). The Gateway copies this ConfigMap seed into its writable home
+#    volume only when no runtime file exists. With persistence enabled, API
+#    updates and the original seed survive pod replacement and Helm upgrades;
+#    remove the runtime file explicitly if a later seed should replace it.
 extensionsConfig: |
   {"mcpServers":{},"skills":{}}

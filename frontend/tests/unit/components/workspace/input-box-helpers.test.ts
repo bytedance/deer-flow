@@ -7,17 +7,21 @@ import {
   createGoalRequestState,
   findSuggestionTemplatePlaceholder,
   finishGoalRequest,
+  getGoalObjectiveCounter,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
+  GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
   isAbortError,
   isCurrentGoalRequest,
+  isGoalObjectiveTooLong,
+  MAX_GOAL_OBJECTIVE_CHARS,
   parseCompactCommand,
   parseGoalCommand,
   readGoalResponseError,
   type SlashSuggestion,
 } from "@/components/workspace/input-box-helpers";
-import type { Skill } from "@/core/skills";
+import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
 
 function makeSkill(name: string, enabled = true): Skill {
   return {
@@ -61,6 +65,98 @@ describe("parseGoalCommand", () => {
     expect(parseGoalCommand("/goalkeeper do thing")).toBeNull();
     expect(parseGoalCommand("hello")).toBeNull();
     expect(parseGoalCommand("/new")).toBeNull();
+  });
+});
+
+describe("isGoalObjectiveTooLong", () => {
+  it("allows objectives up to the limit", () => {
+    expect(isGoalObjectiveTooLong("a")).toBe(false);
+    expect(isGoalObjectiveTooLong("a".repeat(MAX_GOAL_OBJECTIVE_CHARS))).toBe(
+      false,
+    );
+  });
+
+  it("flags objectives past the limit", () => {
+    expect(
+      isGoalObjectiveTooLong("a".repeat(MAX_GOAL_OBJECTIVE_CHARS + 1)),
+    ).toBe(true);
+  });
+
+  it("mirrors the backend limit of 4000 characters", () => {
+    expect(MAX_GOAL_OBJECTIVE_CHARS).toBe(4000);
+  });
+
+  it("counts interior whitespace because the backend validates raw request length", () => {
+    const interiorPastLimit = `${"a".repeat(2000)}    ${"a".repeat(1999)}`;
+    expect(interiorPastLimit.length).toBe(MAX_GOAL_OBJECTIVE_CHARS + 3);
+    expect(isGoalObjectiveTooLong(interiorPastLimit)).toBe(true);
+  });
+
+  it("uses the parsed objective after command boundary whitespace is trimmed", () => {
+    const command = parseGoalCommand(
+      `/goal    ${"a".repeat(MAX_GOAL_OBJECTIVE_CHARS)}   `,
+    );
+    expect(command).toEqual({
+      kind: "set",
+      objective: "a".repeat(MAX_GOAL_OBJECTIVE_CHARS),
+    });
+    if (command?.kind !== "set") {
+      throw new Error("expected a /goal set command");
+    }
+    expect(isGoalObjectiveTooLong(command.objective)).toBe(false);
+  });
+});
+
+describe("getGoalObjectiveCounter", () => {
+  it("returns null for non-goal or non-set inputs", () => {
+    expect(getGoalObjectiveCounter("hello")).toBeNull();
+    expect(getGoalObjectiveCounter("/goal")).toBeNull();
+    expect(getGoalObjectiveCounter("/goal clear")).toBeNull();
+  });
+
+  it("stays hidden while the objective is comfortably under the limit", () => {
+    expect(getGoalObjectiveCounter("/goal ship it")).toBeNull();
+    const justBelowThreshold = "a".repeat(
+      GOAL_OBJECTIVE_COUNTER_VISIBLE_AT - 1,
+    );
+    expect(getGoalObjectiveCounter(`/goal ${justBelowThreshold}`)).toBeNull();
+  });
+
+  it("appears once the objective reaches the visibility threshold", () => {
+    const atThreshold = "a".repeat(GOAL_OBJECTIVE_COUNTER_VISIBLE_AT);
+    expect(getGoalObjectiveCounter(`/goal ${atThreshold}`)).toEqual({
+      length: GOAL_OBJECTIVE_COUNTER_VISIBLE_AT,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: false,
+    });
+  });
+
+  it("marks the counter over the limit and measures raw parsed length", () => {
+    const overLimit = "a".repeat(MAX_GOAL_OBJECTIVE_CHARS + 5);
+    expect(getGoalObjectiveCounter(`/goal ${overLimit}`)).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS + 5,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: true,
+    });
+
+    // Interior whitespace is preserved in the request body, so it must count
+    // toward the same raw max_length enforced by the backend binding.
+    const padded = `${"a".repeat(2000)}    ${"a".repeat(1999)}`;
+    expect(getGoalObjectiveCounter(`/goal ${padded}`)).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS + 3,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: true,
+    });
+
+    expect(
+      getGoalObjectiveCounter(
+        `/goal    ${"a".repeat(MAX_GOAL_OBJECTIVE_CHARS)}   `,
+      ),
+    ).toEqual({
+      length: MAX_GOAL_OBJECTIVE_CHARS,
+      max: MAX_GOAL_OBJECTIVE_CHARS,
+      overLimit: false,
+    });
   });
 });
 
@@ -235,6 +331,29 @@ describe("getMatchingSkillSuggestions", () => {
       "skill:goal-helper",
       "builtin:goal",
     ]);
+  });
+
+  it("excludes skills that collide with a reserved slash name", () => {
+    // The picker must not offer what the slash parsers refuse. Both sides drop
+    // these names, so such a skill can never activate — picking it would send
+    // literal text to the model with nothing loaded.
+    for (const reserved of RESERVED_SLASH_SKILL_NAMES) {
+      const result = getMatchingSkillSuggestions(
+        [makeSkill(reserved), makeSkill(`${reserved}-helper`)],
+        reserved,
+        builtins,
+      );
+
+      expect(
+        result.filter((s) => s.kind === "skill").map((s) => s.name),
+      ).toEqual([`${reserved}-helper`]);
+    }
+  });
+
+  it("keeps reserved names out even when no builtin commands are passed", () => {
+    const result = getMatchingSkillSuggestions([makeSkill("status")], "", []);
+
+    expect(result).toEqual([]);
   });
 
   it("caps the number of suggestions", () => {

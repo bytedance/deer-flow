@@ -133,6 +133,90 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="volcengine_codingplan",
+        display_name="Volcengine Coding Plan",
+        description="One key, multi-vendor models (Doubao/GLM/DeepSeek/Kimi/MiniMax)",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=[
+            "doubao-seed-2.0-code",
+            "doubao-seed-2.0-pro",
+            "doubao-seed-2.0-lite",
+            "doubao-seed-code",
+            "minimax-m2.7",
+            "minimax-m3",
+            "glm-5.2",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "kimi-k2.6",
+            "kimi-k2.7-code",
+        ],
+        default_model="glm-5.2",
+        env_var="VOLCENGINE_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "supports_vision": True,
+            "supports_reasoning_effort": True,
+            **OPENAI_COMPAT_THINKING_CONFIG,
+        },
+        model_vision_overrides={
+            "doubao-seed-2.0-code": True,
+            "doubao-seed-2.0-pro": True,
+            "doubao-seed-2.0-lite": True,
+            "doubao-seed-code": True,
+            "minimax-m2.7": False,
+            "minimax-m3": True,
+            "glm-5.2": False,
+            "deepseek-v4-flash": False,
+            "deepseek-v4-pro": False,
+            "kimi-k2.6": False,
+            "kimi-k2.7-code": False,
+        },
+    ),
+    LLMProvider(
+        name="zai",
+        display_name="Z.AI GLM-5.3-Flash",
+        description="GLM-5.3-Flash with required thinking and native vision",
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        models=["glm-5.3-flash"],
+        default_model="glm-5.3-flash",
+        env_var="ZAI_API_KEY",
+        package="langchain-deepseek",
+        extra_config={
+            "api_base": "https://api.z.ai/api/paas/v4",
+            "timeout": 600.0,
+            "max_retries": 2,
+            "temperature": 1.0,
+            "top_p": 0.95,
+            "max_tokens": 131072,
+            "context_window": 1000000,
+            "supports_thinking": True,
+            # GLM-5.3-Flash only accepts low/high/max, while DeerFlow's current
+            # generic UI can emit minimal/medium. Keep provider effort control
+            # disabled until model-specific reasoning capabilities are exposed.
+            "supports_reasoning_effort": False,
+            "supports_vision": True,
+            # The model cannot disable thinking. This unconditional base payload
+            # deliberately avoids when_thinking_enabled/disabled so background
+            # callers that request thinking_enabled=False cannot synthesize an
+            # invalid disabled/minimal combination in the model factory.
+            "extra_body": {
+                "thinking": {
+                    "type": "enabled",
+                    # Avoid preserved-thinking history requirements until the
+                    # reasoning-history abstraction handles summarization.
+                    "clear_thinking": True,
+                },
+                "tool_stream": True,
+            },
+            # Z.AI streams terminal usage without requiring OpenAI's undocumented
+            # stream_options.include_usage request field.
+            "stream_usage": False,
+        },
+    ),
+    LLMProvider(
         name="openai",
         display_name="OpenAI",
         description="GPT-5, GPT-4.1, GPT-4o",
@@ -392,6 +476,23 @@ LLM_PROVIDERS: list[LLMProvider] = [
         },
     ),
     LLMProvider(
+        name="orcarouter",
+        display_name="OrcaRouter",
+        description="OpenAI-compatible adaptive routing gateway",
+        use="langchain_openai:ChatOpenAI",
+        models=["openai/gpt-5.5", "anthropic/claude-opus-4.8", "google/gemini-3.5-flash", "orcarouter/auto"],
+        default_model="openai/gpt-5.5",
+        env_var="ORCAROUTER_API_KEY",
+        package="langchain-openai",
+        extra_config={
+            "base_url": "https://api.orcarouter.ai/v1",
+            "request_timeout": 600.0,
+            "max_retries": 2,
+            "max_tokens": 8192,
+            "temperature": 0.7,
+        },
+    ),
+    LLMProvider(
         name="vllm",
         display_name="vLLM",
         description="Self-hosted OpenAI-compatible serving",
@@ -544,6 +645,14 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
         description="Independent index, official API, API key required",
         use="deerflow.community.brave.tools:web_search_tool",
         env_var="BRAVE_SEARCH_API_KEY",
+        extra_config={"max_results": 5},
+    ),
+    SearchProvider(
+        name="serply",
+        display_name="Serply",
+        description="Google Search, News and Scholar results, API key required",
+        use="deerflow.community.serply.tools:web_search_tool",
+        env_var="SERPLY_API_KEY",
         extra_config={"max_results": 5},
     ),
     SearchProvider(

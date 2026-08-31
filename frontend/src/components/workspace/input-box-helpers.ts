@@ -1,10 +1,56 @@
-import type { Skill } from "@/core/skills";
+import { RESERVED_SLASH_SKILL_NAMES, type Skill } from "@/core/skills";
 export {
   SUGGESTION_TEMPLATE_PLACEHOLDER_PATTERN,
   findSuggestionTemplatePlaceholder,
 } from "@/core/suggestions/placeholders";
 
 export const MAX_SKILL_SUGGESTIONS = 6;
+
+// Mirror of the backend raw request limit (`ThreadGoalRequest.objective`
+// max_length and `MAX_GOAL_OBJECTIVE_CHARS` in backend goal.py). Kept here so
+// the composer can reject an over-length `/goal <objective>` before issuing the
+// PUT request and show a friendly error instead of surfacing a raw HTTP 422.
+export const MAX_GOAL_OBJECTIVE_CHARS = 4000;
+
+export function isGoalObjectiveTooLong(objective: string): boolean {
+  return objective.length > MAX_GOAL_OBJECTIVE_CHARS;
+}
+
+// The live composer counter stays hidden until the objective approaches the
+// limit, so it only surfaces when the user is at risk of being rejected rather
+// than adding permanent noise to the footer.
+export const GOAL_OBJECTIVE_COUNTER_VISIBLE_AT = Math.floor(
+  MAX_GOAL_OBJECTIVE_CHARS * 0.9,
+);
+
+export type GoalObjectiveCounter = {
+  length: number;
+  max: number;
+  overLimit: boolean;
+};
+
+// Derive the live counter for the composer footer from the same parsed
+// objective string sent to the API. Returns null unless the input is a
+// `/goal <objective>` set command whose raw length has reached the visibility
+// threshold, so the counter only appears for the case the limit actually
+// applies to.
+export function getGoalObjectiveCounter(
+  value: string,
+): GoalObjectiveCounter | null {
+  const command = parseGoalCommand(value);
+  if (command?.kind !== "set") {
+    return null;
+  }
+  const length = command.objective.length;
+  if (length < GOAL_OBJECTIVE_COUNTER_VISIBLE_AT) {
+    return null;
+  }
+  return {
+    length,
+    max: MAX_GOAL_OBJECTIVE_CHARS,
+    overLimit: length > MAX_GOAL_OBJECTIVE_CHARS,
+  };
+}
 
 export type SlashSuggestion = {
   name: string;
@@ -121,9 +167,15 @@ export function getMatchingSkillSuggestions(
   builtinCommands: SlashSuggestion[],
 ): SlashSuggestion[] {
   const normalizedQuery = query.toLowerCase();
-  const builtinCommandNames = new Set(
-    builtinCommands.map(({ name }) => name.toLowerCase()),
-  );
+  // A name the slash parsers refuse must not be offered here either. Both
+  // parsers drop `RESERVED_SLASH_SKILL_NAMES` (the shared contract), and the
+  // builtin commands own their own names in the composer, so a skill carrying
+  // either one is unreachable: submitting it either runs the command or
+  // reaches the model as literal text with nothing activated.
+  const reservedNames = new Set([
+    ...RESERVED_SLASH_SKILL_NAMES,
+    ...builtinCommands.map(({ name }) => name.toLowerCase()),
+  ]);
 
   const builtinMatches = builtinCommands.filter(({ name, description }) => {
     if (!normalizedQuery) {
@@ -145,7 +197,7 @@ export function getMatchingSkillSuggestions(
       if (!skill.enabled) {
         return false;
       }
-      if (builtinCommandNames.has(name)) {
+      if (reservedNames.has(name)) {
         return false;
       }
       return !normalizedQuery || name.includes(normalizedQuery);

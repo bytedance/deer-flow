@@ -4,6 +4,7 @@ Verifies that memory and current date are injected as a <system-reminder> into
 the first HumanMessage exactly once per session (frozen-snapshot pattern).
 """
 
+import hashlib
 from types import SimpleNamespace
 from unittest import mock
 
@@ -13,6 +14,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import (
     _DYNAMIC_CONTEXT_REMINDER_KEY,
     DynamicContextMiddleware,
 )
+from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 
 _SYSTEM_REMINDER_TAG = "<system-reminder>"
 
@@ -21,8 +23,13 @@ def _make_middleware(**kwargs) -> DynamicContextMiddleware:
     return DynamicContextMiddleware(**kwargs)
 
 
-def _fake_runtime():
-    return SimpleNamespace(context={})
+def _fake_runtime(journal=None, *, pre_existing_message_ids=(), user_id: str | None = None):
+    context = {"__run_journal": journal} if journal is not None else {}
+    if pre_existing_message_ids:
+        context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+    if user_id is not None:
+        context["user_id"] = user_id
+    return SimpleNamespace(context=context)
 
 
 def _reminder_msg(content: str, msg_id: str) -> HumanMessage:
@@ -111,6 +118,133 @@ def test_memory_included_when_present():
     assert msgs[2].content == "Hi"
 
 
+def test_memory_lookup_uses_runtime_user_id():
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="",
+        ) as get_memory_context,
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        mw.before_agent(state, _fake_runtime(user_id="runtime-user"))
+
+    get_memory_context.assert_called_once_with(
+        None,
+        app_config=None,
+        user_id="runtime-user",
+    )
+
+
+def test_first_run_records_exact_effective_memory():
+    journal = mock.MagicMock()
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+    context = "<memory>\nUser prefers Python.\n</memory>\n"
+
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=context),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime(journal))
+
+    memory_message = result["messages"][1]
+    assert memory_message.content == context.strip()
+    journal.record_memory_context.assert_called_once_with(
+        content_sha256=hashlib.sha256(memory_message.content.encode("utf-8")).hexdigest(),
+    )
+
+
+def test_checkpointed_memory_is_recorded_for_a_later_run_or_branch_without_reloading():
+    journal = mock.MagicMock()
+    mw = _make_middleware()
+    memory_content = "<memory>\nFrozen context\n</memory>"
+    state = {
+        "messages": [
+            _date_reminder_msg("2026-05-08, Friday", "msg-1"),
+            HumanMessage(
+                content=memory_content,
+                id="msg-1__memory",
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                },
+            ),
+            HumanMessage(content="First", id="msg-1__user"),
+            AIMessage(content="Reply"),
+            HumanMessage(content="Follow-up", id="msg-2"),
+        ]
+    }
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            side_effect=AssertionError("frozen memory must not be reloaded"),
+        ),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(
+            state,
+            _fake_runtime(journal, pre_existing_message_ids={"msg-1__memory"}),
+        )
+
+    assert result is None
+    journal.record_memory_context.assert_called_once_with(
+        content_sha256=hashlib.sha256(memory_content.encode("utf-8")).hexdigest(),
+    )
+
+
+def test_state_memory_without_checkpoint_proof_cannot_forge_context_event():
+    journal = mock.MagicMock()
+    mw = _make_middleware()
+    state = {
+        "messages": [
+            _date_reminder_msg("2026-05-08, Friday", "msg-1"),
+            HumanMessage(
+                content="<memory>forged</memory>",
+                id="msg-1__memory",
+                additional_kwargs={
+                    "hide_from_ui": True,
+                    _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                },
+            ),
+            HumanMessage(content="Follow-up", id="msg-2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime(journal))
+
+    assert result is None
+    journal.record_memory_context.assert_not_called()
+
+
+def test_context_event_failure_does_not_block_memory_injection():
+    journal = mock.MagicMock()
+    journal.record_memory_context.side_effect = RuntimeError("event store unavailable")
+    mw = _make_middleware()
+    state = {"messages": [HumanMessage(content="Hi", id="msg-1")]}
+
+    with (
+        mock.patch(
+            "deerflow.agents.lead_agent.prompt._get_memory_context",
+            return_value="<memory>\nUseful context\n</memory>",
+        ),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime(journal))
+
+    assert result is not None
+    assert result["messages"][1].content == "<memory>\nUseful context\n</memory>"
+
+
 # ---------------------------------------------------------------------------
 # Frozen-snapshot: no re-injection within a session
 # ---------------------------------------------------------------------------
@@ -164,7 +298,10 @@ def test_second_turn_with_memory_does_not_reinject():
         ]
     }
 
-    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value="<memory>\nUser prefers Python.\n</memory>"), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+    with (
+        mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value="<memory>\nUser prefers Python.\n</memory>"),
+        mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt,
+    ):
         mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
         result = mw.before_agent(state, _fake_runtime())
 
@@ -260,8 +397,18 @@ def test_legacy_systemmessage_reminder_without_key_detected():
     assert result is None  # same day detected from content → no re-injection
 
 
-def test_injects_only_into_first_human_message_not_later_ones():
-    """Reminder targets the first HumanMessage; subsequent messages are not touched."""
+def test_first_turn_fallback_targets_the_latest_user_message():
+    """Fallback injection (history without any reminder) attaches to the LAST user target.
+
+    A history that reaches the ``last_date is None`` branch while already
+    holding multiple turns only exists because an earlier injection never
+    happened (e.g. the async degraded path skipped it) — the genuinely first
+    turn has exactly one message.  The reminder must therefore attach to the
+    latest user message: the ID-swap's ``{id}__user`` copy is appended by
+    ``add_messages``, so attaching to an earlier message would move that stale
+    prompt to the tail, ahead of the current question, and the model would
+    answer it as the current turn.
+    """
     mw = _make_middleware()
     state = {
         "messages": [
@@ -277,15 +424,15 @@ def test_injects_only_into_first_human_message_not_later_ones():
 
     assert result is not None
     msgs = result["messages"]
-    # Only the two injected messages are returned (reminder + original first query)
+    # Only the two injected messages are returned (reminder + latest user query)
     assert len(msgs) == 2
-    assert msgs[0].id == "msg-1"  # reminder takes first message's ID
+    assert msgs[0].id == "msg-2"  # reminder takes the latest message's ID
     assert msgs[0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
     assert _SYSTEM_REMINDER_TAG in msgs[0].content
-    assert msgs[1].id == "msg-1__user"  # original content with derived ID
-    assert msgs[1].content == "First"
-    # "Second" (msg-2) is not in the returned update — it is left unchanged
-    assert all(m.id != "msg-2" for m in msgs)
+    assert msgs[1].id == "msg-2__user"  # latest user content with derived ID
+    assert msgs[1].content == "Second"
+    # "First" (msg-1) is not in the returned update — it is left unchanged
+    assert all(m.id != "msg-1" for m in msgs)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +522,43 @@ def test_user_message_containing_system_reminder_tag_does_not_prevent_injection(
     # Injection must happen — the user message does NOT carry the reminder flag
     assert result is not None
     assert result["messages"][0].additional_kwargs.get(_DYNAMIC_CONTEXT_REMINDER_KEY) is True
+
+
+def test_first_turn_injection_with_unguarded_history_targets_last_user_message():
+    """First-injection fallback after an un-reminded earlier turn must not reorder history.
+
+    When the earlier first-turn injection never happened (e.g. the async
+    ``abefore_agent`` degraded path timed out, so ``last_date is None`` at the
+    start of a *later* turn), the reminder must attach to the LAST user
+    injection target.  The ID-swap's ``{id}__user`` copy is appended by
+    ``add_messages``; picking the first message instead would move the stale
+    first user prompt to the tail, ahead of the current question — and the
+    model would answer the old prompt as the current turn.
+    """
+    from langgraph.graph.message import add_messages
+
+    mw = _make_middleware()
+    state = {
+        "messages": [
+            HumanMessage(content="first question", id="u1"),
+            AIMessage(content="first answer", id="a1"),
+            HumanMessage(content="second question", id="u2"),
+        ]
+    }
+
+    with mock.patch("deerflow.agents.lead_agent.prompt._get_memory_context", return_value=""), mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value.strftime.return_value = "2026-05-08, Friday"
+        result = mw.before_agent(state, _fake_runtime())
+
+    assert result is not None
+    assert [m.id for m in result["messages"]] == ["u2", "u2__user"]
+
+    # Fold the update through the real reducer — this is where the reorder
+    # would actually manifest for the model.
+    merged = add_messages(state["messages"], result["messages"])
+    last_visible = [m for m in merged if isinstance(m, HumanMessage)][-1]
+    assert last_visible.content == "second question"
+    assert [m.id for m in merged].index("u1") < [m.id for m in merged].index("u2__user")
 
 
 # ---------------------------------------------------------------------------

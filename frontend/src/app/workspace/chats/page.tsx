@@ -10,6 +10,7 @@ import {
   ThreadChannelBadge,
   ThreadChannelIcon,
 } from "@/components/workspace/thread-channel-source";
+import { VirtualThreadList } from "@/components/workspace/thread-list-virtualizer";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -17,6 +18,7 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
+import { buildThreadListModel } from "@/core/threads/thread-list-model";
 import {
   channelSourceOfThread,
   pathOfThread,
@@ -32,10 +34,11 @@ export default function ChatsPage() {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteThreads();
-  const threads = useMemo(
-    () => infiniteThreads?.pages.flat() ?? [],
-    [infiniteThreads],
+  const threadListModel = useMemo(
+    () => buildThreadListModel(infiniteThreads?.pages ?? []),
+    [infiniteThreads?.pages],
   );
+  const { threads } = threadListModel;
   const [search, setSearch] = useState("");
   const isSearching = search.trim().length > 0;
 
@@ -90,30 +93,35 @@ export default function ChatsPage() {
           <main className="min-h-0 flex-1">
             <ScrollArea className="size-full py-4">
               <div className="mx-auto flex size-full max-w-(--container-width-md) flex-col">
-                {filteredThreads.map((thread) => {
-                  const channelSource = channelSourceOfThread(thread);
-                  return (
-                    <Link key={thread.thread_id} href={pathOfThread(thread)}>
-                      <div className="flex flex-col gap-2 border-b p-4">
-                        <div className="flex min-w-0 items-center gap-2">
-                          <ThreadChannelIcon source={channelSource} />
-                          <div className="min-w-0 flex-1 truncate">
-                            {titleOfThread(thread)}
+                <VirtualThreadList
+                  estimateSize={76}
+                  items={filteredThreads}
+                  scrollParentSelector='[data-slot="scroll-area-viewport"]'
+                  renderItem={(thread) => {
+                    const channelSource = channelSourceOfThread(thread);
+                    return (
+                      <Link key={thread.thread_id} href={pathOfThread(thread)}>
+                        <div className="flex flex-col gap-2 border-b p-4">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <ThreadChannelIcon source={channelSource} />
+                            <div className="min-w-0 flex-1 truncate">
+                              {titleOfThread(thread)}
+                            </div>
+                            <ThreadChannelBadge
+                              source={channelSource}
+                              className="hidden sm:inline-flex"
+                            />
                           </div>
-                          <ThreadChannelBadge
-                            source={channelSource}
-                            className="hidden sm:inline-flex"
-                          />
+                          {thread.updated_at && (
+                            <div className="text-muted-foreground text-sm">
+                              {formatTimeAgo(thread.updated_at)}
+                            </div>
+                          )}
                         </div>
-                        {thread.updated_at && (
-                          <div className="text-muted-foreground text-sm">
-                            {formatTimeAgo(thread.updated_at)}
-                          </div>
-                        )}
-                      </div>
-                    </Link>
-                  );
-                })}
+                      </Link>
+                    );
+                  }}
+                />
                 {hasNextPage && !isSearching && (
                   <div
                     ref={sentinelRef}

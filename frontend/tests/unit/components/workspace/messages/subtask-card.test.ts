@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import { SubtaskCard } from "@/components/workspace/messages/subtask-card";
 import { I18nContext } from "@/core/i18n/context";
+import { enUS } from "@/core/i18n/locales/en-US";
 import { SubtaskContext } from "@/core/tasks/context";
 import type { Subtask } from "@/core/tasks/types";
 
@@ -62,7 +63,7 @@ function renderCard({
   fallbackTask,
 }: {
   contextTask?: Subtask;
-  fallbackTask?: Subtask;
+  fallbackTask: Subtask;
 }) {
   const tasks = contextTask ? { [contextTask.id]: contextTask } : {};
   const queryClient = new QueryClient();
@@ -79,6 +80,7 @@ function renderCard({
           value: {
             locale: "en-US",
             setLocale: () => undefined,
+            t: enUS,
           },
         },
         createElement(
@@ -91,7 +93,7 @@ function renderCard({
             },
           },
           createElement(SubtaskCard, {
-            taskId: fallbackTask?.id ?? contextTask?.id ?? "task-1",
+            taskId: fallbackTask.id,
             isLoading: false,
             fallbackTask,
           }),

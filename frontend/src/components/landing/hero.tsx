@@ -2,15 +2,18 @@
 
 import { ChevronRightIcon } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
-import Galaxy from "@/components/ui/galaxy";
+import { useRenderActivity } from "@/core/dom/render-activity";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
+
+const Galaxy = dynamic(() => import("@/components/ui/galaxy"), { ssr: false });
 
 const HERO_WORDS = [
   "Deep Research",
@@ -29,6 +32,9 @@ const HERO_WORDS = [
 ];
 
 export function Hero({ className }: { className?: string }) {
+  const galaxyContainerRef = useRef<HTMLDivElement>(null);
+  const renderGalaxy = useRenderActivity(galaxyContainerRef);
+
   return (
     <div
       className={cn(
@@ -36,15 +42,20 @@ export function Hero({ className }: { className?: string }) {
         className,
       )}
     >
-      <div className="absolute inset-0 z-0 bg-black/40">
-        <Galaxy
-          mouseRepulsion={false}
-          starSpeed={0.2}
-          density={0.6}
-          glowIntensity={0.35}
-          twinkleIntensity={0.3}
-          speed={0.5}
-        />
+      <div
+        ref={galaxyContainerRef}
+        className="absolute inset-0 z-0 bg-black/40"
+      >
+        {renderGalaxy && (
+          <Galaxy
+            mouseRepulsion={false}
+            starSpeed={0.2}
+            density={0.6}
+            glowIntensity={0.35}
+            twinkleIntensity={0.3}
+            speed={0.5}
+          />
+        )}
       </div>
       <FlickeringGrid
         className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"

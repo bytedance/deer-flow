@@ -1,10 +1,11 @@
 """Tests for ThreadMetaRepository (SQLAlchemy-backed)."""
 
+import asyncio
 import logging
 
 import pytest
 
-from deerflow.persistence.thread_meta import InvalidMetadataFilterError, ThreadMetaRepository
+from deerflow.persistence.thread_meta import THREAD_PINNED_METADATA_KEY, InvalidMetadataFilterError, ThreadMetaRepository
 
 
 @pytest.fixture
@@ -44,6 +45,21 @@ class TestThreadMetaRepository:
     async def test_create_with_metadata(self, repo):
         record = await repo.create("t1", metadata={"key": "value"})
         assert record["metadata"] == {"key": "value"}
+
+    @pytest.mark.anyio
+    async def test_update_display_name_can_remove_stale_metadata_atomically(self, repo):
+        await repo.create("t1", display_name="Original (2)", metadata={"branch_title_sequence": 2, "keep": True})
+
+        await repo.update_display_name(
+            "t1",
+            "Report Q4",
+            remove_metadata_keys=("branch_title_sequence",),
+        )
+
+        record = await repo.get("t1")
+        assert record is not None
+        assert record["display_name"] == "Report Q4"
+        assert record["metadata"] == {"keep": True}
 
     @pytest.mark.anyio
     async def test_get_nonexistent(self, repo):
@@ -136,6 +152,52 @@ class TestThreadMetaRepository:
     @pytest.mark.anyio
     async def test_update_metadata_nonexistent_is_noop(self, repo):
         await repo.update_metadata("nonexistent", {"k": "v"})  # should not raise
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touches_updated_at_by_default(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        await repo.update_metadata("t1", {"b": 2})
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, "b": 2}
+        assert record["updated_at"] >= original
+
+    @pytest.mark.anyio
+    async def test_update_metadata_touch_false_preserves_updated_at(self, repo):
+        await repo.create("t1", metadata={"a": 1})
+        original = (await repo.get("t1"))["updated_at"]
+
+        # Pin/unpin style patch must not bump recency ordering.
+        await repo.update_metadata("t1", {THREAD_PINNED_METADATA_KEY: True}, touch=False)
+
+        record = await repo.get("t1")
+        assert record["metadata"] == {"a": 1, THREAD_PINNED_METADATA_KEY: True}
+        assert record["updated_at"] == original
+
+    @pytest.mark.anyio
+    async def test_concurrent_metadata_updates_preserve_disjoint_keys(self, repo):
+        for index in range(10):
+            thread_id = f"concurrent-{index}"
+            await repo.create(thread_id, metadata={"base": index}, user_id=None)
+
+            await asyncio.gather(
+                repo.update_metadata(thread_id, {"left": index}, user_id=None),
+                repo.update_metadata(thread_id, {"right": index}, user_id=None),
+            )
+
+            record = await repo.get(thread_id, user_id=None)
+            assert record["metadata"] == {"base": index, "left": index, "right": index}
+
+    @pytest.mark.anyio
+    async def test_search_orders_pinned_threads_before_newer_unpinned_threads(self, repo):
+        await repo.create("older-pinned", metadata={THREAD_PINNED_METADATA_KEY: True})
+        await repo.create("newer-unpinned")
+
+        results = await repo.search(limit=1)
+
+        assert [record["thread_id"] for record in results] == ["older-pinned"]
 
     @pytest.mark.anyio
     async def test_update_owner_with_bypass_moves_row(self, repo):
@@ -370,6 +432,20 @@ class TestThreadMetaRepository:
         assert hits == {"t1", "t3"}
 
     @pytest.mark.anyio
+    async def test_search_metadata_float_matches_integer_but_not_boolean(self, repo):
+        await repo.create("int", metadata={"score": 1})
+        await repo.create("float", metadata={"score": 1.0})
+        await repo.create("bool", metadata={"score": True})
+
+        bool_hits = {record["thread_id"] for record in await repo.search(metadata={"score": True})}
+        int_hits = {record["thread_id"] for record in await repo.search(metadata={"score": 1})}
+        float_hits = {record["thread_id"] for record in await repo.search(metadata={"score": 1.0})}
+
+        assert bool_hits == {"bool"}
+        assert int_hits == {"int"}
+        assert float_hits == {"float", "int"}
+
+    @pytest.mark.anyio
     async def test_search_metadata_mixed_types_same_key(self, repo):
         """Each type query only matches its own type, even when the key is shared."""
         await repo.create("str_row", metadata={"x": "hello"})
@@ -561,3 +637,16 @@ class TestJsonMatchCompilation:
 
         with pytest.raises(ValueError, match="Key escaped validation"):
             str(elem.compile(dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}))
+
+
+class TestJsonValueMatches:
+    def test_distinguishes_missing_null_bool_int_and_float(self):
+        from deerflow.persistence.json_compat import json_value_matches
+
+        assert json_value_matches({}, "value", None) is False
+        assert json_value_matches({"value": None}, "value", None) is True
+        assert json_value_matches({"value": 1}, "value", True) is False
+        assert json_value_matches({"value": True}, "value", 1) is False
+        assert json_value_matches({"value": 1.0}, "value", 1) is False
+        assert json_value_matches({"value": 1}, "value", 1.0) is True
+        assert json_value_matches({"value": 1.0}, "value", 1.0) is True

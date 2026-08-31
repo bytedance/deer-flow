@@ -13,6 +13,7 @@ from deerflow.config.acp_config import load_acp_config_from_dict
 from deerflow.config.agents_api_config import get_agents_api_config, load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, get_app_config, reset_app_config
 from deerflow.config.checkpointer_config import get_checkpointer_config, load_checkpointer_config_from_dict
+from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.guardrails_config import get_guardrails_config, load_guardrails_config_from_dict
 from deerflow.config.memory_config import get_memory_config, load_memory_config_from_dict
 from deerflow.config.stream_bridge_config import get_stream_bridge_config, load_stream_bridge_config_from_dict
@@ -104,6 +105,92 @@ def _write_extensions_config(path: Path) -> None:
     path.write_text(json.dumps({"mcpServers": {}, "skills": {}}), encoding="utf-8")
 
 
+def test_checkpoint_channel_mode_defaults_to_full() -> None:
+    assert DatabaseConfig().checkpoint_channel_mode == "full"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_checkpoint_channel_mode_accepts_supported_values(mode: str) -> None:
+    assert DatabaseConfig(checkpoint_channel_mode=mode).checkpoint_channel_mode == mode
+
+
+def test_checkpoint_channel_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_channel_mode="auto")
+
+
+def test_checkpoint_delta_defaults_to_production_cadence() -> None:
+    assert DatabaseConfig().checkpoint_delta.snapshot_frequency == 10
+
+
+def test_checkpoint_delta_accepts_custom_snapshot_frequency() -> None:
+    assert DatabaseConfig(checkpoint_delta={"snapshot_frequency": 250}).checkpoint_delta.snapshot_frequency == 250
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_checkpoint_delta_rejects_non_positive_snapshot_frequency(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta={"snapshot_frequency": value})
+
+
+def test_legacy_snapshot_frequency_maps_to_nested_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(checkpoint_delta_snapshot_frequency=1000)
+    assert config.checkpoint_delta.snapshot_frequency == 1000
+    assert "checkpoint_delta_snapshot_frequency is deprecated" in caplog.text
+
+
+def test_nested_snapshot_frequency_wins_over_legacy_key(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level("WARNING"):
+        config = DatabaseConfig(
+            checkpoint_delta_snapshot_frequency=1000,
+            checkpoint_delta={"snapshot_frequency": 250},
+        )
+    assert config.checkpoint_delta.snapshot_frequency == 250
+    assert "the nested key wins" in caplog.text
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_legacy_snapshot_frequency_rejects_non_positive_value(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_delta_snapshot_frequency=value)
+
+
+def test_checkpoint_graph_cache_defaults() -> None:
+    assert DatabaseConfig().checkpoint_graph_cache.accessor_graph_max == 64
+
+
+def test_checkpoint_graph_cache_accepts_custom_cap() -> None:
+    assert DatabaseConfig(checkpoint_graph_cache={"accessor_graph_max": 8}).checkpoint_graph_cache.accessor_graph_max == 8
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_checkpoint_graph_cache_rejects_non_positive_cap(value: int) -> None:
+    with pytest.raises(ValidationError):
+        DatabaseConfig(checkpoint_graph_cache={"accessor_graph_max": value})
+
+
+def test_resolve_checkpoint_graph_cache_max_tolerates_stub_configs() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
+
+    assert resolve_checkpoint_graph_cache_max(None, "accessor_graph_max", 64) == 64
+    assert resolve_checkpoint_graph_cache_max(SimpleNamespace(), "accessor_graph_max", 64) == 64
+    assert resolve_checkpoint_graph_cache_max(MagicMock(), "accessor_graph_max", 64) == 64
+    stub = SimpleNamespace(checkpoint_graph_cache=SimpleNamespace(accessor_graph_max=3))
+    assert resolve_checkpoint_graph_cache_max(stub, "accessor_graph_max", 64) == 3
+
+
+def test_config_example_does_not_enable_empty_extensions_block_by_default():
+    config_example_path = Path(__file__).resolve().parents[2] / "config.example.yaml"
+
+    config_data = yaml.safe_load(config_example_path.read_text(encoding="utf-8"))
+
+    assert "extensions" not in config_data
+
+
 def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
@@ -116,6 +203,79 @@ def test_app_config_defaults_missing_database_to_sqlite(tmp_path, monkeypatch):
 
     assert config.database.backend == "sqlite"
     assert config.database.sqlite_dir == ".deer-flow/data"
+
+
+def test_app_config_preserves_config_yaml_extension_middlewares(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "middlewares": ["pkg.from_yaml:YamlMiddleware"],
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares == ["pkg.from_yaml:YamlMiddleware"]
+
+
+def test_app_config_normalizes_config_yaml_extension_aliases_before_override(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "from-file": {
+                        "command": "file-mcp",
+                    }
+                },
+                "skills": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(
+        config_path,
+        {
+            "extensions": {
+                "mcp_servers": {
+                    "from-yaml": {
+                        "command": "yaml-mcp",
+                    }
+                },
+            }
+        },
+    )
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert set(config.extensions.mcp_servers) == {"from-yaml"}
+    assert config.extensions.mcp_servers["from-yaml"].command == "yaml-mcp"
+
+
+def test_app_config_loads_extension_middlewares_from_extensions_config(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    extensions_path.write_text(
+        json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg.from_file:FileMiddleware"]}),
+        encoding="utf-8",
+    )
+    _write_config_with_sections(config_path)
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+
+    config = AppConfig.from_file(str(config_path))
+
+    assert config.extensions.middlewares == ["pkg.from_file:FileMiddleware"]
 
 
 def test_app_config_defaults_empty_database_to_sqlite(tmp_path, monkeypatch):
@@ -486,6 +646,56 @@ def test_get_app_config_keeps_persistence_runtime_singletons_when_checkpointer_u
         _reset_config_singletons()
 
 
+def test_get_app_config_does_not_reset_persistence_singletons_when_database_changes(tmp_path, monkeypatch):
+    # ``database`` is a restart-required field: the ORM engine is built once at
+    # startup and never rebuilt on a config.yaml edit. Resetting only the sync
+    # checkpointer/store singletons on a live ``postgres_schema`` change would
+    # half-migrate the deployment (new checkpoint/store tables in the new schema,
+    # ORM rows still in the old one). So a ``database`` change must NOT trigger a
+    # partial reset -- the operator must restart.
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+    _write_config_with_sections(
+        config_path,
+        {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/db", "postgres_schema": "schema_a"}},
+    )
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    _reset_config_singletons()
+
+    reset_calls = {"checkpointer": 0, "store": 0}
+
+    def _reset_checkpointer() -> None:
+        reset_calls["checkpointer"] += 1
+
+    def _reset_store() -> None:
+        reset_calls["store"] += 1
+
+    monkeypatch.setattr("deerflow.runtime.checkpointer.reset_checkpointer", _reset_checkpointer)
+    monkeypatch.setattr("deerflow.runtime.store.reset_store", _reset_store)
+
+    try:
+        get_app_config()
+        reset_calls["checkpointer"] = 0
+        reset_calls["store"] = 0
+
+        _write_config_with_sections(
+            config_path,
+            {"database": {"backend": "postgres", "postgres_url": "postgresql://localhost/db", "postgres_schema": "schema_b"}},
+        )
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        get_app_config()
+
+        assert get_checkpointer_config() is None
+        assert reset_calls == {"checkpointer": 0, "store": 0}
+    finally:
+        _reset_config_singletons()
+
+
 def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"
@@ -528,5 +738,65 @@ def test_get_app_config_does_not_mutate_singletons_when_reload_validation_fails(
         assert get_checkpointer_config() is not None
         assert get_checkpointer() is initial_checkpointer
         assert get_store() is initial_store
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_memory_config_self_syncs_without_prior_get_app_config(tmp_path, monkeypatch):
+    """get_memory_config() triggers reload when file changes without prior get_app_config().
+
+    Background memory paths (updater/queue/storage) never call get_app_config()
+    directly.  This test pins the fix: calling get_memory_config() in isolation
+    — after mutating the file, with no intervening get_app_config() — reflects
+    the new value.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+
+    _write_config_with_sections(config_path, {"memory": {"enabled": False}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        get_app_config()
+        assert get_memory_config().enabled is False
+
+        _write_config_with_sections(config_path, {"memory": {"enabled": True}})
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        assert get_memory_config().enabled is True
+    finally:
+        _reset_config_singletons()
+
+
+def test_get_memory_config_falls_back_on_broken_config(tmp_path, monkeypatch):
+    """get_memory_config() does not crash on transiently broken config.yaml.
+
+    get_app_config() can raise yaml.YAMLError, ValidationError, or ValueError.
+    get_memory_config() catches them and returns the last-good singleton.
+    """
+    config_path = tmp_path / "config.yaml"
+    extensions_path = tmp_path / "extensions_config.json"
+    _write_extensions_config(extensions_path)
+
+    _write_config_with_sections(config_path, {"memory": {"enabled": False}})
+
+    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(config_path))
+    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(extensions_path))
+    reset_app_config()
+
+    try:
+        get_app_config()
+        assert get_memory_config().enabled is False
+
+        config_path.write_text("memory: {enabled: true\n")
+        next_mtime = config_path.stat().st_mtime + 5
+        os.utime(config_path, (next_mtime, next_mtime))
+
+        assert get_memory_config().enabled is False
     finally:
         _reset_config_singletons()

@@ -47,17 +47,25 @@ class TestValidateSkillFrontmatter:
         assert msg == "Skill is valid!"
         assert name == "my-skill"
 
-    def test_rejects_allowed_tools_string(self, tmp_path):
+    def test_allows_argument_hint(self, tmp_path):
         skill_dir = _write_skill(
             tmp_path,
-            "---\nname: my-skill\ndescription: A skill\nallowed-tools: bash\n---\n\nBody\n",
+            "---\nname: my-skill\ndescription: A skill\nargument-hint: '[issue-number]'\n---\n\nBody\n",
         )
         valid, msg, name = _validate_skill_frontmatter(skill_dir)
-        assert valid is False
-        assert "allowed-tools" in msg
-        assert str(tmp_path) not in msg
-        assert "SKILL.md" in msg
-        assert name is None
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
+
+    def test_allows_allowed_tools_string(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: A skill\nallowed-tools: Bash(tvly *) Bash(playwright-cli:*)\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is True
+        assert msg == "Skill is valid!"
+        assert name == "my-skill"
 
     def test_rejects_allowed_tools_non_string_entry(self, tmp_path):
         skill_dir = _write_skill(
@@ -115,6 +123,17 @@ class TestValidateSkillFrontmatter:
         valid, msg, _ = _validate_skill_frontmatter(skill_dir)
         assert valid is False
         assert "custom-field" in msg
+
+    def test_non_string_frontmatter_key_reports_cleanly_instead_of_crashing(self, tmp_path):
+        skill_dir = _write_skill(
+            tmp_path,
+            "---\nname: my-skill\ndescription: test\n42: bad\ncustom-field: bad\n---\n\nBody\n",
+        )
+        valid, msg, name = _validate_skill_frontmatter(skill_dir)
+        assert valid is False
+        assert "custom-field" in msg
+        assert "42" in msg
+        assert name is None
 
     def test_name_must_be_hyphen_case(self, tmp_path):
         skill_dir = _write_skill(

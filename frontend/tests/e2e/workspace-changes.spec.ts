@@ -49,6 +49,7 @@ test.describe("Workspace changes", () => {
               created: 1,
               modified: 1,
               deleted: 0,
+              symlink_created: 0,
               additions: 8,
               deletions: 2,
               truncated: false,
@@ -119,5 +120,102 @@ test.describe("Workspace changes", () => {
     expect(includeDiffValues).toContain("true");
     await expect(page.getByText("+Ready")).toBeVisible();
     await expect(page.getByText("-Draft")).toBeVisible();
+  });
+
+  test("renders one badge for a run that ends in two assistant bubbles", async ({
+    page,
+  }) => {
+    // Answer text the model emitted mid-run that never gained a tool call
+    // settles into its own terminal assistant bubble, so this run owns two.
+    // The card is resolved from (threadId, runId) alone, so rendering it per
+    // message painted the identical summary twice (#4555).
+    mockLangGraphAPI(page, {
+      threads: [
+        {
+          thread_id: THREAD_ID,
+          title: "Workspace changes",
+          updated_at: "2026-07-04T10:00:00Z",
+          messages: [
+            {
+              type: "human",
+              id: "msg-human-multi-bubble",
+              content: [{ type: "text", text: "Create a report" }],
+              run_id: RUN_ID,
+            },
+            {
+              type: "ai",
+              id: "msg-ai-multi-bubble-first",
+              content: "Let me check the workspace first.",
+              run_id: RUN_ID,
+            },
+            {
+              type: "ai",
+              id: "msg-ai-multi-bubble-final",
+              content: "I updated the workspace report.",
+              run_id: RUN_ID,
+            },
+          ],
+        },
+      ],
+    });
+    await page.route(
+      `**/api/threads/${THREAD_ID}/runs/${RUN_ID}/workspace-changes?*`,
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            available: true,
+            version: 1,
+            summary: {
+              created: 0,
+              modified: 1,
+              deleted: 0,
+              symlink_created: 0,
+              additions: 8,
+              deletions: 2,
+              truncated: false,
+            },
+            files: [
+              {
+                path: "/mnt/user-data/outputs/report.md",
+                root: "outputs",
+                status: "modified",
+                binary: false,
+                sensitive: false,
+                size_before: 12,
+                size_after: 20,
+                sha256_before: "before",
+                sha256_after: "after",
+                diff: null,
+                diff_truncated: false,
+                diff_unavailable_reason: null,
+                additions: 8,
+                deletions: 2,
+              },
+            ],
+            limits: {},
+          }),
+        });
+      },
+    );
+
+    await page.goto(`/workspace/chats/${THREAD_ID}`);
+
+    await expect(page.getByText("Edited 1 file")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByText("Edited 1 file")).toHaveCount(1);
+
+    // The surviving card belongs to the run's last bubble, matching how run
+    // duration anchors its own run-scoped display.
+    const assistantTurns = page.locator("[data-assistant-turn]");
+    await expect(assistantTurns).toHaveCount(2);
+    await expect(assistantTurns.nth(0).getByText("Edited 1 file")).toHaveCount(
+      0,
+    );
+    await expect(assistantTurns.nth(1).getByText("Edited 1 file")).toHaveCount(
+      1,
+    );
   });
 });

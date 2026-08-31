@@ -8,6 +8,10 @@ import {
 
 const mermaidContent = `Here is a relationship diagram.
 
+\`\`\`typescript
+const answer: number = 42;
+\`\`\`
+
 \`\`\`mermaid
 flowchart TD
     A[Lin<br/>protagonist]
@@ -87,4 +91,22 @@ test("historical run messages preview labelled dotted Mermaid arrows", async ({
     timeout: 15_000,
   });
   await expect(page.getByText("Mermaid Error:")).toHaveCount(0);
+  const highlightedTokens = page.locator(
+    '[data-streamdown="code-block-body"] code > span > span',
+  );
+  await expect
+    .poll(() => highlightedTokens.count(), { timeout: 15_000 })
+    .toBeGreaterThan(1);
+  const tokenStyles = await highlightedTokens.evaluateAll((tokens) =>
+    tokens.map((token) => ({
+      color: getComputedStyle(token).color,
+      style: token.getAttribute("style"),
+    })),
+  );
+  expect(new Set(tokenStyles.map(({ style }) => style)).size).toBeGreaterThan(
+    1,
+  );
+  expect(new Set(tokenStyles.map(({ color }) => color)).size).toBeGreaterThan(
+    1,
+  );
 });

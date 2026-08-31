@@ -180,9 +180,13 @@ def event_should_fire(
 
     # allow_authors bypasses require_mention entirely. Useful so a repo
     # owner can talk to the bot without typing the handle every time.
+    # Match is case-insensitive — GitHub logins are, and the sibling gates
+    # in this module already are (``_mentions`` uses re.IGNORECASE; the
+    # self-event check lowercases both sides). A bare ``in`` membership
+    # test would drop an owner whose YAML casing differs from the payload.
     if trigger.allow_authors:
         author = _author_login(event, payload)
-        if author and author in trigger.allow_authors:
+        if author and author.lower() in {a.lower() for a in trigger.allow_authors}:
             return True, f"allow_authors:{author}"
 
     if trigger.require_mention:

@@ -52,12 +52,25 @@ def _raw_tool_call(call_id: str, name: str = "task") -> dict:
 
 
 class TestClampSubagentLimit:
-    def test_below_min_clamped_to_min(self):
-        assert _clamp_subagent_limit(0) == MIN_SUBAGENT_LIMIT
-        assert _clamp_subagent_limit(1) == MIN_SUBAGENT_LIMIT
+    def test_min_limit_is_one(self):
+        # MIN lowered from 2 to 1 so a user asking for a single subagent gets 1.
+        # Both consumers (SubagentLimitMiddleware.__init__ and the prompt path)
+        # share this floor via clamp_subagent_concurrency in subagents_config.py.
+        assert MIN_SUBAGENT_LIMIT == 1
+        assert MAX_SUBAGENT_LIMIT == 64
 
-    def test_above_max_clamped_to_max(self):
-        assert _clamp_subagent_limit(10) == MAX_SUBAGENT_LIMIT
+    def test_below_min_clamped_to_one(self):
+        assert _clamp_subagent_limit(0) == 1
+        assert _clamp_subagent_limit(-5) == 1
+
+    def test_one_is_allowed_not_bumped_to_two(self):
+        # Previously 1 clamped up to 2; it must now pass through as 1.
+        assert _clamp_subagent_limit(1) == 1
+
+    def test_above_hard_max_clamped(self):
+        assert _clamp_subagent_limit(5) == 5
+        assert _clamp_subagent_limit(10) == 10
+        assert _clamp_subagent_limit(65) == MAX_SUBAGENT_LIMIT
         assert _clamp_subagent_limit(100) == MAX_SUBAGENT_LIMIT
 
     def test_within_range_unchanged(self):
@@ -76,7 +89,7 @@ class TestSubagentLimitMiddlewareInit:
         mw = SubagentLimitMiddleware(max_concurrent=1)
         assert mw.max_concurrent == MIN_SUBAGENT_LIMIT
 
-        mw = SubagentLimitMiddleware(max_concurrent=10)
+        mw = SubagentLimitMiddleware(max_concurrent=100)
         assert mw.max_concurrent == MAX_SUBAGENT_LIMIT
 
 

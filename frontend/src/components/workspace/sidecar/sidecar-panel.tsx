@@ -51,11 +51,9 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
-  hasOpenHumanInputRequest,
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
@@ -209,14 +207,6 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const hasPendingReferences = sidecar.activeReferences.length > 0;
   const hasSidecarThread = Boolean(sidecar.sidecarThreadId);
-  const hasOpenHumanInputCard = useMemo(
-    () =>
-      hasOpenHumanInputRequest(
-        thread.messages,
-        (message) => !isHiddenFromUIMessage(message),
-      ),
-    [thread.messages],
-  );
   const tokenUsageInlineMode = tokenUsageEnabled
     ? localSettings.tokenUsage.inlineMode
     : "off";
@@ -226,7 +216,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     creatingThread ||
     Boolean(queuedSubmit) ||
     isUploading ||
-    hasOpenHumanInputCard ||
     (hasSidecarThread && isHistoryLoading) ||
     (sidecar.isMock ?? false) ||
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
@@ -550,7 +539,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 : t.sidecar.noContext}
           </div>
         </div>
-        {hasSidecarThread ? (
+        {hasSidecarThread && (
           <Tooltip content={t.sidecar.delete}>
             <Button
               aria-label={t.sidecar.delete}
@@ -563,22 +552,21 @@ export function SidecarPanel({ className }: { className?: string }) {
               <Trash2Icon />
             </Button>
           </Tooltip>
-        ) : (
-          // No conversation yet — nothing to delete, so this just discards the
-          // draft and closes the panel. A plain X (no confirm) keeps it light.
-          <Tooltip content={t.common.close}>
-            <Button
-              aria-label={t.common.close}
-              className="text-muted-foreground hover:text-foreground"
-              data-testid="sidecar-close-button"
-              size="icon-sm"
-              variant="ghost"
-              onClick={() => discardDraftAndClose()}
-            >
-              <XIcon />
-            </Button>
-          </Tooltip>
         )}
+        <Tooltip content={t.common.close}>
+          <Button
+            aria-label={t.common.close}
+            className="text-muted-foreground hover:text-foreground"
+            data-testid="sidecar-close-button"
+            size="icon-sm"
+            variant="ghost"
+            onClick={() =>
+              hasSidecarThread ? sidecar.close() : discardDraftAndClose()
+            }
+          >
+            <XIcon />
+          </Button>
+        </Tooltip>
       </header>
 
       <div className="min-h-0 flex-1">
@@ -951,7 +939,7 @@ function SidecarModelSelector({
     <ModelSelector open={open} onOpenChange={onOpenChange}>
       <ModelSelectorTrigger asChild>
         <PromptInputButton className={cn("min-w-0 px-2!", className)}>
-          <div className="flex min-w-0 flex-col items-start text-left">
+          <div className="flex min-w-0 flex-col text-left">
             <ModelSelectorName className="truncate text-xs font-normal">
               {selectedModel.display_name}
             </ModelSelectorName>

@@ -1,8 +1,10 @@
 """Core behavior tests for task tool orchestration."""
 
 import asyncio
+import gc
 import importlib
 import inspect
+import weakref
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -11,7 +13,9 @@ import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.status_contract import (
     SUBAGENT_ERROR_KEY,
@@ -21,6 +25,7 @@ from deerflow.subagents.status_contract import (
     SUBAGENT_STATUS_KEY,
     SUBAGENT_STOP_REASON_KEY,
     SUBAGENT_TOKEN_USAGE_KEY,
+    SUBAGENT_TOOL_RECEIPTS_KEY,
 )
 
 # Use module import so tests can patch the exact symbols referenced inside task_tool().
@@ -74,6 +79,7 @@ def _make_result(
     error: str | None = None,
     stop_reason: str | None = None,
     token_usage_records: list[dict] | None = None,
+    tool_receipts: list[dict] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         status=status,
@@ -83,6 +89,7 @@ def _make_result(
         stop_reason=stop_reason,
         token_usage_records=token_usage_records or [],
         usage_reported=False,
+        tool_receipts=tool_receipts,
     )
 
 
@@ -259,6 +266,161 @@ def test_task_tool_returns_error_for_unknown_subagent(monkeypatch):
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == "Unknown subagent type 'general-purpose'. Available: general-purpose"
 
 
+def test_task_tool_enforces_caller_subagent_snapshot(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = ["planner"]
+    captured = {}
+
+    def available(*, allowed_subagents):
+        captured["allowed"] = allowed_subagents
+        return ["planner"]
+
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", available)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert captured["allowed"] == ["planner"]
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: planner" in message.content
+
+
+def test_task_tool_explains_when_caller_policy_permits_no_subagents(monkeypatch):
+    runtime = _make_runtime()
+    runtime.config["metadata"]["allowed_subagents"] = []
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, allowed_subagents: [])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+
+    result = _run_task_tool(
+        runtime=runtime,
+        description="blocked delegation",
+        prompt="do work",
+        subagent_type="general-purpose",
+        tool_call_id="tc-empty-policy",
+    )
+
+    message = _task_tool_message(result)
+    assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "failed"
+    assert "Available: none permitted by caller policy" in message.content
+
+
+def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
+    """The lead run binds one immutable extension snapshot; delegation must
+    carry that same object rather than re-reading the process singleton, which
+    a concurrent replacement could have swapped underneath the run."""
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+    from deerflow.extensions.registry import ExtensionRegistry
+
+    loaded = ExtensionRegistry().build()
+    runtime = _make_runtime()
+    runtime.context[EXTENSION_SNAPSHOT_CONTEXT_KEY] = loaded
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
+
+    assert captured["executor_kwargs"]["extensions"] is loaded
+
+
+def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):
+    """Callers outside the Gateway run path (embedded client, standalone
+    LangGraph Server) install no snapshot; the executor must keep its existing
+    singleton fallback instead of receiving a forged or missing value."""
+    runtime = _make_runtime()
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-no-ext")
+
+    assert "extensions" not in captured["executor_kwargs"]
+
+
+def test_bound_task_tool_forwards_explicit_execution_capacity(monkeypatch):
+    runtime = _make_runtime()
+    captured = {}
+    capacity = SubagentExecutionCapacity(SubagentRuntimeConfig(max_running=7))
+    app_config = object()
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda **_kwargs: ["general-purpose"])
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _name, **_kwargs: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    bound_tool = task_tool_module.bind_task_tool(capacity, app_config=app_config)
+    coroutine = getattr(bound_tool, "coroutine", None)
+    assert coroutine is not None
+    asyncio.run(
+        coroutine(
+            runtime=runtime,
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-capacity",
+        )
+    )
+
+    assert captured["executor_kwargs"]["execution_capacity"] is capacity
+    assert captured["executor_kwargs"]["app_config"] is app_config
+
+
 def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     """The IM-channel sender identity must survive delegation: in group chats
     one thread serves many senders, so a subagent's bash commands need the
@@ -300,8 +462,121 @@ def test_task_tool_forwards_channel_user_id_to_executor(monkeypatch):
     assert captured["executor_kwargs"]["channel_user_id"] == "ou_group_sender_1"
 
 
+def test_task_tool_forwards_is_internal_true_to_executor(monkeypatch):
+    """is_internal=True must propagate to SubagentExecutor."""
+    runtime = _make_runtime()
+    runtime.context["is_internal"] = True
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
+    assert captured["executor_kwargs"]["is_internal"] is True
+
+
+def test_task_tool_forwards_is_internal_false_to_executor(monkeypatch):
+    """is_internal=False must also propagate explicitly (not skipped)."""
+    runtime = _make_runtime()
+    runtime.context["is_internal"] = False
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
+    assert captured["executor_kwargs"]["is_internal"] is False
+
+
+def test_task_tool_copies_attributes_to_executor(monkeypatch):
+    """Mapping authz_attributes must be copied; mutating parent doesn't affect executor."""
+    runtime = _make_runtime()
+    runtime.context["authz_attributes"] = {"dept": "eng"}
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
+    executor_attrs = captured["executor_kwargs"]["authz_attributes"]
+    assert executor_attrs == {"dept": "eng"}
+    # Mutate the executor's copy; original context should not change
+    executor_attrs["dept"] = "changed"
+    assert runtime.context["authz_attributes"]["dept"] == "eng"
+
+
+def test_task_tool_rejects_non_mapping_attributes(monkeypatch):
+    """Non-Mapping authz_attributes must raise TypeError, not silently become {}."""
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    runtime = _make_runtime()
+    runtime.context["authz_attributes"] = ["not", "a", "mapping"]
+    with pytest.raises(TypeError, match="authz_attributes must be a Mapping"):
+        _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-1")
+
+
 def test_task_tool_rejects_bash_subagent_when_host_bash_disabled(monkeypatch):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda: ["general-purpose"])
     monkeypatch.setattr(task_tool_module, "is_host_bash_allowed", lambda: False)
 
     result = _run_task_tool(
@@ -387,8 +662,15 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     runtime = _make_runtime()
     runtime.context["deerflow_trace_id"] = "task-trace-1"
     events = []
+    dispatched_events = []
     captured = {}
+    polled_execution_ids = []
+    cleaned_execution_ids = []
     get_available_tools = MagicMock(return_value=["tool-a", "tool-b"])
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+        dispatched_events.append(payload)
 
     class DummyExecutor:
         def __init__(self, **kwargs):
@@ -397,7 +679,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
         def execute_async(self, prompt, task_id=None):
             captured["prompt"] = prompt
             captured["task_id"] = task_id
-            return task_id or "generated-task-id"
+            return "execution-456"
 
     # Simulate two polling rounds: first running (with one message), then completed.
     responses = iter(
@@ -415,8 +697,14 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
 
-    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: next(responses))
+    def get_result(execution_id):
+        polled_execution_ids.append(execution_id)
+        return next(responses)
+
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", get_result)
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleaned_execution_ids.append)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     # task_tool lazily imports from deerflow.tools at call time, so patch that module-level function.
     monkeypatch.setattr("deerflow.tools.get_available_tools", get_available_tools)
@@ -441,10 +729,14 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     # by SubagentExecutor and injected as conversation items (Codex pattern).
     assert captured["executor_kwargs"]["config"].system_prompt == "Base system prompt"
 
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False)
 
     event_types = [e["type"] for e in events]
     assert event_types == ["task_started", "task_running", "task_running", "task_completed"]
+    assert dispatched_events == events
+    assert polled_execution_ids == ["execution-456", "execution-456"]
+    assert cleaned_execution_ids == ["execution-456"]
+    assert {event["task_id"] for event in events} == {"tc-123"}
     assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
 
@@ -551,7 +843,7 @@ def test_task_tool_propagates_tool_groups_to_subagent(monkeypatch):
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: done"
     # The key assertion: groups should be propagated from parent metadata
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=parent_tool_groups, subagent_enabled=False, include_upload_tool=False)
 
 
 def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
@@ -601,6 +893,7 @@ def test_task_tool_uses_subagent_model_override_for_tool_loading(monkeypatch):
         model_name="vision-subagent-model",
         groups=None,
         subagent_enabled=False,
+        include_upload_tool=False,
     )
 
 
@@ -725,7 +1018,7 @@ def test_task_tool_no_tool_groups_passes_none(monkeypatch):
 
     assert _task_tool_message(output).content == "Task Succeeded. Result: ok"
     # No tool_groups in metadata → groups=None (default behavior preserved)
-    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False)
+    get_available_tools.assert_called_once_with(model_name="ark-model", groups=None, subagent_enabled=False, include_upload_tool=False)
 
 
 def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
@@ -769,6 +1062,7 @@ def test_task_tool_runtime_none_passes_groups_none(monkeypatch):
         model_name="default-model",
         groups=None,
         subagent_enabled=False,
+        include_upload_tool=False,
         app_config=fallback_app_config,
     )
 
@@ -898,10 +1192,22 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
 
+    receipts = [
+        {
+            "id": "r1",
+            "tool_call_id": "tc-before-poll-timeout",
+            "tool_name": "write_file",
+            "status": "success",
+            "args_sha256": "a" * 16,
+            "output_sha256": "b" * 16,
+            "output_bytes": 3,
+            "created_at": "2026-08-28T00:00:00+00:00",
+        }
+    ]
     monkeypatch.setattr(
         task_tool_module,
         "get_background_task_result",
-        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]),
+        lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[], tool_receipts=receipts),
     )
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
@@ -920,6 +1226,7 @@ def test_task_tool_polling_safety_timeout(monkeypatch):
     assert message.content.startswith("Task polling timed out after 0 minutes")
     assert message.additional_kwargs[SUBAGENT_STATUS_KEY] == "polling_timed_out"
     assert message.additional_kwargs[SUBAGENT_ERROR_KEY] == message.content
+    assert message.additional_kwargs[SUBAGENT_TOOL_RECEIPTS_KEY] == receipts
     assert events[0]["type"] == "task_started"
     assert events[-1]["type"] == "task_timed_out"
 
@@ -1303,7 +1610,7 @@ def test_cancellation_wait_uses_subagent_polling_budget(monkeypatch):
 
 
 def test_cancellation_calls_request_cancel(monkeypatch):
-    """Verify CancelledError path calls request_cancel_background_task(task_id)."""
+    """Verify CancelledError path cancels the server-generated execution ID."""
     config = _make_subagent_config()
     events = []
     cancel_requests = []
@@ -1315,7 +1622,7 @@ def test_cancellation_calls_request_cancel(monkeypatch):
     monkeypatch.setattr(
         task_tool_module,
         "SubagentExecutor",
-        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: "execution-cancel"}),
     )
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
 
@@ -1347,7 +1654,7 @@ def test_cancellation_calls_request_cancel(monkeypatch):
             tool_call_id="tc-cancel-request",
         )
 
-    assert cancel_requests == ["tc-cancel-request"]
+    assert cancel_requests == ["execution-cancel"]
 
 
 def test_task_tool_returns_cancelled_message(monkeypatch):
@@ -1587,6 +1894,11 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     config = _make_subagent_config()
     runtime = _make_runtime()
     events = []
+    dispatched_events = []
+
+    async def fake_emit_custom_event(payload, *, writer):
+        writer(payload)
+        dispatched_events.append(payload)
 
     records = [
         {"source_run_id": "r1", "caller": "subagent:general-purpose", "input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
@@ -1598,6 +1910,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
     monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
     monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
     monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: events.append)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", fake_emit_custom_event)
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
@@ -1613,6 +1926,7 @@ def test_terminal_events_include_usage(monkeypatch, status, expected_type):
 
     terminal_events = [e for e in events if e["type"] == expected_type]
     assert len(terminal_events) == 1
+    assert dispatched_events == events
     assert terminal_events[0]["usage"] == {
         "input_tokens": 300,
         "output_tokens": 130,
@@ -1650,74 +1964,200 @@ def test_terminal_event_usage_none_when_no_records(monkeypatch):
     assert completed[0]["usage"] is None
 
 
-def test_subagent_usage_cache_is_skipped_when_config_file_is_missing(monkeypatch):
-    monkeypatch.setattr(
-        task_tool_module,
-        "get_app_config",
-        MagicMock(side_effect=FileNotFoundError("missing config")),
-    )
+@pytest.mark.asyncio
+async def test_deferred_cleanup_task_retained_and_survives_gc(monkeypatch):
+    """Verify deferred cleanup task is retained in _deferred_cleanup_tasks and completes after GC."""
+    cleaned = []
+    orig_sleep = asyncio.sleep
 
-    assert task_tool_module._token_usage_cache_enabled(None) is False
-
-
-def test_subagent_usage_cache_is_skipped_when_token_usage_is_disabled(monkeypatch):
-    config = _make_subagent_config()
-    app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=False))
-    runtime = _make_runtime(app_config=app_config)
-    records = [{"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}]
-    result = _make_result(FakeSubagentStatus.COMPLETED, result="done", token_usage_records=records)
-
-    task_tool_module._subagent_usage_cache.clear()
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config: ["general-purpose"])
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="ok"))
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", cleaned.append)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", lambda _: orig_sleep(0))
+
+    task = task_tool_module._schedule_deferred_subagent_cleanup("exec-gc", "trace-gc", 5)
+    assert task in task_tool_module._deferred_cleanup_tasks
+    weak_task = weakref.ref(task)
+    del task
+    gc.collect()
+
+    assert weak_task() is not None and weak_task() in task_tool_module._deferred_cleanup_tasks
+    for _ in range(10):
+        if cleaned:
+            break
+        await orig_sleep(0.01)
+    await orig_sleep(0.01)
+
+    assert cleaned == ["exec-gc"]
+    assert weak_task() not in task_tool_module._deferred_cleanup_tasks
+
+
+def _receipt_fixture(rid: str = "r1", tool: str = "write_file", status: str = "success") -> dict:
+    return {
+        "id": rid,
+        "tool_call_id": f"tc-{rid}",
+        "tool_name": tool,
+        "status": status,
+        "args_sha256": "a" * 16,
+        "output_sha256": "b" * 16,
+        "output_bytes": 10,
+        "created_at": "2026-08-24T00:00:00+00:00",
+    }
+
+
+def _run_completed_task_tool(monkeypatch, *, result_text: str, tool_receipts: list[dict] | None) -> ToolMessage:
+    """Drive the completed branch and return the terminal ToolMessage."""
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
-        "SubagentExecutor",
-        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result=result_text, tool_receipts=tool_receipts),
     )
-    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: result)
-    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
-    monkeypatch.setattr(task_tool_module, "_report_subagent_usage", lambda *_: None)
-    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
-    _run_task_tool(
-        runtime=runtime,
+    command = _run_task_tool(
+        runtime=_make_runtime(),
         description="test",
-        prompt="do work",
+        prompt="p",
         subagent_type="general-purpose",
-        tool_call_id="tc-disabled-cache",
+        tool_call_id="tc-verify",
     )
+    return _task_tool_message(command)
 
-    assert task_tool_module.pop_cached_subagent_usage("tc-disabled-cache") is None
+
+def test_task_tool_completed_attaches_receipts_and_verdict(monkeypatch):
+    receipts = [_receipt_fixture("r1", "write_file")]
+    message = _run_completed_task_tool(monkeypatch, result_text="saved the report [r1]", tool_receipts=receipts)
+
+    assert message.additional_kwargs["subagent_tool_receipts"] == receipts
+    verdict = message.additional_kwargs["subagent_receipt_verdict"]
+    assert verdict["citation_resolved"] is True
+    assert verdict["resolved"] == ["r1"]
 
 
-def test_subagent_usage_cache_is_cleared_when_polling_raises(monkeypatch):
-    config = _make_subagent_config()
-    app_config = SimpleNamespace(token_usage=SimpleNamespace(enabled=True))
-    runtime = _make_runtime(app_config=app_config)
+def test_task_tool_completed_flags_unknown_citation(monkeypatch):
+    receipts = [_receipt_fixture("r1", "write_file")]
+    message = _run_completed_task_tool(monkeypatch, result_text="uploaded [r9]", tool_receipts=receipts)
 
-    task_tool_module._subagent_usage_cache["tc-error"] = {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+    verdict = message.additional_kwargs["subagent_receipt_verdict"]
+    assert verdict["citation_resolved"] is False
+    assert verdict["unknown"] == ["r9"]
+
+
+def test_task_tool_completed_flags_uncited_action_claims(monkeypatch):
+    message = _run_completed_task_tool(monkeypatch, result_text="I wrote the report.", tool_receipts=[])
+
+    verdict = message.additional_kwargs["subagent_receipt_verdict"]
+    assert verdict["no_citation_claims"] is True
+    assert verdict["citation_resolved"] is False
+
+
+def test_task_tool_completed_without_receipts_produces_no_verdict(monkeypatch):
+    # receipts=None means no harvest happened (disabled or pre-stream end):
+    # skip the verdict entirely, keeping disabled deployments pre-PR2.
+    message = _run_completed_task_tool(monkeypatch, result_text="done [r1]", tool_receipts=None)
+
+    assert "subagent_receipt_verdict" not in message.additional_kwargs
+    assert "subagent_tool_receipts" not in message.additional_kwargs
+
+
+def test_task_tool_failed_carries_receipts_without_verdict(monkeypatch):
+    receipts = [_receipt_fixture("r1", "bash", status="error")]
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
     monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
-    monkeypatch.setattr(task_tool_module, "get_available_subagent_names", lambda *, app_config: ["general-purpose"])
-    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _, *, app_config: config)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
     monkeypatch.setattr(
         task_tool_module,
-        "SubagentExecutor",
-        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: task_id}),
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.FAILED, error="boom", tool_receipts=receipts),
     )
-    monkeypatch.setattr(task_tool_module, "get_background_task_result", MagicMock(side_effect=RuntimeError("poll failed")))
-    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _: None)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", MagicMock(return_value=[]))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
 
-    with pytest.raises(RuntimeError, match="poll failed"):
-        _run_task_tool(
-            runtime=runtime,
-            description="test",
-            prompt="do work",
-            subagent_type="general-purpose",
-            tool_call_id="tc-error",
-        )
+    command = _run_task_tool(
+        runtime=_make_runtime(),
+        description="test",
+        prompt="p",
+        subagent_type="general-purpose",
+        tool_call_id="tc-failed",
+    )
+    message = _task_tool_message(command)
+    assert message.additional_kwargs["subagent_tool_receipts"] == receipts
+    assert "subagent_receipt_verdict" not in message.additional_kwargs
 
-    assert task_tool_module.pop_cached_subagent_usage("tc-error") is None
+
+def _capture_executor_call(monkeypatch, **call_kwargs):
+    """Run task_tool with a dummy executor and return (executor_kwargs, prompt)."""
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            captured["prompt"] = prompt
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    kwargs = {
+        "runtime": _make_runtime(),
+        "description": "test",
+        "prompt": "do the work",
+        "subagent_type": "general-purpose",
+        "tool_call_id": "tc-criteria",
+    }
+    kwargs.update(call_kwargs)
+    _run_task_tool(**kwargs)
+    return captured["executor_kwargs"], captured["prompt"]
+
+
+def test_task_tool_forwards_acceptance_criteria_to_executor(monkeypatch):
+    """RFC #4651 PR3: criteria travel via the executor constructor; the
+    executor appends them to the subagent's task HumanMessage as untrusted
+    data at state-build time. The delegated prompt itself stays free of
+    criteria so the tool never dictates the channel."""
+    criteria = ["file:../outputs/report.md non-empty", "tests_passed:make test"]
+
+    executor_kwargs, delegated_prompt = _capture_executor_call(monkeypatch, acceptance_criteria=criteria)
+
+    assert executor_kwargs["acceptance_criteria"] == criteria
+    assert "<acceptance_criteria>" not in delegated_prompt
+
+
+def test_task_tool_forwards_no_criteria_by_default(monkeypatch):
+    executor_kwargs, delegated_prompt = _capture_executor_call(monkeypatch)
+
+    assert executor_kwargs["acceptance_criteria"] is None
+    assert "<acceptance_criteria>" not in delegated_prompt

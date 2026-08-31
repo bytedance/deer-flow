@@ -5,6 +5,17 @@ from starlette.testclient import TestClient
 
 from app.gateway.auth_middleware import AuthMiddleware, _is_public
 from app.gateway.csrf_middleware import CSRFMiddleware
+from deerflow.config.authorization_config import AuthorizationConfig
+
+
+@pytest.fixture(autouse=True)
+def _default_route_authorization_config(monkeypatch):
+    """Keep minimal middleware apps independent of a repository config.yaml."""
+    monkeypatch.setattr(
+        "app.gateway.authz._get_route_authorization_config",
+        lambda: AuthorizationConfig(),
+    )
+
 
 # ── _is_public unit tests ─────────────────────────────────────────────────
 
@@ -203,6 +214,58 @@ def test_public_auth_path_no_cookie(client):
     """Public auth endpoints (login/register) pass without cookie."""
     res = client.get("/api/v1/auth/setup-status")
     assert res.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "encoded_path",
+    [
+        "/api/v1/auth/setup-sta%0Atus",
+        "/api/v1/auth/setup-sta%0Dtus",
+        "/api/v1/auth/setup-sta%09tus",
+        "/api/v1/auth/setup-status%23private",
+        "/api/v1/auth/setup-status%3Fprivate",
+    ],
+)
+def test_url_reconstruction_cannot_turn_a_protected_route_path_public(
+    monkeypatch,
+    encoded_path,
+):
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
+    app = FastAPI()
+    app.add_middleware(AuthMiddleware)
+
+    @app.get("/api/v1/auth/setup-sta{gap}tus")
+    async def control_gap(gap: str):
+        return {"gap": gap}
+
+    @app.get("/api/v1/auth/setup-status{suffix}")
+    async def delimiter_suffix(suffix: str):
+        return {"suffix": suffix}
+
+    response = TestClient(app).get(encoded_path)
+
+    assert response.status_code == 401
+
+
+def test_auth_uses_the_same_root_path_projection_as_the_router(monkeypatch):
+    from fastapi import FastAPI
+
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
+    child = FastAPI()
+    child.add_middleware(AuthMiddleware)
+
+    @child.get("/health")
+    async def health():
+        return {"ok": True}
+
+    parent = FastAPI()
+    parent.mount("/prefix", child)
+
+    response = TestClient(parent).get("/prefix/health")
+
+    assert response.status_code == 200
 
 
 def test_protected_auth_path_no_cookie(client):

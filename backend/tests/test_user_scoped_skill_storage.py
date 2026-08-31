@@ -88,6 +88,12 @@ class TestPathRedirection:
     def test_public_skill_paths_still_use_global_root(self, user_storage: UserScopedSkillStorage, skills_root: Path):
         assert user_storage.get_skills_root_path() == skills_root
 
+    def test_managed_integration_skill_paths_use_global_root(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        assert user_storage.get_integrations_root() == base_dir / "integrations" / "skills"
+
+    def test_user_integrations_root_is_compatibility_alias(self, user_storage: UserScopedSkillStorage):
+        assert user_storage.get_user_integrations_root() == user_storage.get_integrations_root()
+
     def test_user_id_property(self, user_storage: UserScopedSkillStorage):
         assert user_storage.user_id == "test-user"
 
@@ -135,6 +141,35 @@ class TestSkillLoading:
         public_skills = [s for s in skills if s.category == SkillCategory.PUBLIC]
         assert len(public_skills) == 1
         assert public_skills[0].name == "deep-research"
+
+    def test_managed_integration_skills_are_global_but_enabled_per_user(self, base_dir: Path, skills_root: Path, config):
+        integration_dir = base_dir / "integrations" / "skills" / "lark-cli" / "lark-doc"
+        integration_dir.mkdir(parents=True)
+        (integration_dir / "SKILL.md").write_text(_skill_content("lark-doc"), encoding="utf-8")
+
+        with patch("deerflow.config.paths.get_paths", return_value=Paths(base_dir=base_dir)):
+            alice = UserScopedSkillStorage("alice", host_path=str(skills_root), app_config=config)
+            bob = UserScopedSkillStorage("bob", host_path=str(skills_root), app_config=config)
+
+        alice.set_skill_enabled_state("lark-doc", False)
+
+        alice_skill = next(skill for skill in alice.load_skills(enabled_only=False) if skill.name == "lark-doc")
+        bob_skill = next(skill for skill in bob.load_skills(enabled_only=False) if skill.name == "lark-doc")
+        assert alice_skill.category == SkillCategory.INTEGRATION
+        assert alice_skill.skill_file == integration_dir / "SKILL.md"
+        assert alice_skill.enabled is False
+        assert bob_skill.enabled is True
+
+    def test_public_skill_package_children_are_not_registered(self, user_storage: UserScopedSkillStorage, skills_root: Path):
+        public_dir = skills_root / "public" / "reviewer"
+        fixture_dir = public_dir / "evals" / "fixtures" / "injection"
+        fixture_dir.mkdir(parents=True)
+        (public_dir / "SKILL.md").write_text(_skill_content("reviewer"), encoding="utf-8")
+        (fixture_dir / "SKILL.md").write_text(_skill_content("injection-example"), encoding="utf-8")
+
+        names = {skill.name for skill in user_storage.load_skills(enabled_only=False)}
+
+        assert names == {"reviewer"}
 
     def test_custom_skills_loaded_from_user_dir(self, user_storage: UserScopedSkillStorage, base_dir: Path):
         user_storage.write_custom_skill("my-skill", "SKILL.md", _skill_content("my-skill"))
@@ -252,6 +287,100 @@ class TestHistoryIsolation:
 
 class TestPathSafety:
     """UserScopedSkillStorage inherits path-traversal guards from LocalSkillStorage."""
+
+    def test_accepts_skill_files_from_all_allowed_roots(self, user_storage: UserScopedSkillStorage, skills_root: Path, base_dir: Path):
+        skill_files = [
+            skills_root / "public" / "public-skill" / "SKILL.md",
+            base_dir / "users" / "test-user" / "skills" / "custom" / "custom-skill" / "SKILL.md",
+            base_dir / "integrations" / "skills" / "lark-cli" / "lark-doc" / "SKILL.md",
+        ]
+        for skill_file in skill_files:
+            skill_file.parent.mkdir(parents=True, exist_ok=True)
+            skill_file.write_text(_skill_content(skill_file.parent.name), encoding="utf-8")
+
+        assert [user_storage.validate_skill_file_path(skill_file) for skill_file in skill_files] == [skill_file.resolve() for skill_file in skill_files]
+
+    def test_rejects_skill_file_outside_allowed_roots(self, user_storage: UserScopedSkillStorage, base_dir: Path):
+        skill_file = base_dir / "untrusted" / "escaped-skill" / "SKILL.md"
+        skill_file.parent.mkdir(parents=True)
+        skill_file.write_text(_skill_content("escaped-skill"), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(skill_file)
+
+    def test_accepts_external_skill_directory_symlink_but_not_file_symlink(self, user_storage: UserScopedSkillStorage, tmp_path: Path):
+        external_file = tmp_path / "external-skills" / "external-skill" / "SKILL.md"
+        external_file.parent.mkdir(parents=True)
+        external_file.write_text(_skill_content("external-skill"), encoding="utf-8")
+
+        linked_dir = user_storage.get_user_custom_root() / "external-skill"
+        linked_file = linked_dir / "SKILL.md"
+        linked_dir.parent.mkdir(parents=True)
+        try:
+            linked_dir.symlink_to(external_file.parent, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        assert user_storage.validate_skill_file_path(linked_file) == external_file
+
+        file_link = user_storage.get_user_custom_root() / "file-link" / "SKILL.md"
+        file_link.parent.mkdir(parents=True)
+        try:
+            file_link.symlink_to(external_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(file_link)
+
+    def test_rejects_file_symlink_even_when_target_stays_inside_allowed_root(self, user_storage: UserScopedSkillStorage, tmp_path: Path):
+        target_file = user_storage.get_user_custom_root() / "real-skill" / "SKILL.md"
+        target_file.parent.mkdir(parents=True)
+        target_file.write_text(_skill_content("real-skill"), encoding="utf-8")
+        linked_file = user_storage.get_user_custom_root() / "alias-skill" / "SKILL.md"
+        linked_file.parent.mkdir(parents=True)
+        try:
+            linked_file.symlink_to(target_file)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(linked_file)
+
+    def test_rejects_deeper_and_non_custom_directory_symlinks(self, user_storage: UserScopedSkillStorage, skills_root: Path, tmp_path: Path):
+        external_dir = tmp_path / "external-skills" / "nested"
+        external_dir.mkdir(parents=True)
+        external_file = external_dir / "SKILL.md"
+        external_file.write_text(_skill_content("nested-skill"), encoding="utf-8")
+
+        deep_parent = user_storage.get_user_custom_root() / "outer"
+        deep_parent.mkdir(parents=True)
+        deep_link = deep_parent / "link"
+        try:
+            deep_link.symlink_to(external_dir, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        public_link = skills_root / SkillCategory.PUBLIC.value / "external-skill"
+        public_link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            public_link.symlink_to(external_dir, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink creation requires SeCreateSymbolicLinkPrivilege")
+            raise
+
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(deep_link / "SKILL.md")
+        with pytest.raises(ValueError, match="must stay within"):
+            user_storage.validate_skill_file_path(public_link / "SKILL.md")
 
     def test_rejects_invalid_skill_name(self, user_storage: UserScopedSkillStorage):
         with pytest.raises(ValueError, match="hyphen-case"):
@@ -484,11 +613,9 @@ class TestSkillLoadingRespectsGlobalDisable:
                         skills={"shared-skill": SimpleNamespace(enabled=False)},
                         is_skill_enabled=lambda name, _cat: not (name == "shared-skill"),
                     )
-                    # The function inside ``load_skills`` does a
-                    # function-local ``from deerflow.config.extensions_config
-                    # import get_extensions_config``, so patch the
-                    # extension_config module symbol.
-                    with patch("deerflow.config.extensions_config.get_extensions_config", return_value=ext_cfg):
+                    # User-scoped loading re-reads disk state so another
+                    # worker's global disable is not hidden by a stale cache.
+                    with patch("deerflow.config.extensions_config.ExtensionsConfig.from_file", return_value=ext_cfg):
                         storage = get_or_new_user_skill_storage("alice", app_config=cfg)
                         loaded = storage.load_skills(enabled_only=False)
                         shared = [s for s in loaded if s.name == "shared-skill" and s.category == SkillCategory.LEGACY]

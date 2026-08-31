@@ -32,7 +32,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24'
 
       - name: Enable Corepack
         run: corepack enable
@@ -51,6 +51,12 @@ jobs:
       - name: Run E2E tests
         working-directory: frontend
         run: pnpm exec playwright test
+        env:
+          SKIP_ENV_VALIDATION: '1'
+
+      - name: Run auth recovery E2E tests
+        working-directory: frontend
+        run: pnpm exec playwright test -c playwright.auth.config.ts
         env:
           SKIP_ENV_VALIDATION: '1'
 

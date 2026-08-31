@@ -38,7 +38,7 @@ async def test_jsonl_run_event_store_async_api_does_not_block_event_loop(tmp_pat
     thread_dir.mkdir(parents=True, exist_ok=True)
     (thread_dir / "r0.jsonl").write_text('{"seq": 1, "category": "message", "run_id": "r0"}\n', encoding="utf-8")
 
-    # writes: put + put_batch
+    # writes: put + put_batch + idempotent singleton insert
     record = await store.put(thread_id="t1", run_id="r1", event_type="message", category="message", content="hi")
     assert record["seq"] >= 2
     batch = await store.put_batch(
@@ -48,6 +48,23 @@ async def test_jsonl_run_event_store_async_api_does_not_block_event_loop(tmp_pat
         ]
     )
     assert len(batch) == 2
+    singleton, created = await store.put_if_absent(
+        thread_id="t1",
+        run_id="r1",
+        event_type="run.delivery",
+        category="outputs",
+        content={"presented": 0, "paths": [], "by_tool": {}},
+    )
+    duplicate, duplicate_created = await store.put_if_absent(
+        thread_id="t1",
+        run_id="r1",
+        event_type="run.delivery",
+        category="outputs",
+        content={"presented": 99},
+    )
+    assert created is True
+    assert duplicate_created is False
+    assert duplicate == singleton
 
     # reads: list_messages / list_events / list_messages_by_run / count_messages.
     # list_events is exercised both without and with the event_types filter so

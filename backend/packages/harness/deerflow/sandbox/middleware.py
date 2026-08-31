@@ -12,8 +12,16 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
+from deerflow.authz.sandbox_authz import (
+    authorize_sandbox_execution,
+    authorize_sandbox_execution_async,
+    safe_app_config,
+    safe_app_config_async,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
+from deerflow.sandbox.overwrite import unwrap_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +83,21 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return super().before_agent(state, runtime)
+            # Phase 3: enforce sandbox:execute authorization before acquiring
+            # (eager path). On deny, skip the eager acquisition instead of
+            # raising: an exception here is outside any tool call, so it would
+            # surface as a run-level graph error rather than the RFC §9
+            # friendly ToolMessage. Skipping defers to the lazy gate inside
+            # ``ensure_sandbox_initialized``, which denies per-tool with the
+            # friendly message on the first sandbox-touching tool call.
+            try:
+                authorize_sandbox_execution(
+                    context=runtime.context or {},
+                    app_config=safe_app_config(),
+                )
+            except SandboxAuthorizationError:
+                logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
+                return None
             sandbox_id = self._acquire_sandbox(thread_id, user_id=resolve_runtime_user_id(runtime))
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
@@ -92,6 +115,19 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             thread_id = (runtime.context or {}).get("thread_id")
             if thread_id is None:
                 return await super().abefore_agent(state, runtime)
+            # Phase 3: enforce sandbox:execute authorization before acquiring
+            # (eager path, async counterpart of the gate in before_agent). On
+            # deny, skip the eager acquisition — the lazy gate inside
+            # ``ensure_sandbox_initialized`` denies per-tool with the RFC §9
+            # friendly message on the first sandbox-touching tool call.
+            try:
+                await authorize_sandbox_execution_async(
+                    context=runtime.context or {},
+                    app_config=await safe_app_config_async(),
+                )
+            except SandboxAuthorizationError:
+                logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
+                return None
             sandbox_id = await self._acquire_sandbox_async(thread_id, user_id=resolve_runtime_user_id(runtime))
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             return {"sandbox": {"sandbox_id": sandbox_id}}
@@ -99,9 +135,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                # The wrapped value replays the parent thread's sandbox state;
+                # releasing it here would evict the parent's warm sandbox.
+                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             get_sandbox_provider().release(sandbox_id)
             return None
@@ -117,9 +158,14 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        sandbox = state.get("sandbox")
+        sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
+            if fork_restored:
+                # The wrapped value replays the parent thread's sandbox state;
+                # releasing it here would evict the parent's warm sandbox.
+                logger.info(f"Not releasing fork-restored sandbox {sandbox_id}")
+                return None
             logger.info(f"Releasing sandbox {sandbox_id}")
             await self._release_sandbox_async(sandbox_id)
             return None

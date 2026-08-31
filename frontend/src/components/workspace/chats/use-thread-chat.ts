@@ -3,6 +3,7 @@
 import { useParams, usePathname, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { SHOWCASE_ROUTE_PREFIX } from "@/core/threads/static-demo";
 import { uuid } from "@/core/utils/uuid";
 
 export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
@@ -119,7 +120,9 @@ export function useThreadChat() {
     setIsNewThreadState(nextIsNewThread);
   }, []);
 
-  const isMock = searchParams.get("mock") === "true";
+  const isMock =
+    actualPathname.startsWith(`${SHOWCASE_ROUTE_PREFIX}/`) ||
+    searchParams.get("mock") === "true";
   return {
     threadId: isNewPath ? (newThreadIdRef.current ?? threadId) : threadId,
     setThreadId,

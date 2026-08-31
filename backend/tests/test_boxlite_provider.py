@@ -7,6 +7,7 @@ which need a live box.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import sys
 import threading
@@ -17,6 +18,12 @@ import pytest
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.trace_context import get_current_trace_id, request_trace_context
+
+_LEGACY_COLLIDING_IDENTITIES = (
+    ("user-9721", "thread-9721"),
+    ("user-94361", "thread-94361"),
+)
 
 # ── Fake BoxLite SDK ──────────────────────────────────────────────────
 
@@ -159,6 +166,39 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+
+    def _fake_exec(*argv: str):
+        calls.append(argv)
+        return types.SimpleNamespace(
+            exit_code=0,
+            stdout="line 1\nline 2\nline 3\nline 4\nline 5",
+            stderr="",
+        )
+
+    monkeypatch.setattr(box, "_exec", _fake_exec)
+
+    assert box.read_file("/mnt/user-data/workspace/range.txt") == "line 1\nline 2\nline 3\nline 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=2, end_line=4) == "line 2\nline 3\nline 4"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", start_line=4) == "line 4\nline 5"
+    assert box.read_file("/mnt/user-data/workspace/range.txt", end_line=2) == "line 1\nline 2"
+    assert all(call == ("cat", "--", "/mnt/user-data/workspace/range.txt") for call in calls)
+
+
+def test_grep_always_prints_filename_for_single_file_paths() -> None:
+    fake = _FakeBox(name="box-id")
+    box = BoxliteBox("box-id", box=fake, run=_fake_run)
+
+    box.grep("/mnt/user-data/uploads/report.md", "needle")
+
+    grep_commands = [argv[0][2] for argv in fake._exec_history if argv[0][:2] == ("sh", "-lc") and argv[0][2].startswith("grep ")]
+    assert grep_commands
+    assert "-H" in grep_commands[-1].split()
+
+
 def test_execute_command_invalidates_box_on_terminal_transport_error() -> None:
     invalidated: list[tuple[str, str]] = []
 
@@ -262,7 +302,7 @@ def test_sandbox_id_deterministic(monkeypatch):
     id1 = provider._sandbox_id("thread-1", "user-a")
     id2 = provider._sandbox_id("thread-1", "user-a")
     assert id1 == id2
-    assert len(id1) == 8
+    assert len(id1) == 16
 
 
 def test_sandbox_id_different_users(monkeypatch):
@@ -437,6 +477,48 @@ def test_acquire_reclaims_from_warm_pool(monkeypatch):
     assert sid2 not in provider._warm_pool
 
 
+@pytest.mark.asyncio
+async def test_acquire_async_propagates_request_trace_context(monkeypatch):
+    """acquire_async must carry request ContextVars into the worker thread.
+
+    Regression test (#5089): the dedicated-executor bridge replaced the
+    inherited ``to_thread`` acquire (which copies contextvars). Without an
+    explicit ``copy_context`` the worker thread reads the trace id bound by
+    ``request_trace_context()`` as unset and logs ``trace_id=-``.
+    """
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    seen: list[str | None] = []
+    original = BoxliteProvider._acquire_scope_locked
+
+    def spy(self, key, sandbox_id):
+        # Runs inside the executor worker thread, under the copied context.
+        seen.append(get_current_trace_id())
+        return original(self, key, sandbox_id)
+
+    monkeypatch.setattr(BoxliteProvider, "_acquire_scope_locked", spy)
+
+    try:
+        with request_trace_context("trace-boxlite-5089"):
+            sid = await provider.acquire_async("thread-1", user_id="u1")
+        assert sid
+        assert seen == ["trace-boxlite-5089"]
+    finally:
+        # _fake_run uses asyncio.run, which cannot run inside this test's event
+        # loop thread; shut down on a worker thread so box close() completes.
+        await asyncio.to_thread(provider.shutdown)
+
+
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
     """A configured skip window can reclaim recently released boxes without a ping."""
     monkeypatch.setattr(
@@ -460,7 +542,7 @@ def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
 
     monkeypatch.setattr(box, "execute_command", _fail_if_called)
 
-    reclaimed = provider._reclaim_warm_pool(sid)
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
     assert reclaimed == sid
     assert sid in provider._boxes
     assert sid not in provider._warm_pool
@@ -494,7 +576,7 @@ def test_recent_reclaim_validates_by_default(monkeypatch):
 
     monkeypatch.setattr(box, "execute_command", _record_health_check)
 
-    reclaimed = provider._reclaim_warm_pool(sid)
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
     assert reclaimed == sid
     assert calls == 1
     assert sid in provider._boxes
@@ -526,7 +608,7 @@ def test_default_recent_reclaim_drops_dead_warm_box(monkeypatch):
 
     monkeypatch.setattr(box, "execute_command", _dead_health_check)
 
-    reclaimed = provider._reclaim_warm_pool(sid)
+    reclaimed = provider._reclaim_warm_pool(sid, ("u1", "thread-1"))
     assert reclaimed is None
     assert sid not in provider._boxes
     assert sid not in provider._warm_pool
@@ -592,7 +674,10 @@ def test_adopted_warm_pool_box_still_health_checks(monkeypatch):
 
     monkeypatch.setattr(adopted, "execute_command", _record_health_check)
 
-    reclaimed = provider._reclaim_warm_pool("adopted")
+    reclaimed = provider._reclaim_warm_pool(
+        "adopted",
+        ("some-user", "some-thread"),
+    )
     assert reclaimed == "adopted"
     assert calls == 1
     assert "adopted" in provider._boxes
@@ -831,7 +916,9 @@ def test_reset_parks_running_resources_for_later_cleanup(monkeypatch):
     assert provider._warm_pool[sid_active][0] is active_box
     assert provider._warm_pool[sid_warm][0] is warm_box
     assert provider._thread_boxes == {}
-    assert provider._acquire_locks == {}
+    with pytest.raises(RuntimeError, match="closed"):
+        with provider._acquire_serializer.hold("k"):
+            pass
     assert not active_box._closed
     assert not warm_box._closed
     assert not provider._shutdown_called
@@ -1044,3 +1131,161 @@ def test_shutdown_stops_idle_reaper_and_destroys_all_boxes(monkeypatch):
     assert len(provider._boxes) == 0
     assert len(provider._warm_pool) == 0
     assert len(provider._thread_boxes) == 0
+
+
+def test_wider_id_separates_known_legacy_collision():
+    identity_a, identity_b = _LEGACY_COLLIDING_IDENTITIES
+    user_a, thread_a = identity_a
+    user_b, thread_b = identity_b
+
+    old_a = hashlib.sha256(f"{user_a}:{thread_a}".encode()).hexdigest()[:8]
+    old_b = hashlib.sha256(f"{user_b}:{thread_b}".encode()).hexdigest()[:8]
+
+    assert old_a == old_b
+    assert BoxliteProvider._sandbox_id(thread_a, user_a) != BoxliteProvider._sandbox_id(
+        thread_b,
+        user_b,
+    )
+
+
+def test_forced_collision_never_overwrites_active_tenant(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: "deadbeefdeadbeef"),
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    sandbox_id = provider.acquire("thread-a", user_id="user-a")
+    box_a = provider.get(sandbox_id)
+    provider.release(sandbox_id)
+
+    assert box_a is not None
+    assert sandbox_id in provider._warm_pool
+
+    with pytest.raises(RuntimeError, match="Sandbox ID collision"):
+        provider.acquire("thread-b", user_id="user-b")
+
+    assert provider._warm_pool[sandbox_id][0] is box_a
+    assert not box_a.is_closed
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert provider.get(sandbox_id) is box_a
+    provider.shutdown()
+
+
+def test_late_same_tenant_collision_reuses_active_box(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    sandbox_id = "deadbeefdeadbeef"
+    key = ("user-a", "thread-a")
+    active = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+    duplicate = BoxliteBox(
+        sandbox_id,
+        _FakeBox(name=f"deer-flow-boxlite-{sandbox_id}"),
+        _fake_run,
+        default_env={},
+    )
+
+    monkeypatch.setattr(
+        BoxliteProvider,
+        "_sandbox_id",
+        staticmethod(lambda thread_id, user_id: sandbox_id),
+    )
+
+    def _create_box_with_late_registration(_sandbox_id):
+        with provider._lock:
+            provider._boxes[sandbox_id] = active
+            provider._active_box_identity[sandbox_id] = key
+        return duplicate
+
+    monkeypatch.setattr(provider, "_create_box", _create_box_with_late_registration)
+
+    assert provider.acquire("thread-a", user_id="user-a") == sandbox_id
+    assert duplicate.is_closed
+    assert provider.get(sandbox_id) is active
+    assert provider._thread_boxes[key] == sandbox_id
+    provider.shutdown()
+
+
+def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+
+    provider = BoxliteProvider()
+    stale = BoxliteBox(
+        "shared-id",
+        _FakeBox(name="deer-flow-boxlite-shared-id"),
+        _fake_run,
+        default_env={},
+    )
+    replacement = BoxliteBox(
+        "shared-id",
+        _FakeBox(name="deer-flow-boxlite-shared-id"),
+        _fake_run,
+        default_env={},
+    )
+    provider._warm_pool["shared-id"] = (stale, time.time())
+    provider._warm_pool_identity["shared-id"] = ("user-a", "thread-a")
+
+    def _swap_during_health_check(*args, **kwargs):
+        with provider._lock:
+            provider._warm_pool["shared-id"] = (replacement, time.time())
+            provider._warm_pool_identity["shared-id"] = (
+                "user-b",
+                "thread-b",
+            )
+        return "not healthy"
+
+    monkeypatch.setattr(stale, "execute_command", _swap_during_health_check)
+
+    with pytest.raises(RuntimeError, match="Sandbox ID collision"):
+        provider._reclaim_warm_pool(
+            "shared-id",
+            ("user-a", "thread-a"),
+        )
+    assert provider._warm_pool["shared-id"][0] is replacement
+    assert provider._warm_pool_identity["shared-id"] == (
+        "user-b",
+        "thread-b",
+    )
+    assert not replacement.is_closed
+    provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+def test_sandbox_id_none_user_quirk_pinned():
+    """BoxLite passes user_id through raw; None renders as the literal "None".
+
+    Quirk pinned per RFC #4741 §2.2 (its _thread_key uses "" instead, so the
+    two disagree). NOT fixed here — unifying the resolution is a separate
+    behavior-changing decision with its own follow-up issue.
+    """
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")

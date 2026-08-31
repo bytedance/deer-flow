@@ -21,17 +21,34 @@ Launch modes:
 |---|---|
 | `deerflow` | Launch the TUI when stdin/stdout are TTYs |
 | `deerflow --tui` | Force the TUI (clear diagnostic if `textual` is missing) |
+| `deerflow --tui-transparent` | Use the terminal's default background when launching the TUI |
 | `deerflow --cli` | Force headless/classic mode for one invocation |
 | `deerflow chat` | Same TUI conversation surface |
 | `deerflow --continue` | Resume the most recent thread |
 | `deerflow --resume THREAD` | Resume a thread by id |
 | `deerflow --print "question"` | Headless one-shot answer to stdout |
 | `deerflow --json "question"` | Headless newline-delimited `StreamEvent`s |
+| `deerflow --recursion-limit 250 --print "question"` | Set the headless agent-loop super-step limit |
 | `echo "q" \| deerflow --print` | Read the message from stdin |
 | `DEER_FLOW_TUI=1 deerflow` | Force the TUI via environment |
+| `DEER_FLOW_TUI_TRANSPARENT=1 deerflow` | Persist terminal-background rendering via environment |
 
 If no TTY is available and no headless flag is given, `deerflow` prints guidance
 instead of hanging.
+
+Transparent rendering is opt-in; the solid DeerFlow palette remains the default.
+The transparent mode uses Textual's `ansi_default` background for the main
+screen, header, transcript, status, palette, composer, and modal surfaces while
+keeping truecolor foregrounds and selection highlights. Combine
+`--tui-transparent` with `--tui` when the UI also needs to be forced without a
+detected TTY.
+
+Headless runs use a recursion limit of `100` by default. Pass a positive
+`--recursion-limit` when a longer agent loop is expected. This is a LangGraph
+super-step budget, so it can include model and tool-execution steps rather than
+mapping one-to-one to conversational turns. The `max_recursion_limit` setting
+is a Gateway safety ceiling for client-supplied values; it is not the default
+for trusted embedded CLI runs.
 
 ## Surface
 
@@ -53,17 +70,24 @@ instead of hanging.
 | `Enter` | Send message / accept palette selection |
 | `/` | Open the slash-command palette |
 | `↑` / `↓` | Palette navigation, or input history when the palette is closed |
+| `PageUp` / `PageDown` | Scroll the transcript without moving focus from the composer |
 | `Tab` | Complete the highlighted command (adds a trailing space) |
 | `Esc` | Close the palette / overlay |
 | `Ctrl+C` | Interrupt the active run, or quit when idle |
 | `Ctrl+L` | Redraw · `Ctrl+U` clear composer |
 
+Transcript updates follow new output while the view is at the bottom. After you
+scroll upward, streaming refreshes preserve the reading position until you
+return to the bottom with `PageDown`.
+
 ### Slash commands
 
-`/help` `/new` `/goal` `/threads` (`/switch`) `/model` `/skills` `/tools`
+`/help` `/new` `/clear` `/goal` `/threads` (`/switch`) `/model` `/skills` `/tools`
 `/mcp` `/memory` `/uploads` `/usage` `/config` `/quit`, plus
 `/<skill-name> task` to activate any enabled skill for the current turn (same
 semantics as elsewhere in DeerFlow). `/model` and `/threads` open modal pickers.
+
+`/clear` removes the current transcript rows from the terminal display only; it keeps the active thread and persisted conversation intact. During an active run, `/new` and `/clear` ask you to wait for the run to finish instead of resetting in-flight display state.
 Use `/goal <condition>` to set the active thread goal, `/goal` to show it, and
 `/goal clear` to clear it.
 
