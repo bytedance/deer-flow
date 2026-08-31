@@ -185,11 +185,20 @@ class BuzzSeenEventStore:
             self._flush_loop = loop
             self._flush_handle = loop.call_later(FLUSH_DELAY_SECONDS, self._flush_scheduled)
 
+    def _flush_task_on_current_loop(self) -> asyncio.Task[bool] | None:
+        """Return the pending flush only when it belongs to the running loop."""
+        pending = self._flush_task
+        if pending is not None and pending.get_loop() is not asyncio.get_running_loop():
+            self._flush_task = None
+            return None
+        return pending
+
     def _flush_scheduled(self) -> None:
         self._flush_handle = None
         if not self._dirty:
             return
-        if self._flush_task is not None and not self._flush_task.done():
+        pending = self._flush_task_on_current_loop()
+        if pending is not None and not pending.done():
             return
         self._flush_task = asyncio.create_task(self._flush_once())
         self._flush_task.add_done_callback(self._flush_finished)
@@ -218,16 +227,12 @@ class BuzzSeenEventStore:
             self._flush_handle.cancel()
             self._flush_handle = None
 
-        pending = self._flush_task
-        current_loop = asyncio.get_running_loop()
+        pending = self._flush_task_on_current_loop()
         if pending is not None and pending is not asyncio.current_task():
-            if pending.get_loop() is current_loop and not pending.cancelled():
+            if not pending.cancelled():
                 await pending
             elif self._flush_task is pending:
-                # Tasks are loop-pinned just like TimerHandles. A cancelled
-                # task retained from a closed test/tooling loop cannot be
-                # awaited here; discard it and persist the dirty snapshot on
-                # the current loop instead.
+                # A cancelled task cannot make the dirty snapshot durable.
                 self._flush_task = None
 
         # One final snapshot keeps shutdown bounded even if an abandoned relay

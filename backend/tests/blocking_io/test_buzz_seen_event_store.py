@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from app.channels import buzz_seen_events
 from app.channels.buzz_seen_events import BuzzSeenEventStore
 
 pytestmark = pytest.mark.asyncio
@@ -116,3 +117,38 @@ async def test_final_flush_ignores_a_task_from_a_closed_event_loop(tmp_path: Pat
 
     restarted = BuzzSeenEventStore(path)
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
+
+
+async def test_scheduled_flush_replaces_a_pending_task_from_a_closed_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale task must not disable normal coalesced persistence on a new loop."""
+    path = tmp_path / "buzz-seen-events.json"
+    store = BuzzSeenEventStore(path)
+
+    def pending_task_from_closed_loop() -> asyncio.Task:
+        loop = asyncio.new_event_loop()
+
+        async def remain_pending() -> None:
+            await asyncio.sleep(60)
+
+        task = loop.create_task(remain_pending())
+        loop.run_until_complete(asyncio.sleep(0))
+        task._log_destroy_pending = False
+        loop.close()
+        return task
+
+    stale_task = await asyncio.to_thread(pending_task_from_closed_loop)
+    store._flush_task = stale_task
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0)
+
+    try:
+        await store.arecord(_CHANNEL_ID, "event-1")
+        deadline = asyncio.get_running_loop().time() + 1
+        while asyncio.get_running_loop().time() < deadline:
+            if await BuzzSeenEventStore(path).aseen(_CHANNEL_ID, "event-1"):
+                break
+            await asyncio.sleep(0.01)
+
+        assert await BuzzSeenEventStore(path).aseen(_CHANNEL_ID, "event-1")
+    finally:
+        if store._flush_task is stale_task:
+            store._flush_task = None
