@@ -289,6 +289,11 @@ class BuzzChannel(Channel):
         self._session_started_at: int | None = None  # wall clock at which the CURRENT socket opened; anchors the live membership filter
         self._transport: Any = None
         self._task: asyncio.Task | None = None
+        # Transport admission and cleanup completion are separate lifecycle
+        # states: Gateway may cancel stop() after ``_running`` is cleared, and
+        # ChannelService retains this instance specifically so cleanup can be
+        # retried.
+        self._stop_complete = True
         self._publish = self.bus.publish_inbound  # test seam (discord.py idiom)
 
     @property
@@ -308,6 +313,7 @@ class BuzzChannel(Channel):
             # message looks exactly like a broken relay to the operator. Say so
             # once, loudly, at the only point where it is actionable.
             logger.warning("[buzz] channels.buzz.allowed_users is empty: EVERY inbound chat message will be dropped (Buzz denies by default). Add member pubkeys (hex or npub) to enable the channel.")
+        self._stop_complete = False
         self.bus.subscribe_outbound(self._on_outbound)
         self._spawn_connection()
         self._running = True
@@ -343,9 +349,15 @@ class BuzzChannel(Channel):
         still subscribed to anything -- from a previous process lifetime. The
         per-channel replay cursors (``_seen_created_at``) deliberately survive, so
         a restart resumes where it left off instead of replaying every channel.
+
+        ``_running`` closes transport admission at the start of teardown, while
+        ``_stop_complete`` is set only after the final seen-event flush. Keeping
+        those states separate lets ChannelService retry this same instance when
+        its outer shutdown timeout cancels ``stop()`` mid-cleanup.
         """
-        if not self._running:
+        if not self._running and self._stop_complete:
             return
+        self._stop_complete = False
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         if self._task is not None:
@@ -381,6 +393,7 @@ class BuzzChannel(Channel):
         # Seen-id persistence is coalesced (FLUSH_DELAY_SECONDS); a clean stop
         # must not lose records still inside that window to a replay on restart.
         await self._seen_events.aflush()
+        self._stop_complete = True
         logger.info("[buzz] channel stopped")
 
     # -- subscriptions ------------------------------------------------------

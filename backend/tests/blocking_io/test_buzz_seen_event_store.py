@@ -47,7 +47,7 @@ async def test_loaded_store_does_not_dispatch_hot_path_lookups_to_a_thread(tmp_p
     assert await store.aseen(_CHANNEL_ID, "event-1")
 
 
-async def test_event_recorded_during_a_write_survives_the_follow_up_flush(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_event_recorded_during_a_final_write_remains_retryable(tmp_path: Path) -> None:
     """An in-flight snapshot must not mark a newer generation as clean."""
     path = tmp_path / "buzz-seen-events.json"
     store = BuzzSeenEventStore(path)
@@ -65,14 +65,17 @@ async def test_event_recorded_during_a_write_survives_the_follow_up_flush(tmp_pa
 
     store._write_snapshot = pause_first_write
     await store.arecord(_CHANNEL_ID, "event-1")
-    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.01)
     flush = asyncio.create_task(store.aflush())
 
     assert await asyncio.to_thread(write_started.wait, 2)
     await store.arecord(_CHANNEL_ID, "event-2")
     release_write.set()
     await flush
-    await asyncio.sleep(0.05)
+    assert await store.aseen(_CHANNEL_ID, "event-2")
+
+    # The final flush deliberately cancels its trailing timer, but the newer
+    # generation stays dirty so a retried cleanup can make it durable.
+    await store.aflush()
 
     restarted = BuzzSeenEventStore(path)
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
@@ -104,9 +107,10 @@ async def test_final_flush_is_bounded_while_records_keep_arriving(tmp_path: Path
     await store.arecord(_CHANNEL_ID, "event-0")
     assert await asyncio.to_thread(first_write_started.wait, 2)
 
-    # Keep later timers beyond the test window: this test measures only the
-    # existing in-flight write plus aflush()'s one final snapshot.
-    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 60)
+    # Leave enough time to finish the bounded flush before a timer armed by a
+    # late record can fire. Once aflush() returns, no third write may remain
+    # scheduled for a store whose owning channel has stopped.
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.05)
     final_flush = asyncio.create_task(store.aflush())
     await store.arecord(_CHANNEL_ID, "late-1")
     release_first_write.set()
@@ -115,6 +119,7 @@ async def test_final_flush_is_bounded_while_records_keep_arriving(tmp_path: Path
     await store.arecord(_CHANNEL_ID, "late-2")
     release_second_write.set()
     await final_flush
+    await asyncio.sleep(0.1)
 
     assert len(snapshots) == 2
     assert await store.aseen(_CHANNEL_ID, "late-2")
@@ -169,6 +174,45 @@ async def test_final_flush_recovers_when_an_in_flight_flush_task_fails(tmp_path:
 
     restarted = BuzzSeenEventStore(path)
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
+
+
+async def test_cancelled_final_flush_does_not_rearm_timer_from_existing_write(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A retained scheduled write must not create new work after stop."""
+    path = tmp_path / "buzz-seen-events.json"
+    store = BuzzSeenEventStore(path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    snapshots: list[dict[str, list[str]]] = []
+    write_snapshot = store._write_snapshot
+
+    def pause_first_write(payload: dict[str, list[str]]) -> bool:
+        snapshots.append(payload)
+        if len(snapshots) == 1:
+            write_started.set()
+            assert release_write.wait(timeout=2)
+        return write_snapshot(payload)
+
+    store._write_snapshot = pause_first_write
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.01)
+    await store.arecord(_CHANNEL_ID, "event-1")
+    assert await asyncio.to_thread(write_started.wait, 2)
+
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.05)
+    await store.arecord(_CHANNEL_ID, "event-2")
+    final_flush = asyncio.create_task(store.aflush())
+    await asyncio.sleep(0)
+    final_flush.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await final_flush
+
+    release_write.set()
+    await asyncio.sleep(0.1)
+    assert len(snapshots) == 1
+    assert await store.aseen(_CHANNEL_ID, "event-2")
+
+    await store.aflush()
+    restarted = BuzzSeenEventStore(path)
+    assert await restarted.aseen(_CHANNEL_ID, "event-2")
 
 
 async def test_scheduled_flush_replaces_a_pending_task_from_a_closed_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -38,8 +38,11 @@ file load, and ``BuzzChannel.stop()`` awaits ``aflush()`` so clean shutdown is
 durable before it returns. That final flush is bounded: it waits for an existing
 write and attempts at most one newer snapshot, leaving any still-moving
 generation dirty for fail-open replay rather than hanging shutdown. The
-synchronous ``seen()`` / ``record()`` / ``flush()`` methods remain for tests and
-tooling that run outside an event loop.
+in-flight worker write is shielded and retained if Gateway cancellation
+interrupts shutdown, so a retried stop awaits it instead of racing it with a
+second snapshot; every final attempt also removes its coalescing timer before
+returning. The synchronous ``seen()`` / ``record()`` / ``flush()`` methods
+remain for tests and tooling that run outside an event loop.
 """
 
 from __future__ import annotations
@@ -221,37 +224,76 @@ class BuzzSeenEventStore:
         if saved and self._dirty:
             self._request_flush()
 
+    def _final_flush_finished(self, task: asyncio.Task[bool]) -> None:
+        """Retire a stop-owned write without scheduling work after stop."""
+        if self._flush_task is task:
+            self._flush_task = None
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.warning("[buzz] unexpected final seen-event flush failure", exc_info=True)
+
     async def aflush(self) -> None:
         """Make one bounded final persist without blocking the event loop."""
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
 
-        pending = self._flush_task_on_current_loop()
-        if pending is not None and pending is not asyncio.current_task():
-            if not pending.cancelled():
+        try:
+            pending = self._flush_task_on_current_loop()
+            if pending is not None and pending is not asyncio.current_task():
+                if not pending.cancelled():
+                    # This scheduled write now belongs to channel teardown.
+                    # Its normal callback would arm another timer when the
+                    # snapshot is stale, possibly after a cancelled aflush()
+                    # has already run its timer cleanup.
+                    pending.remove_done_callback(self._flush_finished)
+                    pending.remove_done_callback(self._final_flush_finished)
+                    pending.add_done_callback(self._final_flush_finished)
+                    try:
+                        # Cancelling channel stop must not cancel the worker
+                        # write: the thread keeps running regardless, and a
+                        # retried stop must await that same write rather than
+                        # start a concurrent stale snapshot.
+                        await asyncio.shield(pending)
+                    except asyncio.CancelledError:
+                        current = asyncio.current_task()
+                        if current is not None and current.cancelling():
+                            raise
+                        logger.warning("[buzz] in-flight seen-event flush was cancelled during final persist; retrying")
+                    except Exception:
+                        logger.warning("[buzz] in-flight seen-event flush failed during final persist; retrying", exc_info=True)
+                if self._flush_task is pending and pending.done():
+                    self._flush_task = None
+
+            # One final snapshot keeps shutdown bounded even if an abandoned
+            # relay task is still recording. Track and shield it so a Gateway
+            # timeout leaves one retryable write instead of an untracked worker
+            # thread that can race the next stop attempt.
+            if self._dirty:
+                final = asyncio.create_task(self._flush_once())
+                self._flush_task = final
+                final.add_done_callback(self._final_flush_finished)
                 try:
-                    await pending
+                    await asyncio.shield(final)
                 except asyncio.CancelledError:
                     current = asyncio.current_task()
                     if current is not None and current.cancelling():
                         raise
-                    logger.warning("[buzz] in-flight seen-event flush was cancelled during final persist; retrying")
+                    logger.warning("[buzz] final seen-event flush was cancelled; leaving store dirty")
                 except Exception:
-                    logger.warning("[buzz] in-flight seen-event flush failed during final persist; retrying", exc_info=True)
-            if self._flush_task is pending and pending.done():
-                self._flush_task = None
-
-        # One final snapshot keeps shutdown bounded even if an abandoned relay
-        # task is still recording. If that snapshot becomes stale, ``_dirty``
-        # deliberately remains set: the documented fail-open cost is replay on
-        # restart, never an unbounded Gateway shutdown.
-        if self._dirty:
-            await self._flush_once()
-
-        if self._flush_handle is not None and not self._dirty:
-            self._flush_handle.cancel()
-            self._flush_handle = None
+                    logger.warning("[buzz] final seen-event flush failed; leaving store dirty", exc_info=True)
+                if self._flush_task is final and final.done():
+                    self._flush_task = None
+        finally:
+            # ``aflush`` is the channel-stop boundary: never leave a timer
+            # owned by a stopped channel. A record that raced the final
+            # snapshot remains dirty so a retried stop can persist it.
+            if self._flush_handle is not None:
+                self._flush_handle.cancel()
+                self._flush_handle = None
 
     def flush(self) -> None:
         """Persist pending records now (no-op when nothing is dirty).

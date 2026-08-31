@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
 from pathlib import Path
 
 import pytest
 
-from app.channels import buzz_nostr
+from app.channels import buzz_nostr, buzz_seen_events
 from app.channels.buzz import BuzzChannel
 from app.channels.buzz_seen_events import BuzzSeenEventStore
 from app.channels.message_bus import MessageBus
@@ -37,14 +39,14 @@ def _event() -> dict:
     }
 
 
-def _channel(path: Path) -> tuple[BuzzChannel, list]:
+def _channel(path: Path, *, seen_events: BuzzSeenEventStore | None = None) -> tuple[BuzzChannel, list]:
     channel = BuzzChannel(
         bus=MessageBus(),
         config={
             "relay_url": "wss://buzz.example.com",
             "private_key": "unused-by-this-test",
             "allowed_users": [_OWNER_PUBLIC],
-            "seen_event_store": BuzzSeenEventStore(path),
+            "seen_event_store": seen_events or BuzzSeenEventStore(path),
         },
     )
     channel._keys = buzz_nostr.NostrKeys(secret=b"", pubkey_hex=_BOT_PUBLIC)
@@ -75,3 +77,45 @@ async def test_channel_stop_persists_replay_guard_without_blocking(tmp_path: Pat
     await restarted.handle_relay_frame(event_frame)
 
     assert restarted_messages == []
+
+
+async def test_channel_stop_retries_seen_event_flush_after_cancellation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Gateway timeout must leave seen-event cleanup retryable."""
+    path = tmp_path / "buzz-seen-events.json"
+    seen_events = BuzzSeenEventStore(path)
+    channel, _ = _channel(path, seen_events=seen_events)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    retry_write_started = threading.Event()
+    write_snapshot = seen_events._write_snapshot
+    write_count = 0
+
+    def fail_cancelled_write(payload: dict[str, list[str]]) -> bool:
+        nonlocal write_count
+        write_count += 1
+        if write_count == 1:
+            write_started.set()
+            assert release_write.wait(timeout=2)
+            return False
+        retry_write_started.set()
+        return write_snapshot(payload)
+
+    seen_events._write_snapshot = fail_cancelled_write
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 60)
+    await seen_events.arecord(_CHANNEL_ID, "event-1")
+    channel._running = True
+    channel.bus.subscribe_outbound(channel._on_outbound)
+
+    first_stop = asyncio.create_task(channel.stop())
+    assert await asyncio.to_thread(write_started.wait, 2)
+    first_stop.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first_stop
+
+    retry_stop = asyncio.create_task(channel.stop())
+    assert not await asyncio.to_thread(retry_write_started.wait, 0.05)
+    release_write.set()
+    await retry_stop
+
+    restarted = BuzzSeenEventStore(path)
+    assert await restarted.aseen(_CHANNEL_ID, "event-1")
