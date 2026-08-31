@@ -11,9 +11,11 @@
 #   --daemon    Run all services in background (nohup), exit after startup
 #
 # Actions:
-#   --skip-install  Skip dependency installation (faster restart)
-#   --stop      Stop all running services and exit
-#   --restart   Stop all services, then start with the given mode flags
+#   --skip-install        Skip dependency installation (faster restart)
+#   --skip-frontend-build With --prod, reuse the existing .next build via `next start`
+#                         instead of `next build` (opt-in; fails if no build exists)
+#   --stop                Stop all running services and exit
+#   --restart             Stop all services, then start with the given mode flags
 #
 # Examples:
 #   ./scripts/serve.sh --dev                 # Gateway dev, hot reload
@@ -53,6 +55,7 @@ _pick_python() {
 DEV_MODE=true
 DAEMON_MODE=false
 SKIP_INSTALL=false
+SKIP_FRONTEND_BUILD=false
 ACTION="start"   # start | stop | restart
 
 for arg in "$@"; do
@@ -61,11 +64,12 @@ for arg in "$@"; do
         --prod)    DEV_MODE=false ;;
         --daemon)  DAEMON_MODE=true ;;
         --skip-install) SKIP_INSTALL=true ;;
+        --skip-frontend-build) SKIP_FRONTEND_BUILD=true ;;
         --stop)    ACTION="stop" ;;
         --restart) ACTION="restart" ;;
         *)
             echo "Unknown argument: $arg"
-            echo "Usage: $0 [--dev|--prod] [--daemon] [--skip-install] [--stop|--restart]"
+            echo "Usage: $0 [--dev|--prod] [--daemon] [--skip-install] [--skip-frontend-build] [--stop|--restart]"
             exit 1
             ;;
     esac
@@ -264,9 +268,19 @@ stop_all() {
     _kill_repo_port 8001
     _kill_repo_port 3000
     _kill_repo_port 2026
-    ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
+    bash ./scripts/cleanup-containers.sh deer-flow-sandbox 2>/dev/null || true
     echo "✓ All services stopped"
 }
+
+# Validate the reusable frontend build before any stop_all runs, so start and
+# restart never tear down a healthy stack only to fail here. --stop is exempt.
+if [ "$ACTION" != "stop" ] && ! $DEV_MODE && $SKIP_FRONTEND_BUILD; then
+    if [ ! -f "$REPO_ROOT/frontend/.next/BUILD_ID" ]; then
+        echo "✗ --skip-frontend-build requires an existing frontend build."
+        echo "  Run 'make start' once (full build), or: cd frontend && pnpm run build"
+        exit 1
+    fi
+fi
 
 # ── Action routing ───────────────────────────────────────────────────────────
 
@@ -305,6 +319,12 @@ export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
 # Frontend command
 if $DEV_MODE; then
     FRONTEND_CMD='env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
+    if $SKIP_FRONTEND_BUILD; then
+        echo "  Note: --skip-frontend-build is ignored in dev mode (next dev does not build)."
+    fi
+elif $SKIP_FRONTEND_BUILD; then
+    # The BUILD_ID preflight above already guarantees a reusable build exists.
+    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run start"
 else
     FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
 fi
@@ -357,7 +377,7 @@ if ! { \
     exit 1
 fi
 
-"$REPO_ROOT/scripts/config-upgrade.sh"
+bash "$REPO_ROOT/scripts/config-upgrade.sh"
 
 # ── Install dependencies ────────────────────────────────────────────────────
 
@@ -405,6 +425,9 @@ echo "  Starting DeerFlow"
 echo "=========================================="
 echo ""
 echo "  Mode: $MODE_LABEL"
+if ! $DEV_MODE && $SKIP_FRONTEND_BUILD; then
+    echo "  (frontend: reusing existing build)"
+fi
 echo ""
 echo "  Services:"
 echo "    Gateway     → localhost:8001  (REST API + agent runtime)"
@@ -448,7 +471,7 @@ run_service() {
         sh -c "$cmd" &
     fi
 
-    ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
+    bash ./scripts/wait-for-port.sh "$port" "$timeout" "$name" || {
         local logfile="logs/$(echo "$name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-').log"
         echo "✗ $name failed to start."
         [ -f "$logfile" ] && tail -20 "$logfile"
