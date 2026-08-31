@@ -31,12 +31,14 @@ import { useArtifacts } from "./context";
 
 export function ArtifactFileList({
   archiveFileCount,
+  archiveDownloadsEnabled = true,
   className,
   files,
   runId,
   threadId,
 }: {
   archiveFileCount?: number;
+  archiveDownloadsEnabled?: boolean;
   className?: string;
   files: string[];
   runId?: string;
@@ -121,6 +123,7 @@ export function ArtifactFileList({
   }, [downloadingArchive, runId, t, threadId]);
 
   const canDownloadArchive =
+    archiveDownloadsEnabled &&
     runId !== undefined &&
     archiveCount > 1 &&
     archiveCount <= MAX_ARTIFACT_ARCHIVE_FILES &&

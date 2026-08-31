@@ -279,6 +279,7 @@ function LoadMoreHistoryIndicator({
 }
 
 export function MessageList({
+  archiveDownloadsEnabled = true,
   className,
   testId,
   threadId,
@@ -301,6 +302,7 @@ export function MessageList({
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
+  archiveDownloadsEnabled?: boolean;
   className?: string;
   testId?: string;
   threadId: string;
@@ -1297,6 +1299,9 @@ export function MessageList({
                     )}
                     <ArtifactFileList
                       archiveFileCount={archiveDisplay?.fileCount}
+                      archiveDownloadsEnabled={
+                        archiveDownloadsEnabled && !thread.isLoading
+                      }
                       files={presentedFiles}
                       runId={archiveDisplay?.runId}
                       threadId={threadId}

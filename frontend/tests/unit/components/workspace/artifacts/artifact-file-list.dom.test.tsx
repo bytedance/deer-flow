@@ -127,6 +127,16 @@ describe("ArtifactFileList archive download", () => {
     ).toBeNull();
   });
 
+  it("does not offer an archive when the current thread cannot download it", () => {
+    renderList({ archiveDownloadsEnabled: false, runId: "run-1" });
+
+    expect(
+      screen.queryByRole("button", {
+        name: /Download current versions/,
+      }),
+    ).toBeNull();
+  });
+
   it("downloads the archive and releases its object URL", async () => {
     const blob = new Blob(["zip"]);
     archiveState.download.mockResolvedValue({
