@@ -414,6 +414,14 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### Fixed
 
+- **gateway:** Stop persisting a caller-supplied `deerflow_trace_id` on the run
+  record. `body.metadata` reaches both the live run config, which the run
+  worker restamps, and the run record echoed verbatim by the runs API; only the
+  first was covered, so a client could make the most durable surface of a run
+  disagree with the `X-Trace-Id` and the log lines from the same request. The
+  id is now stamped once at the trust boundary, `config.context` is closed off
+  the same way, and a thread's own metadata is no longer seeded with the
+  run-scoped id of whichever run created it. ([#XXXX])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead

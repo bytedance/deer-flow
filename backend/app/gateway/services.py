@@ -77,7 +77,7 @@ from deerflow.runtime.secret_context import (
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
-from deerflow.trace_context import ensure_trace_context
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -197,7 +197,10 @@ async def _ensure_thread_metadata(
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
-            metadata=record.metadata,
+            # Seeded from the run that created the thread, minus the run-scoped
+            # trace id: a thread spans many runs and as many trace ids, so
+            # pinning the first one here would be misleading rather than useful.
+            metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
         )
 
 
@@ -1310,7 +1313,18 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        # deerflow_trace_id is server-issued, so the caller's value is replaced
+        # here at the trust boundary. body.metadata forks two ways -- through
+        # build_run_config into config["metadata"], which the run worker
+        # restamps, and through create_or_reject into the run record, which the
+        # runs API echoes verbatim. Only the first is covered downstream, so
+        # without this the run record is the one surface that persists a forged
+        # id, disagreeing with the response header, the logs, and the
+        # checkpoint. The caller's own metadata keys are preserved.
+        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
+
+        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -1427,7 +1441,7 @@ async def start_run(
                     thread_id,
                     body.assistant_id,
                     on_disconnect=disconnect,
-                    metadata=body.metadata or {},
+                    metadata=run_metadata,
                     # Persist a secret-redacted copy of the config: the run record is
                     # written to runs.kwargs_json and echoed by the run API, so a
                     # request-scoped secret (#3861) must not ride along. The live

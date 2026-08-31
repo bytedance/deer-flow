@@ -28,7 +28,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
@@ -375,6 +375,19 @@ class _LargeFileToolChunkBatcher:
         return chunks
 
 
+# Runtime-context keys the worker owns outright. A same-named key in the
+# caller's ``config['context']`` is dropped rather than merged: the Gateway
+# strips ``__``-prefixed keys in build_run_config, but embedded harness callers
+# have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
+# by it anyway.
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        DEERFLOW_TRACE_METADATA_KEY,
+    }
+)
+
+
 def _build_runtime_context(
     thread_id: str,
     run_id: str,
@@ -387,9 +400,9 @@ def _build_runtime_context(
 
     Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
     ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue #2677)
-    are merged in but never override ``thread_id``/``run_id``. The resolved
-    ``AppConfig`` is added by the worker so tools can consume it without ambient
-    global lookups.
+    are merged in but never override ``thread_id``/``run_id`` or the server-owned
+    keys in ``_SERVER_OWNED_RUNTIME_CONTEXT_KEYS``. The resolved ``AppConfig`` is
+    added by the worker so tools can consume it without ambient global lookups.
 
     langgraph 1.1+ surfaces this as ``runtime.context`` via the parent runtime stored
     under ``config['configurable']['__pregel_runtime']`` — see
@@ -398,7 +411,7 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
-            if key == CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY:
+            if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
@@ -450,8 +463,13 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
+        # Assigned, not setdefault: this is a server-owned key, the same rule
+        # _bind_trace_id applies to the runtime context and the run metadata. A
+        # deerflow_trace_id the caller put in body.config.context is an echo of
+        # a past output, not an input, and leaving it would make this one dict
+        # disagree with the response header and the logs.
         if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
-            existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
+            existing_context[DEERFLOW_TRACE_METADATA_KEY] = runtime_context[DEERFLOW_TRACE_METADATA_KEY]
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
         if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:

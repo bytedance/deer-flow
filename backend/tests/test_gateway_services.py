@@ -13,6 +13,7 @@ import pytest
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
 
 
 @pytest.fixture
@@ -1938,9 +1939,14 @@ def test_start_run_preserves_ordinary_metadata(_stub_app_config):
             )
             await record.task
 
-        assert record.metadata == metadata
+        # The run is additionally stamped with the server-issued trace id;
+        # the caller's own keys pass through untouched, and both metadata forks
+        # agree. Thread metadata is not run-scoped -- one thread spans many
+        # runs and many trace ids -- so it keeps only what the caller sent.
+        assert record.metadata[DEERFLOW_TRACE_METADATA_KEY]
+        assert record.metadata == {**metadata, DEERFLOW_TRACE_METADATA_KEY: record.metadata[DEERFLOW_TRACE_METADATA_KEY]}
+        assert captured["config"]["metadata"] == record.metadata
         assert (await thread_store.get(thread_id))["metadata"] == metadata
-        assert captured["config"]["metadata"] == metadata
 
     asyncio.run(_scenario())
 
@@ -3277,3 +3283,89 @@ def test_client_forged_user_id_never_selects_another_users_credential():
 
     runtime = SimpleNamespace(server_info=None, context=config["context"])
     assert resolve_runtime_user_id(runtime) == "attacker-own-id"
+
+
+def _make_trace_start_run_request(run_manager):
+    from types import SimpleNamespace
+
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+
+    return SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(auth_source=None),
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                stream_bridge=SimpleNamespace(),
+                run_manager=run_manager,
+                checkpointer=InMemorySaver(),
+                store=InMemoryStore(),
+                run_event_store=MemoryRunEventStore(),
+                run_events_config=None,
+                thread_store=MemoryThreadMetaStore(InMemoryStore()),
+            )
+        ),
+    )
+
+
+async def _start_run_capturing_config(body, thread_id):
+    """Run ``start_run`` far enough to see both metadata forks."""
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime.runs.manager import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_manager = RunManager(store=MemoryRunStore())
+    request = _make_trace_start_run_request(run_manager)
+    captured: dict[str, object] = {}
+
+    async def fake_run_agent(*args, **kwargs):
+        captured["config"] = kwargs["config"]
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+    ):
+        record = await start_run(body, thread_id, request)
+        await record.task
+
+    return record, captured["config"]
+
+
+@pytest.mark.anyio
+async def test_start_run_replaces_a_caller_supplied_trace_id(_stub_app_config):
+    """``body.metadata`` forks two ways: through ``build_run_config`` into the
+    live run config, which the worker restamps, and through
+    ``create_or_reject`` into the run record that the runs API echoes back.
+    Only the first is covered downstream, so a forged ``deerflow_trace_id``
+    used to survive on the most visible surface of the two.
+    """
+    from deerflow.trace_context import request_trace_context
+
+    body = _run_create_request(metadata={DEERFLOW_TRACE_METADATA_KEY: "forged-by-caller", "caller_key": "kept"})
+
+    with request_trace_context("gateway-issued"):
+        record, config = await _start_run_capturing_config(body, "thread-trace-forgery")
+
+    assert record.metadata[DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
+    assert config["metadata"][DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
+    # Only the server-owned key is replaced; the caller's own metadata stays.
+    assert record.metadata["caller_key"] == "kept"
+
+
+@pytest.mark.anyio
+async def test_start_run_stamps_the_run_record_without_caller_metadata(_stub_app_config):
+    """The run record always carries the id, so "the run records its trace id"
+    holds for every run rather than only the ones that asked for it."""
+    from deerflow.trace_context import request_trace_context
+
+    body = _run_create_request()
+
+    with request_trace_context("gateway-issued"):
+        record, config = await _start_run_capturing_config(body, "thread-trace-stamp")
+
+    assert record.metadata[DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
+    assert config["metadata"][DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
