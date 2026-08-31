@@ -414,7 +414,9 @@ The caller supplies the values on each run request:
   outside ASCII — is always denied, regardless of `on_missing`. The error
   names the offending key but never repeats the value; without this check the
   HTTP client's own rejection would echo the full credential into a
-  model-visible tool error.
+  model-visible tool error. The same check covers every other way a value
+  reaches these headers: `user_auth`, the OAuth token returned by the token
+  endpoint, and the static `headers` in the config file.
 - Precedence for a server declaring several sources: static `headers` <
   `oauth` < `user_auth` < `headers_from_context`. The value chosen for this one
   request is the most specific, so it wins.

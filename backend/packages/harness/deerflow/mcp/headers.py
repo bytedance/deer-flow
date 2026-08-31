@@ -15,8 +15,10 @@ The credential interceptors therefore write header names through
 emits the spelling the connection already uses, so the adapter's merge replaces
 the static entry instead of duplicating it.
 
-They also refuse to inject a credential that cannot travel as a header value
-(:func:`illegal_header_value_reason`): httpx encodes ``str`` header values as
+Every path that writes a value into an MCP request header checks it with
+:func:`illegal_header_value_reason` first — both credential interceptors, the
+OAuth token manager, and ``build_server_params`` for the operator's static
+headers. httpx encodes ``str`` header values as
 ASCII and h11 rejects line breaks and surrounding whitespace, and both render
 the *full value* into the exception message — which ``ToolErrorHandlingMiddleware`` then
 copies into a model-visible ToolMessage, putting the secret in the prompt,
