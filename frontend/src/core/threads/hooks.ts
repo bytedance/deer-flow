@@ -675,7 +675,9 @@ export function restoreLocalTurnMessageOrder(
  * accepted transient, far safer than pulling a completed turn's answer
  * below the next user message. A resent turn after an interrupted run and
  * pagination orphans from older turns (#4399) fail the checks as well and
- * are left untouched.
+ * are left untouched. When an interrupted turn and the next turn share one
+ * synthetic run_id, the previous human anchor plus the missing terminal
+ * answer makes step ownership ambiguous, so that layout is also preserved.
  */
 export function restoreReconnectedTurnMessageOrder(
   messages: Message[],
@@ -719,6 +721,21 @@ export function restoreReconnectedTurnMessageOrder(
     ) {
       candidateStart = index + 1;
     }
+  }
+
+  const previousHumanRunId =
+    segmentStart > 0 ? getMessageRunId(messages[segmentStart - 1]!) : undefined;
+  const hasUniformRunIdSincePreviousHuman =
+    previousHumanRunId !== undefined &&
+    messages
+      .slice(segmentStart - 1)
+      .every(
+        (message) =>
+          isHiddenFromUIMessage(message) ||
+          getMessageRunId(message) === previousHumanRunId,
+      );
+  if (candidateStart === segmentStart && hasUniformRunIdSincePreviousHuman) {
+    return messages;
   }
 
   const runIdsAfter = new Set<string>();

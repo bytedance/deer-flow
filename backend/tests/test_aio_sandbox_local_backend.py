@@ -128,6 +128,61 @@ def test_start_container_logs_redacted_env_values(monkeypatch, caplog):
     assert "visible-value" not in log_output
 
 
+def test_start_container_filters_nested_config_mounts_for_policy_scoped_skills(
+    monkeypatch,
+):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[
+            SimpleNamespace(
+                host_path="/host/excluded-skill",
+                container_path="/mnt/skills/public/excluded-skill",
+                read_only=True,
+            ),
+            SimpleNamespace(
+                host_path="/host/unrelated",
+                container_path="/mnt/unrelated",
+                read_only=True,
+            ),
+            SimpleNamespace(
+                host_path="/host/sibling",
+                container_path="/mnt/skills-extra",
+                read_only=True,
+            ),
+        ],
+        environment={},
+    )
+    monkeypatch.setattr(backend, "_runtime", "docker")
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    backend._start_container(
+        "sandbox-test",
+        18080,
+        extra_mounts=[
+            (
+                "/host/thread-view/public",
+                "/mnt/skills/public",
+                True,
+            )
+        ],
+        config_mount_exclusion_root="/mnt/skills",
+    )
+
+    command = " ".join(captured_cmd)
+    assert "/host/excluded-skill" not in command
+    assert "/host/unrelated" in command
+    assert "/host/sibling" in command
+    assert "/host/thread-view/public" in command
+
+
 def _capture_start_container_command(monkeypatch, backend: LocalContainerBackend, runtime: str = "docker") -> list[str]:
     monkeypatch.setattr(backend, "_runtime", runtime)
     captured_cmd: list[str] = []
@@ -323,6 +378,7 @@ def test_start_container_brackets_bare_ipv6_bind_override(monkeypatch):
 
 
 def test_start_container_binds_dood_port_to_bridge_gateway(monkeypatch):
+    """Force resolver failure so host DNS cannot bypass the bridge-gateway fallback."""
     backend = LocalContainerBackend(
         image="sandbox:latest",
         base_port=8080,
@@ -332,6 +388,10 @@ def test_start_container_binds_dood_port_to_bridge_gateway(monkeypatch):
     )
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", "host.docker.internal")
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend._resolve_sandbox_host_address",
+        lambda host: None,
+    )
     monkeypatch.setattr(
         "deerflow.community.aio_sandbox.local_backend._docker_bridge_gateway_ip",
         lambda: "172.17.0.1",
@@ -807,7 +867,11 @@ def test_discover_brackets_ipv6_sandbox_host_for_url(monkeypatch, sandbox_host):
 def test_create_brackets_ipv6_sandbox_host_for_url(monkeypatch, sandbox_host):
     backend = _backend_for_inspect_tests()
     monkeypatch.setenv("DEER_FLOW_SANDBOX_HOST", sandbox_host)
-    monkeypatch.setattr(backend, "_start_container", lambda name, port, mounts=None: "container-id")
+    monkeypatch.setattr(
+        backend,
+        "_start_container",
+        lambda name, port, mounts=None, **_kwargs: "container-id",
+    )
     monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18082)
 
     info = backend.create(thread_id="t", sandbox_id="sbx-ipv6")

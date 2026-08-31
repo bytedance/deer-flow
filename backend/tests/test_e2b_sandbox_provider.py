@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -244,7 +245,15 @@ class FakeOwnershipStore:
         return None
 
 
-def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_policy: str = "wait", acquire_timeout: int = 30, burst_limit: int = 0) -> Any:
+def _make_provider(
+    *,
+    replicas: int = 3,
+    idle_timeout: int = 1800,
+    overflow_policy: str = "wait",
+    acquire_timeout: int = 30,
+    burst_limit: int = 0,
+    skills_container_path: str = "/mnt/skills",
+) -> Any:
     """Build a ``E2BSandboxProvider`` instance bypassing ``__init__``."""
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
@@ -280,6 +289,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
         "template": "code-interpreter-v1",
         "domain": None,
         "home_dir": "/home/user",
+        "skills_container_path": skills_container_path,
         "idle_timeout": idle_timeout,
         "replicas": replicas,
         "overflow_policy": overflow_policy,
@@ -364,6 +374,471 @@ def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_pat
     assert "/mnt/skills/public/disabled-skill/SKILL.md" not in uploaded_paths
     assert "/mnt/skills/integrations/lark-cli/enabled-integration/SKILL.md" in uploaded_paths
     assert "/mnt/skills/integrations/lark-cli/disabled-integration/SKILL.md" not in uploaded_paths
+
+
+def test_policy_scoped_thread_skips_shared_projection_during_create(
+    monkeypatch,
+    tmp_path,
+):
+    paths = Paths(base_dir=tmp_path)
+    paths.thread_skills_view_dir("thread-1", user_id="user-1").mkdir(parents=True)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+
+    provider = _make_provider()
+
+    assert provider._skill_projection_mounts("user-1", "thread-1") == []
+
+
+def test_sync_agent_skills_rebuilds_managed_remote_tree_despite_matching_legacy_marker(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    _write_skill(projection.public, "allowed-skill")
+    manifest_path = root / ".projection-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_signature": "source-a",
+                "view_signature": "view-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    files = FakeFilesAPI(
+        {
+            "/mnt/skills/public/excluded-skill/SKILL.md": b"excluded",
+            "/mnt/skills/.deerflow-projection-signature": legacy_signature.encode(),
+            "/mnt/skills/unmanaged.txt": b"keep",
+        }
+    )
+
+    def reset_remote_tree(command: str):
+        assert "sudo rm -rf -- /mnt/skills;" not in command
+        assert "sudo chown -R" not in command
+        assert "if [ -L /mnt/skills ]" in command
+        managed_paths = (
+            "/mnt/skills/public",
+            "/mnt/skills/custom",
+            "/mnt/skills/legacy",
+            "/mnt/skills/integrations",
+            "/mnt/skills/.deerflow-projection-signature",
+        )
+        for managed_path in managed_paths:
+            assert managed_path in command
+        for path in list(files.store):
+            if any(path == managed_path or path.startswith(f"{managed_path}/") for managed_path in managed_paths):
+                files.store.pop(path)
+        return SimpleNamespace(
+            stdout="SKILLS_RESET_OK\n",
+            stderr="",
+            exit_code=0,
+        )
+
+    chmod_ok = SimpleNamespace(stdout="", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([reset_remote_tree, chmod_ok, reset_remote_tree, chmod_ok])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands, files=files)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    provider.sync_agent_skills(
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        projection=projection,
+    )
+
+    assert "/mnt/skills/public/excluded-skill/SKILL.md" not in files.store
+    assert files.store["/mnt/skills/public/allowed-skill/SKILL.md"].startswith(b"---")
+    assert files.store["/mnt/skills/unmanaged.txt"] == b"keep"
+    assert "/mnt/skills/.deerflow-projection-signature" not in files.store
+    assert files.read_calls == []
+    first_command_count = len(commands.calls)
+    first_write_count = len(files.write_calls)
+
+    provider.sync_agent_skills(
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        projection=projection,
+    )
+
+    assert len(commands.calls) == first_command_count * 2
+    assert len(files.write_calls) == first_write_count * 2
+
+
+def test_sync_agent_skills_serializes_reset_and_upload_for_same_thread(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    projections: list[SkillProjectionPaths] = []
+    for name in ("policy-a", "policy-b"):
+        root = tmp_path / name
+        projection = SkillProjectionPaths(
+            public=root / "public",
+            custom=root / "custom",
+            legacy=root / "legacy",
+            integrations=root / "integrations",
+        )
+        for category in (
+            projection.public,
+            projection.custom,
+            projection.legacy,
+            projection.integrations,
+        ):
+            category.mkdir(parents=True)
+        projections.append(projection)
+
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    first_upload_started = threading.Event()
+    allow_first_upload_to_finish = threading.Event()
+    second_sync_started = threading.Event()
+    second_reset_started = threading.Event()
+    reset_count = 0
+    reset_count_lock = threading.Lock()
+
+    def reset_remote_tree(_command: str):
+        nonlocal reset_count
+        with reset_count_lock:
+            reset_count += 1
+            current_reset = reset_count
+        if current_reset == 2:
+            second_reset_started.set()
+        return SimpleNamespace(stdout="SKILLS_RESET_OK\n", stderr="", exit_code=0)
+
+    commands = FakeCommandsAPI([reset_remote_tree, reset_remote_tree])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    first_projection_root = projections[0].public.parent
+
+    def blocking_upload(_client, source, _destination, _read_only, *, budget):
+        del budget
+        if source.parent == first_projection_root and not first_upload_started.is_set():
+            first_upload_started.set()
+            assert allow_first_upload_to_finish.wait(timeout=5)
+
+    monkeypatch.setattr(provider, "_upload_tree", blocking_upload)
+    errors: list[BaseException] = []
+
+    def sync(
+        projection: SkillProjectionPaths,
+        *,
+        started: threading.Event | None = None,
+    ) -> None:
+        try:
+            if started is not None:
+                started.set()
+            provider.sync_agent_skills(
+                "sandbox-1",
+                thread_id="thread-1",
+                user_id="user-1",
+                projection=projection,
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first = threading.Thread(target=sync, args=(projections[0],))
+    second = threading.Thread(
+        target=sync,
+        args=(projections[1],),
+        kwargs={"started": second_sync_started},
+    )
+    first.start()
+    assert first_upload_started.wait(timeout=5)
+    second.start()
+    try:
+        assert second_sync_started.wait(timeout=5)
+        assert not second_reset_started.wait(timeout=0.2)
+    finally:
+        allow_first_upload_to_finish.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert second_reset_started.is_set()
+
+
+@pytest.mark.parametrize(
+    "container_path",
+    [
+        "skills",
+        "/",
+        "//mnt/skills",
+        "/mnt//skills",
+        "/mnt/skills/.",
+        "/mnt/skills/..",
+        "/mnt",
+        "/mnt/user-data",
+        "/mnt/acp-workspace",
+        "/home",
+        "/home/user",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/etc/deerflow-skills",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/lost+found",
+        "/media",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/snap",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/usr/local/deerflow-skills",
+        "/var",
+        "/var/lib/deerflow-skills",
+    ],
+)
+def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
+    tmp_path,
+    container_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    client = FakeClient(sandbox_id="sandbox-1")
+    provider = _make_provider()
+    provider._config["skills_container_path"] = container_path
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    with pytest.raises(ValueError, match="safe E2B skills reset target"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert client.files.read_calls == []
+    assert client.commands.calls == []
+
+
+@pytest.mark.parametrize(
+    ("container_path", "expected"),
+    [
+        ("/mnt/skills", "/mnt/skills"),
+        ("/mnt/skills/", "/mnt/skills"),
+        ("/home/user/skills", "/home/user/skills"),
+        ("/custom-skills", "/custom-skills"),
+        ("/custom/skills", "/custom/skills"),
+    ],
+)
+def test_validate_skills_reset_root_accepts_isolated_directories(
+    container_path,
+    expected,
+):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    assert mod._validate_skills_reset_root(container_path, home_dir="/home/user") == expected
+
+
+@pytest.mark.parametrize(
+    ("home_dir", "container_path"),
+    [
+        ("/opt/e2b-home", "/opt/e2b-home/skills"),
+        ("/tmp/e2b-home", "/tmp/e2b-home/skills"),
+    ],
+)
+def test_validate_skills_reset_root_accepts_isolated_custom_home_subtree(
+    home_dir,
+    container_path,
+):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    assert (
+        mod._validate_skills_reset_root(
+            container_path,
+            home_dir=home_dir,
+        )
+        == container_path
+    )
+
+
+def test_sync_agent_skills_rejects_symlinked_remote_root_before_deleting(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / ".projection-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    legacy_signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    def reject_symlinked_root(command: str):
+        assert "if [ -L /mnt/skills ]" in command
+        return SimpleNamespace(
+            stdout="",
+            stderr="Refusing symlinked skills root\n",
+            exit_code=2,
+        )
+
+    client = FakeClient(
+        sandbox_id="sandbox-1",
+        commands=FakeCommandsAPI([reject_symlinked_root]),
+        files=FakeFilesAPI(
+            {
+                "/mnt/skills/.deerflow-projection-signature": legacy_signature.encode(),
+            }
+        ),
+    )
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_upload_tree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("upload must not start after a rejected reset")),
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to reset E2B skill projection"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert client.files.read_calls == []
+    assert client.files.write_calls == []
+
+
+def test_sync_agent_skills_leaves_no_signature_after_upload_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    (root / ".projection-manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    commands = FakeCommandsAPI([SimpleNamespace(stdout="SKILLS_RESET_OK\n", stderr="", exit_code=0)])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_upload_tree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert "/mnt/skills/.deerflow-projection-signature" not in client.files.store
 
 
 def test_upload_tree_streams_file_contents(tmp_path):
@@ -831,6 +1306,7 @@ def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, caplog, r
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
 
     class FakeConfig:
+        skills = SimpleNamespace(container_path="/mnt/skills")
         sandbox = SimpleNamespace(
             model_extra={"mount_upload_deadline_seconds": raw},
             api_key="test-key",
@@ -1046,9 +1522,9 @@ def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:
     )
 
 
-def test_thread_key_returns_user_thread_tuple():
+def test_thread_key_includes_the_provider_skills_root():
     p = _make_provider()
-    assert p._thread_key("t1", "u1") == ("u1", "t1")
+    assert p._thread_key("t1", "u1") == ("u1", "t1", "/mnt/skills")
 
 
 def test_sandbox_id_falls_back_when_client_id_is_none():
@@ -1060,6 +1536,7 @@ def test_sandbox_id_falls_back_when_client_id_is_none():
 
 def test_stable_seed_is_deterministic_and_user_scoped():
     p = _make_provider()
+    custom_root = _make_provider(skills_container_path="/custom-skills")
     s_a = p._stable_seed("t1", "u1")
     s_b = p._stable_seed("t1", "u1")
     s_other_user = p._stable_seed("t1", "u2")
@@ -1067,6 +1544,7 @@ def test_stable_seed_is_deterministic_and_user_scoped():
     assert s_a == s_b
     assert s_a != s_other_user
     assert s_a != s_other_thread
+    assert s_a != custom_root._stable_seed("t1", "u1")
 
 
 def test_is_sandbox_gone_error_matches_known_signatures():
@@ -1285,7 +1763,7 @@ def test_refresh_owned_leases_reclaims_lapsed_lease():
     client = FakeClient(sandbox_id="sb-lapsed")
     sandbox = _make_sandbox(client, sandbox_id="sb-lapsed")
     p._sandboxes["sb-lapsed"] = sandbox
-    p._thread_sandboxes[("u1", "t1")] = "sb-lapsed"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-lapsed"
     p._owned_sandbox_ids.add("sb-lapsed")
 
     p._refresh_owned_leases()
@@ -1300,7 +1778,8 @@ def test_refresh_owned_leases_forgets_peer_owned_sandbox():
     client = FakeClient(sandbox_id="sb-lost")
     sandbox = _make_sandbox(client, sandbox_id="sb-lost")
     p._sandboxes["sb-lost"] = sandbox
-    p._thread_sandboxes[("u1", "t1")] = "sb-lost"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-lost"
     p._owned_sandbox_ids.add("sb-lost")
     p._ownership = FakeOwnershipStore(
         {"sb-lost": ("owner-peer", "own")},
@@ -1310,7 +1789,7 @@ def test_refresh_owned_leases_forgets_peer_owned_sandbox():
     p._refresh_owned_leases()
 
     assert p.get("sb-lost") is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
     assert "sb-lost" not in p._owned_sandbox_ids
     assert client.closed is True
 
@@ -1320,7 +1799,7 @@ def test_reuse_in_process_sandbox_returns_cached_id_on_healthy_reuse():
     client = FakeClient()
     sb = _make_sandbox(client, sandbox_id="sb-1")
     p._sandboxes["sb-1"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-1"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-1"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid == "sb-1"
@@ -1333,12 +1812,13 @@ def test_reuse_in_process_sandbox_evicts_dead_sandbox():
     sb = _make_sandbox(client, sandbox_id="sb-dead")
     sb._dead = True
     p._sandboxes["sb-dead"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-dead"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
     assert "sb-dead" not in p._sandboxes
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
 
 
 def test_reuse_in_process_sandbox_evicts_when_ping_fails():
@@ -1346,7 +1826,7 @@ def test_reuse_in_process_sandbox_evicts_when_ping_fails():
     client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
     sb = _make_sandbox(client, sandbox_id="sb-stale")
     p._sandboxes["sb-stale"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-stale"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-stale"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
@@ -1356,10 +1836,11 @@ def test_reuse_in_process_sandbox_evicts_when_ping_fails():
 
 def test_reuse_in_process_sandbox_cleans_dangling_mapping():
     p = _make_provider()
-    p._thread_sandboxes[("u1", "t1")] = "ghost"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "ghost"
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
 
 
 def test_reuse_in_process_sandbox_returns_none_when_no_mapping():
@@ -1376,7 +1857,7 @@ def test_reclaim_warm_pool_sandbox_happy_path(monkeypatch):
     sid = p._reclaim_warm_pool_sandbox("t1", user_id="u1")
     assert sid == "sb-warm"
     assert "sb-warm" in p._sandboxes
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-warm"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-warm"
     assert "sb-warm" not in p._warm_pool
     assert [c[0] for c in fake_cls.connect_calls] == ["sb-warm"]
 
@@ -1465,15 +1946,40 @@ class _FakePaginator:
         return page
 
 
-def _info(sandbox_id: str, user_id: str, thread_id: str):
+def _info(
+    sandbox_id: str,
+    user_id: str,
+    thread_id: str,
+    *,
+    skills_container_path: str = "/mnt/skills",
+):
     return SimpleNamespace(
         sandbox_id=sandbox_id,
         metadata={
             "deer_flow_provider": "e2b_sandbox_provider",
             "deer_flow_user": user_id,
             "deer_flow_thread": thread_id,
+            "deer_flow_skills_root": skills_container_path,
         },
     )
+
+
+def test_discover_remote_sandbox_rejects_a_different_skills_root(monkeypatch):
+    p = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-old-root", "u1", "t1")]
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert fake_cls.connect_calls == []
+
+
+def test_create_metadata_records_the_snapshotted_skills_root(monkeypatch):
+    provider = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+
+    provider.acquire("t1", user_id="u1")
+
+    assert fake_cls.create_calls[0]["metadata"]["deer_flow_skills_root"] == "/custom-skills"
 
 
 def test_discover_remote_sandbox_walks_paginator(monkeypatch):
@@ -1488,7 +1994,7 @@ def test_discover_remote_sandbox_walks_paginator(monkeypatch):
 
     sid = p._discover_remote_sandbox("t1", user_id="u1")
     assert sid == "sb-match"
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-match"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-match"
 
 
 def test_discover_remote_sandbox_accepts_legacy_list(monkeypatch):
@@ -1511,7 +2017,7 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     fake_cls.connect_factory = lambda _sid, **_kw: client
 
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert p._thread_key("t1", "u1") not in p._thread_sandboxes
     assert client.closed is True
 
 
@@ -1531,7 +2037,7 @@ def test_discover_remote_sandbox_tries_later_candidate_when_first_is_dead(monkey
 
     assert p._discover_remote_sandbox("t1", user_id="u1") == "sb-b-live"
     assert dead.closed is True
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-b-live"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-b-live"
     assert "sb-b-live" in p._owned_sandbox_ids
 
 
@@ -1677,7 +2183,7 @@ def test_reconcile_adopts_canonical_after_restart_loses_local_state(monkeypatch)
     stats = p._reconcile_remote_sandboxes(now=100.0)
 
     assert stats.adopted == 1
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-existing"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-existing"
     assert "sb-existing" in p._owned_sandbox_ids
 
 
@@ -1748,6 +2254,33 @@ def test_reconcile_kills_metadata_orphan_only_after_ttl(monkeypatch):
     assert client.killed is True
 
 
+def test_reconcile_never_adopts_an_old_skills_root_and_reaps_it_after_grace(
+    monkeypatch,
+):
+    provider = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    fake_cls.list_return = [
+        _info(
+            "sb-old-root",
+            "u1",
+            "t1",
+            skills_container_path="/mnt/skills",
+        )
+    ]
+    client = FakeClient(sandbox_id="sb-old-root")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    provider._config["reconciliation_grace_seconds"] = 5.0
+
+    first = provider._reconcile_remote_sandboxes(now=100.0)
+    second = provider._reconcile_remote_sandboxes(now=106.0)
+
+    assert first.adopted == 0
+    assert first.deferred == 1
+    assert provider._thread_key("t1", "u1") not in provider._thread_sandboxes
+    assert second.killed == 1
+    assert client.killed is True
+
+
 def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
@@ -1766,7 +2299,7 @@ def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeyp
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert client.killed is True
     assert client.closed is True
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert p._thread_key("t1", "u1") not in p._thread_sandboxes
 
 
 def test_discovery_claims_ownership_before_bootstrap_cleanup(monkeypatch):
@@ -1900,7 +2433,14 @@ def test_e2b_config_accepts_documented_reconciliation_fields(monkeypatch, caplog
         reconciliation_max_seconds=15,
     )
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
-    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=config,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         provider._load_config()
@@ -1916,7 +2456,14 @@ def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
         overflo_policy="reject",
     )
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
-    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=config,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         provider._load_config()
@@ -2108,13 +2655,14 @@ def test_release_dead_sandbox_skips_warm_pool(monkeypatch):
     sb = _make_sandbox(client, sandbox_id="sb-dead")
     sb._dead = True
     p._sandboxes["sb-dead"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-dead"
 
     p.release("sb-dead")
 
     assert "sb-dead" not in p._warm_pool, "dead sandbox must not be parked"
     assert "sb-dead" not in p._sandboxes
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
     assert client.killed is True, "release of dead sandbox must kill the remote VM"
 
 
@@ -2125,7 +2673,7 @@ def test_release_healthy_sandbox_parks_in_warm_pool(monkeypatch, tmp_path):
     client = FakeClient(commands=cmds)
     sb = _make_sandbox(client, sandbox_id="sb-warm-1")
     p._sandboxes["sb-warm-1"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-warm-1"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-warm-1"
 
     p.release("sb-warm-1")
 
@@ -2142,7 +2690,7 @@ def test_acquire_waits_for_same_thread_release_transition(monkeypatch):
     client = FakeClient(sandbox_id="sb-release-race")
     sandbox = _make_sandbox(client)
     provider._sandboxes[sandbox.id] = sandbox
-    provider._thread_sandboxes[("user-1", "thread-1")] = sandbox.id
+    provider._thread_sandboxes[provider._thread_key("thread-1", "user-1")] = sandbox.id
 
     sync_started = threading.Event()
     allow_sync_to_finish = threading.Event()
@@ -2190,7 +2738,7 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
     client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
     sb = _make_sandbox(client, sandbox_id="sb-died-during-sync")
     p._sandboxes["sb-died-during-sync"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-died-during-sync"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-died-during-sync"
 
     p.release("sb-died-during-sync")
 
@@ -2987,10 +3535,19 @@ def test_discovery_uses_sdk_query_and_tracks_without_reserving(monkeypatch) -> N
             "deer_flow_provider": "e2b_sandbox_provider",
             "deer_flow_user": "user-a",
             "deer_flow_thread": "thread-a",
+            "deer_flow_skills_root": "/mnt/skills",
             "deer_flow_capacity_ledger": store.key,
         },
     )
-    expected_query = {key: entry.metadata[key] for key in ("deer_flow_provider", "deer_flow_user", "deer_flow_thread")}
+    expected_query = {
+        key: entry.metadata[key]
+        for key in (
+            "deer_flow_provider",
+            "deer_flow_user",
+            "deer_flow_thread",
+            "deer_flow_skills_root",
+        )
+    }
     sdk.list_return = SimpleNamespace(
         has_next=False,
         next_items=lambda: [entry] if sdk.list_calls[-1]["query"].metadata == expected_query else [],
@@ -4134,6 +4691,7 @@ def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u2",
                 "deer_flow_thread": "t2",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4159,6 +4717,7 @@ def test_discovery_reports_shutdown_without_killing_remote_vm(monkeypatch, caplo
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4196,6 +4755,7 @@ def test_discovery_bootstrap_kill_failure_retains_reserved_slot(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4230,6 +4790,7 @@ def test_shutdown_does_not_retry_kill_for_unowned_discovery_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4274,6 +4835,7 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -4321,5 +4883,10 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
 def test_stable_seed_matches_shared_identity():
     from deerflow.sandbox.identity import derive_sandbox_scope_token
 
-    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
-    assert mod.E2BSandboxProvider._stable_seed("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    provider = _make_provider(skills_container_path="/custom-skills")
+    base_scope = derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    expected = hashlib.sha256(
+        f"{base_scope}\0/custom-skills".encode(),
+    ).hexdigest()[:16]
+
+    assert provider._stable_seed("t-1", "u-1") == expected
