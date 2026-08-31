@@ -5,6 +5,7 @@ import os
 import posixpath
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -77,6 +78,7 @@ _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
 _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
+_CUSTOM_MOUNTS_CACHE_TTL_SECONDS = 1.0
 
 # Maximum bytes accepted in a single non-append write_file call (issue #3189).
 # Oversized single-shot writes correlate with LLM streaming chunk-gap timeouts
@@ -384,49 +386,30 @@ def _is_acp_workspace_path(path: str) -> bool:
 def _get_custom_mounts():
     """Get custom volume mounts from sandbox config.
 
-    Result is cached after the first successful config load.  If config loading
-    fails an empty list is returned *without* caching so that a later call can
-    pick up the real value once the config is available.
+    Result is cached after the first successful config load. The hot path uses
+    the cached list directly; after a short TTL, config and mount roots are
+    rechecked so changes are eventually reflected without probing every call.
     """
-    config_path: str | None = None
+    cached = getattr(_get_custom_mounts, "_cached", None)
+    cached_at = getattr(_get_custom_mounts, "_cached_at", None)
+    if cached is not None and cached_at is not None and time.monotonic() - cached_at < _CUSTOM_MOUNTS_CACHE_TTL_SECONDS:
+        return cached
+
     try:
         from deerflow.config import get_app_config
-        from deerflow.config.app_config import AppConfig
 
-        try:
-            config_path = str(AppConfig.resolve_config_path())
-        except (FileNotFoundError, OSError):
-            config_path = None
         config = get_app_config()
         configured_mounts = list(config.sandbox.mounts or []) if config.sandbox else []
-        cache_key = (
-            id(config),
-            config_path,
-            tuple((m.host_path, m.container_path, m.read_only) for m in configured_mounts),
-            tuple(_mount_host_path_exists(m.host_path) for m in configured_mounts),
-        )
-        cached = getattr(_get_custom_mounts, "_cached", None)
-        if cached is not None and getattr(_get_custom_mounts, "_cache_key", None) == cache_key:
-            return cached
-
         # Only include mounts whose host_path exists, consistent with
-        # LocalSandboxProvider._setup_path_mappings() which also filters
-        # by host_path.exists(). The existence component in ``cache_key``
-        # invalidates the authorization cache when a mount is removed or
-        # recreated while the process is running.
+        # LocalSandboxProvider._setup_path_mappings(). The periodic refresh
+        # bounds how long a removed mount can remain authorized.
         mounts = [mount for mount in configured_mounts if _mount_host_path_exists(mount.host_path)]
         _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
-        _get_custom_mounts._cache_key = cache_key  # type: ignore[attr-defined]
-        _get_custom_mounts._cache_config_path = config_path  # type: ignore[attr-defined]
+        _get_custom_mounts._cached_at = time.monotonic()  # type: ignore[attr-defined]
         return mounts
     except Exception:
-        # Embedded/test callers may provide an AppConfig-like object without a
-        # filesystem config. Preserve that fallback, but fail closed if a real
-        # config path had previously supplied the authorization list.
-        cached = getattr(_get_custom_mounts, "_cached", None)
-        cached_config_path = getattr(_get_custom_mounts, "_cache_config_path", None)
-        if cached is not None and cached_config_path is None and config_path is None:
-            return cached
+        # Do not replace a last-known-good cache on a transient config error.
+        # Returning an empty list fails closed once the cache has expired.
         return []
 
 
@@ -455,21 +438,16 @@ def _get_custom_mount_for_path(path: str):
     return best
 
 
-def _looks_like_configured_host_path(path: str, mounts) -> bool:
+def _looks_like_configured_host_path(path: str, _mounts) -> bool:
     """Return whether *path* is a host-path spelling handled by the adapter.
 
-    Windows drive and Git Bash paths are always sent through the adapter so an
+    Windows drive and Git Bash paths are sent through the adapter so an
     unconfigured drive is rejected with an actionable host-path error. POSIX
-    host paths are only considered when they share a configured mount root;
-    unrelated POSIX paths retain the existing virtual-path error contract.
+    local deployments keep host spellings opaque and continue to use the
+    configured virtual path contract.
     """
-    if _WINDOWS_HOST_PATH_PREFIX.match(path):
+    if os.name == "nt" and _WINDOWS_HOST_PATH_PREFIX.match(path):
         return True
-
-    for mount in mounts:
-        host_path = str(mount.host_path).replace("\\", "/").rstrip("/")
-        if host_path.startswith("/") and (path == host_path or path.startswith(f"{host_path}/")):
-            return True
     return False
 
 
@@ -491,6 +469,8 @@ def normalize_local_tool_path(path: str) -> str:
 
 def normalize_local_command(command: str) -> str:
     """Translate configured host paths embedded in a local bash command."""
+    if os.name != "nt":
+        return command
     return replace_host_paths_in_command(command, _get_custom_mounts())
 
 

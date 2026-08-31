@@ -605,7 +605,9 @@ class LocalSandbox(Sandbox):
             raise PermissionError("Program path must be inside a configured sandbox mount")
         resolved_program = self._resolve_path(program_path)
         resolved_args = [_resolve_program_argument(self, value) for value in (args or [])]
-        resolved_cwd = self._resolve_path(cwd) if cwd and self._find_path_mapping(cwd) else cwd
+        if cwd and self._find_path_mapping(cwd) is None:
+            raise PermissionError("working directory must be inside a configured sandbox mount")
+        resolved_cwd = self._resolve_path(cwd) if cwd else None
         resolved_program = resolved_program.replace("/", "\\")
         if resolved_cwd:
             resolved_cwd = resolved_cwd.replace("/", "\\")

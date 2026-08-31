@@ -682,6 +682,7 @@ LocalSandbox 还会提供 `run_host_program`，用于运行 `.exe`、`.cmd`/`.ba
 `run_host_program` 的超时必须为正数，并且不会超过
 `sandbox.bash_command_timeout`（默认 600 秒）。挂载的 `container_path` 必须
 保持为 POSIX 虚拟路径；像 `/c/projects` 这样的盘符形式会在配置校验阶段被拒绝。
+主机路径别名仅适用于 Windows；POSIX 本地部署仍应在工具参数中使用配置的虚拟路径。
 
 ### Context Engineering
 

@@ -1257,6 +1257,9 @@ providers do not expose it. Keep mount `container_path` values POSIX-style;
 drive-shaped values such as `/c/projects` are rejected during configuration
 validation.
 
+This host-path alias is intentionally Windows-only. POSIX local deployments
+continue to use the configured virtual `container_path` in tool arguments.
+
 `AioSandboxProvider` normally detects thread-data mounts from its backend: local
 containers use the mounted gateway directories, while remote/provisioner
 sandboxes receive uploaded files through explicit synchronization. Deployments
