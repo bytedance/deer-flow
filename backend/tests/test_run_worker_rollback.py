@@ -720,6 +720,51 @@ async def test_run_agent_schedules_terminal_run_record_cleanup():
 
 
 @pytest.mark.anyio
+async def test_run_agent_schedules_terminal_cleanup_when_publish_end_fails(monkeypatch):
+    import deerflow.runtime.runs.worker as worker_module
+
+    class CleanupTrackingRunManager(RunManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_calls: list[tuple[str, float]] = []
+
+        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+            self.cleanup_calls.append((run_id, delay))
+
+    run_manager = CleanupTrackingRunManager()
+    record = await run_manager.create("thread-terminal-publish-failure")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(side_effect=RuntimeError("end publication unavailable")),
+        cleanup=AsyncMock(),
+    )
+    schedule_collection = MagicMock()
+    monkeypatch.setattr(worker_module, "_schedule_terminal_cycle_collection", schedule_collection)
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    with pytest.raises(RuntimeError, match="end publication unavailable"):
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: DummyAgent(),
+            graph_input={},
+            config={},
+        )
+    await asyncio.sleep(0)
+
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    assert run_manager.cleanup_calls == [(record.run_id, 300)]
+    schedule_collection.assert_called_once_with()
+
+
+@pytest.mark.anyio
 async def test_run_agent_closes_stream_when_abort_breaks_iteration():
     run_manager = RunManager()
     record = await run_manager.create("thread-stream-close")

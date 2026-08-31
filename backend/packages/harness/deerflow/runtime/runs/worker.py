@@ -1547,12 +1547,15 @@ async def run_agent(
             produced_output_paths = None
             graph_input = {}
 
-        _create_contextless_task(bridge.cleanup(run_id, delay=60))
-        # Preserve the existing five-minute grace period for local join/status
-        # paths, then release the terminal record, completed task, and request
-        # payload. Durable run history remains available through RunStore.
-        _create_contextless_task(run_manager.cleanup(run_id))
-        _schedule_terminal_cycle_collection()
+            # Terminal publication depends on the delivery backend, but local
+            # housekeeping must still be scheduled if that backend is down.
+            _create_contextless_task(bridge.cleanup(run_id, delay=60))
+            # Preserve the existing five-minute grace period for local
+            # join/status paths, then release the terminal record, completed
+            # task, and request payload. Durable run history remains available
+            # through RunStore.
+            _create_contextless_task(run_manager.cleanup(run_id))
+            _schedule_terminal_cycle_collection()
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
