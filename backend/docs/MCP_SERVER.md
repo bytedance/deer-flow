@@ -409,6 +409,14 @@ The caller supplies the values on each run request:
   the discovery credential — which in a multi-tenant deployment would send one
   tenant's request under another tenant's authority. Set `"passthrough"` to opt
   out and forward the static headers instead.
+- A value that cannot be sent as an HTTP header — a stray newline picked up
+  when reading a token from a file, leading/trailing whitespace, characters
+  outside ASCII — is always denied, regardless of `on_missing`. The error
+  names the offending key but never repeats the value; without this check a
+  newline or stray whitespace would reach h11, whose rejection echoes the full
+  credential into a model-visible tool error. The same check covers every other
+  way a value reaches these headers: `user_auth`, the OAuth token returned by
+  the token endpoint, and the static `headers` in the config file.
 - Precedence for a server declaring several sources: static `headers` <
   `oauth` < `user_auth` < `headers_from_context`. The value chosen for this one
   request is the most specific, so it wins.

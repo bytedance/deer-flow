@@ -1688,6 +1688,10 @@ skills:
 
   # Path where skills are mounted in the sandbox container
   # This is used by the agent to access skills in both local and Docker sandbox
+  # AIO/provisioner and E2B modes require a canonical absolute non-root path
+  # that does not overlap reserved platform mounts. Providers snapshot this
+  # path for identity, mounts, metadata, and synchronization, so restart the
+  # Gateway after changing it.
   # Default: /mnt/skills
   container_path: /mnt/skills
 
