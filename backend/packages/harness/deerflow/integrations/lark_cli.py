@@ -435,9 +435,11 @@ def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
     for relative in (Path("bin/lark-cli"), *(Path(f"linux-{arch}/lark-cli") for arch in LARK_CLI_LINUX_ARCHES)):
         candidate = root / relative
         if not candidate.is_file():
-            raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative}")
-        if candidate.stat().st_mode & 0o111 == 0:
-            raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative}")
+            raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative.as_posix()}")
+        # Linux sandbox binaries are prepared on the Gateway host. NTFS/Python does
+        # not preserve POSIX executable bits; chmod happens later inside the sandbox.
+        if os.name != "nt" and candidate.stat().st_mode & 0o111 == 0:
+            raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative.as_posix()}")
 
 
 def _read_json_object_file(path: Path) -> dict[str, Any] | None:

@@ -5,6 +5,7 @@ import inspect
 import io
 import json
 import multiprocessing
+import os
 import re
 import shutil
 import stat
@@ -14,7 +15,7 @@ import threading
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import Path, PurePath
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -84,6 +85,16 @@ def _advance_lark_flow(user_id: str = "alice") -> str:
         return lark_cli._advance_lark_flow_generation_locked(user_id)
 
 
+def _assert_path_suffix(value: str, suffix: str) -> None:
+    assert PurePath(value).as_posix().endswith(suffix)
+
+
+def _assert_posix_mode(path: Path, expected: int) -> None:
+    if os.name == "nt":
+        return
+    assert stat.S_IMODE(path.stat().st_mode) == expected
+
+
 def test_sandbox_lark_cli_env_prepends_managed_linux_runtime() -> None:
     overlay = lark_cli.lark_cli_env_overlay("alice", sandbox_paths=True)
 
@@ -122,7 +133,7 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
 
     assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"amd64-binary"
     assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"arm64-binary"
-    assert stat.S_IMODE((runtime / "linux-amd64" / "lark-cli").stat().st_mode) == 0o755
+    _assert_posix_mode(runtime / "linux-amd64" / "lark-cli", 0o755)
     launcher = (runtime / "bin" / "lark-cli").read_text(encoding="utf-8")
     assert "uname -m" in launcher
     assert "x86_64" in launcher and "aarch64" in launcher
@@ -213,6 +224,7 @@ def test_managed_sandbox_runtime_rejects_any_symlink_in_prestaged_tree(monkeypat
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits unavailable")
 def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeypatch, tmp_path) -> None:
     _patch_paths(monkeypatch, tmp_path / "home")
     source = tmp_path / "pre-staged"
@@ -232,6 +244,35 @@ def test_managed_sandbox_runtime_rejects_non_executable_prestaged_binary(monkeyp
         lark_cli._ensure_managed_sandbox_lark_cli("v1.0.65")
 
     assert not lark_cli.lark_cli_managed_sandbox_dir().exists()
+
+
+def _stage_non_executable_sandbox_runtime(root: Path) -> None:
+    (root / "bin").mkdir(parents=True)
+    launcher = root / "bin" / "lark-cli"
+    launcher.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.chmod(0o644)
+    for arch in lark_cli.LARK_CLI_LINUX_ARCHES:
+        (root / f"linux-{arch}").mkdir(parents=True)
+        binary = root / f"linux-{arch}" / "lark-cli"
+        binary.write_bytes(b"\x7fELF")
+        binary.chmod(0o644)
+
+
+def test_validate_lark_cli_sandbox_runtime_accepts_non_executable_files_on_windows_hosts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(lark_cli.os, "name", "nt")
+    root = tmp_path / "runtime"
+    _stage_non_executable_sandbox_runtime(root)
+
+    lark_cli._validate_lark_cli_sandbox_runtime(root)
+
+
+def test_validate_lark_cli_sandbox_runtime_rejects_non_executable_files_on_posix_hosts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(lark_cli.os, "name", "posix")
+    root = tmp_path / "runtime"
+    _stage_non_executable_sandbox_runtime(root)
+
+    with pytest.raises(ValueError, match="executable"):
+        lark_cli._validate_lark_cli_sandbox_runtime(root)
 
 
 def test_concurrent_managed_sandbox_runtime_installs_serialize_replacement(monkeypatch, tmp_path) -> None:
@@ -987,7 +1028,7 @@ def test_start_lark_auth_returns_browser_url(monkeypatch, tmp_path):
     ]
     env = captured["env"]
     assert isinstance(env, dict)
-    assert env["LARKSUITE_CLI_CONFIG_DIR"].endswith("users/alice/integrations/lark-cli/config")
+    _assert_path_suffix(env["LARKSUITE_CLI_CONFIG_DIR"], "users/alice/integrations/lark-cli/config")
 
 
 def test_start_lark_auth_uses_minimal_login_by_default(monkeypatch, tmp_path):
@@ -1051,8 +1092,8 @@ def test_lark_cli_env_from_runtime_exposes_settings_auth_to_lark_commands(monkey
     env = _lark_cli_env_from_runtime(runtime, "lark-cli auth status --json", sandbox_paths=False)
 
     assert env is not None
-    assert env["LARKSUITE_CLI_CONFIG_DIR"].endswith("users/alice/integrations/lark-cli/config")
-    assert env["LARKSUITE_CLI_DATA_DIR"].endswith("users/alice/integrations/lark-cli/data")
+    _assert_path_suffix(env["LARKSUITE_CLI_CONFIG_DIR"], "users/alice/integrations/lark-cli/config")
+    _assert_path_suffix(env["LARKSUITE_CLI_DATA_DIR"], "users/alice/integrations/lark-cli/data")
 
 
 def test_lark_cli_env_hardens_existing_credential_tree(monkeypatch, tmp_path) -> None:
@@ -1072,11 +1113,11 @@ def test_lark_cli_env_hardens_existing_credential_tree(monkeypatch, tmp_path) ->
 
     lark_cli.lark_cli_env_overlay("alice")
 
-    assert stat.S_IMODE(config_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE((config_dir / "locks").stat().st_mode) == 0o700
-    assert stat.S_IMODE(data_dir.stat().st_mode) == 0o700
-    assert stat.S_IMODE(secret_file.stat().st_mode) == 0o600
-    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    _assert_posix_mode(config_dir, 0o700)
+    _assert_posix_mode(config_dir / "locks", 0o700)
+    _assert_posix_mode(data_dir, 0o700)
+    _assert_posix_mode(secret_file, 0o600)
+    _assert_posix_mode(token_file, 0o600)
 
 
 def test_lark_cli_env_rejects_symlinks_in_credential_tree(monkeypatch, tmp_path) -> None:
@@ -1109,7 +1150,7 @@ def test_save_lark_app_config_rehardens_files_written_by_cli(monkeypatch, tmp_pa
     lark_cli._save_lark_app_config_with_cli("alice", app_id="cli_app", app_secret="secret", brand="feishu")
 
     config_file = lark_cli.lark_cli_config_dir("alice") / "config.json"
-    assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+    _assert_posix_mode(config_file, 0o600)
 
 
 def test_validate_lark_app_credentials_surfaces_cli_probe_rejection(monkeypatch, tmp_path) -> None:
@@ -1149,7 +1190,7 @@ def test_lark_cli_json_rehardens_auth_files_written_by_cli(monkeypatch, tmp_path
     lark_cli._run_lark_cli_json(["/usr/bin/lark-cli", "auth", "login"], user_id="alice", timeout=5)
 
     token_file = lark_cli.lark_cli_data_dir("alice") / "auth.json"
-    assert stat.S_IMODE(token_file.stat().st_mode) == 0o600
+    _assert_posix_mode(token_file, 0o600)
 
 
 def test_lark_cli_env_from_runtime_uses_container_paths_for_sandbox_lark_commands():
