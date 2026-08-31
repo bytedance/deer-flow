@@ -25,7 +25,7 @@ import { Callout } from "nextra/components";
 
 中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
 
-1. 运行时中间件（输入/输出清理、线程数据、上传、沙箱与审计、悬空工具调用修补、LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）
+1. 运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → `ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱与审计、悬空工具调用修补、LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）
 2. `DynamicContextMiddleware` — 当前日期和可选记忆上下文
 3. `SkillActivationMiddleware` — slash skill 激活
 4. `SkillToolPolicyMiddleware` — 将技能工具限制为当前激活的技能

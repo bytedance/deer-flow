@@ -128,12 +128,35 @@ def test_subagent_summarization_optionality_is_explicit(path: Path) -> None:
 def test_runtime_middleware_summary_includes_current_guards(path: Path) -> None:
     content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
     marker = (
-        "运行时中间件（输入/输出清理、线程数据、上传、沙箱与审计、悬空工具调用修补、LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）"
+        "运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → "
+        "`ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱与审计、悬空工具调用修补、"
+        "LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）"
         if "/zh/" in path.as_posix()
         else (
-            "Runtime middlewares (input/output sanitization, thread data, uploads, sandbox and audit, "
+            "Runtime middlewares (`InputSanitizationMiddleware` for input sanitization → `ToolOutputBudgetMiddleware` "
+            "for output-budget truncation → `ToolResultSanitizationMiddleware` for tool-result sanitization, then thread data, "
+            "uploads, sandbox and audit, "
             "dangling tool-call patching, LLM/tool error handling, plus tool receipts, authorization/guardrail, "
             "read-before-write, and tool-progress guards when enabled)"
         )
     )
     assert marker in content
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("frontend/src/content/en/harness/middlewares.mdx"),
+        Path("frontend/src/content/zh/harness/middlewares.mdx"),
+    ),
+    ids=str,
+)
+def test_runtime_sanitization_and_budget_order_is_explicit(path: Path) -> None:
+    content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    markers = (
+        "`InputSanitizationMiddleware`",
+        "`ToolOutputBudgetMiddleware`",
+        "`ToolResultSanitizationMiddleware`",
+    )
+    positions = [content.index(marker) for marker in markers]
+    assert positions == sorted(positions)

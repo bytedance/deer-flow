@@ -29,7 +29,7 @@ This design keeps the agent core simple and stable while allowing rich, composab
 
 The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
 
-1. Runtime middlewares (input/output sanitization, thread data, uploads, sandbox and audit, dangling tool-call patching, LLM/tool error handling, plus tool receipts, authorization/guardrail, read-before-write, and tool-progress guards when enabled)
+1. Runtime middlewares (`InputSanitizationMiddleware` for input sanitization → `ToolOutputBudgetMiddleware` for output-budget truncation → `ToolResultSanitizationMiddleware` for tool-result sanitization, then thread data, uploads, sandbox and audit, dangling tool-call patching, LLM/tool error handling, plus tool receipts, authorization/guardrail, read-before-write, and tool-progress guards when enabled)
 2. `DynamicContextMiddleware` — current date and optional memory context
 3. `SkillActivationMiddleware` — slash-skill activation
 4. `SkillToolPolicyMiddleware` — filters skill tools to the active skill
