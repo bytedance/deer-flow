@@ -352,20 +352,9 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     # (an unbounded marker would skip every memory write forever, issue #3364).
     if get_memory_config().enabled:
         try:
-            from deerflow.agents.memory import get_memory_manager
+            from deerflow.agents.memory import clear_deleted_agent_marker
 
-            # Mirrors the delete path's candidate set so we clear whatever bucket
-            # the deletion marked (raw effective id plus any runtime-resolved id).
-            candidate_ids: set[str] = {user_id}
-            try:
-                candidate_ids.add(resolve_runtime_user_id(None))
-            except Exception:
-                pass
-            manager = await asyncio.to_thread(get_memory_manager)
-            clear = getattr(manager, "clear_agent_deleted", None)
-            if clear is not None:
-                for candidate_id in candidate_ids:
-                    clear(user_id=candidate_id, agent_name=normalized_name)
+            await asyncio.to_thread(clear_deleted_agent_marker, normalized_name, user_id)
         except Exception as e:
             logger.warning(f"Failed to clear deleted marker for agent '{normalized_name}': {e}")
 
@@ -589,20 +578,29 @@ async def delete_agent(name: str) -> None:
         pass
 
     if get_memory_config().enabled:
-        try:
-            # Cancel any pending debounced memory writes for this agent before
-            # removing the directory. Otherwise a lagging write can recreate the
-            # agent dir (with a stray memory.json) and block recreating a
-            # same-named agent (issue #3364).
-            from deerflow.agents.memory import get_memory_manager
+        # Pre-check that this really is a deletable custom agent (mirrors
+        # FileAgentStore.delete's agent_dir + config.yaml test) before we drop
+        # pending updates. For the legacy / missing / not-custom-agent outcomes
+        # the directory is deliberately preserved, so discarding first would
+        # throw away queued memory updates for an agent that still exists
+        # (issue #3364 review).
+        paths_for_check = get_paths()
+        target_agent_dir = paths_for_check.user_agent_dir(user_id, name)
+        if target_agent_dir.exists() and (target_agent_dir / "config.yaml").is_file():
+            try:
+                # Cancel any pending debounced memory writes for this agent before
+                # removing the directory. Otherwise a lagging write can recreate the
+                # agent dir (with a stray memory.json) and block recreating a
+                # same-named agent (issue #3364).
+                from deerflow.agents.memory import get_memory_manager
 
-            manager = await asyncio.to_thread(get_memory_manager)
-            discard = getattr(manager, "discard_pending_updates", None)
-            if discard is not None:
-                for candidate_id in candidate_ids:
-                    discard(user_id=candidate_id, agent_name=name)
-        except Exception as e:
-            logger.warning(f"Failed to discard pending memory updates for agent '{name}': {e}")
+                manager = await asyncio.to_thread(get_memory_manager)
+                discard = getattr(manager, "discard_pending_updates", None)
+                if discard is not None:
+                    for candidate_id in candidate_ids:
+                        discard(user_id=candidate_id, agent_name=name)
+            except Exception as e:
+                logger.warning(f"Failed to discard pending memory updates for agent '{name}': {e}")
 
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.

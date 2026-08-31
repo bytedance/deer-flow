@@ -511,3 +511,77 @@ def test_sync_tool_dispatch_through_thread_pool_uses_runtime_context(tmp_path: P
     default_dir = tmp_path / "users" / "default" / "agents" / "sync-agent"
     assert expected_dir.exists()
     assert not default_dir.exists()
+
+
+class _RecordingStore:
+    """Minimal store stub that records whether an upsert happened."""
+
+    def __init__(self) -> None:
+        self.update_calls: list[tuple[str, dict, str, str]] = []
+
+    def update(self, agent_name: str, config_data: dict | None, soul: str, *, user_id: str) -> None:
+        self.update_calls.append((agent_name, config_data, soul, user_id))
+
+
+def test_setup_agent_clears_deleted_marker_after_recreate(tmp_path: Path) -> None:
+    """issue #3364 review (round 3): re-creating a same-named agent through the
+    chat tool must clear the deletion tombstone, otherwise the re-created agent's
+    memory stays muted forever. Pins that ``setup_agent`` routes through the
+    shared ``clear_deleted_agent_marker`` helper right after a successful
+    ``store.update`` — the same drift guard as the REST create route, so the
+    REST and tool surfaces cannot diverge again."""
+    from langchain.agents import create_agent
+
+    from deerflow.tools.builtins.setup_agent_tool import setup_agent
+
+    auth_uid = "11112222-3333-4444-5555-666677778888"
+    agent_name = "recreated-agent"
+    clear_calls: list[tuple[str, str]] = []
+    store = _RecordingStore()
+
+    fake_model = FakeToolCallingModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "setup_agent",
+                        "args": {"soul": "# Reborn", "description": "recreated via tool"},
+                        "id": "call_marker_1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="recreated done"),
+        ]
+    )
+    graph = create_agent(model=fake_model, tools=[setup_agent], system_prompt="recreate")
+
+    config = _assemble_config(
+        body_config={"recursion_limit": 50},
+        body_context={"agent_name": agent_name, "is_bootstrap": True},
+        request_user_id=auth_uid,
+        thread_id="thread-e2e-marker",
+    )
+    runtime_ctx = _build_runtime_context("thread-e2e-marker", "run-marker", config.get("context"), None)
+    _install_runtime_context(config, runtime_ctx)
+    runtime = Runtime(context=runtime_ctx, store=None)
+    config.setdefault("configurable", {})["__pregel_runtime"] = runtime
+
+    with (
+        patch("deerflow.config.agents_config.get_paths", return_value=_make_paths_mock(tmp_path)),
+        patch("deerflow.tools.builtins.setup_agent_tool.get_agent_store", return_value=store),
+        patch(
+            "deerflow.tools.builtins.setup_agent_tool.clear_deleted_agent_marker",
+            side_effect=lambda a, u, **kw: clear_calls.append((a, u)),
+        ),
+    ):
+        graph.invoke({"messages": [HumanMessage(content="Recreate the agent")]}, config=config)
+
+    # The upsert happened, and the tombstone clear ran under the re-created name
+    # for the authenticated user (not a fallback/default bucket).
+    assert store.update_calls, "setup_agent must have invoked store.update"
+    assert store.update_calls[0][0] == agent_name
+    assert store.update_calls[0][3] == auth_uid
+    assert clear_calls, "setup_agent must call clear_deleted_agent_marker after store.update"
+    assert clear_calls[0] == (agent_name, auth_uid)

@@ -12,6 +12,7 @@ DeerMem-private symbols (``format_memory_for_injection``, ``get_memory_data``,
 them directly from ``deerflow.agents.memory.backends.deermem.deermem.core.*``.
 """
 
+from deerflow.agents.memory.deletion import clear_deleted_agent_marker
 from deerflow.agents.memory.manager import (
     MemoryConflictError,
     MemoryCorruptionError,
@@ -26,6 +27,7 @@ __all__ = [
     "MemoryManagerError",
     "MemoryConflictError",
     "MemoryCorruptionError",
+    "clear_deleted_agent_marker",
     "get_memory_manager",
     "reset_memory_manager",
 ]

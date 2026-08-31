@@ -1525,6 +1525,16 @@ class FileMemoryStorage(MemoryStorage):
                     )
                     notifications_by_agent.append((agent_name, notifications))
 
+            # Delete-tombstone markers only accumulate under
+            # users/{uid}/.deleted-agents/ (they are never reaped because a
+            # marker is cleared only by recreating the exact same agent name).
+            # Clearing this user's memory makes every marker moot, so prune the
+            # directory to avoid unbounded per-user on-disk state (issue #3364
+            # review).
+            markers_dir = path.parent / ".deleted-agents"
+            if markers_dir.exists():
+                shutil.rmtree(markers_dir, ignore_errors=True)
+
             empty = create_empty_memory()
             current_memory = self._load_memory_file(path)
             self._commit_changes_locked(
