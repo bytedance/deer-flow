@@ -109,6 +109,7 @@ describe("documentation content links", () => {
     for (const source of customAgentApiDocs) {
       expect(source).toContain("^[A-Za-z0-9-]+$");
       expect(source).toContain("users/{user_id}/agents/{name}/config.yaml");
+      expect(source).toContain("backend/scripts/migrate_user_isolation.py");
     }
 
     const chineseApiGuide = readFileSync(
@@ -116,5 +117,14 @@ describe("documentation content links", () => {
       "utf8",
     );
     expect(chineseApiGuide).toContain('"name": "data-analyst"');
+    expect(chineseApiGuide).toContain("下一次 Agent 调用时自动加载，无需重启");
+
+    const englishApiGuide = readFileSync(
+      join(CONTENT_ROOT, "en/application/agents-and-threads.mdx"),
+      "utf8",
+    );
+    expect(englishApiGuide).toContain(
+      "changes are picked up on the agent's next invocation",
+    );
   });
 });
