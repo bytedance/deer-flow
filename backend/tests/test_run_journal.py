@@ -1389,6 +1389,34 @@ class TestDeliveryTracking:
         assert delivery[0]["category"] == "outputs"
 
     @pytest.mark.anyio
+    async def test_tool_callback_name_preserves_attribution_when_message_lookup_misses(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        tool_run_id = uuid4()
+        j.on_tool_start(
+            {"name": "present_files"},
+            "",
+            run_id=tool_run_id,
+        )
+        j.on_tool_end(
+            Command(
+                update={
+                    "artifacts": ["/mnt/user-data/outputs/report.md"],
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_missing")],
+                }
+            ),
+            run_id=tool_run_id,
+        )
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["by_tool"] == {"present_files": ["/mnt/user-data/outputs/report.md"]}
+
+    @pytest.mark.anyio
     async def test_command_with_multiple_messages_records_artifacts_once(self, journal_setup):
         from langchain_core.messages import ToolMessage
         from langgraph.types import Command

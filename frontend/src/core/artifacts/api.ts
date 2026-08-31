@@ -13,6 +13,8 @@ export interface ArtifactArchiveDownload {
   filename: string;
 }
 
+export const MAX_ARTIFACT_ARCHIVE_FILES = 50;
+
 export class ArtifactRequestError extends Error {
   readonly status: number;
 

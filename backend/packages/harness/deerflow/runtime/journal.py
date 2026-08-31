@@ -282,6 +282,7 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._active_tool_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
 
         # Artifact-production tracking for the terminal run.delivery event
@@ -523,12 +524,16 @@ class RunJournal(BaseCallbackHandler):
         )
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
-        """Handle tool start event, cache tool call ID for later correlation"""
-        tool_call_id = str(run_id)
-        logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
+        """Cache the executing tool name for artifact attribution."""
+        tool_run_id = str(run_id)
+        tool_name = serialized.get("name") if isinstance(serialized, Mapping) else None
+        if isinstance(tool_name, str) and tool_name:
+            self._active_tool_names[tool_run_id] = tool_name
+        logger.debug("Tool start for node %s, tool_run_id=%s, tags=%s", run_id, tool_run_id, tags)
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
+        active_tool_name = self._active_tool_names.pop(str(run_id), None)
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
@@ -554,7 +559,9 @@ class RunJournal(BaseCallbackHandler):
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
                 if artifacts:
-                    artifact_tool_name = next(iter(artifact_tool_names)) if len(artifact_tool_names) == 1 else None
+                    artifact_tool_name = active_tool_name
+                    if artifact_tool_name is None and len(artifact_tool_names) == 1:
+                        artifact_tool_name = next(iter(artifact_tool_names))
                     self._record_produced_artifacts(artifacts, artifact_tool_name)
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")

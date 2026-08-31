@@ -17,6 +17,7 @@ from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
 
 _VIRTUAL_PREFIX = "mnt/user-data/outputs/"
 _EDIT_TEMP_PREFIX = ".artifact-edit-"
+_ALLOWED_FORMAT_CHARS = frozenset({"\u200c", "\u200d"})
 _WINDOWS_INVALID_CHARS = frozenset('<>:"|?*')
 _WINDOWS_DEVICE_NAMES = frozenset({"con", "prn", "aux", "nul"} | {f"com{number}" for number in range(1, 10)} | {f"lpt{number}" for number in range(1, 10)})
 MAX_FILES = 50
@@ -81,7 +82,7 @@ def _member(
         raise _reject()
     if any(any(char in _WINDOWS_INVALID_CHARS for char in part) or part.endswith((" ", ".")) or part.split(".", 1)[0].rstrip().casefold() in _WINDOWS_DEVICE_NAMES for part in parts):
         raise _reject()
-    if any(any(unicodedata.category(char).startswith("C") for char in part) for part in parts):
+    if any(any(unicodedata.category(char).startswith("C") and char not in _ALLOWED_FORMAT_CHARS for char in part) for part in parts):
         raise _reject()
     if any(part.casefold() in reserved or part.casefold().startswith(_EDIT_TEMP_PREFIX) for part in parts):
         raise _reject()

@@ -11,10 +11,22 @@ const artifactState = rs.hoisted(() => ({
   select: rs.fn(),
   setOpen: rs.fn(),
 }));
-const archiveState = rs.hoisted(() => ({
-  download: rs.fn(),
-  toastError: rs.fn(),
-}));
+const archiveState = rs.hoisted(() => {
+  class RequestError extends Error {
+    readonly status: number;
+
+    constructor(status: number, message: string) {
+      super(message);
+      this.status = status;
+    }
+  }
+
+  return {
+    download: rs.fn(),
+    RequestError,
+    toastError: rs.fn(),
+  };
+});
 
 rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: null }),
@@ -23,13 +35,16 @@ rs.mock("@/components/workspace/artifacts/context", () => ({
   useArtifacts: () => artifactState,
 }));
 rs.mock("@/core/artifacts/api", () => ({
+  ArtifactRequestError: archiveState.RequestError,
   downloadArtifactArchive: archiveState.download,
+  MAX_ARTIFACT_ARCHIVE_FILES: 50,
 }));
 rs.mock("sonner", () => ({
   toast: { error: archiveState.toastError, success: rs.fn() },
 }));
 
 import { ArtifactFileList } from "@/components/workspace/artifacts/artifact-file-list";
+import { ArtifactRequestError } from "@/core/artifacts/api";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 
@@ -102,6 +117,16 @@ describe("ArtifactFileList archive download", () => {
     ).toBeNull();
   });
 
+  it("does not offer an archive above the server file-count limit", () => {
+    renderList({ archiveFileCount: 51, runId: "run-1" });
+
+    expect(
+      screen.queryByRole("button", {
+        name: /Download current versions/,
+      }),
+    ).toBeNull();
+  });
+
   it("downloads the archive and releases its object URL", async () => {
     const blob = new Blob(["zip"]);
     archiveState.download.mockResolvedValue({
@@ -150,6 +175,28 @@ describe("ArtifactFileList archive download", () => {
     await waitFor(() => {
       expect(archiveState.toastError).toHaveBeenCalledWith(
         "Failed to download artifact archive.",
+      );
+    });
+  });
+
+  it("shows actionable archive errors returned by the server", async () => {
+    archiveState.download.mockRejectedValue(
+      new ArtifactRequestError(
+        413,
+        "An artifact archive can contain at most 50 files",
+      ),
+    );
+    renderList({ runId: "run-1" });
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Download current versions (2 files)",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(archiveState.toastError).toHaveBeenCalledWith(
+        "An artifact archive can contain at most 50 files",
       );
     });
   });

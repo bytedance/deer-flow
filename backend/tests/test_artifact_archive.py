@@ -428,6 +428,21 @@ def test_archive_rejects_nonportable_zip_names(tmp_path, filename: str) -> None:
         )
 
 
+def test_archive_allows_emoji_joiner_sequences(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    filename = "report-🧑‍💻.txt"
+    (outputs / filename).write_text("report", encoding="utf-8")
+
+    result = artifact_archive.build_artifact_archive(
+        outputs,
+        [f"/mnt/user-data/outputs/{filename}"],
+    )
+
+    with result.file, zipfile.ZipFile(result.file) as archive:
+        assert archive.namelist() == [filename]
+
+
 @pytest.mark.asyncio
 async def test_repeated_cancellation_keeps_the_archive_slot_until_worker_exit(monkeypatch) -> None:
     started = threading.Event()

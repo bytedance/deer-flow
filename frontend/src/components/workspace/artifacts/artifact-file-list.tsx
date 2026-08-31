@@ -10,7 +10,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { downloadArtifactArchive } from "@/core/artifacts/api";
+import {
+  ArtifactRequestError,
+  downloadArtifactArchive,
+  MAX_ARTIFACT_ARCHIVE_FILES,
+} from "@/core/artifacts/api";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
@@ -105,7 +109,11 @@ export function ArtifactFileList({
       link.remove();
     } catch (error) {
       console.error("Failed to download artifact archive:", error);
-      toast.error(t.artifactArchive.downloadFailed);
+      toast.error(
+        error instanceof ArtifactRequestError
+          ? error.message
+          : t.artifactArchive.downloadFailed,
+      );
     } finally {
       if (objectUrl) URL.revokeObjectURL(objectUrl);
       setDownloadingArchive(false);
@@ -113,7 +121,10 @@ export function ArtifactFileList({
   }, [downloadingArchive, runId, t, threadId]);
 
   const canDownloadArchive =
-    runId !== undefined && archiveCount > 1 && !isStaticWebsiteOnly();
+    runId !== undefined &&
+    archiveCount > 1 &&
+    archiveCount <= MAX_ARTIFACT_ARCHIVE_FILES &&
+    !isStaticWebsiteOnly();
 
   return (
     <div className={cn("flex w-full flex-col gap-4", className)}>
