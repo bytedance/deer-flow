@@ -23,9 +23,10 @@ from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
-# SQLAlchemy leaves the ``email`` column's ``unique=True`` constraint unnamed,
-# so Postgres auto-names it ``<table>_<column>_key``.
-_EMAIL_UNIQUE_CONSTRAINT_NAME = "users_email_key"
+# ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
+# (and 0001_baseline) realise as a single UNIQUE INDEX -- not a named UNIQUE
+# constraint -- so a Postgres duplicate reports the index name here.
+_EMAIL_UNIQUE_INDEX_NAME = "ix_users_email"
 
 
 def _driver_constraint_name(exc: IntegrityError) -> str | None:
@@ -76,13 +77,25 @@ def _is_oauth_identity_violation(exc: IntegrityError) -> bool:
 
 
 def _is_email_violation(exc: IntegrityError) -> bool:
-    """True when ``exc`` is the ``users.email`` uniqueness violation, using the
-    same driver-exception inspection as :func:`_is_oauth_identity_violation`
-    (never ``str(exc)``, whose INSERT text names every column)."""
+    """True when ``exc`` is the ``ix_users_email`` uniqueness violation, using
+    the same driver-exception inspection as
+    :func:`_is_oauth_identity_violation` (never ``str(exc)``, whose INSERT text
+    names every column)."""
     name = _driver_constraint_name(exc)
     if name is not None:
-        return name == _EMAIL_UNIQUE_CONSTRAINT_NAME
+        return name == _EMAIL_UNIQUE_INDEX_NAME
     return "users.email" in str(exc.orig).lower()
+
+
+def _is_uniqueness_violation(exc: IntegrityError) -> bool:
+    """True for a unique-index / primary-key violation specifically, as
+    opposed to a NOT NULL / CHECK / foreign-key ``IntegrityError`` on the same
+    INSERT -- only the former means "a user like this already exists"."""
+    sqlstate = getattr(exc.orig, "sqlstate", None) or getattr(exc.orig, "pgcode", None)
+    if sqlstate is not None:
+        return sqlstate == "23505"  # unique_violation
+    message = str(exc.orig).lower()
+    return "unique constraint failed" in message or "primary key constraint failed" in message
 
 
 def _violated_constraint(exc: IntegrityError) -> str | None:
@@ -160,8 +173,11 @@ class SQLiteUserRepository(UserRepository):
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create_user(self, user: User) -> User:
-        """Insert a new user. Raises ``ValueError`` on duplicate email or,
-        for an OAuth-linked account, a duplicate (provider, oauth_id) pair.
+        """Insert a new user. Raises ``ValueError`` on any uniqueness
+        violation -- duplicate email, a duplicate (provider, oauth_id) pair
+        for an OAuth-linked account, or a duplicate id -- with a message
+        naming the specific conflict. Other ``IntegrityError``\\ s (NOT NULL,
+        CHECK, foreign key) propagate unchanged.
 
         The email is canonicalised to lowercase before insert so the existing
         unique constraint enforces case-insensitive uniqueness for new rows and
@@ -193,13 +209,19 @@ class SQLiteUserRepository(UserRepository):
                     # A duplicate address that got past the pre-check: a
                     # concurrent insert of the same email.
                     raise ValueError(f"Email already registered: {user.email}") from exc
-                # Neither uniqueness constraint we message specifically (in
-                # practice a duplicate id). Don't dress it up as an email
-                # conflict for an address that isn't registered.
-                constraint = _violated_constraint(exc)
-                raise ValueError(
-                    f"User already exists (constraint: {constraint})" if constraint else "User already exists"
-                ) from exc
+                if _is_uniqueness_violation(exc):
+                    # Some other unique index / primary key (in practice a
+                    # duplicate id). "Already exists" fits, but don't dress it
+                    # up as an email conflict for an address that isn't
+                    # registered.
+                    constraint = _violated_constraint(exc)
+                    raise ValueError(
+                        f"User already exists (constraint: {constraint})" if constraint else "User already exists"
+                    ) from exc
+                # A NOT NULL / CHECK / foreign-key IntegrityError is not a
+                # "user already exists" condition and not part of this
+                # method's ValueError contract -- let it propagate.
+                raise
         return user
 
     async def get_user_by_id(self, user_id: str) -> User | None:

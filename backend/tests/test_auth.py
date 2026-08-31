@@ -500,6 +500,38 @@ def test_create_user_duplicate_email_race_still_reports_email(tmp_path):
     asyncio.run(_run())
 
 
+def test_create_user_propagates_non_uniqueness_integrity_error(tmp_path):
+    """A NOT NULL / CHECK / FK IntegrityError is not a "user already exists"
+    condition and is not part of create_user's ValueError contract -- it must
+    propagate as-is, not be relabeled "User already exists"."""
+    import asyncio
+    import sqlite3
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.gateway.auth.repositories import sqlite as sqlite_repo
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    async def _run() -> None:
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+
+        await init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/scratch.db", sqlite_dir=str(tmp_path))
+        try:
+            repo = SQLiteUserRepository(get_session_factory())
+            not_null = IntegrityError(
+                "INSERT INTO users ...",
+                {},
+                orig=sqlite3.IntegrityError("NOT NULL constraint failed: users.system_role"),
+            )
+            with patch.object(sqlite_repo.AsyncSession, "commit", side_effect=not_null):
+                with pytest.raises(IntegrityError):
+                    await repo.create_user(User(email="x@test.com", password_hash="h", system_role="user"))
+        finally:
+            await close_engine()
+
+    asyncio.run(_run())
+
+
 def test_create_user_real_oauth_conflict_still_reported_correctly(tmp_path):
     """The actual case _is_oauth_identity_violation exists to detect: two
     users sharing an (oauth_provider, oauth_id) pair must still raise the
@@ -538,13 +570,14 @@ def test_create_user_real_oauth_conflict_still_reported_correctly(tmp_path):
 # error as `exc.orig`. It re-raises its own AsyncAdapt_asyncpg_dbapi
 # .IntegrityError (pgcode/sqlstate only) `from` the real asyncpg error, so
 # `constraint_name` lives on `exc.orig.__cause__`, not `exc.orig`.
-def _pg_integrity_error(constraint_name: str):
+def _pg_integrity_error(constraint_name: str, sqlstate: str = "23505"):
     """A stub in the shape SQLAlchemy's asyncpg dialect actually produces:
-    the `orig` wrapper carries no constraint_name; the real driver error
-    (which does) is its `__cause__`."""
+    the `orig` wrapper carries `pgcode`/`sqlstate` but no constraint_name;
+    the real driver error (which does) is its `__cause__`. Default sqlstate
+    23505 = unique_violation."""
     from types import SimpleNamespace
 
-    wrapper = SimpleNamespace(pgcode="23505", sqlstate="23505")
+    wrapper = SimpleNamespace(pgcode=sqlstate, sqlstate=sqlstate)
     wrapper.__cause__ = SimpleNamespace(constraint_name=constraint_name)
     return SimpleNamespace(orig=wrapper)
 
@@ -603,9 +636,12 @@ def test_is_email_violation_matches_both_backends():
     import sqlite3
     from types import SimpleNamespace
 
-    from app.gateway.auth.repositories.sqlite import _EMAIL_UNIQUE_CONSTRAINT_NAME, _is_email_violation
+    from app.gateway.auth.repositories.sqlite import _EMAIL_UNIQUE_INDEX_NAME, _is_email_violation
 
-    assert _is_email_violation(_pg_integrity_error(_EMAIL_UNIQUE_CONSTRAINT_NAME)) is True
+    # email is unique=True + index=True -> a single UNIQUE INDEX, so Postgres
+    # reports the index name (ix_users_email), not a users_email_key constraint.
+    assert _EMAIL_UNIQUE_INDEX_NAME == "ix_users_email"
+    assert _is_email_violation(_pg_integrity_error(_EMAIL_UNIQUE_INDEX_NAME)) is True
     sqlite = SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.email"))
     assert _is_email_violation(sqlite) is True
 
@@ -619,6 +655,26 @@ def test_is_email_violation_rejects_primary_key_and_oauth():
     assert _is_email_violation(_pg_integrity_error("users_pkey")) is False
     assert (
         _is_email_violation(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) is False
+    )
+
+
+def test_is_uniqueness_violation_distinguishes_unique_from_not_null_and_check():
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _is_uniqueness_violation
+
+    # Postgres: 23505 unique_violation vs 23502 not_null_violation.
+    assert _is_uniqueness_violation(_pg_integrity_error("ix_users_email", sqlstate="23505")) is True
+    assert _is_uniqueness_violation(_pg_integrity_error("x", sqlstate="23502")) is False
+    # SQLite message forms.
+    assert _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) is True
+    assert (
+        _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("PRIMARY KEY constraint failed"))) is True
+    )
+    assert (
+        _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("NOT NULL constraint failed: users.system_role")))
+        is False
     )
 
 
