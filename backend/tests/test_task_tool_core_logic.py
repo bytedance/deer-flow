@@ -2093,7 +2093,7 @@ def test_task_tool_completed_stamps_acceptance_verdict(monkeypatch):
     message = _run_completed_task_tool_with_criteria(
         monkeypatch,
         criteria=["file:../outputs/report.md non-empty", "tests_passed:make test", "open ended"],
-        bash_executions=[{"tool_call_id": "tc-1", "tool_name": "bash", "command": "make test", "output_tail": "12 passed", "status": "success"}],
+        bash_executions=[{"tool_call_id": "tc-1", "tool_name": "bash", "command": "make test", "output_tail": "12 passed", "status": "success", "shell_persistent": False}],
     )
 
     verdict = message.additional_kwargs["subagent_acceptance_verdict"]

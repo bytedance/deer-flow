@@ -4461,6 +4461,51 @@ class TestBashExecutionHarvest:
 
         assert executions[0]["command_truncated"] is False
 
+    def test_entries_carry_producing_sandbox_shell_persistence(self, classes, monkeypatch):
+        """PR review (P1): the provenance stamp is resolved from the state
+        that carried the evidence — the subagent's own graph state — not the
+        parent task runtime, so a parent that delegated before touching a
+        sandbox cannot mis-adjudicate persistent-session evidence as
+        trusted."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        class _PersistentShellSandbox:
+            persistent_shell_sessions = True
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _PersistentShellSandbox()))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-1"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["shell_persistent"] is True
+
+    def test_fresh_process_sandbox_stamps_false(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        class _OneShotSandbox:
+            persistent_shell_sessions = False
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _OneShotSandbox()))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-1"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["shell_persistent"] is False
+
+    def test_unidentifiable_sandbox_stamps_none(self, classes, monkeypatch):
+        """No sandbox channel in the evidence-carrying state → unknown
+        provenance; the acceptance matcher fails closed on it."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        executions = executor_module._harvest_bash_executions(self._final_state(classes))
+
+        assert executions[0]["shell_persistent"] is None
+
     def test_no_bash_calls_returns_empty_list(self, classes, monkeypatch):
         executor_module = importlib.import_module("deerflow.subagents.executor")
         monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))

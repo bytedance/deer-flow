@@ -119,7 +119,11 @@ class SubagentResult:
             ``tests_passed:<command>`` acceptance leaf to a specific recorded
             execution. Each entry also carries ``status_marker`` — the exit
             marker text the recorded status was derived from, when one was
-            seen — so the leaf detail can report what was actually observed.
+            seen — so the leaf detail can report what was actually observed
+            — and ``shell_persistent``, the producing sandbox's
+            ``persistent_shell_sessions`` flag resolved from the state that
+            carried the evidence (``None`` when unidentifiable — the matcher
+            fails closed on it).
             Accumulated per chunk (merged by ``tool_call_id``) so
             summarization compacting earlier messages cannot erase a recorded
             execution. ``None`` when the delegation carried no acceptance
@@ -419,6 +423,35 @@ def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | No
     return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
 
 
+def _harvest_shell_persistence(final_state: Any) -> bool | None:
+    """Whether the sandbox that produced this state's bash evidence reuses one
+    persistent shell session (``Sandbox.persistent_shell_sessions`` — AIO's
+    legacy exec path).
+
+    Read from the state that CARRIED the evidence — the subagent's own graph
+    state, whose ``sandbox`` channel is seeded from the parent or written by
+    the subagent's own lazy acquisition — so the producing sandbox is the one
+    resolved. Resolving against the parent task runtime instead would
+    mis-adjudicate the common path where the parent never touched a sandbox:
+    its state has no ``sandbox`` key, the lookup would report "no persistent
+    session", and persistent-session evidence would pass as trusted. ``None``
+    when the producing sandbox cannot be identified; consumers must fail
+    closed (UNVERIFIED).
+    """
+    try:
+        from deerflow.sandbox.overwrite import unwrap_sandbox
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+        sandbox_state, _ = unwrap_sandbox(final_state.get("sandbox")) if isinstance(final_state, dict) else (None, False)
+        sandbox_id = sandbox_state.get("sandbox_id") if isinstance(sandbox_state, dict) else None
+        if not isinstance(sandbox_id, str):
+            return None
+        sandbox = get_sandbox_provider().get(sandbox_id)
+        return None if sandbox is None else bool(getattr(sandbox, "persistent_shell_sessions", False))
+    except Exception:
+        return None
+
+
 def _harvest_bash_executions(
     final_state: Any,
 ) -> list[dict[str, Any]] | None:
@@ -432,8 +465,13 @@ def _harvest_bash_executions(
     (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
     ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
     as success — so an explicit exit marker wins, and the meta status is only
-    the fallback when no marker exists. Failure-isolated like the receipt
-    harvest: an error returns ``None`` and the leaves degrade to UNVERIFIED.
+    the fallback when no marker exists. Every entry is stamped with
+    ``shell_persistent`` — the producing sandbox's
+    ``persistent_shell_sessions`` flag, resolved against the sandbox recorded
+    in THIS state (the subagent's own graph state), so provenance survives
+    even when the parent never touched a sandbox. Failure-isolated like the
+    receipt harvest: an error returns ``None`` and the leaves degrade to
+    UNVERIFIED.
     """
     if not final_state:
         return None
@@ -485,6 +523,15 @@ def _harvest_bash_executions(
                     "status_marker": status_marker,
                 }
             )
+        # Provenance stamp: whether the producing sandbox reuses one
+        # persistent shell session. Captured here — while the state that
+        # carried the evidence is at hand — because the parent-side checker
+        # cannot derive it (its runtime has no ``sandbox`` key when the
+        # parent delegated before touching one). ``None`` (unknown) fails
+        # closed in the acceptance matcher.
+        shell_persistent = _harvest_shell_persistence(final_state)
+        for execution in executions:
+            execution["shell_persistent"] = shell_persistent
         return executions[-_BASH_EVIDENCE_MAX_ENTRIES:]
     except Exception:
         logger.warning("Failed to harvest subagent bash execution evidence", exc_info=True)

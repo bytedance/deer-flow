@@ -46,13 +46,16 @@ def _prober(files: dict[str, str]):
     return probe
 
 
-def _bash_execution(command: str, *, status: str = "success", output_tail: str = "") -> dict:
+def _bash_execution(command: str, *, status: str = "success", output_tail: str = "", shell_persistent: bool | None = False) -> dict:
     return {
         "tool_call_id": f"tc-{abs(hash(command)) % 10000}",
         "tool_name": "bash",
         "command": command,
         "output_tail": output_tail,
         "status": status,
+        # The harvest stamps the producing sandbox's persistent-shell flag;
+        # test evidence defaults to a fresh-process (trusted) provenance.
+        "shell_persistent": shell_persistent,
     }
 
 
@@ -607,33 +610,44 @@ class TestProbeInnerScriptRealLayouts:
 
 
 class TestTestsPassedLeaf:
-    def test_persistent_shell_session_evidence_is_untrusted(self, monkeypatch):
+    def test_persistent_shell_session_evidence_is_untrusted(self):
         """PR review (P1): on a persistent-session provider (AIO) any earlier
         call could have exported PATH or redefined the runner — the clean-
         looking matched run proves nothing, so every tests_passed leaf
-        degrades to UNVERIFIED; re-execution belongs to the RFC §6 verifier."""
-
-        class _PersistentShellSandbox:
-            persistent_shell_sessions = True
-
-        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _PersistentShellSandbox()))
-        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}})
-        executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
-        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], runtime=runtime, bash_executions=executions)
+        degrades to UNVERIFIED; re-execution belongs to the RFC §6 verifier.
+        Provenance is the harvest stamp, not the parent runtime: the parent
+        that delegated before touching a sandbox has no ``sandbox`` state."""
+        executions = [_bash_execution("pytest tests/security", output_tail="7 passed", shell_persistent=True)]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
 
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is False
         assert leaf["holds"] is False
         assert "persistent shell session" in leaf["detail"]
 
-    def test_one_shot_session_evidence_still_matches(self, monkeypatch):
-        class _OneShotSandbox:
-            persistent_shell_sessions = False
+    def test_unknown_shell_provenance_fails_closed(self):
+        """PR review (P1): a missing provenance stamp means the producing
+        sandbox could not be identified — the evidence is not adjudicated
+        as trusted by default."""
+        executions = [_bash_execution("pytest tests/security", output_tail="7 passed", shell_persistent=None)]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
 
-        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _OneShotSandbox()))
-        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}})
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+        assert "could not be identified" in leaf["detail"]
+
+    def test_unstamped_evidence_fails_closed(self):
         executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
-        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], runtime=runtime, bash_executions=executions)
+        for execution in executions:
+            del execution["shell_persistent"]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_one_shot_session_evidence_still_matches(self):
+        executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True
 
@@ -683,9 +697,73 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
-    def test_exact_assignment_set_matches_order_insensitively(self):
-        executions = [_bash_execution("NO_COLOR=1 CI=1 pytest tests/security", output_tail="3 passed")]
-        verdict = check_acceptance_criteria(["tests_passed:CI=1 NO_COLOR=1 pytest tests/security"], bash_executions=executions)
+    def test_duplicate_assignment_reorder_is_unprovable(self):
+        """PR review: a repeated assignment name is last-wins, so the raw
+        token set cannot prove the environment — ``CI=0 CI=1`` (effective
+        CI=1) and ``CI=1 CI=0`` (effective CI=0) are the same set with
+        opposite environments."""
+        executions = [_bash_execution("CI=1 CI=0 pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:CI=0 CI=1 pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_duplicate_assignment_same_effective_value_matches(self):
+        executions = [_bash_execution("CI=1 CI=1 pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:CI=1 pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_preceding_export_with_summary_shaped_error_is_unprovable(self):
+        """PR review: ``export 'all tests passed'`` prints bash's
+        ``not a valid identifier`` error — subagent-chosen text carrying a
+        summary shape — so the prefix is neither silent nor state-clean and
+        the passing tail must not anchor the leaf."""
+        executions = [_bash_execution("export 'all tests passed'; make test", output_tail="export: all tests passed: not a valid identifier\nbuild ok")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_preceding_unset_is_unprovable(self):
+        """``unset NAME`` removes shell state the matched run observes —
+        state pollution, not a silent prefix."""
+        executions = [_bash_execution("unset PYTEST_ADDOPTS; pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_preceding_valid_export_is_unprovable(self):
+        """``export CI=1`` is a state mutation even though it prints
+        nothing — the environment is part of the invocation."""
+        executions = [_bash_execution("export CI=1; pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unknown_option_arity_widening_is_unprovable(self):
+        """PR review: ``--rootdir`` takes a separate value but is absent
+        from the value-taking table, so ``/tmp/project`` is not provably a
+        positional target — the execution's added ``tests/security`` then
+        narrows the criterion's default discovery rather than widening a
+        scoped selection."""
+        executions = [_bash_execution("pytest --rootdir /tmp/project tests/security", output_tail="5 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest --rootdir /tmp/project"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_unknown_option_arity_exact_match_still_holds(self):
+        """Unknown arity only kills the scoped-selection *proof*; an
+        execution running exactly the criterion's tokens still matches."""
+        executions = [_bash_execution("pytest --rootdir /tmp/project", output_tail="5 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest --rootdir /tmp/project"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_unknown_option_arity_with_glued_value_still_scopes(self):
+        """The glued form (``--rootdir=/tmp/project``) embeds its value in
+        one token, so the path-like positional that follows is provably a
+        selection target and a wider execution still covers it."""
+        executions = [_bash_execution("pytest --rootdir=/tmp/project tests/security tests/unit", output_tail="9 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest --rootdir=/tmp/project tests/security"], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True
 
@@ -845,14 +923,24 @@ class TestTestsPassedLeaf:
 
     def test_non_silent_invocation_forms_are_rejected(self):
         """PR review: allowlisted names with output-emitting forms —
-        pushd prints the stack, export -p prints variables, umask prints,
-        source runs whatever the file prints — must not lend output."""
-        for wrapped in ("pushd /tmp; make test", "export -p; make test", "umask; make test", "ulimit -n; make test", "source deploy.sh; make test"):
+        pushd prints the stack, umask prints, source runs whatever the file
+        prints — must not lend output. (``export -p`` also prints, but any
+        argumented ``export`` now degrades one gate earlier as state
+        pollution — see ``test_preceding_valid_export_is_unprovable``.)"""
+        for wrapped in ("pushd /tmp; make test", "umask; make test", "ulimit -n; make test", "source deploy.sh; make test"):
             executions = [_bash_execution(wrapped, output_tail="1 passed")]
             verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
             leaf = verdict["leaves"][0]
             assert leaf["checked"] is False, wrapped
             assert leaf["detail"] == "recorded output is not attributable to the matched segment", wrapped
+
+    def test_preceding_export_print_form_is_unprovable(self):
+        """``export -p`` prints the environment; argumented export is state
+        pollution regardless of its output behavior."""
+        executions = [_bash_execution("export -p; make test", output_tail="1 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
 
     def test_cdpath_print_lends_no_pass_shape(self):
         """PR review: one ``mkdir`` plus one ``export`` mints a passing

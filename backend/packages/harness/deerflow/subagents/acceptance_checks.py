@@ -397,12 +397,16 @@ def _carries_summary_shape(text: str) -> bool:
 
 def _is_silent_segment(tokens: list[str]) -> bool:
     """Whether a preceding segment is provably output-free, by invocation
-    form — not by executable name alone: ``pushd``/``popd`` print the
-    directory stack, ``export -p`` prints variables, ``umask``/``ulimit``
-    print on several forms, and ``source``/``.`` execute arbitrary file
-    content — a ``*/bin/activate`` path shape says nothing about what the
-    script emits (the subagent controls the filesystem and can craft one),
-    so sourced prefixes are never provably silent.
+    form — not by executable name alone: ``pushd``/``popd`` print
+    the directory stack, ``umask``/``ulimit`` print on several forms, and
+    ``source``/``.`` execute arbitrary file content — a ``*/bin/activate``
+    path shape says nothing about what the script emits (the subagent
+    controls the filesystem and can craft one), so sourced prefixes are
+    never provably silent. ``export``/``unset`` are never provably silent
+    either: an invalid identifier makes bash print ``export: <arg>: not a
+    valid identifier`` — subagent-chosen text that can itself carry a
+    summary shape (``export 'all tests passed'; make test``) — and valid
+    argument forms mutate shell state (see ``_segment_pollutes_state``).
 
     ``cd`` is silent only when its argument is literal and shape-free:
     with CDPATH set it prints the resolved destination — subagent-chosen
@@ -420,16 +424,9 @@ def _is_silent_segment(tokens: list[str]) -> bool:
     args = stripped[1:]
     if executable == "cd":
         return not any(_carries_summary_shape(arg) or _EXPANSION_CHAR_RE.search(arg) or _GLOB_CHAR_RE.search(arg) for arg in args)
-    if executable == "export":
-        # ``export A=1`` / ``export NAME`` print nothing; bare ``export``
-        # and ``export -p`` print the environment. (Behavior-changing
-        # exports — PATH, CDPATH, PYTEST_ADDOPTS — are state pollution and
-        # degrade the match upstream; silence here is about output only.)
-        return bool(args) and "-p" not in args
-    if executable == "unset":
-        return bool(args)
-    # pushd/popd (print the stack), umask/ulimit (print forms), source/. and
-    # every other executable are not provably silent.
+    # pushd/popd (print the stack), umask/ulimit (print forms), export/unset
+    # (see the docstring), source/. and every other executable are not
+    # provably silent.
     return False
 
 
@@ -544,18 +541,39 @@ def _leading_assignment_tokens(tokens: list[str]) -> list[str]:
     return assignments
 
 
+def _effective_env_assignments(tokens: list[str]) -> dict[str, str]:
+    """The effective leading environment as a name → final-value mapping.
+
+    A set of raw tokens is only order-insensitive when names are distinct:
+    shell assignments may repeat a name and the LAST value wins, so
+    ``CI=0 CI=1`` and ``CI=1 CI=0`` are the same token set but different
+    environments (effective ``CI`` of 1 vs 0).
+    """
+    effective: dict[str, str] = {}
+    for token in _leading_assignment_tokens(tokens):
+        name, _, value = token.partition("=")
+        effective[name] = value
+    return effective
+
+
 def _segment_pollutes_state(tokens: list[str]) -> bool:
     """Whether a preceding segment mutates shell state the matcher cannot
     see: ANY assignment (prefix or pure-assignment segment) or any
-    ``export NAME=``. No variable is provably inert across repositories —
-    ``CI``/``DEBUG``/``VERBOSE`` are routinely read by tests and can change
-    or skip execution, and PATH/LD_PRELOAD/PYTHONPATH/PYTEST_ADDOPTS/
-    MAKEFILES/BASH_ENV change what runs outright."""
+    ``export``/``unset`` with arguments. No variable is provably inert across
+    repositories — ``CI``/``DEBUG``/``VERBOSE`` are routinely read by tests
+    and can change or skip execution, and PATH/LD_PRELOAD/PYTHONPATH/
+    PYTEST_ADDOPTS/MAKEFILES/BASH_ENV change what runs outright."""
     if _leading_assignment_tokens(tokens):
         return True
     stripped = _strip_env_assignments(tokens)
-    if stripped and os.path.basename(stripped[0]) == "export":
-        return any("=" in arg for arg in stripped[1:])
+    if not stripped:
+        return False
+    if os.path.basename(stripped[0]) in ("export", "unset"):
+        # ``export NAME`` marks the inherited value for later children,
+        # ``export NAME=…`` sets it, ``unset NAME`` removes it — all mutate
+        # the state the matched run executes in. (An argument-less
+        # ``export`` prints the environment; the silence check rejects it.)
+        return bool(stripped[1:])
     return False
 
 
@@ -611,18 +629,33 @@ _VALUE_TAKING_OPTION_TOKENS = frozenset(
 _CRITERION_PATHLIKE_ARG_RE = re.compile(r"[/\\]|\.(?:py|jsx?|tsx?|go|rs|java|rb|php)$")
 
 
-def _criterion_positional_args(expected: list[str]) -> list[str]:
+def _criterion_positional_args(expected: list[str]) -> list[str] | None:
     """Criterion tokens that are positional arguments — the tokens that can
     name a test selection. Options and their values are skipped by arity,
     so a path embedded in an option (``--basetemp=/tmp/p``,
-    ``--junitxml=/tmp/r.xml``) is never mistaken for a selection target."""
+    ``--junitxml=/tmp/r.xml``) is never mistaken for a selection target.
+
+    Returns ``None`` when the positional set is unknowable: an option whose
+    arity is NOT known (absent from the value-taking table, no glued
+    ``=``) immediately followed by a path-like token — that token may be
+    the option's separate value (``--rootdir /tmp/project``) rather than a
+    selection target, and the table stays incomplete across runners and
+    plugins by construction, so the unknown case must fail closed rather
+    than lend the criterion a scoped-selection proof it does not have."""
     args: list[str] = []
     tokens = expected[1:]
     index = 0
     while index < len(tokens):
         token = tokens[index]
         if token.startswith("-"):
-            index += 2 if token in _VALUE_TAKING_OPTION_TOKENS else 1
+            if token in _VALUE_TAKING_OPTION_TOKENS:
+                index += 2
+                continue
+            if "=" not in token:
+                following = tokens[index + 1] if index + 1 < len(tokens) else None
+                if following is not None and not following.startswith("-") and _CRITERION_PATHLIKE_ARG_RE.search(following):
+                    return None
+            index += 1
             continue
         args.append(token)
         index += 1
@@ -630,7 +663,9 @@ def _criterion_positional_args(expected: list[str]) -> list[str]:
 
 
 def _criterion_scopes_selection(expected: list[str]) -> bool:
-    return any(_CRITERION_PATHLIKE_ARG_RE.search(token) for token in _criterion_positional_args(expected))
+    positionals = _criterion_positional_args(expected)
+    # Unknown arity (None) fails closed: no scoped-selection proof.
+    return positionals is not None and any(_CRITERION_PATHLIKE_ARG_RE.search(token) for token in positionals)
 
 
 #: Extra flags that provably do not change *which* tests run: verbosity,
@@ -683,12 +718,15 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     (option-looking filenames can narrow invisibly), ``"no_match"``
     otherwise.
     """
-    if set(_leading_assignment_tokens(expected)) != set(_leading_assignment_tokens(actual)):
+    if _effective_env_assignments(expected) != _effective_env_assignments(actual):
         # The environment is part of the invocation: an assignment the
         # criterion does not make, or makes with a different value, can
         # change or skip execution — no variable is provably inert across
-        # repositories, so only an exactly equal assignment set (values
-        # included, order-insensitive) matches.
+        # repositories, so only an exactly equal environment matches. The
+        # comparison is the effective name → final-value mapping, not the
+        # raw token set: distinct-name order is insignificant, but a
+        # repeated name is last-wins — ``CI=0 CI=1`` vs ``CI=1 CI=0`` are
+        # equal sets with opposite effective ``CI`` values.
         return "unprovable"
     expected = _strip_env_assignments(expected)
     actual = _strip_env_assignments(actual)
@@ -894,39 +932,8 @@ def _output_attribution(executed_command: str) -> str | None:
     return None
 
 
-def _sandbox_runs_persistent_shell(runtime: Any) -> bool:
-    """Whether the active sandbox reuses one persistent shell across calls
-    (``Sandbox.persistent_shell_sessions`` — AIO's legacy exec path). Reads
-    the flag from the provider registry without acquiring a sandbox; any
-    failure or absence means no persistent session is known, which keeps
-    the fresh-process providers on the normal matching path."""
-    try:
-        from deerflow.sandbox.overwrite import unwrap_sandbox
-        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-
-        if runtime is None or getattr(runtime, "state", None) is None:
-            return False
-        sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
-        sandbox_id = (sandbox_state or {}).get("sandbox_id") if isinstance(sandbox_state, dict) else None
-        if not isinstance(sandbox_id, str):
-            return False
-        return bool(getattr(get_sandbox_provider().get(sandbox_id), "persistent_shell_sessions", False))
-    except Exception:
-        return False
-
-
-def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None, *, shell_state_trusted: bool = True) -> AcceptanceLeaf:
+def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None) -> AcceptanceLeaf:
     base: AcceptanceLeaf = {"criterion": "", "family": "tests_passed", "checked": False, "holds": False, "detail": ""}
-    if not shell_state_trusted:
-        # The recorded commands ran in a persistent shell session shared with
-        # every earlier call: any of them (including one that has since fallen
-        # off the evidence cap or been compacted away) could have exported
-        # PATH, redefined the runner, or otherwise mutated the state the
-        # "clean-looking" matched run executed in. A fresh controlled session
-        # would be needed to prove otherwise — the read-only verifier (RFC
-        # §6) owns re-execution.
-        base["detail"] = "recorded bash evidence comes from a persistent shell session; earlier calls' state cannot be proven clean"
-        return base
     matches: list[tuple[str, dict[str, Any]]] = []
     for execution in bash_executions or []:
         status = str(execution.get("status") or "")
@@ -945,6 +952,23 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
     latest_outcome, latest = matches[-1]
     if latest_outcome == "unprovable":
         base["detail"] = "recorded command is truncated; the match cannot be proven" if latest.get("command_truncated") else "matching segment cannot be proven to have executed"
+        return base
+    shell_persistent = latest.get("shell_persistent")
+    if shell_persistent is not False:
+        # Provenance comes from the harvest stamp (``_harvest_bash_executions``
+        # resolves ``Sandbox.persistent_shell_sessions`` against the sandbox
+        # recorded in the state that CARRIED the evidence — the subagent's own
+        # graph state — never the parent task runtime, which has no
+        # ``sandbox`` key when the parent delegated before touching one).
+        # True: the matched run shared one persistent shell with every earlier
+        # call — any of them (including one since capped away or compacted
+        # out) could have exported PATH or redefined the runner. Absent/None:
+        # the producing sandbox could not be identified — fail closed either
+        # way. Re-execution belongs to the read-only verifier (RFC §6).
+        if shell_persistent is True:
+            base["detail"] = "recorded bash evidence comes from a persistent shell session; earlier calls' state cannot be proven clean"
+        else:
+            base["detail"] = "the sandbox that produced the recorded bash evidence could not be identified; shell state cannot be proven clean"
         return base
     status = str(latest.get("status") or "")
     if status != "success":
@@ -1024,8 +1048,6 @@ def check_acceptance_criteria(
         content_reader = read_current_file_content
     if size_prober is None:
         size_prober = _probe_file_size
-    shell_state_trusted = not _sandbox_runs_persistent_shell(runtime)
-
     leaves: list[AcceptanceLeaf] = []
     for criterion in criteria:
         file_match = _FILE_LEAF_RE.match(criterion)
@@ -1038,7 +1060,7 @@ def check_acceptance_criteria(
         elif written_match is not None:
             leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
         elif tests_match is not None:
-            leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, shell_state_trusted=shell_state_trusted)
+            leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions)
         else:
             leaf = AcceptanceLeaf(criterion="", family="undecidable", checked=False, holds=False, detail="not deterministically checkable")
         leaf["criterion"] = criterion
