@@ -29,6 +29,14 @@ class TraceMiddleware:
     middleware and emits through the raw send, so its 500 -- the one response
     a user most needs to correlate with a log line -- would be the only one
     without the header.
+
+    That fallback 500 is CORS-opaque: this middleware sits outside
+    ``CORSMiddleware``, so the exception has already unwound past it and the
+    500 carries no ``Access-Control-Allow-Origin`` -- a split-origin browser
+    client cannot read the id on this one response, unchanged from the
+    ``ServerErrorMiddleware`` 500 it replaces. Deliberately not fixed here:
+    replicating the origin allowlist outside ``CORSMiddleware`` would let the
+    two policies drift.
     """
 
     def __init__(self, app: ASGIApp):

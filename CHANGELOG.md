@@ -432,7 +432,9 @@ This section accumulates work toward the **2.1.0** milestone
   correlation — was the only one shipped without the id. `TraceMiddleware` now
   sends its own 500 carrying the header before re-raising; the server's
   exception logging is untouched and mid-stream failures propagate unchanged.
-  ([#5119])
+  This fallback is emitted outside `CORSMiddleware` and stays CORS-opaque, so
+  split-origin browser clients cannot read the id on this one response — same
+  as the `ServerErrorMiddleware` 500 it replaces. ([#5119])
 - **gateway:** Strip a forged `deerflow_trace_id` from the persisted request
   echo. `body.config` is stored verbatim as `runs.kwargs_json` and served back
   by the runs API, so a forged id in `config.metadata` or `config.context`
