@@ -98,7 +98,7 @@ async def _create_run(
 ) -> dict:
     """Insert a scheduled_task_runs row."""
     now = created_at or _NOW
-    return await run_repo.create(
+    run_row = await run_repo.create(
         run_record_id=run_id,
         task_id=task_id,
         thread_id="thread-1",
@@ -106,6 +106,14 @@ async def _create_run(
         trigger="scheduled",
         status=status,
     )
+    # Explicitly set created_at (and scheduled_for) so the offset in
+    # multi-history regressions affects the recency ordering _fetch_latest_run
+    # uses (scheduled_for DESC, matching created_at in these tests).
+    if created_at is not None:
+        async with run_repo._sf() as session:
+            await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == run_id).values(created_at=created_at))
+            await session.commit()
+    return run_row
 
 
 async def _set_task_running(task_repo: ScheduledTaskRepository, task_id: str) -> None:
@@ -232,7 +240,7 @@ class TestCancelStuckOnceTasksOutcomeAware:
             await close_engine()
 
     async def test_no_run_row_preserves_original_cancel_behaviour(self, tmp_path):
-        """No run row at all (or only active runs) → generic cancel."""
+        """No run row at all → generic cancel (active runs are left untouched)."""
         task_repo, run_repo = await _init_db(tmp_path)
         try:
             await _create_once_task(task_repo, task_id="task-norun")
@@ -579,7 +587,7 @@ class TestCancelStuckMultipleRuns:
             await close_engine()
 
     async def test_older_success_newer_active_stays_generic_cancel(self, tmp_path):
-        """Older success + newer running → latest run is active, generic cancel."""
+        """Older success + newer running → latest run is active, parent left unchanged (not cancelled)."""
         task_repo, run_repo = await _init_db(tmp_path)
         try:
             await _create_once_task(task_repo, task_id="task-multi-ca")
@@ -656,7 +664,7 @@ class TestReconcileStuckMultipleRuns:
             await close_engine()
 
     async def test_older_success_newer_active_stays_generic_cancel(self, tmp_path):
-        """Older success + newer running → latest run is active, generic cancel."""
+        """Older success + newer running → latest run is active, parent left unchanged (not cancelled)."""
         task_repo, run_repo = await _init_db(tmp_path)
         try:
             await _create_once_task(task_repo, task_id="task-multi-ra")
@@ -670,7 +678,7 @@ class TestReconcileStuckMultipleRuns:
                 status="success",
                 created_at=_NOW - timedelta(minutes=5),
             )
-            # Newer run is still running — not terminal, so generic cancel.
+            # Newer run is still running — not terminal, so parent left unchanged.
             await _create_run(
                 run_repo,
                 run_id="run-new",
