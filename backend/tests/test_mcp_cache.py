@@ -43,6 +43,7 @@ _TRACKED_GLOBALS = (
     "_config_signature",
     "_config_mtime",
     "_initialization_lock",
+    "_initialization_lock_loop",
 )
 
 
@@ -67,6 +68,8 @@ def cache_globals():
     # asyncio.Lock binds to the first event loop it is awaited on, so each test
     # (which drives initialize_mcp_tools via a fresh asyncio.run) needs its own.
     cache_module._initialization_lock = asyncio.Lock()
+    if hasattr(cache_module, "_initialization_lock_loop"):
+        cache_module._initialization_lock_loop = None
 
     try:
         yield
@@ -286,3 +289,44 @@ def test_config_deleted_after_init_via_real_env_resolution_does_not_raise(cache_
     # last-known-good MCP tools), matching the deliberate contract in
     # test_config_deleted_after_init_is_not_stale above.
     assert cache_module._is_cache_stale() is False
+
+
+def test_reinitialization_survives_a_lock_bound_to_a_closed_loop(cache_globals, monkeypatch):
+    """#5060: a module-level ``asyncio.Lock`` binds to the first loop that
+    contends it, and lazy re-initialization runs through ``asyncio.run`` on
+    fresh loops. Once bound, the next *concurrent* initialization on a later
+    loop raises ``RuntimeError`` out of ``async with _initialization_lock``
+    (the uncontended acquire path does not check the binding, so the failure
+    needs two in-flight inits), the caller swallows it, and the cache never
+    comes back until restart. The rebind in ``_get_initialization_lock`` must
+    let a later loop initialize again.
+    """
+
+    async def _fake_get_mcp_tools():
+        await asyncio.sleep(0.01)  # widen the contention window
+        return ["tool"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+
+    async def _bind_lock_to_this_loop():
+        # Contend the module lock so asyncio binds it to this (soon closed)
+        # loop, the same state a contended lazy init leaves behind.
+        lock = cache_module._initialization_lock
+        async with lock:
+            waiter = asyncio.ensure_future(lock.acquire())
+            await asyncio.sleep(0.01)
+            waiter.cancel()
+
+    asyncio.run(_bind_lock_to_this_loop())
+
+    async def _two_in_flight_inits():
+        first = asyncio.ensure_future(cache_module.initialize_mcp_tools())
+        await asyncio.sleep(0)  # let the first acquire before the second asks
+        second = asyncio.ensure_future(cache_module.initialize_mcp_tools())
+        return await asyncio.gather(first, second)
+
+    # The lock is now bound to a closed loop. Concurrent initialization from a
+    # fresh loop must succeed rather than raising out of the async-with.
+    first, second = asyncio.run(_two_in_flight_inits())
+    assert first == ["tool"]
+    assert second == ["tool"]

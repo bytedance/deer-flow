@@ -14,6 +14,29 @@ logger = logging.getLogger(__name__)
 _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
 _initialization_lock = asyncio.Lock()
+# The loop ``_initialization_lock`` is currently bound to. asyncio.Lock binds
+# to the first loop that contends it and raises RuntimeError on any other
+# loop; the lazy-init path runs each initialization through ``asyncio.run``
+# on a fresh loop, so a permanently-bound module lock would make every later
+# re-initialization fail closed into an empty tool list (#5060).
+_initialization_lock_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_initialization_lock() -> asyncio.Lock:
+    """Return the initialization lock, rebinding it to the running loop.
+
+    Rebinding trades cross-loop mutual exclusion for liveness: two loops
+    could initialize concurrently in the worst case, which the
+    ``_cache_initialized`` flag keeps idempotent. The alternative (a lock
+    stuck on a closed loop) freezes every later config change until restart.
+    """
+    global _initialization_lock, _initialization_lock_loop
+    running = asyncio.get_running_loop()
+    if running is not _initialization_lock_loop:
+        _initialization_lock = asyncio.Lock()
+        _initialization_lock_loop = running
+    return _initialization_lock
+
 
 # Cache-invalidation key for the resolved extensions config file. We track the
 # resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
@@ -123,7 +146,7 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
 
-    async with _initialization_lock:
+    async with _get_initialization_lock():
         if _cache_initialized:
             logger.info("MCP tools already initialized")
             return _mcp_tools_cache or []
