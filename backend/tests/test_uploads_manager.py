@@ -14,6 +14,8 @@ from deerflow.uploads.manager import (
     delete_file_safe,
     list_files_in_dir,
     normalize_filename,
+    release_reserved_filename,
+    reserve_unique_filename,
     validate_path_traversal,
     write_upload_file_no_symlink,
 )
@@ -106,6 +108,66 @@ class TestDeduplicateFilename:
     def test_short_names_keep_existing_dedupe_shape(self):
         seen = {"data.txt"}
         assert claim_unique_filename("data.txt", seen) == "data_1.txt"
+
+
+# ---------------------------------------------------------------------------
+# reserve_unique_filename
+# ---------------------------------------------------------------------------
+
+
+class TestReserveUniqueFilename:
+    def test_creates_exclusive_empty_file(self, tmp_path):
+        seen: set[str] = set()
+        reserved = reserve_unique_filename(tmp_path, "a.md", seen)
+        dest = tmp_path / reserved
+        assert reserved == "a.md"
+        assert seen == {"a.md"}
+        assert dest.is_file()
+        assert dest.stat().st_size == 0
+
+    def test_skips_name_already_on_disk(self, tmp_path):
+        (tmp_path / "a.md").write_text("keep", encoding="utf-8")
+        seen: set[str] = set()
+        reserved = reserve_unique_filename(tmp_path, "a.md", seen)
+        assert reserved == "a_1.md"
+        assert (tmp_path / "a.md").read_text(encoding="utf-8") == "keep"
+        assert (tmp_path / "a_1.md").is_file()
+        assert seen == {"a.md", "a_1.md"}
+
+    def test_separate_seen_sets_still_cannot_share_an_on_disk_name(self, tmp_path):
+        first = reserve_unique_filename(tmp_path, "a.md", set())
+        second = reserve_unique_filename(tmp_path, "a.md", set())
+        assert first == "a.md"
+        assert second == "a_1.md"
+
+    def test_skips_name_already_in_seen(self, tmp_path):
+        seen = {"a.md"}
+        reserved = reserve_unique_filename(tmp_path, "a.md", seen)
+        assert reserved == "a_1.md"
+        assert not (tmp_path / "a.md").exists()
+        assert (tmp_path / "a_1.md").is_file()
+
+    def test_skips_existing_symlink(self, tmp_path):
+        target = tmp_path / "target.md"
+        target.write_text("secret", encoding="utf-8")
+        link = tmp_path / "a.md"
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is not available")
+            raise
+        reserved = reserve_unique_filename(tmp_path, "a.md", set())
+        assert reserved == "a_1.md"
+        assert link.is_symlink()
+        assert target.read_text(encoding="utf-8") == "secret"
+
+    def test_release_unlinks_and_drops_seen(self, tmp_path):
+        seen: set[str] = set()
+        reserved = reserve_unique_filename(tmp_path, "a.md", seen)
+        release_reserved_filename(tmp_path, reserved, seen)
+        assert reserved not in seen
+        assert not (tmp_path / reserved).exists()
 
 
 # ---------------------------------------------------------------------------

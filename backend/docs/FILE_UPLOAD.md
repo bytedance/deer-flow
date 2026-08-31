@@ -110,7 +110,7 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 - Excel (`.xls`, `.xlsx`)
 - Word (`.doc`, `.docx`)
 
-转换后的 Markdown 文件会保存在同一目录下。通常名为原 stem + `.md`；若该名已被占用（例如同一次上传了 `a.docx` 和 `a.pdf`），则会写成 `a_1.md` 这样的唯一名，并通过上传响应的 `markdown_file` 返回。Gateway / `DeerFlowClient` 还会把「原文件 → companion」写进同目录的隐藏 sidecar（`.deer-flow-companions.json`），这样 `list_uploaded_files` 在压缩历史之后仍能把 `a.pdf` 指到 `a_1.md`，而不会误用旁边的 `a.md`。sidecar 同时记录 companion 转换时的指纹（size / mtime）：若 companion 被绕过删除接口移除（如 sandbox 内 `rm`）后有同名新文件出现，该条目视为失效——新文件既不会挂到原文件上，也不会随原文件一起被删除；其中复用重命名 companion 名字（如 `a_1.md`）的新文件会按普通用户文件展示，而与原文件同 stem 的 `.md`（如 `report.pdf` 旁的 `report.md`）仍会被同 stem 启发式规则隐藏（已知限制）。
+转换后的 Markdown 文件会保存在同一目录下。通常名为原 stem + `.md`；若该名已被占用（同一次请求里的 `a.docx` + `a.pdf`，或目录里已有更早的 `notes.md` / `a.md`），则会写成 `a_1.md` 这样的唯一名，并通过上传响应的 `markdown_file` 返回。companion 名用 `O_CREAT|O_EXCL` 原子占位，所以跨请求也不会覆盖已有文件。Gateway / `DeerFlowClient` 还会把「原文件 → companion」写进同目录的隐藏 sidecar（`.deer-flow-companions.json`），这样 `list_uploaded_files` 在压缩历史之后仍能把 `a.pdf` 指到 `a_1.md`，而不会误用旁边的 `a.md`。sidecar 锁（`.deer-flow-companions.lock`）放在 `user-data` 旁边的 thread 目录里（沙箱挂载 / `/mnt/user-data` 都碰不到），用 no-follow 打开并校验为独占普通文件；flock 有界非阻塞，拿不到就跳过这次映射写入，避免沙箱或另一进程握锁把 Gateway 文件 IO 线程占死。sidecar 同时记录 companion 转换时的指纹（size / mtime）：若 companion 被绕过删除接口移除（如 sandbox 内 `rm`）后有同名新文件出现，该条目视为失效——新文件既不会挂到原文件上，也不会随原文件一起被删除；其中复用重命名 companion 名字（如 `a_1.md`）的新文件会按普通用户文件展示，而与原文件同 stem 的 `.md`（如 `report.pdf` 旁的 `report.md`）仍会被同 stem 启发式规则隐藏（已知限制）。
 
 默认情况下，自动转换是关闭的，以避免在网关主机上对不受信任的 Office/PDF 上传执行解析。只有在受信任部署中明确接受此风险时，才应将 `uploads.auto_convert_documents` 设置为 `true`。
 
@@ -144,6 +144,8 @@ To work with these files:
 `list_uploaded_files` 查询历史上传；该工具仍会隐藏作为转换产物的
 companion `.md` 行和 sidecar 本身，但会在原文件条目上返回 `markdown_file` /
 `markdown_path`（优先读 sidecar，没有映射时才回退到同 stem 的 `.md`）。
+`list_uploaded_files` 和 `UploadsMiddleware` 每个目录每次调用只读一次 sidecar，
+已解析的 companion 路径直接交给 outline，不再按文件重复打开 JSON。
 如果已知文件名，也可直接使用 `read_file` 或 `grep`
 访问 `/mnt/user-data/uploads/` 下的文件。
 
@@ -225,6 +227,7 @@ print(response.json())
 ```
 backend/.deer-flow/threads/
 └── {thread_id}/
+    ├── .deer-flow-companions.lock   # 在沙箱挂载之外：sidecar 写锁
     └── user-data/
         └── uploads/
             ├── document.pdf          # 原始文件

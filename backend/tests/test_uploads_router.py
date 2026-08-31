@@ -1070,6 +1070,80 @@ def test_upload_files_two_convertibles_get_distinct_markdown_companions(tmp_path
     assert load_companion_map(thread_uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
 
 
+def test_upload_files_companion_does_not_overwrite_prior_request_user_markdown(tmp_path):
+    """A later notes.docx must not clobber notes.md left by an earlier request."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    (thread_uploads_dir / "notes.md").write_bytes(b"USER_MARKDOWN")
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=_fake_convert_honoring_output_path({"notes.docx": "FROM_DOCX"})),
+        ),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename="notes.docx", file=BytesIO(b"DOCX"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file == "notes_1.md"
+    assert (thread_uploads_dir / "notes.md").read_bytes() == b"USER_MARKDOWN"
+    assert (thread_uploads_dir / "notes_1.md").read_text(encoding="utf-8") == "FROM_DOCX"
+    from deerflow.uploads.companion_map import load_companion_map
+
+    assert load_companion_map(thread_uploads_dir) == {"notes.docx": "notes_1.md"}
+
+
+def test_upload_files_companion_does_not_reuse_prior_request_same_stem_markdown(tmp_path):
+    """A later a.pdf must not overwrite a.md or collapse the earlier mapping."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    (thread_uploads_dir / "a.docx").write_bytes(b"DOCX")
+    (thread_uploads_dir / "a.md").write_text("FROM_DOCX", encoding="utf-8")
+    record_companion_mapping(thread_uploads_dir, "a.docx", "a.md")
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=_fake_convert_honoring_output_path({"a.pdf": "FROM_PDF"})),
+        ),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename="a.pdf", file=BytesIO(b"PDF"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file == "a_1.md"
+    assert (thread_uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM_DOCX"
+    assert (thread_uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM_PDF"
+    from deerflow.uploads.companion_map import load_companion_map
+
+    assert load_companion_map(thread_uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
+
+
 def test_upload_files_records_companion_mapping_via_file_io(tmp_path):
     """Sidecar writes must leave the Gateway event loop, like other upload FS work."""
     thread_uploads_dir = tmp_path / "uploads"

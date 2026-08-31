@@ -2250,6 +2250,107 @@ class TestUploads:
 
             assert load_companion_map(uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
 
+    def test_upload_files_companion_does_not_overwrite_prior_request_user_markdown(self, client):
+        """A later notes.docx must not clobber notes.md left by an earlier call."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            (uploads_dir / "notes.md").write_bytes(b"USER_MARKDOWN")
+
+            docx = tmp_path / "notes.docx"
+            docx.write_bytes(b"DOCX")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("FROM_DOCX", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".docx"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [docx])
+
+            assert result["success"] is True
+            assert result["files"][0]["markdown_file"] == "notes_1.md"
+            assert (uploads_dir / "notes.md").read_bytes() == b"USER_MARKDOWN"
+            assert (uploads_dir / "notes_1.md").read_text(encoding="utf-8") == "FROM_DOCX"
+            from deerflow.uploads.companion_map import load_companion_map
+
+            assert load_companion_map(uploads_dir) == {"notes.docx": "notes_1.md"}
+
+    def test_upload_files_companion_does_not_reuse_prior_request_same_stem_markdown(self, client):
+        """A later a.pdf must not overwrite a.md or collapse the earlier mapping."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+            (uploads_dir / "a.docx").write_bytes(b"DOCX")
+            (uploads_dir / "a.md").write_text("FROM_DOCX", encoding="utf-8")
+            from deerflow.uploads.companion_map import record_companion_mapping
+
+            record_companion_mapping(uploads_dir, "a.docx", "a.md")
+
+            pdf = tmp_path / "a.pdf"
+            pdf.write_bytes(b"PDF")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("FROM_PDF", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["success"] is True
+            assert result["files"][0]["markdown_file"] == "a_1.md"
+            assert (uploads_dir / "a.md").read_text(encoding="utf-8") == "FROM_DOCX"
+            assert (uploads_dir / "a_1.md").read_text(encoding="utf-8") == "FROM_PDF"
+            from deerflow.uploads.companion_map import load_companion_map
+
+            assert load_companion_map(uploads_dir) == {"a.docx": "a.md", "a.pdf": "a_1.md"}
+
+    def test_upload_files_succeeds_when_companion_sidecar_write_fails(self, client):
+        """Sidecar write is advisory; a mapping IO error must not fail the upload."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            uploads_dir = tmp_path / "uploads"
+            uploads_dir.mkdir()
+
+            pdf = tmp_path / "report.pdf"
+            pdf.write_bytes(b"%PDF-1.4")
+
+            async def fake_convert(path: Path, output_path: Path | None = None) -> Path:
+                md_path = output_path if output_path is not None else path.with_suffix(".md")
+                md_path.write_text("FROM_PDF", encoding="utf-8")
+                return md_path
+
+            with (
+                patch("deerflow.client.get_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.client.ensure_uploads_dir", return_value=uploads_dir),
+                patch("deerflow.utils.file_conversion.CONVERTIBLE_EXTENSIONS", {".pdf"}),
+                patch("deerflow.utils.file_conversion.convert_file_to_markdown", side_effect=fake_convert),
+                patch("deerflow.client.record_companion_mapping", side_effect=OSError("disk full")),
+            ):
+                result = client.upload_files("thread-1", [pdf])
+
+            assert result["success"] is True
+            assert result["files"][0]["filename"] == "report.pdf"
+            assert result["files"][0]["markdown_file"] == "report.md"
+            assert (uploads_dir / "report.pdf").is_file()
+            assert (uploads_dir / "report.md").read_text(encoding="utf-8") == "FROM_PDF"
+            from deerflow.uploads.companion_map import load_companion_map
+
+            assert load_companion_map(uploads_dir) == {}
+
     def test_upload_files_failed_conversion_releases_the_claimed_markdown_name(self, client):
         """A conversion that writes nothing must not reserve stem.md against a later companion.
 

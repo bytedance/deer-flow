@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Mapping
 from pathlib import Path
 
-from deerflow.uploads.companion_map import companion_entry_matches, load_companion_entries
+from deerflow.uploads.companion_map import CompanionEntry, companion_entry_matches, load_companion_entries
 from deerflow.uploads.manager import is_upload_staging_file
 
 logger = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ def resolve_converted_markdown_path(
     file_path: Path,
     *,
     companion_name: str | None = None,
+    entries: Mapping[str, CompanionEntry] | None = None,
 ) -> Path | None:
     """Return the on-disk converted-markdown path for *file_path*, or ``None``.
 
@@ -47,12 +49,16 @@ def resolve_converted_markdown_path(
     treated as stale — the stem fallback is skipped so ``a.pdf`` cannot
     inherit ``a.md`` from ``a.docx``.
     Symlinks and paths that resolve outside *file_path*'s directory are ignored.
+
+    Pass a preloaded *entries* mapping to reuse one sidecar read for a whole
+    directory listing. ``None`` loads from disk; ``{}`` means no mappings.
     """
     names: list[str] = []
     if is_safe_markdown_companion_name(companion_name):
         names.append(companion_name)
 
-    entries = load_companion_entries(file_path.parent)
+    if entries is None:
+        entries = load_companion_entries(file_path.parent)
     entry = entries.get(file_path.name)
     if entry is not None and companion_entry_matches(file_path.parent, entry) and entry.name not in names and is_safe_markdown_companion_name(entry.name):
         names.append(entry.name)
@@ -207,12 +213,18 @@ def extract_outline_for_file(
     file_path: Path,
     *,
     companion_name: str | None = None,
+    md_path: Path | None = None,
+    entries: Mapping[str, CompanionEntry] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Return the document outline and fallback preview for *file_path*.
 
     Looks for a converted-markdown companion: an explicit basename, the
     convert-time sidecar mapping, or a sibling ``<stem>.md`` for legacy
     threads (for example ``a.pdf`` → ``a_1.md``).
+
+    When the caller already resolved the companion, pass *md_path* to skip a
+    second sidecar read. *entries* is forwarded to resolve when *md_path* is
+    omitted.
 
     Returns:
         (outline, preview) where:
@@ -222,7 +234,12 @@ def extract_outline_for_file(
           anchor when outline is empty so the agent has some context.
           Empty when outline is non-empty (no fallback needed).
     """
-    md_path = resolve_converted_markdown_path(file_path, companion_name=companion_name)
+    if md_path is None:
+        md_path = resolve_converted_markdown_path(
+            file_path,
+            companion_name=companion_name,
+            entries=entries,
+        )
     if md_path is None:
         return [], []
 

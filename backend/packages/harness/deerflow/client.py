@@ -74,6 +74,8 @@ from deerflow.uploads.manager import (
     ensure_uploads_dir,
     get_uploads_dir,
     list_files_in_dir,
+    release_reserved_filename,
+    reserve_unique_filename,
     upload_artifact_url,
     upload_virtual_path,
 )
@@ -1580,11 +1582,11 @@ class DeerFlowClient:
                     info["original_filename"] = src_path.name
 
                 if src_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
-                    # Reserve companion .md name before convert so two stems
-                    # that collapse to the same .md (or a prior .md upload)
-                    # cannot silently overwrite each other.
+                    # Reserve companion .md exclusively so two stems that
+                    # collapse to the same .md — or a .md left by an earlier
+                    # upload_files call — cannot silently overwrite each other.
                     provisional_md_name = Path(dest_name).with_suffix(".md").name
-                    unique_md_name = claim_unique_filename(provisional_md_name, seen_names)
+                    unique_md_name = reserve_unique_filename(uploads_dir, provisional_md_name, seen_names)
                     md_output = dest.with_name(unique_md_name)
                     try:
                         if conversion_pool is not None:
@@ -1604,12 +1606,22 @@ class DeerFlowClient:
                         info["markdown_path"] = str(uploads_dir / md_path.name)
                         info["markdown_virtual_path"] = upload_virtual_path(md_path.name)
                         info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                        record_companion_mapping(uploads_dir, dest_name, md_path.name)
+                        # Sidecar is advisory: the companion is already on disk and
+                        # stem fallback still resolves it for this session. Do not
+                        # fail the whole upload (this path has no rollback).
+                        try:
+                            record_companion_mapping(uploads_dir, dest_name, md_path.name)
+                        except (OSError, FileNotFoundError):
+                            logger.warning(
+                                "Failed to record companion mapping for %s",
+                                dest_name,
+                                exc_info=True,
+                            )
                     else:
-                        # Conversion failed and wrote nothing, so release the
-                        # claim; holding it would rename a later same-stem
-                        # upload against a name nothing occupies.
-                        seen_names.discard(unique_md_name)
+                        # Conversion failed and wrote nothing, so drop the
+                        # empty reservation; holding it would rename a later
+                        # same-stem upload against a name nothing occupies.
+                        release_reserved_filename(uploads_dir, unique_md_name, seen_names)
 
                 uploaded_files.append(info)
         finally:

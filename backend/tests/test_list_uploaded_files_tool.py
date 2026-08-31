@@ -226,6 +226,31 @@ class TestListUploadedFiles:
         assert result["files"][0]["markdown_file"] == "doc.md"
         assert result["files"][0]["markdown_path"] == "/mnt/user-data/uploads/doc.md"
 
+    def test_sidecar_loaded_once_when_listing_outlines(self, tmp_path, monkeypatch):
+        from deerflow.uploads import companion_map as companion_map_mod
+        from deerflow.uploads.companion_map import record_companion_mapping
+
+        uploads_dir = _uploads_dir(tmp_path)
+        for i in range(8):
+            (uploads_dir / f"f{i}.pdf").write_bytes(b"%PDF")
+            (uploads_dir / f"f{i}.md").write_text(f"# F{i}\n", encoding="utf-8")
+            record_companion_mapping(uploads_dir, f"f{i}.pdf", f"f{i}.md")
+
+        loads = {"n": 0}
+        real = companion_map_mod._load_unlocked
+
+        def counting(path):
+            loads["n"] += 1
+            return real(path)
+
+        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+
+        result = _list_uploaded_files_impl(include_outline=True, runtime=_runtime(), _paths=_paths(tmp_path))
+
+        assert len(result["files"]) == 8
+        assert all(row.get("markdown_file") == f"f{i}.md" for i, row in enumerate(sorted(result["files"], key=lambda r: r["filename"])))
+        assert loads["n"] == 1
+
     def test_attaches_converted_markdown_path_without_listing_the_companion(self, tmp_path):
         uploads_dir = _uploads_dir(tmp_path)
         (uploads_dir / "report.pdf").write_bytes(b"%PDF")

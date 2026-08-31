@@ -5,17 +5,24 @@ companions (``a.pdf`` → ``a_1.md``) after summarization drops message metadata
 Each entry also carries the companion's convert-time fingerprint (size and
 mtime) so a same-named file that later replaces the companion — for example
 after the companion was deleted inside the sandbox — is not mistaken for it.
-The sidecar lives beside the files it describes and is hidden from listings.
+The sidecar JSON lives beside the files it describes and is hidden from
+listings. The lock file lives *outside* sandbox-visible directories (beside
+``user-data``, not inside ``uploads``), is opened with no-follow semantics,
+and is acquired with a bounded non-blocking flock so a held lock cannot pin
+the shared Gateway file-IO pool.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import stat
 import tempfile
 import threading
-from collections.abc import Iterable, Iterator
+import time
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +33,23 @@ COMPANION_MAP_FILENAME = ".deer-flow-companions.json"
 COMPANION_MAP_LOCK_FILENAME = ".deer-flow-companions.lock"
 _COMPANION_MAP_PREFIX = ".deer-flow-companions"
 _MAP_VERSION = 2
+_LOCK_RETRY_ATTEMPTS = 10
+_LOCK_RETRY_INTERVAL_S = 0.02
+_UNSAFE_LOCK_OPEN_ERRNOS = {errno.ELOOP, errno.EISDIR, errno.ENOTDIR, errno.ENXIO, errno.EAGAIN}
+if hasattr(errno, "EWOULDBLOCK"):
+    _UNSAFE_LOCK_OPEN_ERRNOS.add(errno.EWOULDBLOCK)
+_LOCK_BUSY_ERRNOS = {errno.EAGAIN, errno.EACCES}
+if hasattr(errno, "EWOULDBLOCK"):
+    _LOCK_BUSY_ERRNOS.add(errno.EWOULDBLOCK)
+
+
+class CompanionMapLockError(OSError):
+    """Raised when the sidecar lock path is not a safe exclusive regular file."""
+
+
+class CompanionMapLockTimeout(Exception):
+    """Raised when the sidecar lock cannot be taken within the bounded wait."""
+
 
 try:
     import fcntl
@@ -83,29 +107,147 @@ def _lock_for(uploads_dir: Path) -> threading.Lock:
         return lock
 
 
+def companion_map_lock_path(uploads_dir: Path) -> Path:
+    """Return the flock path for *uploads_dir*.
+
+    Production uploads live at ``.../user-data/uploads``. The lock sits beside
+    ``user-data`` (the thread directory) so it is outside AIO's three mounts
+    and the local sandbox's ``/mnt/user-data`` mapping. The JSON sidecar stays
+    inside *uploads_dir*.
+
+    Nonstandard layouts (tests that pass a bare temp dir) keep the lock one
+    directory above *uploads_dir* so they do not write two levels up into a
+    shared parent.
+    """
+    resolved = uploads_dir.resolve()
+    parent = resolved.parent
+    if parent.name == "user-data":
+        return parent.parent / COMPANION_MAP_LOCK_FILENAME
+    return parent / COMPANION_MAP_LOCK_FILENAME
+
+
+def _reject_unsafe_lock(lock_path: Path, reason: str) -> CompanionMapLockError:
+    return CompanionMapLockError(f"Unsafe companion-map lock at {lock_path}: {reason}")
+
+
+def _open_lock_no_follow(lock_path: Path):
+    """Open *lock_path* without following a symlink.
+
+    The lock lives outside sandbox mounts in the production layout, but
+    no-follow plus an exclusive-regular-file check still apply: a confused or
+    nonstandard layout must not let ``open()`` follow a link with Gateway
+    privileges. POSIX uses ``O_NOFOLLOW``; Windows falls back to ``lstat``
+    plus ``fstat``.
+    """
+    has_nofollow = hasattr(os, "O_NOFOLLOW")
+    flags = os.O_RDWR | os.O_CREAT
+    if has_nofollow:
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+
+    if not has_nofollow:
+        try:
+            pre_open = os.lstat(lock_path)
+        except FileNotFoundError:
+            pre_open = None
+        if pre_open is not None and (stat.S_ISLNK(pre_open.st_mode) or not stat.S_ISREG(pre_open.st_mode)):
+            raise _reject_unsafe_lock(lock_path, "not a regular file")
+        if pre_open is not None and pre_open.st_nlink != 1:
+            raise _reject_unsafe_lock(lock_path, "not an exclusive regular file")
+
+    fd = -1
+    handle = None
+    try:
+        try:
+            fd = os.open(lock_path, flags, 0o600)
+        except OSError as exc:
+            if exc.errno in _UNSAFE_LOCK_OPEN_ERRNOS:
+                raise _reject_unsafe_lock(lock_path, "cannot open without following a link") from exc
+            raise
+
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise _reject_unsafe_lock(lock_path, "not an exclusive regular file")
+
+        handle = os.fdopen(fd, "r+b")
+        fd = -1
+        if opened.st_size == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        return handle
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        if handle is not None:
+            handle.close()
+        raise
+
+
+def _try_acquire_exclusive(lock_file) -> bool:
+    """Take a non-blocking exclusive lock. Return False when the lock is busy."""
+    if fcntl is not None:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError as exc:
+            if exc.errno in _LOCK_BUSY_ERRNOS:
+                return False
+            raise
+    try:  # pragma: no cover - Windows
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+        return True
+    except OSError:  # pragma: no cover - Windows
+        return False
+
+
+def _release_exclusive(lock_file) -> None:
+    if fcntl is not None:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        return
+    lock_file.seek(0)  # pragma: no cover - Windows
+    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)  # pragma: no cover - Windows
+
+
+def _acquire_exclusive_bounded(lock_file, lock_path: Path) -> None:
+    """Acquire *lock_file* with a short bounded wait, then raise on timeout.
+
+    The sidecar is advisory: callers catch :class:`CompanionMapLockTimeout` and
+    skip the write rather than block a shared file-IO worker indefinitely.
+    """
+    attempts = max(1, _LOCK_RETRY_ATTEMPTS)
+    for attempt in range(attempts):
+        if _try_acquire_exclusive(lock_file):
+            return
+        if attempt + 1 < attempts and _LOCK_RETRY_INTERVAL_S > 0:
+            time.sleep(_LOCK_RETRY_INTERVAL_S)
+    raise CompanionMapLockTimeout(f"Timed out acquiring companion-map lock at {lock_path}")
+
+
 @contextmanager
 def _map_write_lock(uploads_dir: Path) -> Iterator[None]:
-    """Serialize sidecar writes in-process and across POSIX workers."""
+    """Serialize sidecar writes in-process and across POSIX workers.
+
+    Flock is taken first with a bounded non-blocking wait so a held lock
+    cannot pin the per-directory threading lock (or a file-IO worker) forever.
+    The in-process lock is acquired only after flock succeeds.
+    """
     uploads_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = uploads_dir / COMPANION_MAP_LOCK_FILENAME
+    lock_path = companion_map_lock_path(uploads_dir)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     process_lock = _lock_for(uploads_dir.resolve())
-    with process_lock, lock_path.open("a+b") as lock_file:
-        if lock_file.tell() == 0:
-            lock_file.write(b"\0")
-            lock_file.flush()
-        lock_file.seek(0)
-        if fcntl is not None:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        else:  # pragma: no cover - Windows
-            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+    with _open_lock_no_follow(lock_path) as lock_file:
+        _acquire_exclusive_bounded(lock_file, lock_path)
         try:
-            yield
+            with process_lock:
+                yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-            else:  # pragma: no cover - Windows
-                lock_file.seek(0)
-                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            _release_exclusive(lock_file)
 
 
 def _map_path(uploads_dir: Path) -> Path:
@@ -255,10 +397,19 @@ def has_companion_entry(uploads_dir: Path, original: str) -> bool:
     return original in _load_unlocked(uploads_dir)
 
 
-def mapped_companion_names(uploads_dir: Path) -> set[str]:
-    """Return companion basenames whose recorded file still matches its fingerprint."""
+def mapped_companion_names(
+    uploads_dir: Path,
+    entries: Mapping[str, CompanionEntry] | None = None,
+) -> set[str]:
+    """Return companion basenames whose recorded file still matches its fingerprint.
+
+    Pass a preloaded *entries* mapping (from :func:`load_companion_entries`) so a
+    listing pass can reuse one sidecar read instead of opening the JSON again.
+    ``entries is None`` loads from disk; an empty mapping means no companions.
+    """
+    source = _load_unlocked(uploads_dir) if entries is None else entries
     names: set[str] = set()
-    for entry in _load_unlocked(uploads_dir).values():
+    for entry in source.values():
         if companion_entry_matches(uploads_dir, entry):
             names.add(entry.name)
     return names
@@ -282,27 +433,35 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
         raise ValueError("Companion mapping cannot point a file at itself")
 
     companion_path = uploads_dir / companion
-    with _map_write_lock(uploads_dir):
-        # Stat inside the lock: sampling the fingerprint before acquiring it
-        # would let a concurrent writer swap the companion in between, so the
-        # recorded size/mtime could describe a file this mapping never pointed at.
-        try:
-            if companion_path.is_symlink() or not companion_path.is_file():
-                raise FileNotFoundError(f"Companion file does not exist: {companion!r}")
-            companion_stat = companion_path.stat()
-        except OSError as exc:
-            raise FileNotFoundError(f"Companion file does not exist: {companion!r}") from exc
+    try:
+        with _map_write_lock(uploads_dir):
+            # Stat inside the lock: sampling the fingerprint before acquiring it
+            # would let a concurrent writer swap the companion in between, so the
+            # recorded size/mtime could describe a file this mapping never pointed at.
+            try:
+                if companion_path.is_symlink() or not companion_path.is_file():
+                    raise FileNotFoundError(f"Companion file does not exist: {companion!r}")
+                companion_stat = companion_path.stat()
+            except OSError as exc:
+                raise FileNotFoundError(f"Companion file does not exist: {companion!r}") from exc
 
-        mapping = _load_unlocked(uploads_dir)
-        for key, entry in list(mapping.items()):
-            if entry.name == companion and key != original:
-                del mapping[key]
-        mapping[original] = CompanionEntry(
-            name=companion,
-            size=companion_stat.st_size,
-            mtime_ns=companion_stat.st_mtime_ns,
+            mapping = _load_unlocked(uploads_dir)
+            for key, entry in list(mapping.items()):
+                if entry.name == companion and key != original:
+                    del mapping[key]
+            mapping[original] = CompanionEntry(
+                name=companion,
+                size=companion_stat.st_size,
+                mtime_ns=companion_stat.st_mtime_ns,
+            )
+            _persist_unlocked(uploads_dir, mapping)
+    except CompanionMapLockTimeout:
+        logger.warning(
+            "Skipping companion-map write for %s → %s; lock busy at %s",
+            original,
+            companion,
+            companion_map_lock_path(uploads_dir),
         )
-        _persist_unlocked(uploads_dir, mapping)
 
 
 def forget_companion_mappings(
@@ -324,14 +483,17 @@ def forget_companion_mappings(
     wanted = {(original, companion) for original, companion in pairs if _is_safe_original(original)}
     if not wanted:
         return
-    with _map_write_lock(uploads_dir):
-        mapping = _load_unlocked(uploads_dir)
-        stale = [key for key, entry in mapping.items() if (key, entry.name) in wanted]
-        if not stale:
-            return
-        for key in stale:
-            del mapping[key]
-        _persist_unlocked(uploads_dir, mapping)
+    try:
+        with _map_write_lock(uploads_dir):
+            mapping = _load_unlocked(uploads_dir)
+            stale = [key for key, entry in mapping.items() if (key, entry.name) in wanted]
+            if not stale:
+                return
+            for key in stale:
+                del mapping[key]
+            _persist_unlocked(uploads_dir, mapping)
+    except CompanionMapLockTimeout:
+        logger.warning("Skipping companion-map rollback; lock busy at %s", companion_map_lock_path(uploads_dir))
 
 
 def forget_companion_mapping(
@@ -343,16 +505,19 @@ def forget_companion_mapping(
     """Drop sidecar entries when an original or companion is deleted."""
     if original is None and companion is None:
         return
-    with _map_write_lock(uploads_dir):
-        mapping = _load_unlocked(uploads_dir)
-        changed = False
-        if original is not None and original in mapping:
-            del mapping[original]
-            changed = True
-        if companion is not None:
-            for key, entry in list(mapping.items()):
-                if entry.name == companion:
-                    del mapping[key]
-                    changed = True
-        if changed:
-            _persist_unlocked(uploads_dir, mapping)
+    try:
+        with _map_write_lock(uploads_dir):
+            mapping = _load_unlocked(uploads_dir)
+            changed = False
+            if original is not None and original in mapping:
+                del mapping[original]
+                changed = True
+            if companion is not None:
+                for key, entry in list(mapping.items()):
+                    if entry.name == companion:
+                        del mapping[key]
+                        changed = True
+            if changed:
+                _persist_unlocked(uploads_dir, mapping)
+    except CompanionMapLockTimeout:
+        logger.warning("Skipping companion-map forget; lock busy at %s", companion_map_lock_path(uploads_dir))

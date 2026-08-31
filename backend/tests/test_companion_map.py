@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+from pathlib import Path
 
 import pytest
 
+from deerflow.uploads import companion_map as companion_map_mod
 from deerflow.uploads.companion_map import (
     COMPANION_MAP_FILENAME,
+    COMPANION_MAP_LOCK_FILENAME,
     CompanionEntry,
+    CompanionMapLockError,
     companion_entry_matches,
+    companion_map_lock_path,
     forget_companion_mapping,
+    forget_companion_mappings,
     has_companion_entry,
     is_companion_map_file,
     load_companion_entries,
@@ -29,6 +37,13 @@ from deerflow.uploads.manager import (
 from deerflow.utils.file_outline import resolve_converted_markdown_path
 
 
+def _thread_uploads(tmp_path: Path) -> Path:
+    """Production layout: ``.../user-data/uploads`` (lock lives beside user-data)."""
+    uploads = tmp_path / "user-data" / "uploads"
+    uploads.mkdir(parents=True)
+    return uploads
+
+
 class TestCompanionMapFilePredicate:
     def test_json_and_lock_and_tmp_are_internal(self):
         assert is_companion_map_file(COMPANION_MAP_FILENAME)
@@ -41,6 +56,14 @@ class TestCompanionMapFilePredicate:
         assert is_upload_hidden_file(".upload-active.part")
         assert is_upload_hidden_file(COMPANION_MAP_FILENAME)
         assert not is_upload_hidden_file("report.pdf")
+
+    def test_lock_path_uses_thread_dir_for_user_data_layout(self, tmp_path):
+        uploads = tmp_path / "user-data" / "uploads"
+        assert companion_map_lock_path(uploads) == tmp_path / COMPANION_MAP_LOCK_FILENAME
+
+    def test_lock_path_stays_one_level_up_without_user_data(self, tmp_path):
+        uploads = tmp_path / "uploads"
+        assert companion_map_lock_path(uploads) == tmp_path / COMPANION_MAP_LOCK_FILENAME
 
 
 class TestRecordAndLoad:
@@ -175,6 +198,25 @@ class TestMappedCompanionNames:
 
         assert mapped_companion_names(tmp_path) == {"a.md"}
 
+    def test_preloaded_entries_do_not_reread_sidecar(self, tmp_path, monkeypatch):
+        (tmp_path / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.pdf", "a.md")
+        preloaded = load_companion_entries(tmp_path)
+
+        loads = {"n": 0}
+        real = companion_map_mod._load_unlocked
+
+        def counting(uploads_dir):
+            loads["n"] += 1
+            return real(uploads_dir)
+
+        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+
+        assert mapped_companion_names(tmp_path, preloaded) == {"a.md"}
+        assert loads["n"] == 0
+        assert mapped_companion_names(tmp_path) == {"a.md"}
+        assert loads["n"] == 1
+
 
 class TestFingerprintStaleness:
     def test_modified_companion_content_is_stale(self, tmp_path):
@@ -279,6 +321,48 @@ class TestResolveUsesSidecar:
 
         assert resolve_converted_markdown_path(pdf, companion_name="a_1.md") == renamed
 
+    def test_preloaded_entries_skip_disk_read(self, tmp_path, monkeypatch):
+        pdf = tmp_path / "a.pdf"
+        pdf.write_bytes(b"%PDF")
+        (tmp_path / "a.md").write_text("# DOCX\n", encoding="utf-8")
+        renamed = tmp_path / "a_1.md"
+        renamed.write_text("# PDF\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
+        preloaded = load_companion_entries(tmp_path)
+
+        loads = {"n": 0}
+        real = companion_map_mod._load_unlocked
+
+        def counting(uploads_dir):
+            loads["n"] += 1
+            return real(uploads_dir)
+
+        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+
+        assert resolve_converted_markdown_path(pdf, entries=preloaded) == renamed
+        assert loads["n"] == 0
+
+    def test_empty_preloaded_entries_do_not_consult_disk_sidecar(self, tmp_path, monkeypatch):
+        pdf = tmp_path / "a.pdf"
+        pdf.write_bytes(b"%PDF")
+        (tmp_path / "a.md").write_text("# DOCX\n", encoding="utf-8")
+        renamed = tmp_path / "a_1.md"
+        renamed.write_text("# PDF\n", encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
+
+        loads = {"n": 0}
+        real = companion_map_mod._load_unlocked
+
+        def counting(uploads_dir):
+            loads["n"] += 1
+            return real(uploads_dir)
+
+        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+
+        # No sidecar row in the preloaded map → legacy stem fallback, no disk read.
+        assert resolve_converted_markdown_path(pdf, entries={}) == tmp_path / "a.md"
+        assert loads["n"] == 0
+
 
 class TestListingHidesSidecar:
     def test_list_files_in_dir_skips_sidecar(self, tmp_path):
@@ -348,3 +432,166 @@ class TestDeleteUsesSidecar:
     def test_delete_traversal_still_raises(self, tmp_path):
         with pytest.raises(PathTraversalError):
             delete_file_safe(tmp_path, "../outside.txt")
+
+
+def _symlink_or_skip(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("symlink creation requires Developer Mode or elevated privileges on Windows")
+        raise
+
+
+class TestLockLivesOutsideSandbox:
+    def test_production_layout_puts_lock_beside_user_data(self, tmp_path):
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        lock = companion_map_lock_path(uploads)
+        assert lock == tmp_path / COMPANION_MAP_LOCK_FILENAME
+        assert lock.is_file()
+        assert not lock.is_symlink()
+        assert stat.S_ISREG(lock.stat().st_mode)
+        assert not (uploads / COMPANION_MAP_LOCK_FILENAME).exists()
+        assert not (uploads.parent / COMPANION_MAP_LOCK_FILENAME).exists()
+        assert lookup_companion_mapping(uploads, "a.pdf") == "a.md"
+
+    def test_sandbox_lock_inside_uploads_is_ignored(self, tmp_path):
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        planted = uploads / COMPANION_MAP_LOCK_FILENAME
+        planted.write_bytes(b"sandbox-held")
+
+        record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        assert planted.read_bytes() == b"sandbox-held"
+        assert lookup_companion_mapping(uploads, "a.pdf") == "a.md"
+        assert companion_map_lock_path(uploads).is_file()
+
+
+class TestLockDoesNotFollowSymlink:
+    def test_record_does_not_follow_lock_symlink_to_host_file(self, tmp_path):
+        """A symlink at the real lock path must not be followed with Gateway privileges."""
+        host_target = tmp_path / "host-secret"
+        host_target.write_bytes(b"")
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        _symlink_or_skip(companion_map_lock_path(uploads), host_target)
+
+        with pytest.raises(CompanionMapLockError):
+            record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        assert host_target.read_bytes() == b""
+        assert not (uploads / COMPANION_MAP_FILENAME).exists()
+
+    def test_forget_does_not_follow_lock_symlink_to_host_file(self, tmp_path):
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        host_target = tmp_path / "host-secret"
+        host_target.write_bytes(b"untouched")
+        lock_path = companion_map_lock_path(uploads)
+        lock_path.unlink()
+        _symlink_or_skip(lock_path, host_target)
+
+        with pytest.raises(CompanionMapLockError):
+            forget_companion_mapping(uploads, original="a.pdf")
+
+        assert host_target.read_bytes() == b"untouched"
+        assert load_companion_map(uploads) == {"a.pdf": "a.md"}
+
+    def test_rejects_lock_directory(self, tmp_path):
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        companion_map_lock_path(uploads).mkdir()
+
+        with pytest.raises(CompanionMapLockError):
+            record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        assert not (uploads / COMPANION_MAP_FILENAME).exists()
+
+    def test_rejects_hardlinked_lock(self, tmp_path):
+        host_target = tmp_path / "host-secret"
+        host_target.write_bytes(b"keep")
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        try:
+            os.link(host_target, companion_map_lock_path(uploads))
+        except OSError as exc:
+            pytest.skip(f"hardlink not supported: {exc}")
+
+        with pytest.raises(CompanionMapLockError):
+            record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        assert host_target.read_bytes() == b"keep"
+        assert not (uploads / COMPANION_MAP_FILENAME).exists()
+
+    def test_regular_lock_still_records(self, tmp_path):
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(uploads, "a.pdf", "a.md")
+        assert lookup_companion_mapping(uploads, "a.pdf") == "a.md"
+        lock = companion_map_lock_path(uploads)
+        assert lock.is_file()
+        assert not lock.is_symlink()
+        assert stat.S_ISREG(lock.stat().st_mode)
+
+    def test_fallback_without_nofollow_still_rejects_symlink(self, tmp_path, monkeypatch):
+        monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+        host_target = tmp_path / "host-secret"
+        host_target.write_bytes(b"")
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        _symlink_or_skip(companion_map_lock_path(uploads), host_target)
+
+        with pytest.raises(CompanionMapLockError):
+            record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        assert host_target.read_bytes() == b""
+        assert not (uploads / COMPANION_MAP_FILENAME).exists()
+
+
+class TestLockWaitIsBounded:
+    def test_record_skips_write_when_lock_is_held(self, tmp_path, monkeypatch):
+        if companion_map_mod.fcntl is None:
+            pytest.skip("fcntl flock is required to hold the lock from the test process")
+        monkeypatch.setattr(companion_map_mod, "_LOCK_RETRY_ATTEMPTS", 2)
+        monkeypatch.setattr(companion_map_mod, "_LOCK_RETRY_INTERVAL_S", 0)
+
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        lock_path = companion_map_lock_path(uploads)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            companion_map_mod.fcntl.flock(fd, companion_map_mod.fcntl.LOCK_EX)
+            record_companion_mapping(uploads, "a.pdf", "a.md")
+        finally:
+            companion_map_mod.fcntl.flock(fd, companion_map_mod.fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert load_companion_map(uploads) == {}
+        assert not (uploads / COMPANION_MAP_FILENAME).exists()
+
+    def test_forget_skips_when_lock_is_held(self, tmp_path, monkeypatch):
+        if companion_map_mod.fcntl is None:
+            pytest.skip("fcntl flock is required to hold the lock from the test process")
+        uploads = _thread_uploads(tmp_path)
+        (uploads / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(uploads, "a.pdf", "a.md")
+
+        monkeypatch.setattr(companion_map_mod, "_LOCK_RETRY_ATTEMPTS", 2)
+        monkeypatch.setattr(companion_map_mod, "_LOCK_RETRY_INTERVAL_S", 0)
+        lock_path = companion_map_lock_path(uploads)
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            companion_map_mod.fcntl.flock(fd, companion_map_mod.fcntl.LOCK_EX)
+            forget_companion_mapping(uploads, original="a.pdf")
+            forget_companion_mappings(uploads, [("a.pdf", "a.md")])
+        finally:
+            companion_map_mod.fcntl.flock(fd, companion_map_mod.fcntl.LOCK_UN)
+            os.close(fd)
+
+        assert load_companion_map(uploads) == {"a.pdf": "a.md"}

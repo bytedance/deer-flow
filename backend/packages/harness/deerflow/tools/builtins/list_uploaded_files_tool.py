@@ -19,7 +19,7 @@ from deerflow.agents.middlewares.input_sanitization_middleware import neutralize
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.tools.types import Runtime
-from deerflow.uploads.companion_map import mapped_companion_names
+from deerflow.uploads.companion_map import load_companion_entries, mapped_companion_names
 from deerflow.uploads.manager import is_upload_hidden_file
 from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 
@@ -115,13 +115,15 @@ def _list_uploaded_files_impl(
     # Collect historical files (sorted by mtime descending).
     # Skip .md files that are conversion artifacts (have a same-stem non-.md sibling).
     candidates: list[tuple[float, Path, int]] = []
+    companion_entries: dict = {}
     try:
         # Collect file entries once to build the name set and iterate.
-        entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_hidden_file(e.name)]
-        all_names: set[str] = {e.name for e in entries}
-        known_companions = mapped_companion_names(uploads_dir)
+        dir_entries = [e for e in os.scandir(uploads_dir) if e.is_file() and not e.is_symlink() and not is_upload_hidden_file(e.name)]
+        all_names: set[str] = {e.name for e in dir_entries}
+        companion_entries = load_companion_entries(uploads_dir)
+        known_companions = mapped_companion_names(uploads_dir, companion_entries)
 
-        for entry in entries:
+        for entry in dir_entries:
             if entry.name in current_run_filenames:
                 continue
             # Skip conversion artifacts: sidecar-mapped companions first, then
@@ -161,7 +163,7 @@ def _list_uploaded_files_impl(
             "path": neutralize_untrusted_tags(f"/mnt/user-data/uploads/{filename}"),
             "extension": neutralize_untrusted_tags(file_path.suffix),
         }
-        companion = resolve_converted_markdown_path(file_path)
+        companion = resolve_converted_markdown_path(file_path, entries=companion_entries)
         if companion is not None and companion.name != filename:
             file_info["markdown_file"] = neutralize_untrusted_tags(companion.name)
             file_info["markdown_path"] = neutralize_untrusted_tags(f"/mnt/user-data/uploads/{companion.name}")
@@ -170,7 +172,9 @@ def _list_uploaded_files_impl(
         if should_include_outline:
             outline, preview = extract_outline_for_file(
                 file_path,
+                md_path=companion,
                 companion_name=companion.name if companion is not None else None,
+                entries=companion_entries,
             )
             if outline:
                 file_info["outline"] = [{**entry, "title": neutralize_untrusted_tags(entry["title"])} if "title" in entry else entry for entry in outline]

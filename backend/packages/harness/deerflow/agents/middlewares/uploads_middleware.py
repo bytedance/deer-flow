@@ -6,6 +6,7 @@ on demand via the ``list_uploaded_files`` tool.
 
 import logging
 from collections import Counter
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -18,6 +19,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.uploads.companion_map import CompanionEntry, load_companion_entries
 from deerflow.uploads.manager import is_upload_hidden_file
 from deerflow.utils.file_outline import extract_outline_for_file, resolve_converted_markdown_path
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
@@ -167,7 +169,13 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
 
         return "\n".join(lines)
 
-    def _files_from_kwargs(self, message: HumanMessage, uploads_dir: Path | None = None) -> list[dict] | None:
+    def _files_from_kwargs(
+        self,
+        message: HumanMessage,
+        uploads_dir: Path | None = None,
+        *,
+        entries: Mapping[str, CompanionEntry] | None = None,
+    ) -> list[dict] | None:
         """Extract file info from message additional_kwargs.files.
 
         The frontend sends uploaded file metadata in additional_kwargs.files
@@ -207,6 +215,7 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 companion = resolve_converted_markdown_path(
                     uploads_dir / filename,
                     companion_name=requested if isinstance(requested, str) else None,
+                    entries=entries,
                 )
                 if companion is not None and companion.name != filename:
                     entry["markdown_file"] = companion.name
@@ -243,9 +252,11 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             except RuntimeError:
                 pass
         uploads_dir = self._paths.sandbox_uploads_dir(thread_id, user_id=resolve_runtime_user_id(runtime)) if thread_id else None
+        has_file_metadata = bool((last_message.additional_kwargs or {}).get("files"))
+        companion_entries = load_companion_entries(uploads_dir) if uploads_dir is not None and has_file_metadata else None
 
         # Get newly uploaded files from the current message's additional_kwargs.files
-        new_files = self._files_from_kwargs(last_message, uploads_dir) or []
+        new_files = self._files_from_kwargs(last_message, uploads_dir, entries=companion_entries) or []
         if not new_files:
             if (last_message.additional_kwargs or {}).get("files"):
                 logger.info(
@@ -264,9 +275,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             for file in context_files:
                 phys_path = uploads_dir / file["filename"]
                 companion_name = file.get("markdown_file")
+                md_path = uploads_dir / companion_name if isinstance(companion_name, str) else None
                 outline, preview = extract_outline_for_file(
                     phys_path,
                     companion_name=companion_name if isinstance(companion_name, str) else None,
+                    md_path=md_path,
+                    entries=companion_entries,
                 )
                 file["outline"] = outline
                 file["outline_preview"] = preview

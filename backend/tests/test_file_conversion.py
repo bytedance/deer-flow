@@ -519,3 +519,23 @@ class TestResolveConvertedMarkdownPath:
         (tmp_path / "report.md").symlink_to(target)
 
         assert resolve_converted_markdown_path(pdf) is None
+
+
+class TestExtractOutlineForFileReuse:
+    def test_pre_resolved_md_path_skips_sidecar_load(self, tmp_path, monkeypatch):
+        from deerflow.utils.file_outline import extract_outline_for_file
+
+        pdf = tmp_path / "a.pdf"
+        pdf.write_bytes(b"%PDF")
+        (tmp_path / "a.md").write_text("# WRONG\n", encoding="utf-8")
+        right = tmp_path / "a_1.md"
+        right.write_text("# RIGHT\n", encoding="utf-8")
+
+        def boom(*_args, **_kwargs):
+            raise AssertionError("pre-resolved md_path must not load the sidecar")
+
+        monkeypatch.setattr("deerflow.utils.file_outline.load_companion_entries", boom)
+
+        outline, preview = extract_outline_for_file(pdf, md_path=right)
+        assert preview == []
+        assert outline[0]["title"] == "RIGHT"

@@ -30,6 +30,8 @@ from deerflow.uploads.manager import (
     get_uploads_dir,
     list_files_in_dir,
     normalize_filename,
+    release_reserved_filename,
+    reserve_unique_filename,
     upload_artifact_url,
     upload_virtual_path,
     validate_upload_destination,
@@ -420,11 +422,11 @@ async def upload_files(
 
             file_ext = file_path.suffix.lower()
             if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                # Reserve the companion .md name in this request's seen set
-                # before writing so conversion cannot silently truncate another
-                # uploaded or derived file (same invariant as form-part dedupe).
+                # Reserve the companion .md exclusively so conversion cannot
+                # truncate another uploaded or derived file — including one
+                # left by an earlier request (seen_filenames is request-scoped).
                 provisional_md_name = Path(safe_filename).with_suffix(".md").name
-                unique_md_name = claim_unique_filename(provisional_md_name, seen_filenames)
+                unique_md_name = await run_file_io(reserve_unique_filename, uploads_dir, provisional_md_name, seen_filenames)
                 md_output = file_path.with_name(unique_md_name)
                 md_path = await convert_file_to_markdown(file_path, output_path=md_output)
                 if md_path:
@@ -441,10 +443,10 @@ async def upload_files(
                     await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
                     recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
                 else:
-                    # Conversion failed and wrote nothing, so release the claim;
-                    # holding it would rename a later same-stem upload against
-                    # a name nothing occupies.
-                    seen_filenames.discard(unique_md_name)
+                    # Conversion failed and wrote nothing, so drop the empty
+                    # reservation; holding it would rename a later same-stem
+                    # upload against a name nothing occupies.
+                    await run_file_io(release_reserved_filename, uploads_dir, unique_md_name, seen_filenames)
 
             uploaded_files.append(file_info)
 

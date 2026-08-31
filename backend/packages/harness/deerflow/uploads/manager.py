@@ -129,6 +129,48 @@ def claim_unique_filename(name: str, seen: set[str]) -> str:
     return candidate
 
 
+def reserve_unique_filename(directory: Path, name: str, seen: set[str]) -> str:
+    """Create *name* (or a ``_N`` variant) exclusively in *directory*.
+
+    Unlike :func:`claim_unique_filename`, this observes existing directory
+    entries: ``os.open(..., O_CREAT | O_EXCL)`` fails when the path already
+    exists, including leftovers from an earlier request. The reserved path
+    is an empty regular file; the caller must write it or
+    :func:`release_reserved_filename`.
+    """
+    if not name or Path(name).name != name:
+        raise ValueError(f"Filename is not a basename: {name!r}")
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    if hasattr(os, "O_CLOEXEC"):
+        flags |= os.O_CLOEXEC
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    while True:
+        candidate = claim_unique_filename(name, seen)
+        dest = directory / candidate
+        try:
+            fd = os.open(dest, flags, 0o600)
+        except OSError as exc:
+            # Occupied by a regular file, leftover symlink, or directory.
+            if exc.errno in {errno.EEXIST, getattr(errno, "ELOOP", errno.EEXIST), errno.EISDIR}:
+                continue
+            seen.discard(candidate)
+            raise
+        os.close(fd)
+        return candidate
+
+
+def release_reserved_filename(directory: Path, name: str, seen: set[str]) -> None:
+    """Drop an unused exclusive reservation from *seen* and the directory."""
+    seen.discard(name)
+    try:
+        os.unlink(Path(directory) / name)
+    except FileNotFoundError:
+        pass
+
+
 def is_upload_staging_file(filename: str) -> bool:
     """Return whether *filename* is a transient Gateway upload staging file."""
     return filename.startswith(UPLOAD_STAGING_PREFIX) and filename.endswith(UPLOAD_STAGING_SUFFIX)

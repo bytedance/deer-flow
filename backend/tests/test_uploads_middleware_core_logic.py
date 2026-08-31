@@ -648,6 +648,58 @@ class TestBeforeAgent:
         assert "line numbers refer to the converted text" in content
         assert result["uploaded_files"][0]["markdown_file"] == "report.md"
 
+    def test_sidecar_loaded_once_for_multiple_current_uploads(self, tmp_path, monkeypatch):
+        from deerflow.uploads import companion_map as companion_map_mod
+        from deerflow.uploads.companion_map import record_companion_mapping
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        files = []
+        for name in ("a.pdf", "b.pdf", "c.pdf"):
+            (uploads_dir / name).write_bytes(b"%PDF")
+            md_name = f"{name[:-4]}.md"
+            (uploads_dir / md_name).write_text(f"# {name}\n", encoding="utf-8")
+            record_companion_mapping(uploads_dir, name, md_name)
+            files.append({"filename": name, "size": 4, "path": f"/mnt/user-data/uploads/{name}"})
+
+        loads = {"n": 0}
+        real = companion_map_mod._load_unlocked
+
+        def counting(path):
+            loads["n"] += 1
+            return real(path)
+
+        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+
+        result = mw.before_agent(self._state(_human("summarise", files=files)), _runtime())
+
+        assert result is not None
+        content = result["messages"][-1].content
+        assert "Converted text: /mnt/user-data/uploads/a.md" in content
+        assert "Converted text: /mnt/user-data/uploads/c.md" in content
+        assert loads["n"] == 1
+
+    def test_does_not_read_sidecar_when_message_has_no_files(self, tmp_path, monkeypatch):
+        from deerflow.uploads import companion_map as companion_map_mod
+        from deerflow.uploads.companion_map import record_companion_mapping
+
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "a.md").write_text("# pdf\n", encoding="utf-8")
+        record_companion_mapping(uploads_dir, "a.pdf", "a.md")
+
+        loads = {"n": 0}
+        real = companion_map_mod._load_unlocked
+
+        def counting(path):
+            loads["n"] += 1
+            return real(path)
+
+        monkeypatch.setattr(companion_map_mod, "_load_unlocked", counting)
+
+        mw.before_agent(self._state(_human("plain message")), _runtime())
+        assert loads["n"] == 0
+
     def test_explicit_markdown_file_wins_over_same_stem_sibling(self, tmp_path):
         """Collision-renamed companions (a.pdf → a_1.md) must not use a.md."""
         mw = _middleware(tmp_path)

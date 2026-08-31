@@ -151,8 +151,9 @@ async def convert_file_to_markdown(file_path: Path, output_path: Path | None = N
         file_path: Path to the file to convert.
         output_path: Optional destination for the generated ``.md`` file.
             When omitted, writes to ``file_path`` with a ``.md`` suffix.
-            Callers that track per-request filename uniqueness should pass a
-            pre-claimed path so companion markdown cannot clobber other uploads.
+            Callers that need a unique companion path should pass a
+            pre-reserved exclusive path so conversion cannot clobber
+            another upload, including one from an earlier request.
 
     Returns:
         Path to the generated .md file, or None if conversion failed.
