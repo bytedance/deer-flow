@@ -164,9 +164,23 @@ export function getLeadingSlashSkillQuery(value: string): string | null {
 // The full list the composer's skill picker offers: every enabled skill that
 // is not shadowed by a reserved slash name. Unlike getMatchingSkillSuggestions
 // this is the unqueried catalog — cmdk does the filtering inside the picker.
-export function getSelectableSkills(skills: Skill[]): Skill[] {
+// Composer builtin commands own their names the same way reserved names do
+// (a skill literally named `compact` would submit as the compact command, not
+// the skill), so both sets are excluded.
+const COMPOSER_BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set([
+  "goal",
+  "compact",
+]);
+
+export function getSelectableSkills(
+  skills: Skill[],
+  builtinCommandNames: ReadonlySet<string> = COMPOSER_BUILTIN_COMMAND_NAMES,
+): Skill[] {
   return skills.filter(
-    (skill) => skill.enabled && !RESERVED_SLASH_SKILL_NAMES.has(skill.name),
+    (skill) =>
+      skill.enabled &&
+      !RESERVED_SLASH_SKILL_NAMES.has(skill.name) &&
+      !builtinCommandNames.has(skill.name),
   );
 }
 

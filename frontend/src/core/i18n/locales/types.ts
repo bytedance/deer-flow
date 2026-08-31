@@ -142,6 +142,7 @@ export interface Translations {
     createSkillPrompt: string;
     addAttachments: string;
     skillPickerLabel: string;
+    skillPickerDescription: string;
     skillPickerSearch: string;
     skillPickerEmpty: string;
     skillPickerGroup: string;

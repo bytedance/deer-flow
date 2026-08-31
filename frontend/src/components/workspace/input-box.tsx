@@ -2315,13 +2315,23 @@ export function InputBox({
             <ComposerSkillPicker
               skills={skills}
               disabled={composerLocked}
-              onPick={(skill) =>
+              onPick={(skill) => {
+                // Selecting from the picker must not discard a draft the user
+                // already typed. applySkillSuggestion clears the input as part
+                // of the slash-path flow, so capture the draft and re-seed it:
+                // the inline chip-text effect carries the value into the
+                // editable span, matching how reload-restore rehydrates the
+                // {text, skillName} draft pair.
+                const draft = textInput.value;
                 applySkillSuggestion({
                   name: skill.name,
                   description: skill.description,
                   kind: "skill",
-                })
-              }
+                });
+                if (draft) {
+                  textInput.setInput(draft);
+                }
+              }}
             />
             <VoiceInputButton
               disabled={composerLocked}

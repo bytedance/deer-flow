@@ -167,6 +167,7 @@ export const enUS: Translations = {
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
     skillPickerLabel: "Skills",
+    skillPickerDescription: "Pick a skill to attach to your next message.",
     skillPickerSearch: "Search skills...",
     skillPickerEmpty: "No matching skills.",
     skillPickerGroup: "Skills",

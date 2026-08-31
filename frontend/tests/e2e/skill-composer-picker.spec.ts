@@ -46,6 +46,12 @@ test.describe("Composer skill picker", () => {
       const textarea = page.getByPlaceholder(/how can i assist you/i);
       await expect(textarea).toBeVisible({ timeout: 15_000 });
 
+      // Draft preservation: text typed before opening the picker must survive
+      // selection — the chip-mode inline editor is seeded from it, matching
+      // the reload-restore behavior for {text, skillName} drafts.
+      const draft = "run the quarterly report";
+      await textarea.fill(draft);
+
       await page.getByRole("button", { name: "Skills" }).click();
       const search = page.getByPlaceholder(/search skills/i);
       await expect(search).toBeVisible();
@@ -59,11 +65,13 @@ test.describe("Composer skill picker", () => {
       ).toBeVisible();
 
       // With a skill selected the composer swaps the plain textarea for the
-      // chip + inline editor, so address it by its accessible name.
+      // chip + inline editor, so address it by its accessible name. The draft
+      // typed above must already be inside it.
       const composer = page.getByRole("textbox", {
         name: /how can i assist you/i,
       });
-      await composer.fill("run the quarterly report");
+      await expect(composer).toHaveText(draft);
+      await composer.press("End");
       await composer.press("Enter");
 
       await expect.poll(() => sentInput).toBeTruthy();
@@ -86,6 +94,7 @@ test.describe("Composer skill picker", () => {
                 .join("")
             : "";
       expect(text.startsWith("/data-analysis ")).toBe(true);
+      expect(text).toContain(draft);
       // The picker's contract ends at the wire: selection rode the message as
       // the /name prefix through the existing slash activation path (asserted
       // above). Response rendering from there is the general streaming

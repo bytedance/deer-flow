@@ -1,6 +1,6 @@
 "use client";
 
-import { SparklesIcon } from "lucide-react";
+import { BlocksIcon } from "lucide-react";
 import { useMemo, useState } from "react";
 
 import { PromptInputButton } from "@/components/ai-elements/prompt-input";
@@ -15,6 +15,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
@@ -51,9 +52,9 @@ export function ComposerSkillPicker({
         <DialogTrigger asChild>
           <PromptInputButton
             aria-label={t.inputBox.skillPickerLabel}
-            disabled={disabled ?? selectableSkills.length === 0}
+            disabled={(disabled ?? false) || selectableSkills.length === 0}
           >
-            <SparklesIcon className="size-4" />
+            <BlocksIcon className="size-3" />
           </PromptInputButton>
         </DialogTrigger>
       </Tooltip>
@@ -61,6 +62,9 @@ export function ComposerSkillPicker({
         <DialogTitle className="sr-only">
           {t.inputBox.skillPickerLabel}
         </DialogTitle>
+        <DialogDescription className="sr-only">
+          {t.inputBox.skillPickerDescription}
+        </DialogDescription>
         <Command>
           <CommandInput placeholder={t.inputBox.skillPickerSearch} />
           <CommandList>

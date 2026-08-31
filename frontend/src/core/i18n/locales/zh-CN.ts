@@ -163,6 +163,7 @@ export const zhCN: Translations = {
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
     skillPickerLabel: "技能",
+    skillPickerDescription: "选择一个技能附加到下一条消息。",
     skillPickerSearch: "搜索技能…",
     skillPickerEmpty: "没有匹配的技能。",
     skillPickerGroup: "技能",

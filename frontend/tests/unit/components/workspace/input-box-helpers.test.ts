@@ -482,4 +482,14 @@ describe("getSelectableSkills", () => {
   it("returns an empty list for empty input", () => {
     expect(getSelectableSkills([])).toEqual([]);
   });
+
+  it("excludes composer builtin command names that shadow skills", () => {
+    // `goal` is double-covered by the reserved set, but `compact` is a pure
+    // composer builtin: a skill with that name would submit as the compact
+    // command instead of the skill, so the picker must not offer it.
+    const skills = [makeSkill("compact"), makeSkill("data-analysis")];
+    expect(getSelectableSkills(skills).map((skill) => skill.name)).toEqual([
+      "data-analysis",
+    ]);
+  });
 });
