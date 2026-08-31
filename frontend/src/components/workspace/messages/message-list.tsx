@@ -53,7 +53,6 @@ import {
   areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractPresentFilesFromMessage,
-  extractTextFromMessage,
   getAssistantTurnCopyData,
   getBranchableAssistantGroupIds,
   getLatestEditableTurn,
@@ -74,10 +73,7 @@ import {
 } from "@/core/sidecar";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
-import {
-  derivePendingSubtaskStatus,
-  parseSubtaskResult,
-} from "@/core/tasks/subtask-result";
+import { collectRenderedSubtasks } from "@/core/tasks/subtask-render";
 import type { AgentThreadState } from "@/core/threads";
 import { cn } from "@/lib/utils";
 
@@ -498,6 +494,23 @@ export function MessageList({
   }, [groupedMessages]);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
+  const renderedSubtasks = useMemo(
+    () =>
+      collectRenderedSubtasks(
+        groupedMessages,
+        (groupIndex) => thread.isLoading && groupIndex === lastGroupIndex,
+        t.subtasks.failed,
+      ),
+    [groupedMessages, lastGroupIndex, t.subtasks.failed, thread.isLoading],
+  );
+
+  useEffect(() => {
+    // Synchronize message-derived snapshots after render. The task context
+    // ignores identical updates, so streamed re-renders remain idempotent.
+    for (const task of renderedSubtasks.updates) {
+      updateSubtask(task);
+    }
+  }, [renderedSubtasks, updateSubtask]);
   const previousTurnUsageStateRef = useRef<AssistantTurnUsageState | undefined>(
     undefined,
   );
@@ -1297,40 +1310,15 @@ export function MessageList({
               } else if (group.type === "assistant:subagent") {
                 const tasks = new Set<Subtask>();
                 for (const message of group.messages) {
-                  if (message.type === "ai") {
-                    for (const toolCall of message.tool_calls ?? []) {
-                      if (toolCall.name === "task") {
-                        const taskId = toolCall.id;
-                        if (!taskId) {
-                          continue;
-                        }
-                        const status = derivePendingSubtaskStatus(
-                          taskId,
-                          group.messages,
-                          groupIsLoading,
-                        );
-                        const task: Subtask = {
-                          id: taskId,
-                          subagent_type: toolCall.args.subagent_type,
-                          description: toolCall.args.description,
-                          prompt: toolCall.args.prompt,
-                          status,
-                          ...(status === "failed"
-                            ? { error: t.subtasks.failed }
-                            : {}),
-                        };
-                        updateSubtask(task);
-                        tasks.add(task);
-                      }
-                    }
-                  } else if (message.type === "tool") {
-                    const taskId = message.tool_call_id;
-                    if (taskId) {
-                      const parsed = parseSubtaskResult(
-                        extractTextFromMessage(message),
-                        message.additional_kwargs,
-                      );
-                      updateSubtask({ id: taskId, ...parsed });
+                  if (message.type !== "ai") {
+                    continue;
+                  }
+                  for (const toolCall of message.tool_calls ?? []) {
+                    const task = toolCall.id
+                      ? renderedSubtasks.tasks.get(toolCall.id)
+                      : undefined;
+                    if (toolCall.name === "task" && task) {
+                      tasks.add(task);
                     }
                   }
                 }
@@ -1372,6 +1360,10 @@ export function MessageList({
                       : [],
                   );
                   for (const taskId of taskIds ?? []) {
+                    const fallbackTask = renderedSubtasks.tasks.get(taskId);
+                    if (!fallbackTask) {
+                      continue;
+                    }
                     results.push(
                       <SubtaskCard
                         key={"task-group-" + taskId}
@@ -1379,6 +1371,7 @@ export function MessageList({
                         threadId={threadId}
                         runId={(message as { run_id?: string }).run_id}
                         isLoading={groupIsLoading}
+                        fallbackTask={fallbackTask}
                       />,
                     );
                   }
