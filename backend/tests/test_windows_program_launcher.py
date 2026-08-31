@@ -108,8 +108,38 @@ def test_execute_program_uses_cmd_call_for_cmd_files(monkeypatch) -> None:
 
     assert isinstance(calls[0], str)
     expected_program = _windows_path(str(_LAUNCHER_ROOT / "tools" / "build.cmd"))
-    expected_command = local_sandbox._build_cmd_invocation(["call", expected_program, "--release"])
+    expected_command = f"call {local_sandbox._quote_cmd_program_path(expected_program)} --release"
     assert calls[0] == f'{shell_path} /d /s /c "{expected_command}"'
+
+
+def test_execute_program_allows_parentheses_in_configured_cmd_program_path(monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    calls: list[list[str] | str] = []
+
+    def fake_run(args, timeout, env=None, *, cwd=None):
+        calls.append(args)
+        return "ok", "", 0, False
+
+    shell_path = r"C:\Windows\System32\cmd.exe"
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: shell_path))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    sandbox.execute_program("/root/Program Files (x86)/build.cmd", ["--release"])
+
+    expected_program = _windows_path(str(_LAUNCHER_ROOT / "Program Files (x86)" / "build.cmd"))
+    expected_command = f"call {local_sandbox._quote_cmd_program_path(expected_program)} --release"
+    assert calls == [f'{shell_path} /d /s /c "{expected_command}"']
+
+
+@pytest.mark.parametrize("component", ["%TEMP%", "caret^dir"])
+def test_execute_program_rejects_unsafe_cmd_program_path(component: str, monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    with pytest.raises(PermissionError, match="program paths may not contain"):
+        sandbox.execute_program(f"/root/{component}/build.cmd")
 
 
 def test_execute_program_rejects_cmd_metacharacter_arguments(monkeypatch) -> None:

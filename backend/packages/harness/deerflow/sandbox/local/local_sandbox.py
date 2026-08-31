@@ -112,6 +112,13 @@ def _build_cmd_invocation(args: list[str]) -> str:
     return " ".join(_quote_cmd_argument(value) for value in args)
 
 
+def _quote_cmd_program_path(value: str) -> str:
+    """Quote a validated batch-program path without applying model-arg policy."""
+    if any(char in {"%", "^", '"'} or ord(char) < 32 for char in value):
+        raise PermissionError("cmd.exe program paths may not contain %, ^, or quote characters")
+    return f'"{value}"'
+
+
 def _resolve_program_argument(sandbox: "LocalSandbox", value: str) -> str:
     if "=" in value:
         prefix, separator, candidate = value.partition("=")
@@ -599,6 +606,10 @@ class LocalSandbox(Sandbox):
         virtual paths before entering this method. ``.cmd``/``.bat`` files use
         an explicit ``cmd.exe`` wrapper and ``.ps1`` files use PowerShell's
         ``-File`` mode; executables are launched directly with ``shell=False``.
+        Batch paths are quoted separately from model arguments so common
+        directory names such as ``Program Files (x86)`` remain runnable. Paths
+        containing ``%`` or ``^`` are rejected because cmd.exe expands or
+        interprets those characters before the batch file starts.
         """
         _validate_extra_env(env)
         if not _is_windows_native_program_platform():
@@ -623,7 +634,7 @@ class LocalSandbox(Sandbox):
             shell = self._find_first_available_shell(("cmd.exe", "cmd"))
             if shell is None:
                 raise RuntimeError("cmd.exe is required to run .cmd/.bat programs")
-            command_line = _build_cmd_invocation(["call", resolved_program, *resolved_args])
+            command_line = " ".join(["call", _quote_cmd_program_path(resolved_program), *(_quote_cmd_argument(value) for value in resolved_args)])
             # Passing nested quotes as a list makes Python escape them for
             # CommandLineToArgvW; cmd.exe then sees the backslashes literally.
             # Build the complete process command line after validating every

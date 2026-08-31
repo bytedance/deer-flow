@@ -67,7 +67,7 @@ def run_host_program_tool(
 
     Args:
         description: Explain why the program is being run.
-        program_path: Program path, as a configured virtual or Windows host path.
+        program_path: Program path, as a configured virtual or Windows host path. For ``.cmd``/``.bat`` files, paths containing ``%`` or ``^`` are not supported by the Windows command wrapper.
         args: Optional program arguments. Configured host paths in arguments are normalized.
         cwd: Optional working directory, as a configured virtual or Windows host path.
         timeout: Optional wall-clock timeout in seconds.
@@ -107,6 +107,8 @@ def run_host_program_tool(
             return "Error: Only .exe, .cmd, .bat, and .ps1 programs are supported"
         if normalized_cwd:
             validate_local_tool_path(normalized_cwd, thread_data, read_only=True)
+            if not _is_custom_mount_path(normalized_cwd):
+                return "Error: Working directory must be inside a configured sandbox mount"
         injected_env = read_active_secrets(getattr(runtime, "context", None)) or None
         sandbox_config = get_app_config().sandbox
         timeout = _resolve_program_timeout(timeout, getattr(sandbox_config, "bash_command_timeout", None))

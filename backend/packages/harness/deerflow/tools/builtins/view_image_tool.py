@@ -72,7 +72,7 @@ def view_image_tool(
     - For multiple files at once (use present_files instead)
 
     Args:
-        image_path: Absolute /mnt/user-data virtual path to the image file. Common formats supported: jpg, jpeg, png, webp, gif.
+        image_path: Absolute /mnt/user-data virtual path or configured local-mount path to the image file. On Windows LocalSandbox, a configured host spelling is also accepted. Common formats supported: jpg, jpeg, png, webp, gif.
     """
     from deerflow.sandbox.exceptions import SandboxError
     from deerflow.sandbox.tools import (

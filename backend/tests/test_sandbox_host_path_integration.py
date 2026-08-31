@@ -271,6 +271,52 @@ def test_run_host_program_clamps_model_timeout_to_sandbox_limit() -> None:
     assert calls == [12]
 
 
+def test_run_host_program_rejects_non_custom_mount_cwd() -> None:
+    calls = 0
+
+    class FakeSandbox:
+        id = "local"
+
+        def execute_program(self, *args, **kwargs):
+            nonlocal calls
+            calls += 1
+            return "ok"
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _POSIX_THREAD_DATA},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+    config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+            mounts=_MOUNTS,
+            bash_command_timeout=12,
+        )
+    )
+    with (
+        patch.object(run_host_program_module, "_is_windows_host_program_platform", return_value=True),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized") as acquire,
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
+        patch("deerflow.config.get_app_config", return_value=config),
+    ):
+        result = run_host_program_tool.func(
+            runtime,
+            "运行程序",
+            "/root/tools/build.exe",
+            [],
+            "/mnt/user-data/workspace",
+            30,
+        )
+
+    assert result == "Error: Working directory must be inside a configured sandbox mount"
+    assert calls == 0
+    acquire.assert_not_called()
+
+
 @pytest.mark.parametrize("timeout", [0, -1])
 def test_run_host_program_rejects_non_positive_timeout(timeout: float) -> None:
     calls = 0
