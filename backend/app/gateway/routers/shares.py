@@ -206,6 +206,10 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
     if meta is None or not meta.get("user_id") or str(meta["user_id"]) != str(user_id):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Thread {thread_id} not found")
 
+    # Body validation runs BEFORE the snapshot build (round 7): an invalid
+    # expiry request must 400 without paying for a scan that can walk the
+    # raw-scan budget first.
+    expires_at = _resolve_expiry(body)
     try:
         snapshot = await build_share_snapshot(thread_id, request=request, user_id=user_id)
     except ShareSnapshotTooLarge as exc:
@@ -222,7 +226,6 @@ async def create_share(thread_id: ThreadId, request: Request, body: ShareCreateR
         body.title or await resolve_share_title(thread_id, request=request),
         max_length=_TITLE_MAX_LENGTH,
     )
-    expires_at = _resolve_expiry(body)
     token = generate_share_token()
     pepper = await get_share_pepper_async()
     record = await repo.create(

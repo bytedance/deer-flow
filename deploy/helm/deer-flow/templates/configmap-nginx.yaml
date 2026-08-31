@@ -18,7 +18,16 @@ data:
         keepalive_timeout 65;
         types_hash_max_size 2048;
 
-        access_log /dev/stdout;
+        # Share URLs carry the raw bearer token in the path (#4548); the
+        # token is the sole credential for the snapshot, so it must never
+        # reach the access log. Masked lines keep the route but drop the
+        # secret. Same masking as docker/nginx/*.conf.
+        map $request $masked_request {
+            default                                                                $request;
+            "~*^(?<share_head>[A-Z]+ +/(?:share|api/shares)/)[^ ]*(?<share_tail> +HTTP/.*)$" $share_head***$share_tail;
+        }
+        log_format masked_access '$remote_addr - $remote_user [$time_local] "$masked_request" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+        access_log /dev/stdout masked_access;
         error_log /dev/stderr;
 
         # Preserve an upstream proxy's X-Forwarded-Proto so the Gateway sees the
@@ -202,6 +211,31 @@ data:
             {{- end }}
 
             # Catch-all for other /api/ routes (e.g. /api/v1/auth/*).
+            # Share token surfaces (#4548): severity does not redact request
+            # lines in error_log output (nginx trac #2193) and it cannot be
+            # format-masked, so these ^~ locations route error_log to
+            # /dev/null — a sink that cannot retain the token. ^~ pins the
+            # paths so no later regex location can shadow the share surface.
+            location ^~ /api/shares/ {
+                error_log /dev/null crit;
+                proxy_pass http://gateway_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
+            location ^~ /share/ {
+                error_log /dev/null crit;
+                proxy_pass http://frontend_upstream;
+                proxy_http_version 1.1;
+                proxy_set_header Host $http_host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $forwarded_proto;
+            }
+
             location /api/ {
                 proxy_pass http://gateway_upstream;
                 proxy_http_version 1.1;

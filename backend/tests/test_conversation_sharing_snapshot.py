@@ -504,3 +504,19 @@ def test_markdown_labels_keep_original_bytes():
     from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
 
     assert neutralize("[C:\\Users\\\\bob](/api/threads/t1/uploads/x)") == "C:\\Users\\\\bob [private artifact omitted]"
+
+
+def test_markdown_label_and_structural_adjacency_are_redacted():
+    """Round 7: references hidden inside markdown labels, closing backticks,
+    and emphasis markers must classify private — the structural bytes stay
+    in the public output around the marker."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    # Private reference inside the LABEL of a public-target link.
+    assert neutralize("[see /api/threads/t1/uploads](https://example.com/public)") == "[private artifact omitted]"
+    # Inline-code shape (assistants habitually wrap shell paths in backticks).
+    assert neutralize("run `ls /api/threads/t1/uploads` to list files") == "run `ls [private artifact omitted]` to list files"
+    # Emphasis adjacency.
+    assert neutralize("**/api/threads/t1/uploads** is where the files are") == "**[private artifact omitted]** is where the files are"
+    # Bracket adjacency from the markdown shape itself.
+    assert "thread" not in neutralize("[see /api/threads/t1/uploads](https://example.com/public)")
