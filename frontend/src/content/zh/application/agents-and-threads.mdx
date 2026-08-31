@@ -57,9 +57,9 @@ curl -X POST http://localhost:8001/api/agents \
 
 ### Agent 存储
 
-自定义 Agent 配置按用户存储在 `{base_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{base_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。旧的 `{base_dir}/agents/{name}/` 布局仅作为尚未执行 `backend/scripts/migrate_user_isolation.py` 的安装的只读回退路径。
+使用默认的 `agent_storage.backend: file` 时，自定义 Agent 配置按用户存储在 `{base_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{base_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。旧的 `{base_dir}/agents/{name}/` 布局仅作为尚未执行 `backend/scripts/migrate_user_isolation.py` 的安装的只读回退路径。使用 `agent_storage.backend: db` 时，定义会改为存储在共享 SQL 数据库中。
 
-你可以直接编辑这些文件；更改会在下一次 Agent 调用时自动加载，无需重启。
+使用文件后端时，你可以直接编辑这些文件；更改会在下一次 Agent 调用时自动加载，无需重启。
 
 ## 线程生命周期
 

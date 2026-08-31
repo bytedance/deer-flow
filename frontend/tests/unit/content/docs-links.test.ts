@@ -103,12 +103,14 @@ describe("documentation content links", () => {
 
     for (const source of customAgentDocs) {
       expect(source).toContain("agents_api.enabled");
+      expect(source).toContain("agent_storage.backend: file");
+      expect(source).toContain("agent_storage.backend: db");
+      expect(source).toContain("users/{user_id}/agents/{name}/config.yaml");
       expect(source).not.toContain("display_name");
     }
 
     for (const source of customAgentApiDocs) {
       expect(source).toContain("^[A-Za-z0-9-]+$");
-      expect(source).toContain("users/{user_id}/agents/{name}/config.yaml");
       expect(source).toContain("backend/scripts/migrate_user_isolation.py");
     }
 
