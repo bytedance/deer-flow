@@ -10,14 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.utils.time import coerce_iso
-
-# NOTE: Cannot import TERMINAL_RUN_STATUSES / ACTIVE_RUN_STATUSES from
-# scheduled_task_runs.sql due to a circular import chain through __init__.py.
-# Kept in sync manually; changes in scheduled_task_runs must be mirrored here.
-TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
-ACTIVE_RUN_STATUSES: frozenset[str] = frozenset({"queued", "launching", "running"})
 
 logger = logging.getLogger(__name__)
 
@@ -492,7 +486,7 @@ class ScheduledTaskRepository:
         bypasses the session identity map so a concurrently committed status is
         read back fresh.
         """
-        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(1).execution_options(populate_existing=True)
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.scheduled_for.desc()).limit(1).execution_options(populate_existing=True)
         result = await session.execute(stmt)
         return result.scalars().first()
 

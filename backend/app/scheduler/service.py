@@ -63,12 +63,9 @@ class ScheduledTaskService:
                 error=_LEASE_RECOVERY_ERROR,
                 now=now,
             )
-            try:
-                stuck = await self._task_repo.cancel_stuck_once_tasks(error=_LEASE_RECOVERY_ERROR)
-                if stuck:
-                    logger.warning("Cancelled %d stuck once task(s) in poll loop", stuck)
-            except Exception:
-                logger.exception("Failed to reconcile stuck once tasks in poll loop")
+            stuck = await self._task_repo.cancel_stuck_once_tasks(error=_LEASE_RECOVERY_ERROR)
+            if stuck:
+                logger.warning("Cancelled %d stuck once task(s) in poll loop", stuck)
         await self._expire_waiting_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
