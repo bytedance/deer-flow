@@ -1,43 +1,39 @@
 ### Request Trace Context (`packages/harness/deerflow/trace_context.py`)
 
-DeerFlow's request-level correlation id — the `X-Trace-Id` header and the `deerflow_trace_id` key. It is not Langfuse's native trace id, not a DeerFlow `run_id`, and not the subagent `trace_id`: that short id stays a per-execution label for subagent logs and status.
+DeerFlow's request-level correlation id — the `X-Trace-Id` header and the `deerflow_trace_id` key. Distinct from Langfuse's native trace id, from `run_id`, and from the short subagent `trace_id` log label.
 
-**The ContextVar is the only source.** Every path that reaches a run binds one first, so downstream code treats the id as a plain `str` and drops the `if trace_id:` guards a nullable id used to require.
+**The ContextVar is the only source.** Every path that reaches a run binds one first, so downstream code treats the id as a plain `str` with no `if trace_id:` guards.
 
 | Entry point | Bound by |
 |---|---|
 | Gateway HTTP request | `app.gateway.trace_middleware.TraceMiddleware` |
-| Scheduled occurrence | `ScheduledTaskService._attempt_queued_run`, then `services.launch_scheduled_thread_run` |
+| Scheduled occurrence | `ScheduledTaskService._attempt_queued_run` → `launch_scheduled_thread_run` |
 | MCP task notification run | `services.launch_mcp_task_notification_run` |
 | IM channel inbound message | `app.channels.manager.ChannelManager._worker_loop` |
 | Embedded / TUI / CLI turn | `DeerFlowClient.stream()` |
 
-Only the first holds an HTTP request. The others run from lifespan background services, from long-lived provider connections, or in-process, so no ASGI middleware ever runs for them — the binding cannot live in middleware alone. Each scopes **one unit of work**, never a poller loop: those worker tasks are long-lived and reused, so a leaked binding would attribute every later occurrence to the first one that task ever handled. The two layers of scheduled binding do not fight because `ensure_trace_context` inherits: the scheduler opens the scope for the whole occurrence (including the bookkeeping for one that never reaches a launch), and the launcher joins it rather than minting a competing id. The same inheritance is what keeps a manual trigger fired from inside a Gateway request on that request's trace.
+Only the first is HTTP; the rest run outside ASGI, so the binding cannot live in middleware alone. Each scopes **one unit of work**, never a poller loop — worker tasks are reused, and a leaked binding would tag every later occurrence with the first one's id. Layered scheduled bindings agree because `ensure_trace_context` inherits, which also keeps a manual trigger inside a Gateway request on that request's trace.
 
-**Everything else that carries the id is a derived output, never read back as an input.** `worker._bind_trace_id` stamps the runtime context and `config["metadata"]`, and `services.start_run` stamps the run record; a `deerflow_trace_id` the caller sent in `body.metadata` or `body.config.context` is replaced, not honoured. Reading it back would let the persisted run disagree with the header and the log lines the same request already produced — and a correlation id you cannot trust to match the logs is worse than none. `_SERVER_OWNED_RUNTIME_CONTEXT_KEYS` enforces the same rule for the runtime context on the embedded path, where the Gateway's `__`-prefix filter does not run, and `redact_config_secrets` drops the key from the persisted request echo (`runs.kwargs_json`, served back by the runs API) — the id is ignored as an input there, so echoing a caller-supplied one would only manufacture disagreement. `build_run_config` merges run metadata onto a copy for the same reason: its `config["metadata"]` is the caller's own `body.config` dict, and an in-place merge would write the server-stamped id through into the "what the client sent" record. Callers pin an id with the `X-Trace-Id` header instead.
+**Everything else that carries the id is a derived output, never read back as an input.** `worker._bind_trace_id` stamps the runtime context and `config["metadata"]`; `services.start_run` stamps the run record; a `deerflow_trace_id` the caller sent in `body.metadata` or `body.config.context` is replaced, not honoured — honouring it would let the persisted run disagree with the header and the logs. `_SERVER_OWNED_RUNTIME_CONTEXT_KEYS` enforces the rule on the embedded path (no Gateway `__`-prefix filter there), `redact_config_secrets` drops the key from the persisted request echo (`runs.kwargs_json`), and `build_run_config` merges metadata onto a copy so the stamp cannot reach `body.config`. Callers pin an id with the `X-Trace-Id` header.
 
-One accepted divergence: a crash-recovered scheduled launch reuses its durable run through the idempotency key, and `start_run` returns early on `idempotency_reused` without restamping — so the run record keeps the first attempt's `deerflow_trace_id` while the retry's own log lines carry the id its `ensure_trace_context` scope minted. Confined to the crash-recovery window and accepted deliberately: restamping would rewrite a persisted record for a run that already exists, which is worse than two ids that each correlate their own attempt's logs. Do not re-diagnose it as a bug.
+One accepted divergence: a crash-recovered scheduled launch reuses its run via the idempotency key and `start_run` returns early without restamping — the record keeps the first attempt's id while the retry's logs carry a fresh one. Crash-recovery-window only; restamping would rewrite an existing persisted record. Not a bug.
 
-Both writes matter for different reasons: the runtime context is the carrier across boundaries the ContextVar does not cross (subagent delegation, the memory update on a Timer thread), while `config["metadata"]` and the run record persist with the checkpoint and make a finished run traceable after the fact. The thread's own metadata is deliberately seeded without the key — a thread spans many runs and as many trace ids.
+Thread metadata deliberately omits the key — a thread spans many runs.
 
 **Do not open-code fallback chains.** Two helpers own the resolution order:
 
-- `resolve_trace_id(*carriers)` — first usable carrier, else the ambient id. Use where the id travels as data (`runtime.context[DEERFLOW_TRACE_METADATA_KEY]`) because ContextVars do not survive a bare thread hop. Consumers: `memory_middleware`, `task_tool`, `SubagentExecutor.__init__`.
-- `ensure_trace_context(trace_id)` — reuse the surrounding scope, else start a self-contained one. Use at boundary crossings (`SubagentExecutor._aexecute` on the isolated loop thread, the memory manager's `trace_context_manager` hook on the Timer thread) and at non-HTTP entry points, where it mints a scoped id with no argument.
+- `resolve_trace_id(*carriers)` — first usable carrier, else the ambient id. Use where the id travels as data (`runtime.context[DEERFLOW_TRACE_METADATA_KEY]`); ContextVars do not survive a bare thread hop.
+- `ensure_trace_context(trace_id)` — reuse the surrounding scope, else start a self-contained one. Use at boundary crossings (`SubagentExecutor._aexecute`, the memory manager's `trace_context_manager` hook) and at non-HTTP entry points; with no argument it mints a scoped id.
 
-`request_trace_context` is the HTTP counterpart and deliberately does **not** inherit: a crafted header must not silently fall back to the id of whatever request ran before it on the same task.
+`request_trace_context` is the HTTP counterpart and deliberately does **not** inherit: a crafted header must not silently fall back to the previous request's id.
 
-`get_current_trace_id()` stays nullable for one caller: the logging filter, which must neither mutate context nor fabricate a value, and renders records emitted before any entry point as `trace_id=-`. Everything else uses `ensure_trace_id()` or `resolve_trace_id()`. Tests get an unbound baseline from the autouse `_isolate_trace_context` fixture in `tests/conftest.py` — without it, one test's binding leaks into the next and quietly satisfies assertions about ids the test under exercise never bound.
+`get_current_trace_id()` stays nullable for one caller — the logging filter (must neither mutate nor fabricate; renders pre-entry-point records as `trace_id=-`); everything else uses `ensure_trace_id()` or `resolve_trace_id()`.
 
-`DeerFlowClient.stream()` binds per `next()` step rather than around `yield from`. `stream()` is a sync generator sharing the caller's context, so a `with` across the yield would leak the id into the caller between events and risk `ValueError: <Token> was created in a different Context` when GC finalizes an abandoned generator elsewhere (pinned by `tests/test_client_langfuse_metadata.py::test_stream_does_not_leak_trace_id_to_caller_context_between_yields` and `::test_stream_abandoned_generator_close_does_not_raise_cross_context`).
+`DeerFlowClient.stream()` binds per `next()` step, never across a `yield`: a sync generator shares the caller's context, so a scope held across yields would leak the id to the caller and risk cross-context `Token` errors on GC of an abandoned generator (pinned in `tests/test_client_langfuse_metadata.py`).
 
-`logging.enhance.enabled` gates **log output only** — whether records carry a `trace_id` field, and in which format. It does not gate the id's existence, the response header, or the run metadata, so `TraceMiddleware` reads no `AppConfig` at all. `logging` remains restart-required (`STARTUP_ONLY_FIELDS["logging"]`) because `configure_logging()` installs the filter and formatter once during app.py lifespan startup.
+`logging.enhance.enabled` gates **log output only** (`trace_id` field presence and format); it does not gate the id, the header, or the run metadata, so `TraceMiddleware` reads no `AppConfig`; `logging` stays restart-required (`STARTUP_ONLY_FIELDS["logging"]`). `X-Trace-Id` is in `CORS_EXPOSED_HEADERS` (not safelisted; split-origin clients could not read it otherwise). Unhandled-exception 500s keep the header: `ServerErrorMiddleware` emits outside user middleware, so `TraceMiddleware` sends its own plain 500 before re-raising, leaving mid-stream failures to propagate unchanged.
 
-`X-Trace-Id` is listed in `CORS_EXPOSED_HEADERS`: it is not CORS-safelisted, so without it a split-origin browser client is the one caller that cannot read the id it is meant to quote in a bug report — and it cannot see the Gateway's logs either.
-
-Unhandled-exception 500s carry the header too: Starlette's `ServerErrorMiddleware` emits through the raw send outside every user middleware, so `TraceMiddleware` ships its own plain 500 with the header before re-raising when the response has not started, and leaves mid-stream failures to propagate unchanged.
-
-Tests: `tests/test_trace_context.py` (contract), `tests/test_trace_middleware.py` (Gateway, CORS listing, 500 fallback), `tests/test_trace_entry_points.py` (scheduler, run launchers, IM channels), `tests/test_gateway_services.py` (run-record stamping, kwargs-echo scrub), `tests/test_run_metadata_secret_safety.py` (echo redaction), plus the Langfuse metadata suites listed in `tracing/AGENTS.md`.
+Tests: `tests/test_trace_context.py`, `tests/test_trace_middleware.py` (CORS, 500 fallback), `tests/test_trace_entry_points.py`, `tests/test_gateway_services.py` (stamping, kwargs echo), `tests/test_run_metadata_secret_safety.py`, plus the Langfuse suites in `tracing/AGENTS.md`.
 
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
