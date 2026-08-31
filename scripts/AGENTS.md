@@ -15,6 +15,23 @@ likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
 
+## Public Skill Review Waivers
+
+`review_changed_public_skills.py` keeps the analyzer strict and applies narrow
+CI-only exceptions from `.github/skill-review-waivers.v1.json`. The manifest is
+versioned by `contracts/skill_review/waiver_manifest.v1.schema.json`; each entry
+must identify one current error by package, source, rule, path, line, and
+evidence, and pin the complete source file with SHA-256 plus an expiry date.
+Blockers are never waivable, and waived errors are still printed with their
+original severity and justification.
+
+For pull requests, only the base revision's manifest is effective. The head
+manifest is parsed and checked against the current analyzer output, but cannot
+self-authorize a finding in the same pull request. Push comparisons use the
+same before/after trust boundary. A waiver-only change can therefore land
+without weakening its own check, then become effective for later changes after
+it is part of the trusted base.
+
 ## Backend Static Analysis Commands
 
 The root `detect-thread-boundaries` target statically inventories execution
