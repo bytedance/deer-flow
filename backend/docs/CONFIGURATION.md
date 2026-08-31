@@ -367,7 +367,7 @@ tools:
 ```
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -519,6 +519,7 @@ sandbox:
    home_dir: /home/user             # /mnt/user-data is remapped under this directory
    idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
    replicas: 3                      # max concurrent sandboxes per gateway process
+   mount_upload_deadline_seconds: 120  # per-sandbox time budget for mount uploads (seconds)
    ownership:                       # use Redis when more than one gateway shares E2B
      type: redis
      redis_url: $REDIS_URL
@@ -543,10 +544,13 @@ provider in `config.yaml`.
 Notes specific to `E2BSandboxProvider`:
 
 - Each DeerFlow thread is bound to its E2B sandbox via metadata
-  (`deer_flow_user`, `deer_flow_thread`). Startup and periodic reconciliation
-  probe every bounded candidate, adopt one healthy canonical sandbox, and reap
-  duplicates after a grace period. Provider-tagged entries without a complete
-  user/thread identity are reaped only after the orphan TTL.
+  (`deer_flow_user`, `deer_flow_thread`, `deer_flow_skills_root`). Startup and
+  periodic reconciliation probe every bounded candidate, adopt one healthy
+  canonical sandbox, and reap duplicates after a grace period. A sandbox whose
+  skills root differs from the provider's startup snapshot is never adopted and
+  is reaped after the same grace period once no live peer owns it.
+  Provider-tagged entries without a complete user/thread identity are reaped
+  only after the orphan TTL.
 - Ownership leases prevent one gateway from adopting or destroying a sandbox
   another live gateway is responsible for. The default in-memory store is safe
   only for one gateway process. Multi-worker/load-balanced deployments must use
@@ -564,6 +568,11 @@ Notes specific to `E2BSandboxProvider`:
   `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
+- `mount_upload_deadline_seconds` sets the per-sandbox time budget for mount
+  uploads. The provider checks it before each mount, during directory preflight,
+  and before each SDK write. The deadline does not interrupt active filesystem or
+  E2B SDK calls. Omitting the key preserves the 120-second default. Values below
+  1 are clamped to 1; non-numeric or null values fall back to the default.
 
 **OpenSandbox Remote Sandbox** (runs code through an OpenSandbox deployment):
 
@@ -746,6 +755,15 @@ skills:
   container_path: /mnt/skills
 ```
 
+For the AIO provider (including the Kubernetes provisioner) and E2B,
+`skills.container_path` is captured when the provider starts and must be one
+canonical absolute, non-root POSIX path. Do not use redundant separators,
+`.`/`..`, or a path that contains or sits below DeerFlow's reserved mounts
+(`/mnt/user-data`, `/mnt/acp-workspace`, or `/mnt/integrations/lark-cli`).
+Restart the Gateway after changing it so sandbox identities and mounts use the
+same root. E2B also records the root in remote metadata and refuses to adopt a
+VM created for another root.
+
 **How Skills Work**:
 - Skills are stored in `deer-flow/skills/{public,custom}/`
 - Each skill has a `SKILL.md` file with metadata
@@ -770,6 +788,12 @@ Custom agents can restrict which skills they discover and activate by defining a
 This field is a discovery and activation allowlist; it does not activate every listed skill's `allowed-tools` policy when the agent is constructed. Use `tool_groups` to define the agent's baseline tools. A listed skill's policy applies only after slash activation or an actual `SKILL.md` load.
 
 The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A passive subagent skill never removes baseline tools; its `allowed-tools` declaration becomes active only after slash activation or a completed `SKILL.md` read.
+
+`LocalSandboxProvider` enforces this filesystem view through its managed virtual
+path mappings only. Explicit per-Agent skill policies therefore fail closed when
+`sandbox.allow_host_bash` is enabled, because host subprocesses can bypass those
+mappings. Keep host bash disabled (the default), or use AIO/provisioner/E2B when
+shell access and filesystem isolation are both required.
 
 ### Title Generation
 
@@ -809,6 +833,7 @@ models:
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths

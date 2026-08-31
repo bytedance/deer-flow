@@ -4,16 +4,18 @@ FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWA
 
 Durable MCP task notifications are internal Agent runs: keep the trusted delivery instruction outside the user-input boundary and frame the serialized remote event payload as untrusted text before model invocation. These runs use strict thread existence/ownership admission so an event from a task that outlives its deleted chat is dead-lettered rather than recreating the thread.
 
-CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (comma-separated exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed. The LangGraph SDK resolves run metadata from that header alone — withhold it and `useStream`'s `onCreated` never fires, a new thread keeps its placeholder route, and every action gated on an established thread (edit, regenerate, branch) stays hidden until the page is reloaded. Same-origin nginx deployments never hit this because CORS does not apply.
+CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
 
-Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`, and CSRF cookie creation mirrors that value so the double-submit cookie pair expires together, including explicit re-issue after password changes and OIDC callbacks. A small `HttpOnly` preference cookie preserves the user's remember choice across token re-issue paths. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
+Browser auth sessions are owned by `app.gateway.auth.session_cookie`. Login accepts a `remember_me` form flag, but the Gateway never stores passwords. `SessionCookiePolicy` persists the `HttpOnly access_token` cookie only for HTTPS/trusted-forwarded HTTPS, direct-host localhost HTTP, or explicit operator opt-in for insecure persistence; public HTTP sandbox URLs degrade to session cookies. Session-creating handlers stamp the final `max_age` on `request.state`; CSRF cookie creation mirrors it so the double-submit pair expires together, including re-issue after password changes and OIDC callbacks. A small `HttpOnly` preference cookie preserves the remember choice across re-issues. Logout clears all auth cookies and suppresses CSRF re-issue on the logout response.
+
+Personal Access Tokens (`app.gateway.auth.pat`, `Authorization: Bearer dfp_...`) run as their owning user: an invalid Bearer is a hard 401 with no cookie fallback, which keeps `CSRFMiddleware`'s Bearer skip safe (origin checks still run). Scopes narrow within the allowlisted threads/runs routes; every other authenticated route 403s PAT callers (admin included). PAT management and `/change-password` require session auth; only SHA-256 digests are stored (`0017`).
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
 Standalone local LangGraph Studio is recognized only through the upstream
 `Auth.types.StudioUser` principal type, never by its reusable identity string.
 The type is resolved once at import; an older SDK without it degrades to normal
-owner scoping instead of failing requests.
+owner scoping.
 For that principal's assistant reads/searches, `langgraph_auth.add_owner_filter`
 selects genuine server-registered assistants plus assistants owned by Studio;
 all other resources remain owner-scoped. Assistant create/update handlers make
@@ -33,11 +35,9 @@ test. An empty graph registry or absent persistence file is a no-op, while
 persistence parse/write errors fail startup closed. The harness requires
 in-memory runtime 0.30.0 or newer, and a persisted store containing no
 expected registered assistant row emits a drift warning so changes to
-LangGraph's internal persistence contract are observable. Because current
-create/update writes and all legacy
-versions are sanitized, ordinary owner-scoped assistant version selection
-remains enabled. Ordinary authenticated users retain owner-scoped assistant
-reads/searches.
+LangGraph's internal persistence contract are observable. With current
+create/update writes and all legacy versions sanitized, ordinary
+owner-scoped assistant version selection remains enabled.
 
 **Routers**:
 
@@ -48,7 +48,7 @@ reads/searches.
 | **Console** (`/api/console`) | Read-only cross-thread observability for the current user (the data layer for an operations dashboard or external monitoring): `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods); requires a SQL database backend — returns 503 on `database.backend: memory`. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). All priced models must use one currency; mixed currencies disable cost reporting and leave cost/currency fields null instead of producing invalid aggregates. Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - replace the full config with whole-payload stdio validation; `PATCH /config` - toggle one server while preserving the raw extensions config and validating only an enabled target; both writes reload config and reset the process-local MCP cache |
 | **MCP Tasks** (`/api/threads/{id}/mcp-tasks`) | `GET /` - current user's durable tasks for one owned thread; `GET /{task_id}` - bounded result/input/status-error/cancellation-error detail, including cancellation attempt count, without remote task IDs or driver configuration |
-| **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`); `POST /reload` - admin-only process-local prompt-cache invalidation after trusted external filesystem changes |
+| **Skills** (`/api/skills`) | `GET /` - list; `GET /{name}` - inspect; `PUT /{name}` - toggle; `POST /install` - install a thread-local .skill archive; `POST /install/upload` - admin-only multipart, authorized before parsing and capped at a 100 MiB file plus 1 MiB framing; `POST /reload` - invalidate process-local cache after trusted filesystem changes |
 | **Subagents** (`/api/subagents`) | Admin managed-worker CRUD and listing. |
 | **Integrations** (`/api/integrations`) | `GET /lark/status` - inspect managed Lark/Feishu CLI integration state, including `sandbox_runtime_mode` / `sandbox_runtime_ready` (whether `lark-cli` will actually be present in the sandbox at chat time); `POST /lark/install` - admin-only install of the official `lark-*` managed skill pack; `POST /lark/config/start` and `/lark/config/complete` - internal first-time Lark connection setup; `POST /lark/config/credentials` - atomically switch the caller's per-user Lark app after validating the new `app_id`/`app_secret` through the official CLI's live tenant-token probe, revoke/remove the previous OAuth tokens, and restore the prior credential tree if the switch fails; `POST /lark/auth/start` and `/lark/auth/complete` - browser device-flow user authorization without terminal access, with optional `domains` / exact `scope` for incremental permission grants. Config and auth flows carry a server-issued, per-user generation persisted under the credential lock; a rejected direct switch leaves the current generation unchanged, stale completions return 409, and browser re-registration uses the same token-clearing/revocation transaction as direct credential switches. |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
@@ -70,11 +70,10 @@ Gateway creation and state-producing request boundaries, embedded-client
 entry points, filesystem/upload/event-store consumers, scheduled launches,
 and the standalone Provisioner enforce the same contract before persistence
 or workspace initialization. Route-addressable legacy IDs remain accepted by
-pure reads and cleanup/control endpoints. Deleting a noncanonical legacy ID
-best-effort removes its metadata and checkpoints but deliberately skips local
-filesystem cleanup, so the raw value is never interpolated into a host path;
-new runs, workspace/sandbox operations, and other state-producing mutations
-remain blocked.
+pure reads and cleanup/control endpoints; deleting one best-effort removes
+metadata and checkpoints but skips local filesystem cleanup, so the raw value
+is never interpolated into a host path. New runs, workspace/sandbox
+operations, and other state-producing mutations remain blocked.
 
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
@@ -135,8 +134,8 @@ paths: a separate boundary flag preserves the previous completion-data
 semantics, so checkpoint incompatibility or cancellation while waiting for an
 older finalizing run does not persist an empty completion snapshot. Worker tests
 pin one accumulated receipt across multiple goal-continuation `_stream_once`
-calls; journal tests drive LangChain's real async callback dispatcher against a
-single journal to pin serialized, deduplicated parallel tool callbacks.
+calls; journal tests drive LangChain's real async callback dispatcher to pin
+serialized, deduplicated parallel tool callbacks.
 Multi-worker deployments therefore require `run_events.backend: db` for shared,
 ordered delivery events; the startup gate rejects process-local memory and
 JSONL event stores when `GATEWAY_WORKERS > 1`.

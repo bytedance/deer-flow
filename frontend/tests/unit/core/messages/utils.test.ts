@@ -755,6 +755,57 @@ test("falls back to reasoning for a reasoning-only assistant turn's copy data", 
   expect(getAssistantTurnCopyData(messages)).toBe("the actual reasoning");
 });
 
+test("settled copy data is derived once per messages array reference (#5094)", () => {
+  // Settled group arrays keep their identity across streaming chunks, and the
+  // copy button re-renders per chunk. Reading `content` through a getter
+  // proves the second settled call is served from the array-reference cache
+  // instead of re-running the O(turn bytes) extraction.
+  let contentReads = 0;
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    get content() {
+      contentReads += 1;
+      return "Final answer";
+    },
+  } as unknown as Message;
+  const messages = [message];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  const readsAfterFirstCall = contentReads;
+  expect(readsAfterFirstCall).toBeGreaterThan(0);
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  expect(contentReads).toBe(readsAfterFirstCall);
+});
+
+test("copy-data cache does not leak across array references", () => {
+  const first = [
+    { id: "ai-1", type: "ai", content: "first answer" },
+  ] as Message[];
+  const second = [
+    { id: "ai-2", type: "ai", content: "second answer" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(first)).toBe("first answer");
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+  // The streaming short-circuit stays ahead of the cache.
+  expect(getAssistantTurnCopyData(second, { isStreaming: true })).toBeNull();
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+});
+
+test("null copy data is not cached for a reference", () => {
+  // A turn with no copyable AI text must keep recomputing (and stay null)
+  // rather than a cached null hiding a later value — the same array can be
+  // re-used once messages are appended to a rebuilt group.
+  const messages = [
+    { id: "human-1", type: "human", content: "hi" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+});
+
 test("marks the latest assistant message as streaming", () => {
   const messages = [
     {

@@ -453,15 +453,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
+            from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
+
+            app.state.pat_repo = PersonalAccessTokenRepository(sf, last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            # Memory backend has no durable PAT store, so Bearer credentials
+            # cannot be validated there and are rejected by the middleware.
+            app.state.pat_repo = None
 
         # Services are app-scoped. Capture this app's immutable extension set
         # once and close over the same object for teardown; the process-wide
@@ -752,6 +759,19 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_pat_repo(request: Request):
+    """Return the personal-access-token repository from app state.
+
+    Raises 503 when the process runs on the memory backend (no durable PAT
+    storage), so PAT management routes fail explicitly instead of silently
+    accepting tokens nobody can validate.
+    """
+    pat_repo = getattr(request.app.state, "pat_repo", None)
+    if pat_repo is None:
+        raise HTTPException(status_code=503, detail="Personal access tokens require a configured database")
+    return pat_repo
+
+
 async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 
@@ -759,12 +779,13 @@ async def get_current_user_from_request(request: Request):
     """
     state = getattr(request, "state", None)
     state_user = getattr(state, "user", None)
-    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
 
     if state_user is not None and getattr(state, "auth_source", None) in {
         AUTH_SOURCE_SESSION,
         AUTH_SOURCE_AUTH_DISABLED,
         AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_PAT,
     }:
         return state_user
 
@@ -817,6 +838,13 @@ async def is_admin_user(request: Request) -> bool:
     per-router copies that previously existed in ``mcp``, ``channel_connections``
     and ``channels``.
     """
+    # PAT credentials never carry admin capability: no scope in the PAT
+    # universe grants it, so an admin's automation token must not unlock
+    # admin-only routes (skill installs, integration credentials, MCP config).
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        return False
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)

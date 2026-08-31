@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
+from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
 
 logger = logging.getLogger(__name__)
 _MEMORY_STREAM_ID_RE = re.compile(r"\d+-(\d+)")
@@ -31,8 +31,9 @@ class MemoryStreamBridge(StreamBridge):
     and reconnecting clients can replay buffered events from ``Last-Event-ID``.
     """
 
-    def __init__(self, *, queue_maxsize: int = 256) -> None:
-        self._maxsize = queue_maxsize
+    def __init__(self, *, queue_maxsize: int = 256, heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS) -> None:
+        super().__init__(heartbeat_interval=heartbeat_interval)
+        self._maxsize = max(1, queue_maxsize)
         self._streams: dict[str, _RunStream] = {}
         self._counters: dict[str, int] = {}
 
@@ -67,8 +68,8 @@ class MemoryStreamBridge(StreamBridge):
     def _make_gap(stream: _RunStream, requested_event_id: str | None) -> StreamGap:
         return StreamGap(
             requested_event_id=requested_event_id,
-            earliest_available_event_id=stream.events[0].id,
-            latest_available_event_id=stream.events[-1].id,
+            earliest_available_event_id=stream.events[0].id if stream.events else None,
+            latest_available_event_id=stream.events[-1].id if stream.events else None,
         )
 
     def _resolve_start_offset(self, stream: _RunStream, last_event_id: str | None) -> int | StreamGap:
@@ -85,7 +86,7 @@ class MemoryStreamBridge(StreamBridge):
         # watermark keep the legacy replay-from-earliest behavior.
         seq = self._parse_event_seq(last_event_id)
         if seq is not None:
-            if stream.events and seq < stream.start_offset:
+            if seq < stream.start_offset:
                 return self._make_gap(stream, last_event_id)
             local_index = seq - stream.start_offset
             if 0 <= local_index < len(stream.events) and stream.events[local_index].id == last_event_id:
@@ -126,8 +127,9 @@ class MemoryStreamBridge(StreamBridge):
         run_id: str,
         *,
         last_event_id: str | None = None,
-        heartbeat_interval: float = 15.0,
+        heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamItem]:
+        heartbeat_interval = self._resolve_heartbeat_interval(heartbeat_interval)
         stream = self._get_or_create_stream(run_id)
         async with stream.condition:
             start = self._resolve_start_offset(stream, last_event_id)

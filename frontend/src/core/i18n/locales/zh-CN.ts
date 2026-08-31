@@ -121,6 +121,8 @@ export const zhCN: Translations = {
     loadFullFile: "加载完整文件",
     loadingFullFile: "正在加载完整文件...",
     previewFailed: "无法预览此文件，但仍可下载原始文件。",
+    viewSource: "查看原始文件",
+    missingTarget: "该链接没有指明要展示哪个文件。",
   },
 
   // Citations
@@ -592,6 +594,8 @@ export const zhCN: Translations = {
     branchCreated: "已创建分叉对话",
     branchFailed: "创建分叉对话失败。",
     streamReplayGap: "部分实时更新已过期，已从持久化状态恢复对话。",
+    outlineLabel: "对话章节",
+    outlineAttachmentFallback: "图片或文件消息",
   },
 
   // Chats
@@ -1162,6 +1166,11 @@ export const zhCN: Translations = {
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
+      installFromFile: "安装 .skill",
+      installingArchive: "正在安装…",
+      invalidArchive: "请选择扩展名为 .skill 的文件。",
+      archiveTooLarge: "技能包大小不能超过 100 MiB。",
+      installFailed: "安装技能包失败。",
     },
     notification: {
       title: "通知",

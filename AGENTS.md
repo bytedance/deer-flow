@@ -124,7 +124,7 @@ make extension-enable NAME=...     # Enable an installed extension (restart requ
 make extension-disable NAME=...    # Disable without uninstalling (restart required)
 make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Start all services in production mode (local, optimized)
+make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
@@ -146,7 +146,8 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Backend test suite
+cd backend && make test       # Default backend suite; excludes live and blocking-I/O tests
+cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
