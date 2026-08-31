@@ -486,8 +486,8 @@ def _normalize_command(command: str) -> str:
     return " ".join(command.split())
 
 
-def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
-    """Tokenize a shell command into segments plus the operators joining them.
+def _shell_parse_line(line: str) -> tuple[list[list[str]], list[str]] | None:
+    """Tokenize one physical line into segments plus the operators joining them.
 
     ``ops[i]`` is the operator between segment ``i`` and segment ``i+1``
     (``;``, ``&&``, ``||``, ``|``, ``&``, or a rarer punctuation run).
@@ -495,7 +495,7 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
     quotes are honored, so an operator inside an argument cannot split a
     segment. Returns ``None`` on malformed shell (unbalanced quotes).
     """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=_SHELL_OPERATORS)
+    lexer = shlex.shlex(line, posix=True, punctuation_chars=_SHELL_OPERATORS)
     lexer.whitespace_split = True
     lexer.commenters = "#"
     try:
@@ -521,6 +521,39 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
     # ops[i] is the operator following segment i; a trailing operator (e.g.
     # ``make test &``) leaves ops as long as segments and must stay visible —
     # backgrounding makes the execution unprovable.
+    return segments, ops
+
+
+def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
+    """Tokenize a shell command into segments plus the operators joining them.
+
+    Physical newlines are command separators with ``;`` semantics — bash
+    executes ``pytest tests/\\nseq 1 90000\\necho '3 passed'`` as three
+    sequential commands whose overall exit status is the LAST one's. shlex
+    treats ``\\n`` as ordinary whitespace, so parsing the raw string would
+    merge the lines into one segment: the trailing ``echo`` would pass for an
+    extra positional, its exit status for the run's, and its text for the
+    test summary while bulk output (``seq``) pushes the real one out of the
+    bounded tail. Each line is parsed on its own and joined with a ``;`` op —
+    or with the previous line's trailing operator when it ends on one
+    (``cmd &``). A newline inside an open quote breaks that line's parse and
+    falls back to exact-equality matching — fail closed.
+    """
+    segments: list[list[str]] = []
+    ops: list[str] = []
+    for line in command.split("\n"):
+        parsed = _shell_parse_line(line)
+        if parsed is None:
+            return None
+        line_segments, line_ops = parsed
+        if not line_segments:
+            continue  # blank line: no command, no separator effect
+        if segments and len(ops) < len(segments):
+            # The previous line ended without an operator: the newline
+            # itself separates the two commands.
+            ops.append(";")
+        segments.extend(line_segments)
+        ops.extend(line_ops)
     return segments, ops
 
 

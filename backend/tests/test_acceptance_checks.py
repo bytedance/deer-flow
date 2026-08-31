@@ -878,6 +878,46 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is True
         assert leaf["holds"] is False
 
+    def test_multiline_execution_tail_commands_are_not_attributed(self):
+        """Self-audit: physical newlines are command separators (``;``
+        semantics) that shlex would otherwise merge into one segment — the
+        trailing ``echo`` would pass for an extra positional, its exit status
+        for the run's, and its text for the test summary while the bulk
+        ``seq`` output pushes the real (failing) summary out of the bounded
+        tail."""
+        executions = [_bash_execution("pytest tests/ --tb=no\nseq 1 90000\necho '3 passed'", output_tail="99998\n99999\n90000\n3 passed\n")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "matching segment cannot be proven to have executed"
+
+    def test_multiline_execution_with_test_command_last_still_matches(self):
+        """Newline splitting keeps legit multi-line wrappers verifiable: the
+        silent ``cd`` precedes, the test command owns the last line."""
+        executions = [_bash_execution("cd backend\npytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_multiline_background_operator_stays_unprovable(self):
+        """A trailing ``&`` at end of a line still separates (and backgrounds)
+        the next line's command."""
+        executions = [_bash_execution("cmd1 &\npytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_multiline_quote_spanning_falls_back_to_exact_equality(self):
+        """A newline inside an open quote breaks per-line parsing; the whole
+        command falls back to exact-equality matching, which this is not."""
+        executions = [_bash_execution("echo 'a\nb'\npytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "no matching bash execution recorded"
+
     def test_or_chain_success_is_unprovable(self):
         """``true || make test`` succeeding: make test may have been skipped."""
         executions = [_bash_execution("true || make test", output_tail="3 passed")]
