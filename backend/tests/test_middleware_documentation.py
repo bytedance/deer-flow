@@ -75,3 +75,32 @@ def test_middleware_placement_scope_is_explicit(path: Path) -> None:
         else "On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response, model-length, or clarification stage"
     )
     assert marker in " ".join(content.split())
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("frontend/src/content/en/harness/middlewares.mdx"),
+        Path("frontend/src/content/zh/harness/middlewares.mdx"),
+    ),
+    ids=str,
+)
+def test_middleware_order_includes_configured_extension_tail(path: Path) -> None:
+    content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    markers = (
+        (
+            "`SkillToolPolicyMiddleware`",
+            "Configured extension middlewares (if any)",
+            "`TerminalResponseMiddleware`",
+            "`ModelLengthFinishReasonMiddleware`",
+        )
+        if "/en/" in path.as_posix()
+        else (
+            "`SkillToolPolicyMiddleware`",
+            "配置的扩展中间件（如有）",
+            "`TerminalResponseMiddleware`",
+            "`ModelLengthFinishReasonMiddleware`",
+        )
+    )
+    positions = [content.index(marker) for marker in markers]
+    assert positions == sorted(positions)

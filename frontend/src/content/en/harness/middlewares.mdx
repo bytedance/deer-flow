@@ -32,21 +32,25 @@ The middleware chain is built once per agent invocation, based on the current co
 1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
 2. `DynamicContextMiddleware` — current date and optional memory context
 3. `SkillActivationMiddleware` — slash-skill activation
-4. `DurableContextMiddleware` — captures durable summary, delegation, and skill-reference state
-5. `SummarizationMiddleware` — context compression (if enabled)
-6. `TodoMiddleware` — task list management (plan mode only)
-7. `TokenUsageMiddleware` — token tracking (if enabled)
-8. `TitleMiddleware` — automatic thread title generation
-9. `MemoryMiddleware` — cross-session memory injection and queuing
-10. `ViewImageMiddleware` — image details injection (if model supports vision)
-11. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
-12. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
-13. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
-14. `LoopDetectionMiddleware` — breaks repetitive tool call loops
-15. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
-16. Custom middlewares (if any)
-17. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
-18. `ClarificationMiddleware` — intercepts clarification requests (always last)
+4. `SkillToolPolicyMiddleware` — filters skill tools to the active skill
+5. `DurableContextMiddleware` — captures durable summary, delegation, and skill-reference state
+6. `SummarizationMiddleware` — context compression (if enabled)
+7. `TodoMiddleware` — task list management (plan mode only)
+8. `TokenUsageMiddleware` — token tracking (if enabled)
+9. `TitleMiddleware` — automatic thread title generation
+10. `MemoryMiddleware` — cross-session memory injection and queuing
+11. `ViewImageMiddleware` — image details injection (if model supports vision)
+12. `DeferredToolFilterMiddleware` — hides deferred tool schemas (if tool search enabled)
+13. `SystemMessageCoalescingMiddleware` — coalesces provider-facing system messages
+14. `SubagentLimitMiddleware` — limits parallel subagent calls (if subagents enabled)
+15. `LoopDetectionMiddleware` — breaks repetitive tool call loops
+16. `TokenBudgetMiddleware` — per-run token budget enforcement (if enabled)
+17. Custom middlewares (if any)
+18. Configured extension middlewares (if any)
+19. `TerminalResponseMiddleware` — retries an empty final response once
+20. `ModelLengthFinishReasonMiddleware` — records a length-capped completion
+21. `SafetyFinishReasonMiddleware` — suppresses tool execution after safety-terminated responses (if enabled)
+22. `ClarificationMiddleware` — intercepts clarification requests (always last)
 
 The ordering is significant. Durable context capture runs before summarization so delegated task dispatches, terminal delegation results, and loaded skill references survive compaction. Clarification always runs last so it can intercept after all other middlewares have had their turn.
 
