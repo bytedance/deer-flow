@@ -404,32 +404,28 @@ def _is_silent_segment(tokens: list[str]) -> bool:
     script emits (the subagent controls the filesystem and can craft one),
     so sourced prefixes are never provably silent.
 
-    ``cd`` is silent only when it cannot print a summary shape: with CDPATH
-    set it prints the resolved destination — subagent-chosen text. One
-    ``mkdir 'all tests passed'`` plus ``cd`` into it (or a shaped CDPATH
-    value, which becomes part of the printed path) lends the tail a pass
-    shape, so a ``cd`` whose argument carries a summary shape — or one
-    preceded by a shaped ``CDPATH=`` assignment — is not provably silent.
-    The everyday shape-free ``cd dir &&`` wrapper stays silent (bash_tool
-    auto-prefixes it for every local command).
+    ``cd`` is silent only when its argument is literal and shape-free:
+    with CDPATH set it prints the resolved destination — subagent-chosen
+    text — so a shaped (``mkdir 'all tests passed'``) or runtime-expanded
+    (``cd $D``, ``cd all*``) argument could lend the tail a summary shape.
+    Behavior-changing assignments that feed the print (``CDPATH=``) are
+    state pollution and degrade the match upstream; the everyday
+    shape-free ``cd dir &&`` wrapper stays silent (bash_tool auto-prefixes
+    it for every local command).
     """
     stripped = _strip_env_assignments(tokens)
     if not stripped:
         return True  # pure VAR=value assignments
-    assignments = tokens[: len(tokens) - len(stripped)]
     executable = os.path.basename(stripped[0])
     args = stripped[1:]
     if executable == "cd":
-        if any(_carries_summary_shape(arg) for arg in args):
-            return False
-        return not any(assignment.startswith("CDPATH=") and _carries_summary_shape(assignment) for assignment in assignments)
+        return not any(_carries_summary_shape(arg) or _EXPANSION_CHAR_RE.search(arg) or _GLOB_CHAR_RE.search(arg) for arg in args)
     if executable == "export":
         # ``export A=1`` / ``export NAME`` print nothing; bare ``export``
-        # and ``export -p`` print the environment. A shaped CDPATH value
-        # re-opens the cd print channel above.
-        if not args or "-p" in args:
-            return False
-        return not any(arg.startswith("CDPATH=") and _carries_summary_shape(arg) for arg in args)
+        # and ``export -p`` print the environment. (Behavior-changing
+        # exports — PATH, CDPATH, PYTEST_ADDOPTS — are state pollution and
+        # degrade the match upstream; silence here is about output only.)
+        return bool(args) and "-p" not in args
     if executable == "unset":
         return bool(args)
     # pushd/popd (print the stack), umask/ulimit (print forms), source/. and
@@ -538,6 +534,53 @@ def _strip_env_assignments(tokens: list[str]) -> list[str]:
     return tokens[index:]
 
 
+#: Assignment names provably inert for matching: display/CI knobs that
+#: cannot change what executes, what gets selected, or what gets printed.
+#: Everything else is behavior-changing by reach — PATH redirects the
+#: executable, LD_PRELOAD/PYTHONPATH/NODE_OPTIONS inject code,
+#: PYTEST_ADDOPTS/GOFLAGS/MAKEFILES inject selection-changing inputs,
+#: BASH_ENV runs arbitrary shell startup, CDPATH changes what ``cd``
+#: prints — so an unrecognized assignment before or inside the matched
+#: span makes the match unprovable instead of being stripped.
+_SAFE_ASSIGNMENT_NAMES = frozenset({"CI", "GITHUB_ACTIONS", "TF_IN_AUTOMATION", "DEBUG", "VERBOSE", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "PY_COLORS", "TERM", "COLORTERM"})
+
+
+def _leading_assignment_names(tokens: list[str]) -> list[str]:
+    """Names of the leading ``NAME=`` assignments (the env-setup prefix)."""
+    names: list[str] = []
+    for token in tokens:
+        if not _ENV_ASSIGNMENT_RE.match(token):
+            break
+        names.append(token.split("=", 1)[0])
+    return names
+
+
+def _segment_pollutes_state(tokens: list[str]) -> bool:
+    """Whether a preceding segment mutates shell state the matcher cannot
+    see: a non-allowlisted assignment (prefix or pure-assignment segment —
+    ``PATH=/tmp/fake; pytest tests`` redirects the executable) or an
+    ``export NAME=`` with a non-allowlisted name (``export
+    PYTEST_ADDOPTS=-k smoke`` narrows a later segment's selection)."""
+    if any(name not in _SAFE_ASSIGNMENT_NAMES for name in _leading_assignment_names(tokens)):
+        return True
+    stripped = _strip_env_assignments(tokens)
+    if stripped and os.path.basename(stripped[0]) == "export":
+        return any("=" in arg and arg.split("=", 1)[0] not in _SAFE_ASSIGNMENT_NAMES for arg in stripped[1:])
+    return False
+
+
+#: Tokens whose runtime expansion the matcher cannot see: command/parameter
+#: substitution (``$(cat args)``, ``$TARGET``, backticks). In the matched
+#: span a substitution can inject selection-changing flags or an unknown
+#: exclusion; anywhere it makes the run's arguments unknowable.
+_EXPANSION_CHAR_RE = re.compile(r"[$`]")
+#: Glob metacharacters in an *extra* executed token: the expanded file set
+#: is unknowable — and crafted option-looking filenames (``-k``/``smoke``)
+#: turn a widening glob into an invisible narrowing. Criterion tokens are
+#: matched literally, so a criterion-side glob stays self-consistent.
+_GLOB_CHAR_RE = re.compile(r"[*?[]")
+
+
 #: A criterion argument scopes the run's selection only when it is path-like
 #: (``tests/security``, ``tests/test_auth.py``); dotted module names, make
 #: targets, and bare runner invocations leave the runner default in charge,
@@ -589,15 +632,30 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     After a bare criterion the same extra positional NARROWS the runner's
     default selection (``python -m unittest pkg.OneTest``). Returns
     ``"unprovable"`` when the textual match carries a behavior-changing
-    extra (``pytest -k smoke tests/security``) or a negating option excludes
+    extra (``pytest -k smoke tests/security``), a negating option excludes
     the matched target or a sub-path of it (``--deselect
-    tests/unit/test_auth.py`` against ``pytest tests``), ``"no_match"``
-    otherwise.
+    tests/unit/test_auth.py`` against ``pytest tests``), a non-allowlisted
+    env-assignment prefix is present (``PATH=…``/``PYTEST_ADDOPTS=…`` change
+    what runs), or any span token carries a runtime expansion
+    (``$VAR``/``$( )``/backticks — expanded arguments are unknowable) or an
+    extra token carries glob metacharacters (option-looking filenames can
+    narrow invisibly), ``"no_match"`` otherwise.
     """
+    if any(name not in _SAFE_ASSIGNMENT_NAMES for name in _leading_assignment_names(expected) + _leading_assignment_names(actual)):
+        # A non-allowlisted assignment prefix changes what executes, what
+        # gets selected, or what gets printed (PATH, LD_PRELOAD, PYTHONPATH,
+        # PYTEST_ADDOPTS, MAKEFILES, BASH_ENV, …) — never strip what the
+        # matcher cannot see.
+        return "unprovable"
     expected = _strip_env_assignments(expected)
     actual = _strip_env_assignments(actual)
     if not expected or not actual:
         return "no_match"
+    if any(_EXPANSION_CHAR_RE.search(token) for token in (*expected, *actual)):
+        # A substitution expands at runtime to arguments the matcher cannot
+        # see — hidden flags (``pytest tests/security $(cat args)``) or
+        # unknown targets (``pytest $T``).
+        return "unprovable"
     if expected[0] != actual[0]:
         criterion_executable = _normalize_executable(expected[0])
         if "/" in criterion_executable:
@@ -645,11 +703,21 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     # --ignore tests``) excludes the target itself. Unrelated exclusions
     # (``--ignore tests/slow`` against ``pytest tests/unit``) keep matching.
     negated_values = [_negated_value(actual[position]) for position in negated]
+    if any(_EXPANSION_CHAR_RE.search(value) or _GLOB_CHAR_RE.search(value) for value in negated_values):
+        # An unknown or glob exclusion (``--ignore $X``, ``--ignore
+        # tests/slow*``): the overlap check cannot reason about what did
+        # not run.
+        return "unprovable"
     if any(_negation_overlaps(actual[position], value) for position in consumed if position != 0 for value in negated_values):
         return "unprovable"
     for position, token in enumerate(actual):
         if position in consumed or position in negated or position in option_positions:
             continue
+        if _EXPANSION_CHAR_RE.search(token) or _GLOB_CHAR_RE.search(token):
+            # An extra token whose expansion or glob result is unknowable —
+            # it may inject flags (``$(cat args)``) or option-looking
+            # filenames that narrow the run invisibly.
+            return "unprovable"
         if token.startswith("-"):
             if not _EXTRA_TOKEN_SAFE_RE.fullmatch(token):
                 return "unprovable"
@@ -725,6 +793,11 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
     span = len(expected)
     saw_unprovable = False
     for start in range(len(actual) - span + 1):
+        if any(_segment_pollutes_state(segment) for segment in actual[:start]):
+            # A preceding segment mutated shell state the matcher cannot see
+            # (PATH/exports): nothing later is provable.
+            saw_unprovable = True
+            continue
         outcomes = [_segment_matches(expected[i], actual[start + i]) for i in range(span)]
         if any(outcome == "no_match" for outcome in outcomes):
             continue

@@ -803,14 +803,15 @@ class TestTestsPassedLeaf:
     def test_cdpath_print_lends_no_pass_shape(self):
         """PR review: one ``mkdir`` plus one ``export`` mints a passing
         summary for a quiet command — CDPATH makes ``cd`` print the resolved
-        destination, and the pass shapes match as substrings."""
+        destination, and the pass shapes match as substrings. CDPATH is not
+        an inert assignment, so the whole match degrades as state pollution."""
         executions = [_bash_execution("export CDPATH=.; cd 'all tests passed'; make test", output_tail="all tests passed")]
         verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
 
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is False
         assert leaf["holds"] is False
-        assert leaf["detail"] == "recorded output is not attributable to the matched segment"
+        assert leaf["detail"] == "matching segment cannot be proven to have executed"
 
     def test_cd_argument_with_fail_shape_is_not_silent(self):
         """A shaped destination is untrusted in the failing direction too —
@@ -828,12 +829,82 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["checked"] is False
 
-    def test_shape_free_cd_wrapper_stays_silent(self):
-        """The everyday CDPATH + ``cd dir`` wrapper keeps matching."""
+    def test_cdpath_export_is_state_pollution(self):
+        """CDPATH changes what ``cd`` prints — not an inert assignment, so
+        any CDPATH export degrades the match even with a shape-free dir."""
         executions = [_bash_execution("export CDPATH=.; cd backend; make test", output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
 
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "matching segment cannot be proven to have executed"
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "PATH=/tmp/fake pytest tests/security",  # executable redirection via prefix
+            "PATH=/tmp/fake; cd backend; pytest tests/security",  # pure-assignment segment pollutes the state
+            "export PATH=/tmp/fake; pytest tests/security",  # export form
+            "PYTEST_ADDOPTS=--lf pytest tests/security",  # single-token value: selection-narrowing flags via env
+            "export PYTEST_ADDOPTS=-k smoke; pytest tests/security",  # export form
+            "export MAKEFILES=evil.mk; make test",  # make target redefinition
+            "LD_PRELOAD=/tmp/evil.so pytest tests/security",  # arbitrary code injection
+            "export BASH_ENV=/tmp/evil; pytest tests/security",  # shell startup code
+        ),
+    )
+    def test_non_inert_env_assignment_is_unprovable(self, command):
+        """PR review: env assignments are behavior-changing by reach —
+        PATH redirects the executable, LD_PRELOAD/PYTHONPATH inject code,
+        PYTEST_ADDOPTS/MAKEFILES inject selection-changing inputs — so only
+        allowlisted inert names may be stripped for matching."""
+        criterion = "make test" if "make test" in command else "pytest tests/security"
+        executions = [_bash_execution(command, output_tail="7 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:{criterion}"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False, command
+        assert leaf["detail"] == "matching segment cannot be proven to have executed", command
+
+    def test_inert_assignment_prefix_still_matches(self):
+        executions = [_bash_execution("CI=1 NO_COLOR=1 pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
         assert verdict["leaves"][0]["holds"] is True
+
+    @pytest.mark.parametrize(
+        "command",
+        (
+            "pytest tests/security $(cat extra)",  # substitution can hide selection flags
+            "pytest tests/security $EXTRA",
+            "pytest tests/security --ignore $X",  # unknown exclusion
+            "pytest tests/security --ignore tests/slow*",  # glob exclusion: unknown excluded set
+            "pytest tests/security *",  # glob: option-looking filenames narrow invisibly
+        ),
+    )
+    def test_expansion_or_glob_in_span_is_unprovable(self, command):
+        """PR review: a substitution or glob expands at runtime to arguments
+        the matcher cannot see — hidden flags, an unknown exclusion, or
+        option-looking filenames that narrow the run."""
+        executions = [_bash_execution(command, output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False, command
+        assert leaf["detail"] == "matching segment cannot be proven to have executed", command
+
+    def test_criterion_side_glob_stays_self_consistent(self):
+        """A criterion glob matched literally means the same glob — the
+        executed run ran exactly the selection the criterion names."""
+        executions = [_bash_execution("pytest tests/*.py", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/*.py"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_substitution_in_criterion_is_unprovable(self):
+        executions = [_bash_execution("pytest $TARGETS", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest $TARGETS"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
 
     @pytest.mark.parametrize(
         ("command", "criterion"),
