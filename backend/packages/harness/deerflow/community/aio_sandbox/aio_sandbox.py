@@ -43,6 +43,11 @@ class AioSandbox(Sandbox):
     from corrupting the container's single persistent session (see #1433).
     """
 
+    #: The legacy exec path reuses one persistent shell session across calls,
+    #: so shell state (exports, cwd, functions) carries from one command into
+    #: the next — recorded bash evidence cannot prove a clean environment.
+    persistent_shell_sessions = True
+
     def __init__(self, id: str, base_url: str, home_dir: str | None = None):
         """Initialize the AIO sandbox.
 

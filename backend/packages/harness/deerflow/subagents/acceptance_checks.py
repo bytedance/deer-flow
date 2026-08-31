@@ -534,38 +534,28 @@ def _strip_env_assignments(tokens: list[str]) -> list[str]:
     return tokens[index:]
 
 
-#: Assignment names provably inert for matching: display/CI knobs that
-#: cannot change what executes, what gets selected, or what gets printed.
-#: Everything else is behavior-changing by reach — PATH redirects the
-#: executable, LD_PRELOAD/PYTHONPATH/NODE_OPTIONS inject code,
-#: PYTEST_ADDOPTS/GOFLAGS/MAKEFILES inject selection-changing inputs,
-#: BASH_ENV runs arbitrary shell startup, CDPATH changes what ``cd``
-#: prints — so an unrecognized assignment before or inside the matched
-#: span makes the match unprovable instead of being stripped.
-_SAFE_ASSIGNMENT_NAMES = frozenset({"CI", "GITHUB_ACTIONS", "TF_IN_AUTOMATION", "DEBUG", "VERBOSE", "NO_COLOR", "FORCE_COLOR", "CLICOLOR", "CLICOLOR_FORCE", "PY_COLORS", "TERM", "COLORTERM"})
-
-
-def _leading_assignment_names(tokens: list[str]) -> list[str]:
-    """Names of the leading ``NAME=`` assignments (the env-setup prefix)."""
-    names: list[str] = []
+def _leading_assignment_tokens(tokens: list[str]) -> list[str]:
+    """The leading ``NAME=value`` assignment tokens (the env-setup prefix)."""
+    assignments: list[str] = []
     for token in tokens:
         if not _ENV_ASSIGNMENT_RE.match(token):
             break
-        names.append(token.split("=", 1)[0])
-    return names
+        assignments.append(token)
+    return assignments
 
 
 def _segment_pollutes_state(tokens: list[str]) -> bool:
     """Whether a preceding segment mutates shell state the matcher cannot
-    see: a non-allowlisted assignment (prefix or pure-assignment segment —
-    ``PATH=/tmp/fake; pytest tests`` redirects the executable) or an
-    ``export NAME=`` with a non-allowlisted name (``export
-    PYTEST_ADDOPTS=-k smoke`` narrows a later segment's selection)."""
-    if any(name not in _SAFE_ASSIGNMENT_NAMES for name in _leading_assignment_names(tokens)):
+    see: ANY assignment (prefix or pure-assignment segment) or any
+    ``export NAME=``. No variable is provably inert across repositories —
+    ``CI``/``DEBUG``/``VERBOSE`` are routinely read by tests and can change
+    or skip execution, and PATH/LD_PRELOAD/PYTHONPATH/PYTEST_ADDOPTS/
+    MAKEFILES/BASH_ENV change what runs outright."""
+    if _leading_assignment_tokens(tokens):
         return True
     stripped = _strip_env_assignments(tokens)
     if stripped and os.path.basename(stripped[0]) == "export":
-        return any("=" in arg and arg.split("=", 1)[0] not in _SAFE_ASSIGNMENT_NAMES for arg in stripped[1:])
+        return any("=" in arg for arg in stripped[1:])
     return False
 
 
@@ -581,6 +571,39 @@ _EXPANSION_CHAR_RE = re.compile(r"[$`]")
 _GLOB_CHAR_RE = re.compile(r"[*?[]")
 
 
+#: Options that consume the NEXT token as their value (separate form), so
+#: that token is not a positional target: the negating family (the value
+#: names what did NOT run), selection flags, and the output/config family.
+#: Glued forms (``--opt=value``) need no entry — the whole token is an
+#: option either way.
+_VALUE_TAKING_OPTION_TOKENS = frozenset(
+    {
+        "-k",
+        "-m",
+        "-c",
+        "-p",
+        "-n",
+        "-r",
+        "--maxfail",
+        "--junitxml",
+        "--basetemp",
+        "--cov",
+        "--cov-report",
+        "--durations-min",
+        "--capture",
+        "--tb",
+        "--color",
+        "--dist",
+        "--ignore",
+        "--ignore-glob",
+        "--deselect",
+        "--exclude",
+        "--exclude-glob",
+        "--skip",
+        "--skip-file",
+    }
+)
+
 #: A criterion argument scopes the run's selection only when it is path-like
 #: (``tests/security``, ``tests/test_auth.py``); dotted module names, make
 #: targets, and bare runner invocations leave the runner default in charge,
@@ -588,8 +611,26 @@ _GLOB_CHAR_RE = re.compile(r"[*?[]")
 _CRITERION_PATHLIKE_ARG_RE = re.compile(r"[/\\]|\.(?:py|jsx?|tsx?|go|rs|java|rb|php)$")
 
 
+def _criterion_positional_args(expected: list[str]) -> list[str]:
+    """Criterion tokens that are positional arguments — the tokens that can
+    name a test selection. Options and their values are skipped by arity,
+    so a path embedded in an option (``--basetemp=/tmp/p``,
+    ``--junitxml=/tmp/r.xml``) is never mistaken for a selection target."""
+    args: list[str] = []
+    tokens = expected[1:]
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-"):
+            index += 2 if token in _VALUE_TAKING_OPTION_TOKENS else 1
+            continue
+        args.append(token)
+        index += 1
+    return args
+
+
 def _criterion_scopes_selection(expected: list[str]) -> bool:
-    return any(_CRITERION_PATHLIKE_ARG_RE.search(token) for token in expected[1:])
+    return any(_CRITERION_PATHLIKE_ARG_RE.search(token) for token in _criterion_positional_args(expected))
 
 
 #: Extra flags that provably do not change *which* tests run: verbosity,
@@ -634,18 +675,20 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     ``"unprovable"`` when the textual match carries a behavior-changing
     extra (``pytest -k smoke tests/security``), a negating option excludes
     the matched target or a sub-path of it (``--deselect
-    tests/unit/test_auth.py`` against ``pytest tests``), a non-allowlisted
-    env-assignment prefix is present (``PATH=…``/``PYTEST_ADDOPTS=…`` change
-    what runs), or any span token carries a runtime expansion
-    (``$VAR``/``$( )``/backticks — expanded arguments are unknowable) or an
-    extra token carries glob metacharacters (option-looking filenames can
-    narrow invisibly), ``"no_match"`` otherwise.
+    tests/unit/test_auth.py`` against ``pytest tests``), the env-assignment
+    prefix differs at all (extra, missing, or different value — no variable
+    is provably inert across repositories), or any span token carries a
+    runtime expansion (``$VAR``/``$( )``/backticks — expanded arguments are
+    unknowable) or an extra token carries glob metacharacters
+    (option-looking filenames can narrow invisibly), ``"no_match"``
+    otherwise.
     """
-    if any(name not in _SAFE_ASSIGNMENT_NAMES for name in _leading_assignment_names(expected) + _leading_assignment_names(actual)):
-        # A non-allowlisted assignment prefix changes what executes, what
-        # gets selected, or what gets printed (PATH, LD_PRELOAD, PYTHONPATH,
-        # PYTEST_ADDOPTS, MAKEFILES, BASH_ENV, …) — never strip what the
-        # matcher cannot see.
+    if set(_leading_assignment_tokens(expected)) != set(_leading_assignment_tokens(actual)):
+        # The environment is part of the invocation: an assignment the
+        # criterion does not make, or makes with a different value, can
+        # change or skip execution — no variable is provably inert across
+        # repositories, so only an exactly equal assignment set (values
+        # included, order-insensitive) matches.
         return "unprovable"
     expected = _strip_env_assignments(expected)
     actual = _strip_env_assignments(actual)
@@ -851,8 +894,39 @@ def _output_attribution(executed_command: str) -> str | None:
     return None
 
 
-def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None) -> AcceptanceLeaf:
+def _sandbox_runs_persistent_shell(runtime: Any) -> bool:
+    """Whether the active sandbox reuses one persistent shell across calls
+    (``Sandbox.persistent_shell_sessions`` — AIO's legacy exec path). Reads
+    the flag from the provider registry without acquiring a sandbox; any
+    failure or absence means no persistent session is known, which keeps
+    the fresh-process providers on the normal matching path."""
+    try:
+        from deerflow.sandbox.overwrite import unwrap_sandbox
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+        if runtime is None or getattr(runtime, "state", None) is None:
+            return False
+        sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+        sandbox_id = (sandbox_state or {}).get("sandbox_id") if isinstance(sandbox_state, dict) else None
+        if not isinstance(sandbox_id, str):
+            return False
+        return bool(getattr(get_sandbox_provider().get(sandbox_id), "persistent_shell_sessions", False))
+    except Exception:
+        return False
+
+
+def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None, *, shell_state_trusted: bool = True) -> AcceptanceLeaf:
     base: AcceptanceLeaf = {"criterion": "", "family": "tests_passed", "checked": False, "holds": False, "detail": ""}
+    if not shell_state_trusted:
+        # The recorded commands ran in a persistent shell session shared with
+        # every earlier call: any of them (including one that has since fallen
+        # off the evidence cap or been compacted away) could have exported
+        # PATH, redefined the runner, or otherwise mutated the state the
+        # "clean-looking" matched run executed in. A fresh controlled session
+        # would be needed to prove otherwise — the read-only verifier (RFC
+        # §6) owns re-execution.
+        base["detail"] = "recorded bash evidence comes from a persistent shell session; earlier calls' state cannot be proven clean"
+        return base
     matches: list[tuple[str, dict[str, Any]]] = []
     for execution in bash_executions or []:
         status = str(execution.get("status") or "")
@@ -950,6 +1024,7 @@ def check_acceptance_criteria(
         content_reader = read_current_file_content
     if size_prober is None:
         size_prober = _probe_file_size
+    shell_state_trusted = not _sandbox_runs_persistent_shell(runtime)
 
     leaves: list[AcceptanceLeaf] = []
     for criterion in criteria:
@@ -963,7 +1038,7 @@ def check_acceptance_criteria(
         elif written_match is not None:
             leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
         elif tests_match is not None:
-            leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions)
+            leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, shell_state_trusted=shell_state_trusted)
         else:
             leaf = AcceptanceLeaf(criterion="", family="undecidable", checked=False, holds=False, detail="not deterministically checkable")
         leaf["criterion"] = criterion

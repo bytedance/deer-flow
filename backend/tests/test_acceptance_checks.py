@@ -607,6 +607,36 @@ class TestProbeInnerScriptRealLayouts:
 
 
 class TestTestsPassedLeaf:
+    def test_persistent_shell_session_evidence_is_untrusted(self, monkeypatch):
+        """PR review (P1): on a persistent-session provider (AIO) any earlier
+        call could have exported PATH or redefined the runner — the clean-
+        looking matched run proves nothing, so every tests_passed leaf
+        degrades to UNVERIFIED; re-execution belongs to the RFC §6 verifier."""
+
+        class _PersistentShellSandbox:
+            persistent_shell_sessions = True
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _PersistentShellSandbox()))
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}})
+        executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], runtime=runtime, bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+        assert "persistent shell session" in leaf["detail"]
+
+    def test_one_shot_session_evidence_still_matches(self, monkeypatch):
+        class _OneShotSandbox:
+            persistent_shell_sessions = False
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _OneShotSandbox()))
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "sb-1"}})
+        executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], runtime=runtime, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_exact_command_match_with_passing_summary(self):
         executions = [_bash_execution("make test", output_tail=".....\n277 passed in 76.6s\n")]
         verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
@@ -634,11 +664,36 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
-    def test_env_assignment_prefix_still_matches(self):
+    def test_extra_env_assignment_is_unprovable(self):
+        """PR review: the environment is part of the invocation — an
+        assignment the criterion does not make can change or skip execution
+        (``CI``/``DEBUG`` are routinely read by tests); no variable is
+        provably inert across repositories."""
         executions = [_bash_execution("CI=1 make test", output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
 
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "matching segment cannot be proven to have executed"
+
+    def test_assignment_value_mismatch_is_unprovable(self):
+        """``CI=0`` vs ``CI=1``: same name, different environment."""
+        executions = [_bash_execution("CI=1 pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:CI=0 pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_exact_assignment_set_matches_order_insensitively(self):
+        executions = [_bash_execution("NO_COLOR=1 CI=1 pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:CI=1 NO_COLOR=1 pytest tests/security"], bash_executions=executions)
+
         assert verdict["leaves"][0]["holds"] is True
+
+    def test_preceding_pure_assignment_segment_is_unprovable(self):
+        executions = [_bash_execution("CI=1; cd backend; pytest tests/security", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
 
     def test_path_spelled_executable_matches_bare_name(self):
         executions = [_bash_execution("./venv/bin/pytest tests/test_auth.py", output_tail="3 passed")]
@@ -784,10 +839,9 @@ class TestTestsPassedLeaf:
         assert leaf["holds"] is False
 
     def test_silent_preceding_segments_keep_output_attributable(self):
-        for wrapped in ("cd backend && make test", "export CI=1; cd backend; make test"):
-            executions = [_bash_execution(wrapped, output_tail="3 passed")]
-            verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
-            assert verdict["leaves"][0]["holds"] is True, wrapped
+        executions = [_bash_execution("cd backend && make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+        assert verdict["leaves"][0]["holds"] is True
 
     def test_non_silent_invocation_forms_are_rejected(self):
         """PR review: allowlisted names with output-emitting forms —
@@ -850,13 +904,17 @@ class TestTestsPassedLeaf:
             "export MAKEFILES=evil.mk; make test",  # make target redefinition
             "LD_PRELOAD=/tmp/evil.so pytest tests/security",  # arbitrary code injection
             "export BASH_ENV=/tmp/evil; pytest tests/security",  # shell startup code
+            "CI=1 pytest tests/security",  # extra assignment the criterion does not make
+            "export CI=1; cd backend; make test",  # innocuous-looking export still mutates state
         ),
     )
-    def test_non_inert_env_assignment_is_unprovable(self, command):
-        """PR review: env assignments are behavior-changing by reach —
-        PATH redirects the executable, LD_PRELOAD/PYTHONPATH inject code,
-        PYTEST_ADDOPTS/MAKEFILES inject selection-changing inputs — so only
-        allowlisted inert names may be stripped for matching."""
+    def test_env_assignment_outside_criterion_is_unprovable(self, command):
+        """PR review: the environment is part of the invocation — no
+        variable is provably inert across repositories. PATH redirects the
+        executable, LD_PRELOAD/PYTHONPATH inject code, PYTEST_ADDOPTS/
+        MAKEFILES inject selection-changing inputs, and even CI/DEBUG are
+        routinely read by tests; only an exactly equal assignment set
+        matches."""
         criterion = "make test" if "make test" in command else "pytest tests/security"
         executions = [_bash_execution(command, output_tail="7 passed")]
         verdict = check_acceptance_criteria([f"tests_passed:{criterion}"], bash_executions=executions)
@@ -865,9 +923,29 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False, command
         assert leaf["detail"] == "matching segment cannot be proven to have executed", command
 
-    def test_inert_assignment_prefix_still_matches(self):
-        executions = [_bash_execution("CI=1 NO_COLOR=1 pytest tests/security", output_tail="3 passed")]
-        verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
+    def test_option_embedded_path_does_not_scope_the_selection(self):
+        """PR review: a path inside an option (``--basetemp=``,
+        ``--junitxml=``) is not a test target — the criterion denotes the
+        default selection, so an extra positional narrows it."""
+        for criterion in ("pytest --basetemp=/tmp/p", "pytest --junitxml=/tmp/r.xml"):
+            executions = [_bash_execution(f"{criterion} tests/security", output_tail="7 passed")]
+            verdict = check_acceptance_criteria([f"tests_passed:{criterion}"], bash_executions=executions)
+
+            leaf = verdict["leaves"][0]
+            assert leaf["checked"] is False, criterion
+            assert leaf["detail"] == "matching segment cannot be proven to have executed", criterion
+
+    def test_option_value_in_separate_form_does_not_scope_either(self):
+        """``--basetemp /tmp/p`` (separate form): the value token is consumed
+        by arity, not counted as a positional target."""
+        executions = [_bash_execution("pytest --basetemp /tmp/p tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest --basetemp /tmp/p"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_positional_target_after_an_option_still_scopes(self):
+        executions = [_bash_execution("pytest --basetemp=/tmp/p tests/security tests/unit", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest --basetemp=/tmp/p tests/security"], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True
 
