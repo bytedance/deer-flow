@@ -93,23 +93,6 @@ def _patch_task_tool_boundary(monkeypatch, tmp_path: Path) -> None:
         _blocking_probe_reader(tmp_path / "probe.txt"),
     )
 
-    class _BlockingProbeSandbox:
-        """Sandbox stub whose shell-out performs real blocking IO.
-
-        The acceptance size probe (``wc -c``) must run inside the same
-        offload as the content read; an unparseable reply keeps the leaf on
-        the reader fallback so the verdict is unchanged.
-        """
-
-        def execute_command(self, command: str, **kwargs) -> str:
-            (tmp_path / "probe.txt").read_text(encoding="utf-8")  # Real IO: trips the strict gate on the loop.
-            return "not-an-integer"
-
-    # The runtime's sandbox id is local, so the probe consults the host-bash
-    # policy first; pin it allowed so the probe branch is genuinely exercised.
-    monkeypatch.setattr("deerflow.sandbox.security.is_host_bash_allowed", lambda config=None: True)
-    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _BlockingProbeSandbox())
-
     class DummyExecutor:
         def __init__(self, **kwargs):
             pass
@@ -145,8 +128,12 @@ def _patch_task_tool_boundary(monkeypatch, tmp_path: Path) -> None:
 
 
 async def test_acceptance_checklist_file_leaf_is_offloaded(monkeypatch, tmp_path):
-    """The completed branch runs file-leaf reads off the event loop."""
+    """The completed branch runs file-leaf stat+read off the event loop."""
     (tmp_path / "probe.txt").write_text("probe body", encoding="utf-8")
+    # The size probe stats the real host path (local sandbox), so the
+    # criterion's target must exist on disk.
+    (tmp_path / "user-data" / "outputs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "user-data" / "outputs" / "report.md").write_text("real body", encoding="utf-8")
     _patch_task_tool_boundary(monkeypatch, tmp_path)
 
     tool = task_tool_module.task_tool
@@ -172,7 +159,10 @@ async def test_acceptance_checklist_file_leaf_is_offloaded(monkeypatch, tmp_path
 
 async def test_blocking_probe_reader_actually_trips_the_gate(monkeypatch, tmp_path):
     """Meta-check: the same read on the event loop must raise BlockingError,
-    so the anchor above cannot go vacuously green."""
+    so the anchor above cannot go vacuously green. (The size probe is
+    injected here so the read is reached: the real prober's broad failure
+    isolation swallows a BlockingError into an UNVERIFIED leaf — by design,
+    since Blockbuster intercepts the syscall before it can block.)"""
     from blockbuster import BlockingError
 
     from deerflow.subagents.acceptance_checks import check_acceptance_criteria
@@ -189,4 +179,5 @@ async def test_blocking_probe_reader_actually_trips_the_gate(monkeypatch, tmp_pa
             runtime=None,
             thread_data=thread_data,
             content_reader=_blocking_probe_reader(tmp_path / "probe.txt"),
+            size_prober=lambda _rt, _p, _td: 10,
         )

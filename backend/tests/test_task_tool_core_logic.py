@@ -2052,6 +2052,12 @@ def _run_completed_task_tool_with_criteria(monkeypatch, *, criteria: list[str], 
         "deerflow.sandbox.tools.read_current_file_content",
         lambda _runtime, path: files[path] if path in files else (_ for _ in ()).throw(FileNotFoundError(path)),
     )
+    # A bounded size is established before any read; fake the prober over the
+    # same fake filesystem.
+    monkeypatch.setattr(
+        "deerflow.subagents.acceptance_checks._probe_file_size",
+        lambda _runtime, path, _thread_data: len(files[path].encode("utf-8")) if path in files else (_ for _ in ()).throw(FileNotFoundError(path)),
+    )
 
     class DummyExecutor:
         def __init__(self, **kwargs):

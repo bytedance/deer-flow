@@ -19,8 +19,11 @@ Leaf families:
   ``checked=False`` (UNVERIFIED) rather than assuming cross-sandbox
   reachability — if a future isolated-sandbox provider breaks sharing,
   leaves degrade to UNVERIFIED instead of misjudging. Reads are
-  byte-bounded: a shell size probe (``wc -c``) answers leaves on files
-  larger than ``_FILE_CONTENT_READ_CAP_BYTES`` without loading content.
+  byte-bounded: the size is established first (``os.stat`` on the local
+  host path, a guarded ``wc -c`` through the shell on remote providers);
+  above ``_FILE_CONTENT_READ_CAP_BYTES`` the leaf answers from the size
+  alone, at or below it the full read runs, and when the size cannot be
+  established the leaf degrades to UNVERIFIED — never an unbounded read.
 - ``file_written:<path>`` — typed claim binding: existence + read-back
   through the same workspace-scoped read.
 - ``tests_passed:<command>`` — typed claim binding: the criterion must
@@ -50,6 +53,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import stat
 from collections.abc import Callable, Mapping
 from typing import Any, TypedDict
 
@@ -79,7 +83,7 @@ _TESTS_PASSED_RE = re.compile(r"^tests_passed:(?P<command>.+)$", re.IGNORECASE)
 
 #: Byte budget for the content read behind ``file:`` leaves — the same scale
 #: at which ``read_file_output_max_chars`` caps the read tool's output. A
-#: larger deliverable is proven by a shell size probe alone instead of
+#: larger deliverable is proven by the size probe alone instead of
 #: loading ~2× its size (decoded text plus the utf-8 re-encode used for the
 #: byte count) onto the worker thread, once per ``file:`` criterion.
 _FILE_CONTENT_READ_CAP_BYTES = 50_000
@@ -186,29 +190,54 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
     return None
 
 
-def _probe_file_size(runtime: Any, resolved: str) -> int | None:
-    """Best-effort byte size of the resolved file via the sandbox shell, else ``None``.
+def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> int | None:
+    """Bounded byte size of the resolved file, else ``None`` when it cannot be
+    established without reading content.
 
-    ``wc -c`` succeeds only when the file exists and is openable, so a bare
-    integer answer proves existence and size without loading the content. Any
-    other rendering — a provider ``Error:`` string, the local ``Exit Code: N``
-    suffix, missing-file noise — fails the parse and the caller falls back to
-    the full read, so the probe can never make a verdict less sound; it only
-    skips a read whose size alone answers the leaf. Respects the host-bash
-    kill switch: on a local sandbox with host bash disabled the probe does
-    not run at all (the read path is unaffected by that policy).
+    Local sandbox: a direct ``os.stat`` of the validated host path — the same
+    filesystem access the read itself would perform, no shell, so the
+    host-bash kill switch (a shell-execution policy) does not apply and the
+    supported host-bash-disabled configuration keeps working. Remote
+    providers: a guarded ``wc -c`` through the sandbox shell that renders a
+    missing file as ``NOFILE`` and an unreadable one as ``UNREADABLE`` in its
+    own words — never parsed from provider-specific error text, and always
+    exit-0 so no provider's nonzero-exit handling can interfere. Only a bare
+    integer is a size; every other outcome is ``None`` and the caller
+    degrades to UNVERIFIED rather than performing an unbounded read.
+
+    Non-regular local entries (directories, fifos) and mount-mapped virtual
+    paths the parent cannot resolve to a host path yield ``None``. The size
+    is a point-in-time probe: the subagent has completed, so a grow-between-
+    probe-and-read race is accepted (same tradeoff as ``download_file``).
+
+    Raises ``FileNotFoundError`` when the file is provably absent — the same
+    contract ``content_reader`` has.
     """
     try:
-        from deerflow.sandbox.security import is_host_bash_allowed
-        from deerflow.sandbox.tools import ensure_sandbox_initialized, is_local_sandbox
+        from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
 
-        if is_local_sandbox(runtime) and not is_host_bash_allowed():
-            return None
+        if is_local_sandbox(runtime):
+            host_path = _resolve_local_read_path(resolved, thread_data)
+            if host_path == resolved:
+                # A mount-mapped virtual path: only the provider's mount
+                # table resolves it, and the parent cannot stat that.
+                return None
+            stat_result = os.stat(host_path)
+            return stat_result.st_size if stat.S_ISREG(stat_result.st_mode) else None
         sandbox = ensure_sandbox_initialized(runtime)
-        output = sandbox.execute_command(f"wc -c < {shlex.quote(resolved)}")
+        quoted = shlex.quote(resolved)
+        output = sandbox.execute_command(f"if [ -e {quoted} ]; then wc -c < {quoted} 2>/dev/null || echo UNREADABLE; else echo NOFILE; fi")
+    except FileNotFoundError:
+        raise
     except Exception:
+        # Best-effort optimization over provider-specific failure modes; the
+        # caller degrades to UNVERIFIED. Runs only inside the offloaded
+        # checklist call, so this broad catch cannot mask a BlockingError on
+        # the event loop (same precedent as _safe_load_agent_config).
         return None
     text = str(output or "").strip()
+    if text == "NOFILE":
+        raise FileNotFoundError(resolved)
     return int(text) if text.isdigit() else None
 
 
@@ -219,7 +248,7 @@ def _check_file_leaf(
     runtime: Any,
     thread_data: Mapping[str, Any] | None,
     content_reader: Callable[[Any, str], str],
-    size_prober: Callable[[Any, str], int | None],
+    size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None],
 ) -> AcceptanceLeaf:
     criterion_path = path.strip()
     # Lazy imports: the sandbox helpers pull the provider stack, and this
@@ -236,8 +265,20 @@ def _check_file_leaf(
     if resolved is None:
         base["detail"] = "path is outside the shared thread workspace" if thread_data else "shared thread workspace unavailable"
         return base
-    probed_size = size_prober(runtime, resolved)
-    if probed_size is not None and probed_size > _FILE_CONTENT_READ_CAP_BYTES:
+    try:
+        probed_size = size_prober(runtime, resolved, thread_data)
+    except (FileNotFoundError, SandboxFileNotFoundError):
+        base["checked"] = True
+        base["detail"] = "file does not exist"
+        return base
+    if probed_size is None:
+        # The size could not be established by a bounded probe (unreadable or
+        # non-regular file, mount-mapped path, probe unavailable). Reading the
+        # content anyway could materialize an unbounded deliverable on the
+        # worker — degrade to UNVERIFIED instead.
+        base["detail"] = "file size could not be established by a bounded probe; content not read"
+        return base
+    if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
         # Large deliverable: the probe already proved the file exists, is
         # openable, and is non-empty (size > cap > 0) — answering every file
         # leaf without loading content (and its utf-8 re-encode) onto the
@@ -246,11 +287,11 @@ def _check_file_leaf(
         base["checked"] = True
         base["holds"] = True
         if family == "file_non_empty":
-            base["detail"] = f"{probed_size} bytes (shell size probe; content not loaded)"
+            base["detail"] = f"{probed_size} bytes (size probe; content not loaded)"
         elif family == "file_written":
             base["detail"] = f"size probe ok, {probed_size} bytes (read-back skipped for a large file)"
         else:  # file_exists
-            base["detail"] = f"exists, {probed_size} bytes (shell size probe; content not loaded)"
+            base["detail"] = f"exists, {probed_size} bytes (size probe; content not loaded)"
         return base
     try:
         content = content_reader(runtime, resolved)  # resolved is the virtual read path
@@ -302,7 +343,10 @@ def _is_silent_segment(tokens: list[str]) -> bool:
     """Whether a preceding segment is provably output-free, by invocation
     form — not by executable name alone: ``pushd``/``popd`` print the
     directory stack, ``export -p`` prints variables, ``umask``/``ulimit``
-    print on several forms, and ``source`` runs whatever the file prints.
+    print on several forms, and ``source``/``.`` execute arbitrary file
+    content — a ``*/bin/activate`` path shape says nothing about what the
+    script emits (the subagent controls the filesystem and can craft one),
+    so sourced prefixes are never provably silent.
 
     ``cd`` stays classified silent: it only prints via CDPATH (a bare path,
     never a test-summary shape) and the workspace ``cd dir &&`` wrapper is
@@ -319,16 +363,10 @@ def _is_silent_segment(tokens: list[str]) -> bool:
         # ``export A=1`` / ``export NAME`` print nothing; bare ``export``
         # and ``export -p`` print the environment.
         return bool(args) and "-p" not in args
-    if executable in {"source", "."}:
-        # Only the conventional (quiet) venv activation script is accepted.
-        # Matched by shape (``*/bin/activate``), not by suffix: a file the
-        # subagent just wrote named ``./activate`` or ``deactivate`` must not
-        # lend its output to the recorded tail.
-        return bool(args) and args[-1].endswith("/bin/activate")
     if executable == "unset":
         return bool(args)
-    # pushd/popd (print the stack), umask/ulimit (print forms), and every
-    # other executable are not provably silent.
+    # pushd/popd (print the stack), umask/ulimit (print forms), source/. and
+    # every other executable are not provably silent.
     return False
 
 
@@ -460,10 +498,20 @@ _EXTRA_TOKEN_SAFE_RE = re.compile(
 )
 
 
+def _normalize_executable(token: str) -> str:
+    """Canonical spelling of an executable token: forward slashes, no ``.`` or
+    duplicate-separator noise — ``./venv/bin/pytest`` and ``venv/bin/pytest``
+    are the same invocation."""
+    return os.path.normpath(token.replace("\\", "/"))
+
+
 def _segment_matches(expected: list[str], actual: list[str]) -> str:
     """Match one segment against the criterion's, classifying extra flags.
 
-    Returns ``"match"`` when the executable agrees (path spellings allowed),
+    Returns ``"match"`` when the executable agrees — directional: a bare
+    criterion executable (``pytest``) accepts any path spelling of the same
+    name, while an explicitly path-spelled criterion
+    (``/opt/project/.venv/bin/pytest``) requires the same normalized path —
     the criterion's arguments appear in order among the executed ones
     (tokens consumed by a negating option — ``--ignore tests/security`` —
     are ineligible evidence, they name what did NOT run), and every extra
@@ -483,8 +531,19 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     actual = _strip_env_assignments(actual)
     if not expected or not actual:
         return "no_match"
-    if expected[0] != actual[0] and os.path.basename(expected[0]) != os.path.basename(actual[0]):
-        return "no_match"
+    if expected[0] != actual[0]:
+        criterion_executable = _normalize_executable(expected[0])
+        if "/" in criterion_executable:
+            # An explicitly path-spelled criterion names THAT executable: a
+            # same-basename binary at a different path (or a bare PATH lookup
+            # resolving who-knows-where) may select a different environment —
+            # only the same normalized path is evidence for it.
+            if criterion_executable != _normalize_executable(actual[0]):
+                return "no_match"
+        elif os.path.basename(expected[0]) != os.path.basename(actual[0]):
+            # A bare criterion deliberately leaves the runner to PATH, so any
+            # path spelling of the same executable name is evidence for it.
+            return "no_match"
     option_positions, negated = _negated_positions(actual)
     consumed: set[int] = {0}
     index = 1
@@ -703,7 +762,7 @@ def check_acceptance_criteria(
     thread_data: Mapping[str, Any] | None = None,
     bash_executions: list[dict[str, Any]] | None = None,
     content_reader: Callable[[Any, str], str] | None = None,
-    size_prober: Callable[[Any, str], int | None] | None = None,
+    size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None] | None = None,
 ) -> AcceptanceVerdict | None:
     """Check each decidable criterion against recorded execution evidence.
 

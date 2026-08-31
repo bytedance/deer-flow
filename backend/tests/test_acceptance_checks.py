@@ -31,6 +31,18 @@ def _reader(files: dict[str, str]):
     return read
 
 
+def _prober(files: dict[str, str]):
+    """Size prober over the same fake filesystem as ``_reader`` — the leaf
+    only reads content once a bounded size is established."""
+
+    def probe(_runtime, path: str, _thread_data) -> int:
+        if path not in files:
+            raise FileNotFoundError(path)
+        return len(files[path].encode("utf-8"))
+
+    return probe
+
+
 def _bash_execution(command: str, *, status: str = "success", output_tail: str = "") -> dict:
     return {
         "tool_call_id": f"tc-{abs(hash(command)) % 10000}",
@@ -77,7 +89,7 @@ class TestFileLeaves:
     # paths (PR review finding).
     def test_exists_holds_when_file_present(self):
         files = {"/mnt/user-data/outputs/report.md": "hello"}
-        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files))
+        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         leaf = verdict["leaves"][0]
         assert leaf["family"] == "file_exists"
@@ -94,7 +106,7 @@ class TestFileLeaves:
             seen.append(path)
             return "x"
 
-        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=capturing_reader)
+        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=capturing_reader, size_prober=lambda _rt, _p, _td: 1)
 
         assert verdict["leaves"][0]["holds"] is True
         assert seen == ["/mnt/user-data/outputs/report.md"]
@@ -110,7 +122,7 @@ class TestFileLeaves:
 
     def test_non_empty_fails_on_empty_file(self):
         files = {"/mnt/user-data/outputs/report.md": ""}
-        verdict = check_acceptance_criteria(["file:../outputs/report.md non-empty"], thread_data=THREAD_DATA, content_reader=_reader(files))
+        verdict = check_acceptance_criteria(["file:../outputs/report.md non-empty"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         leaf = verdict["leaves"][0]
         assert leaf["family"] == "file_non_empty"
@@ -120,7 +132,7 @@ class TestFileLeaves:
         assert verdict["all_hold"] is False
 
     def test_missing_file_is_checked_does_not_hold(self):
-        verdict = check_acceptance_criteria(["file:report.md exists"], thread_data=THREAD_DATA, content_reader=_reader({}))
+        verdict = check_acceptance_criteria(["file:report.md exists"], thread_data=THREAD_DATA, content_reader=_reader({}), size_prober=_prober({}))
 
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is True
@@ -129,7 +141,7 @@ class TestFileLeaves:
 
     def test_file_written_reads_back(self):
         files = {"/mnt/user-data/workspace/draft.md": "draft body"}
-        verdict = check_acceptance_criteria(["file_written:draft.md"], thread_data=THREAD_DATA, content_reader=_reader(files))
+        verdict = check_acceptance_criteria(["file_written:draft.md"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         leaf = verdict["leaves"][0]
         assert leaf["family"] == "file_written"
@@ -139,7 +151,7 @@ class TestFileLeaves:
 
     def test_virtual_path_resolves_into_workspace(self):
         files = {"/mnt/user-data/outputs/report.md": "virtual"}
-        verdict = check_acceptance_criteria(["file:/mnt/user-data/outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files))
+        verdict = check_acceptance_criteria(["file:/mnt/user-data/outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         assert verdict["leaves"][0]["holds"] is True
 
@@ -219,7 +231,7 @@ class TestFileLeaves:
         def permission_reader(_runtime, _path):
             raise PermissionError("sandbox denied")
 
-        verdict = check_acceptance_criteria(["file:report.md exists"], thread_data=THREAD_DATA, content_reader=permission_reader)
+        verdict = check_acceptance_criteria(["file:report.md exists"], thread_data=THREAD_DATA, content_reader=permission_reader, size_prober=lambda _rt, _p, _td: 10)
 
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is False
@@ -237,7 +249,7 @@ class TestFileLeaves:
         runtime = self._local_runtime()
         files = {"/mnt/user-data/outputs/error.log": "Error: summary of yesterday's incidents\n..."}
         for criterion in ("file:../outputs/error.log exists", "file:../outputs/error.log non-empty", "file_written:../outputs/error.log"):
-            verdict = check_acceptance_criteria([criterion], runtime=runtime, thread_data=THREAD_DATA, content_reader=_reader(files))
+            verdict = check_acceptance_criteria([criterion], runtime=runtime, thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
             assert verdict["leaves"][0]["holds"] is True, criterion
 
     def test_binary_deliverable_holds_file_leaves(self):
@@ -249,7 +261,7 @@ class TestFileLeaves:
             raise UnicodeDecodeError("utf-8", b"%PDF-1.4", 0, 1, "invalid start byte")
 
         for criterion in ("file:../outputs/report.pdf exists", "file:../outputs/report.pdf non-empty", "file_written:../outputs/report.pdf"):
-            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=binary_reader)
+            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=binary_reader, size_prober=lambda _rt, _p, _td: 100)
             leaf = verdict["leaves"][0]
             assert leaf["checked"] is True, criterion
             assert leaf["holds"] is True, criterion
@@ -265,7 +277,7 @@ class TestFileLeaves:
             return "Error: No such file or directory"
 
         for criterion in ("file:../outputs/report.md exists", "file:../outputs/report.md non-empty", "file_written:../outputs/report.md"):
-            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=remote_error_reader)
+            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=remote_error_reader, size_prober=lambda _rt, _p, _td: 10)
             leaf = verdict["leaves"][0]
             assert leaf["checked"] is True, criterion
             assert leaf["holds"] is False, criterion
@@ -275,27 +287,27 @@ class TestFileLeaves:
         """Only the provider error-return convention (leading ``Error:``) is
         normalized; ordinary content merely containing the word is content."""
         files = {"/mnt/user-data/outputs/report.md": "Errors encountered during analysis: none fatal"}
-        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files))
+        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         assert verdict["leaves"][0]["holds"] is True
 
 
 class TestFileLeafSizeProbe:
-    """PR review: file leaves must not load an unbounded deliverable (~2× its
-    size with the utf-8 re-encode) just to learn exists/byte count — a shell
-    size probe answers large files, and any probe doubt falls back to the
-    full read so verdicts never get less sound."""
+    """PR review: file leaves must never perform an unbounded read — large
+    deliverables are answered from a bounded size probe alone, and when the
+    size cannot be established the leaf degrades to UNVERIFIED rather than
+    materializing ~2× the file on the worker."""
 
     def test_large_file_is_proven_by_probe_without_reading_content(self):
         def forbidden_reader(_runtime, _path):
             raise AssertionError("content must not be read above the probe cap")
 
         for criterion, expected in (
-            ("file:../outputs/big.csv exists", "exists, 10000000 bytes (shell size probe; content not loaded)"),
-            ("file:../outputs/big.csv non-empty", "10000000 bytes (shell size probe; content not loaded)"),
+            ("file:../outputs/big.csv exists", "exists, 10000000 bytes (size probe; content not loaded)"),
+            ("file:../outputs/big.csv non-empty", "10000000 bytes (size probe; content not loaded)"),
             ("file_written:../outputs/big.csv", "size probe ok, 10000000 bytes (read-back skipped for a large file)"),
         ):
-            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=forbidden_reader, size_prober=lambda _rt, _p: 10_000_000)
+            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=forbidden_reader, size_prober=lambda _rt, _p, _td: 10_000_000)
             leaf = verdict["leaves"][0]
             assert leaf["checked"] is True, criterion
             assert leaf["holds"] is True, criterion
@@ -307,19 +319,47 @@ class TestFileLeafSizeProbe:
             ["file:../outputs/report.md exists"],
             thread_data=THREAD_DATA,
             content_reader=_reader(files),
-            size_prober=lambda _rt, _p: 5,
+            size_prober=lambda _rt, _p, _td: 5,
         )
 
         assert verdict["leaves"][0]["detail"] == "exists, 5 bytes"
 
-    def test_probe_doubt_falls_back_to_the_full_read(self):
-        """A missing file makes ``wc -c`` fail (no bare integer) — the fallback
-        read, not the probe, must produce the verdict."""
+    def test_probe_doubt_is_unverified_without_reading(self):
+        """PR review: when the size cannot be established (probe unavailable
+        or failing) the leaf must degrade to UNVERIFIED — never fall back to
+        an unbounded read of a possibly multi-GB deliverable."""
+
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read when the size is unknown")
+
+        verdict = check_acceptance_criteria(
+            ["file:../outputs/big.csv exists"],
+            thread_data=THREAD_DATA,
+            content_reader=forbidden_reader,
+            size_prober=lambda _rt, _p, _td: None,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+        assert leaf["detail"] == "file size could not be established by a bounded probe; content not read"
+        assert verdict["unchecked"] == ["file:../outputs/big.csv exists"]
+
+    def test_probe_reports_missing_file_without_reading(self):
+        """The prober's ``FileNotFoundError`` carries the same deterministic
+        not-holds as the reader's."""
+
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read for a probed-missing file")
+
+        def prober(_runtime, path, _thread_data):
+            raise FileNotFoundError(path)
+
         verdict = check_acceptance_criteria(
             ["file:../outputs/report.md exists"],
             thread_data=THREAD_DATA,
-            content_reader=_reader({}),
-            size_prober=lambda _rt, _p: None,
+            content_reader=forbidden_reader,
+            size_prober=prober,
         )
 
         leaf = verdict["leaves"][0]
@@ -327,69 +367,110 @@ class TestFileLeafSizeProbe:
         assert leaf["holds"] is False
         assert leaf["detail"] == "file does not exist"
 
-    def test_default_prober_is_failure_isolated_without_runtime(self):
-        """No runtime → the real prober cannot reach a sandbox and must
-        degrade to the content read, never raise."""
-        files = {"/mnt/user-data/outputs/report.md": "hello"}
-        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files))
+    def test_default_prober_without_runtime_degrades_to_unverified(self):
+        """No runtime → the real prober cannot establish a size and must not
+        raise or read — the leaf degrades to UNVERIFIED."""
 
-        assert verdict["leaves"][0]["holds"] is True
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read when the size is unknown")
+
+        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=forbidden_reader)
+
+        assert verdict["leaves"][0]["checked"] is False
 
 
 class TestProbeFileSize:
+    """The default prober: ``os.stat`` on the local host path (no shell, so
+    the supported host-bash-disabled configuration stays fully functional),
+    a guarded ``wc -c`` through the shell on remote providers."""
+
+    _REMOTE_RUNTIME = SimpleNamespace(state=None)  # no sandbox state → not local
+
     @staticmethod
     def _install_sandbox(monkeypatch, output=None, raises=None):
+        captured: list[str] = []
+
         class _Sandbox:
             def execute_command(self, command, **kwargs):
-                assert command.startswith("wc -c < ")
+                captured.append(command)
                 if raises is not None:
                     raise raises
                 return output
 
         monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _Sandbox())
-
-    _RUNTIME = SimpleNamespace(state=None)  # no sandbox state → not local, policy check skipped
+        return captured
 
     def test_bare_integer_output_is_the_size(self, monkeypatch):
         from deerflow.subagents.acceptance_checks import _probe_file_size
 
-        self._install_sandbox(monkeypatch, output="  12345\n")
-        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") == 12345
+        captured = self._install_sandbox(monkeypatch, output="  12345\n")
+        assert _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None) == 12345
+        assert "wc -c < " in captured[0]
+
+    def test_nofile_marker_raises_file_not_found(self, monkeypatch):
+        """A missing remote file must keep its deterministic not-holds — the
+        probe renders it in its own words, never from provider error text."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, output="NOFILE")
+        with pytest.raises(FileNotFoundError):
+            _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/missing.md", None)
+
+    def test_unreadable_marker_is_not_a_size(self, monkeypatch):
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, output="UNREADABLE")
+        assert _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None) is None
 
     def test_provider_error_string_is_not_a_size(self, monkeypatch):
         from deerflow.subagents.acceptance_checks import _probe_file_size
 
         self._install_sandbox(monkeypatch, output="Error: No such file or directory")
-        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") is None
-
-    def test_local_failure_suffix_is_not_a_size(self, monkeypatch):
-        """A failing local run appends ``Exit Code: N`` — the trailing digit
-        must not parse as a 1-byte file."""
-        from deerflow.subagents.acceptance_checks import _probe_file_size
-
-        self._install_sandbox(monkeypatch, output="wc: /x: No such file or directory\nExit Code: 1")
-        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") is None
+        assert _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None) is None
 
     def test_execute_failure_degrades_to_none(self, monkeypatch):
         from deerflow.subagents.acceptance_checks import _probe_file_size
 
         self._install_sandbox(monkeypatch, raises=OSError("sandbox gone"))
-        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") is None
+        assert _probe_file_size(self._REMOTE_RUNTIME, "/mnt/user-data/outputs/big.csv", None) is None
 
-    def test_local_sandbox_with_host_bash_disabled_never_runs_the_probe(self, monkeypatch):
-        """The host-bash kill switch binds harness shell-outs too: a local
-        sandbox with the policy off must not even attempt ``wc -c``."""
+    @staticmethod
+    def _local_runtime():
+        return SimpleNamespace(state={"sandbox": {"sandbox_id": "local"}})
+
+    def test_local_stat_reads_size_without_a_shell(self, monkeypatch, tmp_path):
+        """PR review: in the supported host-bash-disabled configuration the
+        probe must still work — locally it stats the validated host path
+        directly and never acquires a sandbox or runs ``wc``."""
         from deerflow.subagents.acceptance_checks import _probe_file_size
 
-        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local:u1:t1"}})
-        monkeypatch.setattr("deerflow.sandbox.security.is_host_bash_allowed", lambda config=None: False)
+        workspace = tmp_path / "user-data" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "report.md").write_text("hello", encoding="utf-8")
 
-        class _ForbiddenSandbox:
-            def execute_command(self, command, **kwargs):
-                raise AssertionError("probe must not run when host bash is disabled")
+        def forbidden_ensure(runtime=None):
+            raise AssertionError("the local probe must not acquire a sandbox")
 
-        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _ForbiddenSandbox())
-        assert _probe_file_size(runtime, "/mnt/user-data/outputs/big.csv") is None
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", forbidden_ensure)
+        thread_data = {"workspace_path": str(workspace)}
+        assert _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/report.md", thread_data) == 5
+
+    def test_local_missing_file_raises_file_not_found(self, tmp_path):
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        workspace = tmp_path / "user-data" / "workspace"
+        workspace.mkdir(parents=True)
+        with pytest.raises(FileNotFoundError):
+            _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/missing.md", {"workspace_path": str(workspace)})
+
+    def test_local_directory_is_not_a_size(self, tmp_path):
+        """A directory stats fine but is not a readable file — ``None`` lets
+        the leaf degrade to UNVERIFIED instead of claiming a byte count."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        workspace = tmp_path / "user-data" / "workspace"
+        (workspace / "subdir").mkdir(parents=True)
+        assert _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/subdir", {"workspace_path": str(workspace)}) is None
 
 
 class TestTestsPassedLeaf:
@@ -431,6 +512,38 @@ class TestTestsPassedLeaf:
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/test_auth.py"], bash_executions=executions)
 
         assert verdict["leaves"][0]["holds"] is True
+
+    def test_explicit_criterion_path_requires_the_same_executable_path(self):
+        """PR review: ``/tmp/fake/pytest`` is not evidence for
+        ``/opt/project/.venv/bin/pytest`` — same basename, potentially a
+        completely different environment or runner."""
+        executions = [_bash_execution("/tmp/fake/pytest tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:/opt/project/.venv/bin/pytest tests/security"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["detail"] == "no matching bash execution recorded"
+
+    def test_explicit_criterion_path_does_not_match_a_bare_invocation(self):
+        """A bare ``pytest`` resolves through PATH — which pytest ran cannot
+        be proven, so it is not evidence for an explicit criterion path."""
+        executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:/opt/project/.venv/bin/pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize(
+        "executed",
+        (
+            "/opt/project/.venv/bin/pytest tests/security",  # identical
+            "/opt/project/./.venv/bin/pytest tests/security",  # dot-separator noise
+        ),
+    )
+    def test_explicit_criterion_path_matches_the_same_normalized_path(self, executed):
+        executions = [_bash_execution(executed, output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:/opt/project/.venv/bin/pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True, executed
 
     def test_echo_forgery_with_passing_output_does_not_match(self):
         """PR review: a command that merely *mentions* the criterion string —
@@ -538,7 +651,7 @@ class TestTestsPassedLeaf:
         assert leaf["holds"] is False
 
     def test_silent_preceding_segments_keep_output_attributable(self):
-        for wrapped in ("cd backend && make test", "export CI=1; cd backend; make test", "source .venv/bin/activate && make test"):
+        for wrapped in ("cd backend && make test", "export CI=1; cd backend; make test"):
             executions = [_bash_execution(wrapped, output_tail="3 passed")]
             verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
             assert verdict["leaves"][0]["holds"] is True, wrapped
@@ -588,15 +701,29 @@ class TestTestsPassedLeaf:
         assert leaf["holds"] is False
 
     def test_self_written_activate_script_lends_no_output(self):
-        """PR review: the silent-source allowlist accepts the conventional
-        ``*/bin/activate`` shape only — a file the subagent just wrote named
-        ``./activate`` runs whatever it prints."""
+        """PR review: a file the subagent just wrote named ``./activate``
+        runs whatever it prints — sourced prefixes lend no output."""
         executions = [_bash_execution("source ./activate && make test", output_tail="3 passed")]
         verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
 
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is False
         assert leaf["detail"] == "recorded output is not attributable to the matched segment"
+
+    @pytest.mark.parametrize("script", (".venv/bin/activate", "./crafted/bin/activate"))
+    def test_sourced_activate_shape_lends_no_output(self, script):
+        """PR review: the ``*/bin/activate`` path shape is not evidence of
+        silence — the subagent controls the filesystem and can craft one that
+        prints a passing summary (``source ./crafted/bin/activate &&
+        make test``). Sourced content is never provably silent by invocation
+        form, so every sourced prefix stays non-attributable."""
+        executions = [_bash_execution(f"source {script} && make test", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False, script
+        assert leaf["holds"] is False, script
+        assert leaf["detail"] == "recorded output is not attributable to the matched segment", script
 
     def test_selection_narrowing_extra_flag_is_unprovable(self):
         """PR review: ``pytest -k smoke tests/security`` runs only the
@@ -929,6 +1056,7 @@ class TestVerdictShape:
             ["file:../outputs/r.md exists", "deploy to staging"],
             thread_data=THREAD_DATA,
             content_reader=_reader(files),
+            size_prober=_prober(files),
         )
 
         assert verdict["source"] == "acceptance_checklist"
@@ -940,7 +1068,7 @@ class TestVerdictShape:
 
     def test_validate_round_trip(self):
         files = {"/mnt/user-data/outputs/r.md": "x"}
-        verdict = check_acceptance_criteria(["file:../outputs/r.md exists", "open ended"], thread_data=THREAD_DATA, content_reader=_reader(files))
+        verdict = check_acceptance_criteria(["file:../outputs/r.md exists", "open ended"], thread_data=THREAD_DATA, content_reader=_reader(files), size_prober=_prober(files))
 
         assert validate_acceptance_verdict(dict(verdict)) == verdict
 
@@ -967,6 +1095,7 @@ class TestRendering:
             thread_data=THREAD_DATA,
             bash_executions=executions,
             content_reader=_reader(files),
+            size_prober=_prober(files),
         )
 
     def test_section_marks_each_leaf_and_states_limitation(self):
