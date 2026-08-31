@@ -4337,6 +4337,39 @@ class TestBashExecutionHarvest:
 
         assert executions[0]["status"] == "success"
 
+    def test_marker_text_is_recorded_as_status_marker(self, classes, monkeypatch):
+        """PR review: the entry must carry the marker the status was derived
+        from, so the leaf detail can report what was seen instead of asserting
+        a failure indistinguishable from the command's own trailing text."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "green\nExit Code: 5"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+        assert executions[0]["status_marker"] == "Exit Code: 5"
+
+    def test_remote_form_records_its_marker_text(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "Command exited with code 3"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status_marker"] == "Command exited with code 3"
+
+    def test_meta_status_without_marker_records_none(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        executions = executor_module._harvest_bash_executions(self._final_state(classes))
+
+        assert executions[0]["status"] == "success"
+        assert executions[0]["status_marker"] is None
+
     def test_timeout_marker_is_error(self, classes, monkeypatch):
         """A command killed on timeout carries Exit Code: 124 after the
         notice — partial passing output must not record success."""

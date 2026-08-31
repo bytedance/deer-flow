@@ -117,7 +117,10 @@ class SubagentResult:
         bash_executions: Bounded bash command/output evidence accumulated from
             every streamed chunk (RFC #4651 PR4), letting the parent anchor a
             ``tests_passed:<command>`` acceptance leaf to a specific recorded
-            execution. Accumulated per chunk (merged by ``tool_call_id``) so
+            execution. Each entry also carries ``status_marker`` — the exit
+            marker text the recorded status was derived from, when one was
+            seen — so the leaf detail can report what was actually observed.
+            Accumulated per chunk (merged by ``tool_call_id``) so
             summarization compacting earlier messages cannot erase a recorded
             execution. ``None`` when the delegation carried no acceptance
             criteria, the run ended before streaming, or harvesting failed;
@@ -398,19 +401,22 @@ _BASH_EXIT_CODE_MARKER_RE = re.compile(r"Exit Code: (-?\d+)\s*$")
 _BASH_EXITED_WITH_CODE_RE = re.compile(r"Command exited with code (-?\d+)")
 
 
-def _bash_evidence_status(content: str, meta_status: str) -> str:
+def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
     """Derive the recorded status from the shell exit marker when present.
 
-    The explicit marker is authoritative: ``deerflow_tool_meta`` reports the
+    Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
+    Code: 5``), so consumers can report it instead of asserting a failure the
+    harness cannot distinguish from the command's own trailing text. The
+    explicit marker is authoritative: ``deerflow_tool_meta`` reports the
     generic ToolMessage status, which stays ``success`` for a nonzero exit
     rendered as ordinary output text.
     """
     match = _BASH_EXIT_CODE_MARKER_RE.search(content) or _BASH_EXITED_WITH_CODE_RE.fullmatch(content.strip())
     if match is None:
-        return meta_status
+        return meta_status, None
     # Signal-killed local subprocesses report signed codes (Exit Code: -9);
     # only an exact zero is a success.
-    return "success" if int(match.group(1)) == 0 else "error"
+    return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
 
 
 def _harvest_bash_executions(
@@ -467,7 +473,7 @@ def _harvest_bash_executions(
             meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
             meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
             content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
-            status = _bash_evidence_status(content, meta_status)
+            status, status_marker = _bash_evidence_status(content, meta_status)
             executions.append(
                 {
                     "tool_call_id": tool_call_id,
@@ -476,6 +482,7 @@ def _harvest_bash_executions(
                     "command_truncated": command_truncated,
                     "output_tail": content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:],
                     "status": status,
+                    "status_marker": status_marker,
                 }
             )
         return executions[-_BASH_EVIDENCE_MAX_ENTRIES:]

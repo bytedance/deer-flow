@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -277,6 +278,118 @@ class TestFileLeaves:
         verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files))
 
         assert verdict["leaves"][0]["holds"] is True
+
+
+class TestFileLeafSizeProbe:
+    """PR review: file leaves must not load an unbounded deliverable (~2× its
+    size with the utf-8 re-encode) just to learn exists/byte count — a shell
+    size probe answers large files, and any probe doubt falls back to the
+    full read so verdicts never get less sound."""
+
+    def test_large_file_is_proven_by_probe_without_reading_content(self):
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read above the probe cap")
+
+        for criterion, expected in (
+            ("file:../outputs/big.csv exists", "exists, 10000000 bytes (shell size probe; content not loaded)"),
+            ("file:../outputs/big.csv non-empty", "10000000 bytes (shell size probe; content not loaded)"),
+            ("file_written:../outputs/big.csv", "size probe ok, 10000000 bytes (read-back skipped for a large file)"),
+        ):
+            verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=forbidden_reader, size_prober=lambda _rt, _p: 10_000_000)
+            leaf = verdict["leaves"][0]
+            assert leaf["checked"] is True, criterion
+            assert leaf["holds"] is True, criterion
+            assert leaf["detail"] == expected, criterion
+
+    def test_probe_at_or_below_cap_still_reads_content(self):
+        files = {"/mnt/user-data/outputs/report.md": "hello"}
+        verdict = check_acceptance_criteria(
+            ["file:../outputs/report.md exists"],
+            thread_data=THREAD_DATA,
+            content_reader=_reader(files),
+            size_prober=lambda _rt, _p: 5,
+        )
+
+        assert verdict["leaves"][0]["detail"] == "exists, 5 bytes"
+
+    def test_probe_doubt_falls_back_to_the_full_read(self):
+        """A missing file makes ``wc -c`` fail (no bare integer) — the fallback
+        read, not the probe, must produce the verdict."""
+        verdict = check_acceptance_criteria(
+            ["file:../outputs/report.md exists"],
+            thread_data=THREAD_DATA,
+            content_reader=_reader({}),
+            size_prober=lambda _rt, _p: None,
+        )
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is False
+        assert leaf["detail"] == "file does not exist"
+
+    def test_default_prober_is_failure_isolated_without_runtime(self):
+        """No runtime → the real prober cannot reach a sandbox and must
+        degrade to the content read, never raise."""
+        files = {"/mnt/user-data/outputs/report.md": "hello"}
+        verdict = check_acceptance_criteria(["file:../outputs/report.md exists"], thread_data=THREAD_DATA, content_reader=_reader(files))
+
+        assert verdict["leaves"][0]["holds"] is True
+
+
+class TestProbeFileSize:
+    @staticmethod
+    def _install_sandbox(monkeypatch, output=None, raises=None):
+        class _Sandbox:
+            def execute_command(self, command, **kwargs):
+                assert command.startswith("wc -c < ")
+                if raises is not None:
+                    raise raises
+                return output
+
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _Sandbox())
+
+    _RUNTIME = SimpleNamespace(state=None)  # no sandbox state → not local, policy check skipped
+
+    def test_bare_integer_output_is_the_size(self, monkeypatch):
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, output="  12345\n")
+        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") == 12345
+
+    def test_provider_error_string_is_not_a_size(self, monkeypatch):
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, output="Error: No such file or directory")
+        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") is None
+
+    def test_local_failure_suffix_is_not_a_size(self, monkeypatch):
+        """A failing local run appends ``Exit Code: N`` — the trailing digit
+        must not parse as a 1-byte file."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, output="wc: /x: No such file or directory\nExit Code: 1")
+        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") is None
+
+    def test_execute_failure_degrades_to_none(self, monkeypatch):
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        self._install_sandbox(monkeypatch, raises=OSError("sandbox gone"))
+        assert _probe_file_size(self._RUNTIME, "/mnt/user-data/outputs/big.csv") is None
+
+    def test_local_sandbox_with_host_bash_disabled_never_runs_the_probe(self, monkeypatch):
+        """The host-bash kill switch binds harness shell-outs too: a local
+        sandbox with the policy off must not even attempt ``wc -c``."""
+        from deerflow.subagents.acceptance_checks import _probe_file_size
+
+        runtime = SimpleNamespace(state={"sandbox": {"sandbox_id": "local:u1:t1"}})
+        monkeypatch.setattr("deerflow.sandbox.security.is_host_bash_allowed", lambda config=None: False)
+
+        class _ForbiddenSandbox:
+            def execute_command(self, command, **kwargs):
+                raise AssertionError("probe must not run when host bash is disabled")
+
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _ForbiddenSandbox())
+        assert _probe_file_size(runtime, "/mnt/user-data/outputs/big.csv") is None
 
 
 class TestTestsPassedLeaf:
@@ -695,6 +808,57 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is True
         assert leaf["holds"] is False
         assert "failing test summary" in leaf["detail"]
+
+    def test_errored_summary_shape_does_not_hold(self):
+        """PR review: ``4 passed, 1 error`` satisfies the pass shape while an
+        errored collection means part of the criterion's selection never ran.
+        The error shape must win over the pass shape even where the real exit
+        status is swallowed (``|| true``) or the provider yields none."""
+        executions = [_bash_execution("pytest tests", output_tail="===== 4 passed, 1 error in 0.12s =====")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is False
+        assert "failing test summary" in leaf["detail"]
+
+    def test_short_summary_error_line_does_not_hold(self):
+        """pytest's short summary records errored items as ``ERROR <nodeid>`` lines."""
+        executions = [_bash_execution("pytest tests", output_tail="ERROR tests/unit/test_auth.py - ValueError: boom\n4 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is False
+
+    def test_zero_errors_does_not_veto_a_pass(self):
+        """``0 errors`` is a clean run, not a failure record — the count-bearing
+        error shape must stay nonzero like the failed/passed shapes."""
+        executions = [_bash_execution("pytest tests", output_tail="===== 4 passed, 0 errors in 0.12s =====")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_exit_marker_is_reported_as_seen_not_asserted(self):
+        """PR review: a trailing ``Exit Code: N`` makes the recorded status
+        error, but the harness cannot distinguish it from the command's own
+        trailing text — the detail must report what was actually seen."""
+        execution = _bash_execution("make test", status="error", output_tail="green\nExit Code: 5")
+        execution["status_marker"] = "Exit Code: 5"
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=[execution])
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is False
+        assert "Exit Code: 5" in leaf["detail"]
+        assert "cannot tell" in leaf["detail"]
+        assert "status=error" not in leaf["detail"]
+
+    def test_meta_error_without_marker_keeps_status_detail(self):
+        executions = [_bash_execution("make test", status="error", output_tail="no marker here")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["detail"] == "latest matching run recorded status=error"
 
     def test_summary_without_shape_is_unverified(self):
         executions = [_bash_execution("make test", output_tail="compiling modules... done")]

@@ -18,7 +18,9 @@ Leaf families:
   paths, not host paths. Paths outside the shared domain return
   ``checked=False`` (UNVERIFIED) rather than assuming cross-sandbox
   reachability — if a future isolated-sandbox provider breaks sharing,
-  leaves degrade to UNVERIFIED instead of misjudging.
+  leaves degrade to UNVERIFIED instead of misjudging. Reads are
+  byte-bounded: a shell size probe (``wc -c``) answers leaves on files
+  larger than ``_FILE_CONTENT_READ_CAP_BYTES`` without loading content.
 - ``file_written:<path>`` — typed claim binding: existence + read-back
   through the same workspace-scoped read.
 - ``tests_passed:<command>`` — typed claim binding: the criterion must
@@ -39,8 +41,8 @@ Vocabulary layering: the leaf booleans are ``checked``/``holds`` — never
 to the runtime hard gate so the model never conflates deterministic
 execution evidence with task acceptance.
 
-All functions are pure (file IO only through the injected reader); the async
-caller offloads the whole check with ``asyncio.to_thread``.
+All functions are pure (sandbox IO only through the injected reader/prober);
+the async caller offloads the whole check with ``asyncio.to_thread``.
 """
 
 from __future__ import annotations
@@ -75,9 +77,16 @@ _FILE_LEAF_RE = re.compile(r"^file:(?P<path>.+?)\s+(?P<mode>exists|non-empty)$",
 _FILE_WRITTEN_RE = re.compile(r"^file_written:(?P<path>.+)$", re.IGNORECASE)
 _TESTS_PASSED_RE = re.compile(r"^tests_passed:(?P<command>.+)$", re.IGNORECASE)
 
+#: Byte budget for the content read behind ``file:`` leaves — the same scale
+#: at which ``read_file_output_max_chars`` caps the read tool's output. A
+#: larger deliverable is proven by a shell size probe alone instead of
+#: loading ~2× its size (decoded text plus the utf-8 re-encode used for the
+#: byte count) onto the worker thread, once per ``file:`` criterion.
+_FILE_CONTENT_READ_CAP_BYTES = 50_000
+
 #: Test-runner summary shapes recognized in a recorded bash output tail.
 #: Pass shapes require an explicit success summary; fail shapes require an
-#: explicit failure record. An output carrying neither is not evidence either
+#: explicit failure or error record. An output carrying neither is not evidence either
 #: way (UNVERIFIED), and fail shapes win over pass shapes when both appear.
 _TEST_PASS_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+passed\b"  # pytest / jest: "5 passed" (zero is not a pass)
@@ -95,7 +104,9 @@ _TEST_ZERO_SHAPE_RE = re.compile(r"\b0\s+passed\b|\[no test files\]|\[no tests t
 
 _TEST_FAIL_SHAPE_RE = re.compile(
     r"\b[1-9]\d*\s+failed\b"  # pytest / jest: "1 failed"
+    r"|\b[1-9]\d*\s+errors?\b"  # pytest: "1 error" — an errored collection means part of the selection never ran
     r"|^FAILED\b"  # unittest summary line
+    r"|^ERROR\s+\S"  # pytest short summary: "ERROR tests/unit/test_auth.py"
     r"|test result: FAILED"  # cargo test
     r"|^FAIL\s+\S"  # go test: "FAIL\tpkg/path"
     r"|\bBUILD FAILURE\b",  # maven / gradle
@@ -175,7 +186,41 @@ def _resolve_scoped_path(path: str, thread_data: Mapping[str, Any] | None, *, re
     return None
 
 
-def _check_file_leaf(family: str, path: str, *, runtime: Any, thread_data: Mapping[str, Any] | None, content_reader: Callable[[Any, str], str]) -> AcceptanceLeaf:
+def _probe_file_size(runtime: Any, resolved: str) -> int | None:
+    """Best-effort byte size of the resolved file via the sandbox shell, else ``None``.
+
+    ``wc -c`` succeeds only when the file exists and is openable, so a bare
+    integer answer proves existence and size without loading the content. Any
+    other rendering — a provider ``Error:`` string, the local ``Exit Code: N``
+    suffix, missing-file noise — fails the parse and the caller falls back to
+    the full read, so the probe can never make a verdict less sound; it only
+    skips a read whose size alone answers the leaf. Respects the host-bash
+    kill switch: on a local sandbox with host bash disabled the probe does
+    not run at all (the read path is unaffected by that policy).
+    """
+    try:
+        from deerflow.sandbox.security import is_host_bash_allowed
+        from deerflow.sandbox.tools import ensure_sandbox_initialized, is_local_sandbox
+
+        if is_local_sandbox(runtime) and not is_host_bash_allowed():
+            return None
+        sandbox = ensure_sandbox_initialized(runtime)
+        output = sandbox.execute_command(f"wc -c < {shlex.quote(resolved)}")
+    except Exception:
+        return None
+    text = str(output or "").strip()
+    return int(text) if text.isdigit() else None
+
+
+def _check_file_leaf(
+    family: str,
+    path: str,
+    *,
+    runtime: Any,
+    thread_data: Mapping[str, Any] | None,
+    content_reader: Callable[[Any, str], str],
+    size_prober: Callable[[Any, str], int | None],
+) -> AcceptanceLeaf:
     criterion_path = path.strip()
     # Lazy imports: the sandbox helpers pull the provider stack, and this
     # package is imported in cycles with deerflow.tools (same pattern as
@@ -190,6 +235,22 @@ def _check_file_leaf(family: str, path: str, *, runtime: Any, thread_data: Mappi
     base: AcceptanceLeaf = {"criterion": "", "family": family, "checked": False, "holds": False, "detail": ""}
     if resolved is None:
         base["detail"] = "path is outside the shared thread workspace" if thread_data else "shared thread workspace unavailable"
+        return base
+    probed_size = size_prober(runtime, resolved)
+    if probed_size is not None and probed_size > _FILE_CONTENT_READ_CAP_BYTES:
+        # Large deliverable: the probe already proved the file exists, is
+        # openable, and is non-empty (size > cap > 0) — answering every file
+        # leaf without loading content (and its utf-8 re-encode) onto the
+        # worker. The read-back claim of ``file_written`` degrades to the
+        # probe's open-for-reading proof, which the detail states.
+        base["checked"] = True
+        base["holds"] = True
+        if family == "file_non_empty":
+            base["detail"] = f"{probed_size} bytes (shell size probe; content not loaded)"
+        elif family == "file_written":
+            base["detail"] = f"size probe ok, {probed_size} bytes (read-back skipped for a large file)"
+        else:  # file_exists
+            base["detail"] = f"exists, {probed_size} bytes (shell size probe; content not loaded)"
         return base
     try:
         content = content_reader(runtime, resolved)  # resolved is the virtual read path
@@ -607,7 +668,14 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
     status = str(latest.get("status") or "")
     if status != "success":
         base["checked"] = True
-        base["detail"] = f"latest matching run recorded status={status or 'unknown'}"
+        marker = latest.get("status_marker")
+        if isinstance(marker, str) and marker.strip():
+            # The recorded failure comes from a trailing exit marker, which
+            # the harness cannot distinguish from the command's own output
+            # ending in the same shape — report what was actually seen.
+            base["detail"] = f"recorded output carries an exit marker ({_bound_detail(marker)}); the harness cannot tell it from the command's own text"
+        else:
+            base["detail"] = f"latest matching run recorded status={status or 'unknown'}"
         return base
     output_tail = str(latest.get("output_tail") or "")
     unattributable = _output_attribution(str(latest.get("command") or ""))
@@ -635,6 +703,7 @@ def check_acceptance_criteria(
     thread_data: Mapping[str, Any] | None = None,
     bash_executions: list[dict[str, Any]] | None = None,
     content_reader: Callable[[Any, str], str] | None = None,
+    size_prober: Callable[[Any, str], int | None] | None = None,
 ) -> AcceptanceVerdict | None:
     """Check each decidable criterion against recorded execution evidence.
 
@@ -672,6 +741,8 @@ def check_acceptance_criteria(
         from deerflow.sandbox.tools import read_current_file_content
 
         content_reader = read_current_file_content
+    if size_prober is None:
+        size_prober = _probe_file_size
 
     leaves: list[AcceptanceLeaf] = []
     for criterion in criteria:
@@ -681,9 +752,9 @@ def check_acceptance_criteria(
         if file_match is not None:
             mode = file_match.group("mode").lower()
             family = "file_exists" if mode == "exists" else "file_non_empty"
-            leaf = _check_file_leaf(family, file_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader)
+            leaf = _check_file_leaf(family, file_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
         elif written_match is not None:
-            leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader)
+            leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
         elif tests_match is not None:
             leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions)
         else:

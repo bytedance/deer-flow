@@ -93,6 +93,23 @@ def _patch_task_tool_boundary(monkeypatch, tmp_path: Path) -> None:
         _blocking_probe_reader(tmp_path / "probe.txt"),
     )
 
+    class _BlockingProbeSandbox:
+        """Sandbox stub whose shell-out performs real blocking IO.
+
+        The acceptance size probe (``wc -c``) must run inside the same
+        offload as the content read; an unparseable reply keeps the leaf on
+        the reader fallback so the verdict is unchanged.
+        """
+
+        def execute_command(self, command: str, **kwargs) -> str:
+            (tmp_path / "probe.txt").read_text(encoding="utf-8")  # Real IO: trips the strict gate on the loop.
+            return "not-an-integer"
+
+    # The runtime's sandbox id is local, so the probe consults the host-bash
+    # policy first; pin it allowed so the probe branch is genuinely exercised.
+    monkeypatch.setattr("deerflow.sandbox.security.is_host_bash_allowed", lambda config=None: True)
+    monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", lambda runtime=None: _BlockingProbeSandbox())
+
     class DummyExecutor:
         def __init__(self, **kwargs):
             pass
