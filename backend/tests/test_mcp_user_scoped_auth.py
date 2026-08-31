@@ -118,6 +118,34 @@ def test_default_user_fallback_is_denied_when_unmapped():
         asyncio.run(interceptor(_request(runtime=None), AsyncMock()))
 
 
+def test_credential_with_trailing_newline_is_denied_without_leaking_it():
+    """A credential that cannot travel as a header value (docker env-file with
+    CRLF line endings, `$ENV_VAR` set from a token file) must be rejected here:
+    h11 renders the full value into its LocalProtocolError message, which
+    ToolErrorHandlingMiddleware then copies into a model-visible ToolMessage."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer sk-secret-value\n"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException) as excinfo:
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), handler))
+    handler.assert_not_awaited()
+    assert "sk-secret-value" not in str(excinfo.value)
+    assert "u1" in str(excinfo.value)
+
+
+def test_credential_with_carriage_return_is_denied_even_with_passthrough():
+    """passthrough covers an *unmapped user*; a mapped-but-broken credential
+    must not silently fall back to the shared discovery credential."""
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1\r"}, on_missing="passthrough"))
+    with pytest.raises(ToolException):
+        asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), AsyncMock()))
+
+
+def test_credential_with_embedded_space_is_not_rejected():
+    interceptor = build_user_scoped_auth_interceptor(_config(users={"u1": "Bearer t1"}))
+    result = asyncio.run(interceptor(_request(runtime=_runtime_for_user("u1")), _echo_handler))
+    assert result.headers["Authorization"] == "Bearer t1"
+
+
 def test_env_var_reference_resolution(tmp_path, monkeypatch):
     monkeypatch.setenv("TEST_USER_CRED", "Bearer from-env")
     config_file = tmp_path / "extensions_config.json"
