@@ -57,7 +57,7 @@ curl -X POST http://localhost:8001/api/agents \
 
 ### Agent 存储
 
-自定义 Agent 配置按用户存储在 `{data_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{data_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。旧的 `{data_dir}/agents/{name}/` 布局仅作为尚未执行用户隔离迁移的安装的只读回退路径。
+自定义 Agent 配置按用户存储在 `{base_dir}/users/{user_id}/agents/{name}/config.yaml` 中，其中 `{base_dir}` 是 `DEER_FLOW_HOME`（默认值为 `backend/.deer-flow`）。旧的 `{base_dir}/agents/{name}/` 布局仅作为尚未执行用户隔离迁移的安装的只读回退路径。
 
 ## 线程生命周期
 

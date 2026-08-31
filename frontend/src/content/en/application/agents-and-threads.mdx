@@ -34,14 +34,14 @@ Both paths require `agents_api.enabled: true` in `config.yaml`. The management A
 
 The `name` must match `^[A-Za-z0-9-]+$` and be unique per user. The backend stores it in lowercase. Use `/api/agents/check?name={name}` to validate a name and check whether it is available before creating the agent.
 
-Agent configuration is stored per user at `{data_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{data_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`). The older `{data_dir}/agents/{name}/` layout remains a read-only fallback for installations that have not yet run the user-isolation migration.
+Agent configuration is stored per user at `{base_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{base_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`). The older `{base_dir}/agents/{name}/` layout remains a read-only fallback for installations that have not yet run the user-isolation migration.
 
 ### Restricting agent capabilities
 
 To restrict a custom agent to specific skills:
 
 ```yaml
-# {data_dir}/users/{user_id}/agents/my-researcher/config.yaml
+# {base_dir}/users/{user_id}/agents/my-researcher/config.yaml
 name: my-researcher
 skills:
   - deep-research

@@ -138,7 +138,7 @@ The same Lead Agent runtime powers both the default agent and any custom agents 
 - which **tool groups** it can use, and
 - which **model** it defaults to.
 
-Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Both paths require `agents_api.enabled: true` in `config.yaml`; the management API is disabled by default. Configuration is stored per user at `{data_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{data_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`).
+Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Both paths require `agents_api.enabled: true` in `config.yaml`; the management API is disabled by default. Configuration is stored per user at `{base_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{base_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`).
 
 <Callout type="tip">
   When a custom agent is selected in a thread, the Lead Agent loads that agent's

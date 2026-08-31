@@ -108,6 +108,7 @@ describe("documentation content links", () => {
 
     for (const source of customAgentApiDocs) {
       expect(source).toContain("^[A-Za-z0-9-]+$");
+      expect(source).toContain("users/{user_id}/agents/{name}/config.yaml");
     }
 
     const chineseApiGuide = readFileSync(
