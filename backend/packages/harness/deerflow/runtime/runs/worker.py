@@ -776,20 +776,6 @@ async def run_agent(
     subagent_events: _SubagentEventBuffer | None = None
     started = False
 
-    if ctx.mcp_task_repo is not None and record.user_id is not None:
-        try:
-            task_rows = await ctx.mcp_task_repo.list_by_thread(
-                thread_id,
-                user_id=record.user_id,
-                limit=20,
-            )
-            graph_input = {
-                **graph_input,
-                "background_tasks": _project_background_tasks(task_rows),
-            }
-        except Exception:
-            logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
-
     async def _finish_cancellation(
         action: str,
         *,
@@ -853,6 +839,22 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+
+        # Keep cancellable preflight work under the worker's terminal guard so
+        # cancellation cannot strand a pending RunRecord or stream subscriber.
+        if ctx.mcp_task_repo is not None and record.user_id is not None:
+            try:
+                task_rows = await ctx.mcp_task_repo.list_by_thread(
+                    thread_id,
+                    user_id=record.user_id,
+                    limit=20,
+                )
+                graph_input = {
+                    **graph_input,
+                    "background_tasks": _project_background_tasks(task_rows),
+                }
+            except Exception:
+                logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
 
         await run_manager.wait_for_prior_finalizing(
             thread_id,
@@ -1132,9 +1134,11 @@ async def run_agent(
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
                         stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
+                        broke_on_abort = False
                         try:
                             async for chunk in stream:
                                 if record.abort_event.is_set():
+                                    broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
@@ -1147,9 +1151,13 @@ async def run_agent(
                             try:
                                 await _close_agent_stream(stream)
                             except Exception:
-                                if close_error is None:
+                                abort_requested = broke_on_abort or record.abort_event.is_set()
+                                if close_error is None and not abort_requested:
                                     raise
-                                logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
+                                if abort_requested:
+                                    logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                                else:
+                                    logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
                         return
                     # Multiple modes or subgraphs: astream yields tuples
                     stream = agent.astream(
@@ -1158,9 +1166,11 @@ async def run_agent(
                         stream_mode=lg_modes,
                         subgraphs=stream_subgraphs,
                     )
+                    broke_on_abort = False
                     try:
                         async for item in stream:
                             if record.abort_event.is_set():
+                                broke_on_abort = True
                                 logger.info("Run %s abort requested — stopping", run_id)
                                 break
 
@@ -1187,9 +1197,13 @@ async def run_agent(
                         try:
                             await _close_agent_stream(stream)
                         except Exception:
-                            if close_error is None:
+                            abort_requested = broke_on_abort or record.abort_event.is_set()
+                            if close_error is None and not abort_requested:
                                 raise
-                            logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
+                            if abort_requested:
+                                logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                            else:
+                                logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:

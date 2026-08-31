@@ -926,34 +926,11 @@ class RunJournal(BaseCallbackHandler):
                 self._buffer = batch + self._buffer
                 raise
 
-    async def close(self, *, flush: bool = True) -> None:
-        """Release run-scoped references, optionally flushing buffered events."""
-        if self._closed:
-            return
-        if flush:
-            # A failed terminal write returns its batch to ``_buffer``. Keep the
-            # store and all buffered state attached so a later close/flush can retry
-            # instead of silently discarding the tail of the run event stream.
-            await self.flush()
-            self._closed = True
-            self._store = None
-            self._progress_reporter = None
-        else:
-            # A worker that lost its lease must detach without starting another
-            # durable write. Drop dependencies before cancelling already-scheduled
-            # work so tasks that have not begun observe the detached state.
-            self._closed = True
-            self._store = None
-            self._progress_reporter = None
-            pending_flush_tasks = tuple(self._pending_flush_tasks)
-            for task in pending_flush_tasks:
-                task.cancel()
-            if pending_flush_tasks:
-                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
-            pending_progress_task = self._pending_progress_task
-            if pending_progress_task is not None:
-                pending_progress_task.cancel()
-                await asyncio.gather(pending_progress_task, return_exceptions=True)
+    def _detach_runtime_dependencies(self) -> None:
+        """Drop every external or potentially cyclic run-scoped reference."""
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
         self._buffer.clear()
         self._pending_flush_tasks.clear()
         self._pending_progress_task = None
@@ -972,6 +949,38 @@ class RunJournal(BaseCallbackHandler):
         self._last_ai_msg = None
         self._first_human_msg = None
         self._llm_error_fallback_message = None
+
+    async def close(self, *, flush: bool = True) -> None:
+        """Release run-scoped references, optionally flushing buffered events."""
+        if self._closed:
+            return
+        if flush:
+            # A failed terminal write returns its batch to ``_buffer``. Keep the
+            # store and all buffered state attached so a later close/flush can retry
+            # instead of silently discarding the tail of the run event stream.
+            await self.flush()
+            self._detach_runtime_dependencies()
+            return
+
+        # A worker that lost its lease must detach without starting another
+        # durable write. Drop dependencies before cancelling already-scheduled
+        # work so tasks that have not begun observe the detached state. The
+        # final detach must survive a second cancellation while those tasks stop.
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        try:
+            pending_flush_tasks = tuple(self._pending_flush_tasks)
+            for task in pending_flush_tasks:
+                task.cancel()
+            if pending_flush_tasks:
+                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task is not None:
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+        finally:
+            self._detach_runtime_dependencies()
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""

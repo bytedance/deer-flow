@@ -108,6 +108,36 @@ async def test_close_without_flush_discards_buffer_and_detaches_runtime_dependen
     assert journal._buffer == []
 
 
+@pytest.mark.anyio
+async def test_close_without_flush_detaches_when_cancellation_interrupts_pending_task_cleanup():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-close-cancelled", "t-close-cancelled", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+    first_cancellation_seen = asyncio.Event()
+
+    async def stubborn_pending_flush() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancellation_seen.set()
+            await asyncio.Event().wait()
+
+    pending_flush = asyncio.create_task(stubborn_pending_flush())
+    journal._pending_flush_tasks.add(pending_flush)
+    close_task = asyncio.create_task(journal.close(flush=False))
+    await asyncio.wait_for(first_cancellation_seen.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert pending_flush.done()
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+
+
 @pytest.fixture
 def journal_setup():
     store = MemoryRunEventStore()

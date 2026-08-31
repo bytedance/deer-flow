@@ -54,6 +54,61 @@ class FakeCheckpointer:
 
 
 @pytest.mark.anyio
+async def test_run_agent_cleans_up_when_mcp_task_projection_is_cancelled():
+    class CleanupTrackingRunManager(RunManager):
+        def __init__(self) -> None:
+            super().__init__()
+            self.cleanup_calls: list[tuple[str, float]] = []
+
+        async def cleanup(self, run_id: str, *, delay: float = 300) -> None:
+            self.cleanup_calls.append((run_id, delay))
+
+    projection_started = asyncio.Event()
+
+    class BlockingTaskRepository:
+        async def list_by_thread(self, thread_id, *, user_id, limit):
+            del thread_id, user_id, limit
+            projection_started.set()
+            await asyncio.Event().wait()
+
+    run_manager = CleanupTrackingRunManager()
+    record = await run_manager.create("thread-mcp-projection-cancelled", user_id="alice")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    agent_factory = MagicMock(side_effect=AssertionError("cancelled preflight built the agent"))
+    run_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=MemoryRunEventStore(),
+                mcp_task_repo=BlockingTaskRepository(),
+            ),
+            agent_factory=agent_factory,
+            graph_input={},
+            config={},
+        )
+    )
+    await asyncio.wait_for(projection_started.wait(), timeout=1)
+
+    run_task.cancel("MCP projection interrupted")
+    await run_task
+    await asyncio.sleep(0)
+
+    agent_factory.assert_not_called()
+    assert record.status == RunStatus.interrupted
+    assert record.finalizing is False
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    assert run_manager.cleanup_calls == [(record.run_id, 300)]
+
+
+@pytest.mark.anyio
 async def test_pending_cancel_stops_waiting_for_prior_finalization():
     run_manager = RunManager()
     prior = await run_manager.create("thread-cancel-while-waiting")
@@ -882,6 +937,67 @@ async def test_run_agent_closes_stream_when_abort_breaks_iteration():
 
     assert stream.closed is True
     assert record.status == RunStatus.interrupted
+
+
+@pytest.mark.parametrize("stream_modes", [["values"], ["messages-tuple", "values"]])
+@pytest.mark.parametrize("abort_before_break", [True, False], ids=["early-break", "exhaustion-race"])
+@pytest.mark.anyio
+async def test_run_agent_ignores_stream_close_failure_after_abort(stream_modes, abort_before_break, caplog):
+    run_manager = RunManager()
+    record = await run_manager.create("thread-stream-close-failure")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class CloseFailingStream:
+        def __init__(self) -> None:
+            self.yielded = False
+            self.close_attempted = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self.yielded:
+                if not abort_before_break:
+                    record.abort_event.set()
+                raise StopAsyncIteration
+            self.yielded = True
+            if abort_before_break:
+                record.abort_event.set()
+            chunk = {"messages": []}
+            return chunk if len(stream_modes) == 1 else ("values", chunk)
+
+        async def aclose(self) -> None:
+            self.close_attempted = True
+            raise RuntimeError("stream close failed")
+
+    stream = CloseFailingStream()
+
+    class DummyAgent:
+        def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            return stream
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.runtime.runs.worker"):
+        await run_agent(
+            bridge,
+            run_manager,
+            record,
+            ctx=RunContext(checkpointer=None),
+            agent_factory=lambda **_kwargs: DummyAgent(),
+            graph_input={},
+            config={},
+            stream_modes=stream_modes,
+        )
+
+    assert stream.close_attempted is True
+    assert record.status == RunStatus.interrupted
+    assert record.error is None
+    assert "Could not close aborted agent stream" in caplog.text
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
 @pytest.mark.anyio

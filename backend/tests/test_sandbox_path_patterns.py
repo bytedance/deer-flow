@@ -110,6 +110,31 @@ def test_direct_replacer_matches_the_shared_boundary_and_tail_contract() -> None
     assert replacer("root /host/skills, done", "/host/skills", "/mnt/skills", separator_agnostic=True) == "root /mnt/skills, done"
 
 
+def test_separator_agnostic_replacer_avoids_normalization_without_backslashes() -> None:
+    class ReplaceTrackingString(str):
+        def __init__(self, value: str) -> None:
+            del value
+            self.replace_calls = 0
+
+        def replace(self, old: str, new: str, count: int = -1) -> str:
+            self.replace_calls += 1
+            return super().replace(old, new, count)
+
+    output = ReplaceTrackingString("see /host/skills/a.md")
+    base = ReplaceTrackingString("/host/skills")
+
+    result = path_patterns_module.replace_output_path_matches(
+        output,
+        base,
+        "/mnt/skills",
+        separator_agnostic=True,
+    )
+
+    assert result == "see /mnt/skills/a.md"
+    assert output.replace_calls == 0
+    assert base.replace_calls == 0
+
+
 def test_local_sandbox_reverse_mask_routes_through_the_direct_helper(tmp_path: Path, monkeypatch) -> None:
     local = tmp_path / "skills"
     local.mkdir()

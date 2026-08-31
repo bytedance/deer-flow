@@ -88,8 +88,8 @@ def replace_output_path_matches(
     if not output or not base:
         return output
 
-    searchable_output = output.replace("\\", "/") if separator_agnostic else output
-    searchable_base = base.replace("\\", "/") if separator_agnostic else base
+    searchable_output = output.replace("\\", "/") if separator_agnostic and "\\" in output else output
+    searchable_base = base.replace("\\", "/") if separator_agnostic and "\\" in base else base
     chunks: list[str] = []
     copied_until = 0
     search_from = 0
