@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 from langchain.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
@@ -295,6 +296,49 @@ def test_thinking_disabled_no_when_thinking_enabled_does_nothing(monkeypatch):
     assert "thinking" not in captured
     # reasoning_effort not forced (supports_reasoning_effort defaults to False → cleared)
     assert captured.get("reasoning_effort") is None
+
+
+def test_required_thinking_profile_keeps_base_payload_when_runtime_requests_disabled():
+    """Always-thinking models keep their base payload on every call.
+
+    Required-thinking models such as GLM-5.3-Flash intentionally declare no
+    conditional thinking settings.  A runtime ``thinking_enabled=False`` must
+    therefore leave the profile's unconditional ``extra_body.thinking`` block
+    untouched, while the capability guard drops DeerFlow's generic effort value.
+    """
+    model = ModelConfig(
+        name="glm-5.3-flash",
+        display_name="GLM-5.3-Flash",
+        description=None,
+        use="deerflow.models.patched_deepseek:PatchedChatDeepSeek",
+        model="glm-5.3-flash",
+        api_base="https://api.z.ai/api/paas/v4",
+        api_key="test-key",
+        supports_thinking=True,
+        supports_reasoning_effort=False,
+        supports_vision=True,
+        stream_usage=False,
+        extra_body={
+            "thinking": {"type": "enabled", "clear_thinking": True},
+            "tool_stream": True,
+        },
+    )
+    cfg = _make_app_config([model])
+    chat_model = factory_module.create_chat_model(
+        name="glm-5.3-flash",
+        thinking_enabled=False,
+        reasoning_effort="medium",
+        app_config=cfg,
+        attach_tracing=False,
+    )
+    payload = chat_model._get_request_payload([HumanMessage(content="ping")])
+
+    assert payload["extra_body"] == {
+        "thinking": {"type": "enabled", "clear_thinking": True},
+        "tool_stream": True,
+    }
+    assert "reasoning_effort" not in payload
+    assert chat_model.stream_usage is False
 
 
 # ---------------------------------------------------------------------------

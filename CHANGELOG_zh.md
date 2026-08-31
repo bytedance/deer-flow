@@ -13,6 +13,13 @@
 
 ### ⚠ 不兼容变更（Breaking Changes）
 
+- **技能：** 沙箱现在将 `/mnt/skills` 保留给“仅启用项”的托管投影视图。
+  `DEER_FLOW_HOST_SKILLS_PATH` 与 `SKILLS_HOST_PATH` 不再使用；Docker/AIO 和
+  hostPath 部署会从 `DEER_FLOW_HOST_BASE_DIR` 推导投影路径。指向 `/mnt/skills`
+  或其子路径的 E2B operator 挂载会被跳过并告警，避免遮蔽托管投影；请将额外内容
+  挂载到其他容器路径。用户投影会从磁盘重读全局启用状态，使切换在下一次获取沙箱时
+  跨 Gateway worker 生效。既有 E2B 沙箱在重建前仍保留创建时快照；PVC 模式暂不提供
+  已禁用技能的文件系统隔离。([#4178])
 - **沙箱：** E2B 现在将 `sandbox.replicas` 作为进程级容量上限来强制执行。默认的
   `wait` 策略会等待 `acquire_timeout`，随后令当前智能体回合失败。DeerFlow 不会自
   动重试该回合。可使用 `burst` 配合 `burst_limit` 允许有限地超出额度多开 VM。`reject`
@@ -49,6 +56,14 @@
   接入的自定义后端。这是有意为之——静默返回空比启动期报错更糟。修复方式：切换到 `mode:
   middleware`，或覆盖 `search()`（并设置 `supports_search=True`）。([#4324])
 
+- **配置：** `database.checkpoint_delta_snapshot_frequency` 已迁移为
+  `database.checkpoint_delta.snapshot_frequency`，默认值从 `1000` 改为 `10`。
+  旧顶层字段仍会在告警后映射到新字段，显式的新字段优先。依赖旧默认值的 delta
+  模式部署现在会将快照频率提高 100 倍；如需保留原节奏，请显式设置为 `1000`。([#4516])
+- **Docker：** 两份 compose 文件发布的入口端口现在默认只绑定回环地址
+  (`127.0.0.1`)。依赖旧 `0.0.0.0` 绑定的部署必须设置 `BIND_HOST` 才能向其他网卡
+  暴露服务。([#4618])
+
 ### 新增
 
 #### 智能体与运行时
@@ -78,6 +93,22 @@
   投递失败时不再误报成功。([#4365])
 - **上传：** 通过 `list_uploaded_files` 工具懒加载历史文件，而非注入完整清单。([#4174])
 
+- **运行时：** Delta 模式 checkpoint 历史缓存（内存/Redis）支持 O(1) 增量合成，
+  通过 `database.checkpoint_cache` 配置。([#4638])
+- **调度器：** `scheduler.recursion_limit` 可设置定时运行的 LangGraph super-step
+  上限（默认 1000，与 Web UI 一致，并受 `max_recursion_limit` 限制）。([#4848])
+- **运行时：** 每次工具调用都会携带由运行时签发且可防篡改的工具回执；有界回执账本
+  会注入模型上下文，使智能体能在报告中引用执行证据。默认通过新的 `verification`
+  配置节启用。([#4659])
+- **澄清：** 人工输入卡片支持结构化表单字段，智能体可精确请求所需信息。([#4406])
+- **子智能体：** 内置子智能体会接收当前日期上下文锚点，使相对日期任务与主智能体
+  直接处理时表现一致。([#4797])
+- **子智能体：** 设置页新增部署级子智能体目录；自定义智能体可配置显式 worker
+  allowlist，并在 prompt 与执行阶段同时强制执行。([#4887])
+- **子智能体：** 并发由统一的进程级容量控制器管理；可选 `batch_task` 工具可把大量
+  独立项目作为基于 SQL 的持久、可恢复批次执行，支持租约、有限重试、暂停、恢复与
+  取消，并在聊天中展示进度。([#4998])
+
 #### 记忆
 - **记忆：** 记忆合并（consolidation）合成碎片化的事实，并通过 LLM 为每条事实分
   配的 `expected_valid_days` / `staleFactsToExtend` 进行过期审查，剪除静默过期的
@@ -90,10 +121,17 @@
 - **记忆：** 记忆消息处理新增会话水位（watermark）、无意义回合过滤与持久化队列，
   使抽取不再每回合都重新喂入完整会话。([#4447])
 
+- **记忆：** 内置 FTS5/BM25 检索适配器，无需外部服务即可对已存记忆全文搜索。([#4360])
+- **记忆：** 新增可插拔后端：通过 HTTP 接入 OpenViking 与 mem0，以及作为用户模型
+  记忆 provider 的 Honcho。([#4509]、[#4528]、[#4730])
+- **记忆：** 混合事实淘汰策略综合多种信号，决定容量满时应丢弃哪些事实。([#4789])
+
 #### 技能
 - **技能：** 原生 SkillScan（阶段一）在加载时静态分析技能包；`describe_skill` 支
   持延迟发现，模型按需获取技能 schema，而非一开始就加载全部技能。([#3033]、[#3775])
 - **技能：** 按用户的自定义技能隔离，并配合沙箱挂载。([#3889])
+
+- **技能：** 选中一个技能后技能列表会重新打开，便于连续附加多个技能。([#4639])
 
 #### 模型与集成
 - **社区工具：** 新增网络检索 / 抓取引擎——GroundRoute、Crawl4AI（`web_fetch`）与
@@ -101,15 +139,35 @@
   。([#3675]、[#3821]、[#3585]、[#3881]、[#3866])
 - **MCP：** MCP 工具调用支持按 server 的 `tool_call_timeout`，并提供路由提示引导
   模型选用正确的 server。([#3843]、[#4004])
+- **MCP：** 新增官方 OpenViking `/mcp` 示例，通过 DeerFlow 通用 MCP 客户端暴露其
+  原生工具集。([#4745])
 - **社区工具：** 将“智能体化浏览器控制”作为会话的一等能力——基于 Playwright 的浏
   览器会话由智能体操作，用户可在工作区中观察或接管。([#4187])
 - **社区工具：** Lark / 飞书 CLI 集成打包了运行时安装、官方 `lark-*` 技能包与交
   互式授权流程，使该集成不再依赖手动环境配置。([#3971])
 
+- **集成：** 可在“设置 > 集成”中按用户切换 Lark/飞书应用凭据；新 App ID/Secret
+  会在写入前校验，成功切换后撤销旧 OAuth token。([#4703])
+- **ACP：** 支持 MiniMax Code (`mcode acp`) 作为原生外部编码智能体；ACP thought
+  chunk 不再拼接进工具结果。([#4846])
+
+#### MCP
+- **MCP：** 新增持久任务运行时：长时工具任务通过持久 driver 跨 Gateway 重启继续，
+  进度与完成通知显示在聊天 UI 中。([#4665]、[#4690]、[#4833])
+- **MCP：** 共享 MCP server 可注入按用户区分的凭据；未映射用户默认拒绝，存储的
+  凭据在 Gateway API 响应中脱敏。([#4868])
+- **MCP：** 新增按 server 的 `tool_name_prefix`，让已自行命名空间化工具的 server
+  保留原始工具名；默认行为不变。([#4624])
+
 #### 渠道
 - **渠道：** 把 IM 的 `channel_user_id` 以 `DEERFLOW_CHANNEL_USER_ID` 暴露给沙箱
   命令。([#3926])
 - **渠道：** 对同一会话的密集消息进行排队，并在批次间保留话题卡片预览。([#3988])
+
+- **渠道：** 入站 webhook 去重迁移到 Postgres，使多个 Gateway Pod 可同时服务同一
+  IM 渠道而不重复处理事件。([#4210])
+- **渠道：** 钉钉入站消息支持文件与图片附件。([#4423])
+- **渠道：** 新增 Buzz (Nostr) 渠道连接器及配套前端体验。([#4649]、[#4727])
 
 #### 认证与防护
 - **认证：** 通用 OIDC / SSO 认证，并支持 Keycloak。([#3506])
@@ -121,11 +179,33 @@
 - **鉴权：** 内置 RBAC 鉴权 provider 与统一工厂，并在装配期（模型可见前移除工具
   ）与运行期（拒绝被禁用的调用）双重强制执行工具鉴权。([#4260]、[#4370])
 
+- **鉴权：** Gateway 路由权限改由已配置的 `AuthorizationProvider` 推导，不再使用
+  固定表。([#4439])
+- **鉴权：** 模型权限会在 Gateway 路由和智能体运行时双重执行，获取沙箱时还会校验
+  `sandbox:execute`。([#4540]、[#4911])
+
 #### 沙箱与 provisioner
 - **沙箱：** 新增 E2B 与 BoxLite（micro-VM）沙箱 provider；BoxLite 自带预热池。([#3883]
   、[#3940]、[#3951])
 - **provisioner：** ClusterIP Service 与按技能作用域的 PVC 挂载，并支持配置沙箱
   容器端口。([#4016]、[#3928])
+
+- **沙箱：** 新增云沙箱 provider：Tenki 与 OpenSandbox。([#4382]、[#4877])
+- **沙箱：** K8s provisioner 模式新增可选的 lark-cli 凭据 broker sidecar，将 Lark
+  应用密钥与 OAuth token 移出沙箱文件系统；沙箱只看到转发命令的 shim。默认关闭。
+  ([#4501])
+
+#### 扩展与插件
+- **扩展：** 新增 out-of-tree Python 扩展系统，可贡献中间件、任务生命周期与系统模型
+  observer、Gateway 服务和 HTTP 路由，并用 `deerflow extensions` 管理。([#4636]、
+  [#4684]、[#4780])
+- **扩展：** 扩展可观察消息来源、中间件策略、智能体装配指纹、上下文压缩、护栏决策
+  和工具的 MCP 来源。`deerflow-extension-api` 升至 0.2.0，0.1 扩展会在启动时被拒绝。
+  ([#4863])
+
+#### 持久化
+- **持久化：** 可通过 `postgres_schema` 选择自定义 PostgreSQL schema；ORM、LangGraph
+  checkpointer 与 store 表均创建在其中，启动时自动创建。([#3442])
 
 #### 前端
 - **前端：** 支持对助手回合进行分支，以及针对引用追问的侧边对话。([#3950]、[#3934])
@@ -141,6 +221,15 @@
 - **前端：** 支持置顶最近会话。([#4442])
 - **前端：** 在输入框中校验 `/goal` 目标长度。([#4337])
 
+- **前端：** 实时显示上下文窗口使用量。([#3183])
+- **前端：** 可原地编辑并重新运行最近一次用户回合。([#4377])
+- **前端：** 澄清卡片待处理时仍可输入并发送回复。([#4530])
+- **建议：** 可通过 `suggestions.max_suggestions` 配置后续建议数量（默认 3）。([#4533])
+- **Artifact：** 可在 artifact 面板中内联编辑文本 artifact。([#4596])
+- **前端：** 自定义智能体聊天支持 Browser Live。([#4719])
+- **会话：** 分支会话自动使用 `Title (2)`、`Title (3)` 等编号区分标题，最近会话
+  列表以树形连接线展示父子关系。([#4983])
+
 #### 可观测性与工具
 - **可观测性：** trace-id 关联与增强日志，以及通过 Monocle 实现的智能体可观测性
   。([#3902]、[#4024])
@@ -150,8 +239,17 @@
   ，并新增火山引擎 Coding Plan 快速安装路径。([#3428]、[#4141])
 - **TUI：** `clear` 命令。([#4306])
 
+- **TUI：** 支持透明终端背景。([#4631])
+
 ### 变更
 
+- **前端性能：** 保持公共根页面和本地化文档静态化；懒加载关闭的工作区面板及编辑器/
+  高亮依赖；增量推导流式消息状态；限制流式 Markdown 工作量；虚拟化超长消息与聊天
+  列表；暂停屏幕外装饰效果，并对代表性路由设置 JS/CSS 预算。
+- **浏览器：** 协商二进制 Browser Live JPEG 帧，兼容旧 JSON/base64 协议；每次刷新
+  只呈现最新帧，并撤销已替换的 object URL。
+- **Artifact：** 普通文本 artifact 支持 HTTP byte-range 流式读取；Web UI 初始预览
+  限制为 1 MiB，用户显式请求后才加载完整文件。
 - **沙箱：** Helm chart 现在默认将每个沙箱的 Service 设为 `ClusterIP` 而非 `NodePort`
   ，因此代码执行沙箱只能通过集群内 Service DNS（`http://sandbox-<id>-svc.<ns>.svc.cluster.local`
   ）访问，不再绑定到每个节点（包括 GKE / EKS / AKS 上外部可达的）网卡。升级时现
@@ -175,6 +273,13 @@
 - **沙箱：** 宿主机到虚拟机的输出脱敏正则现在统一归属，消除重复的模式编译。([#4108])
 - **文档：** `AGENTS.md` 成为智能体指引的权威来源，`CLAUDE.md` 通过 `@AGENTS.md`
   导入；模块指南同步刷新。([#3770])
+
+- **记忆：** OpenViking 后端改用官方适配器；旧 trusted-mode 的 `auth_mode`/`account`
+  字段会被拒绝，改用绑定凭据的 USER API key。([#4707])
+- **网关：** 在 run-event journal 出现之前创建的会话，会在首次新 run 前把 checkpoint
+  历史回填为 seed event，使旧会话升级后仍可见且顺序正确。([#4590])
+- **智能体：** 子智能体委派改按净收益路由；除非并行延迟、专长能力或上下文隔离明确
+  有益，否则主智能体默认直接执行。([#4384])
 
 ### 修复
 
@@ -351,6 +456,119 @@
 - **前端：** 允许非 localhost 主机访问 dev-server。([#4471])
 - **内容安全：** 回填空的内容过滤响应，避免污染会话。([#4394])
 - **工具：** 从 `list_uploaded_files` 的 schema 中排除注入的 runtime。([#4376])
+- **Artifact：** 显式加载完整文件时限定在来源会话内，使其他会话中同路径 artifact
+  仍保持 1 MiB 预览。([#4634])
+- **沙箱：** `SandboxAuditMiddleware` 改为按命令替换所处位置判断风险：普通输出捕获
+  不再误拦，而命令位置、解释器代码参数、`eval`/`source`、process substitution 与
+  here-string 中执行下载内容仍会阻止；heredoc 正文继续按数据处理。([#4611]、[#4623])
+- **MCP：** 设置页的启停只校验目标 server；允许禁用已不合规目标但拒绝重新启用，
+  支持规范中的 `transport` 别名、展示后端校验详情，并以原子方式更新共享配置。([#4574]、[#4577])
+- **MCP：** 用按 server 的 `session_init_timeout`（默认 60 秒，`null` 可关闭）限制工具
+  发现与持久 stdio session 初始化，避免挂起 server 阻塞智能体装配或 Gateway 事件循环。([#4657])
+- **运行时：** `.tool-results` 等超大工具输出外置目录不再计入工作区变更和产物检测，
+  仅外置工具输出的 run 不会再被投递校验误判失败。([#4657])
+- **前端：** 回合仍在流式输出时隐藏旧的后续建议。([#3396])
+- **前端：** 修复流式渲染抖动：不重复播放逐字动画、稳定步骤文本和消息顺序，并保持
+  reasoning 位于答案上方。([#4266]、[#4510]、[#4513]、[#4578])
+- **前端：** 聊天路由中的 thread id 现在会编码，特殊字符不再破坏导航。([#4302])
+- **前端：** 从 React children 正确渲染引用链接。([#4486])
+- **前端：** 本地化会话导出失败消息。([#4493])
+- **前端：** 拖拽折叠面板时同步侧边面板状态。([#4556])
+- **前端：** 每个 run 只渲染一张工作区变更卡片。([#4559])
+- **前端：** 活动 artifact 发生变化时刷新其内容。([#4584])
+- **网关：** 拒绝 API 请求中的非正读取上限。([#4284])
+- **网关：** 解析 thread id 时兼容为 null 的 `config.configurable`。([#4301])
+- **网关：** 统一各 API 路由的 thread id 校验。([#4589])
+- **网关：** 合并并发的会话元数据更新，避免相互静默覆盖。([#4489])
+- **网关：** 向跨域客户端暴露 run 元数据响应 header，使分离部署的前端能及时获知新 run id。([#4535])
+- **网关：** 从稳定 checkpoint 执行“编辑并重跑”，确保编辑后的 prompt 真正运行，
+  并在重跑后保留手动标题。([#4534]、[#4539])
+- **运行时：** 可从任意存活 Gateway worker 取消 run，停止按钮不再依赖请求路由。([#4500])
+- **运行时：** interrupt 或 rollback admission 中途取消时关闭替代 run，避免留下不可见的活动 run。([#4472])
+- **运行时：** 重新生成响应时保留当前标题，并支持最近一次尚未写入 checkpoint 的中断响应。([#4480]、[#4524])
+- **智能体：** 将 404 等 `web_fetch` 错误页识别为错误证据，使重试和停滞保护能够响应。([#4314])
+- **智能体：** 规范化澄清选项时兼容 XML-to-dict 形态。([#4527])
+- **子智能体：** 委派执行使用隔离 callback 与惰性技能激活，修复跨事件循环错误及被动
+  技能移除 `write_file` 等基础工具的问题。([#4497])
+- **沙箱：** 初始化沙箱时兼容被 `Overwrite` 包裹的状态。([#4429])
+- **沙箱：** 安全协调 E2B 沙箱：选择首个健康候选、按用户与会话采纳规范实例、延后
+  处理 peer 的活动副本，并在宽限期后回收孤儿。([#4443])
+- **沙箱：** 销毁 readiness 失败的沙箱前先取得所有权，避免 peer 采纳后误杀活动回合。([#4505])
+- **沙箱：** `grep` 支持搜索单个文件。([#4512])
+- **沙箱：** 使用 Redis 所有权时在部署范围内强制 E2B 容量上限。([#4575])
+- **技能：** 斜杠调用可从托管 integrations 根目录激活集成技能。([#4570])
+- **技能：** 更新技能时把阻塞文件 IO 移出事件循环，并序列化并发写入。([#3565])
+- **MCP：** 忽略过大的类路径文本。([#4582])
+- **记忆：** 在创建临界区拒绝重复事实，按条目边界截断 mem0 注入上下文，并阻止
+  “仅检查”等任务级指令进入长期记忆。([#4599]、[#4600]、[#4604])
+- **调度器：** 启动成功后的记账若失败，仍保留 run slot 与 run id，防止后续重复启动。([#4504])
+- **配置：** 被删除的 extensions 配置文件按不存在处理，工具与技能配置解析仍可继续。([#4275])
+- **配置：** 为异步 ORM engine 规范化 `postgres://` 短 scheme。([#4293])
+- **控制台：** 模型定价混用货币时禁用成本汇总，避免输出无意义总额。([#4564])
+- **Browserless：** 接受 `timeout` 配置键并加固类型转换。([#4519])
+- **Docker：** 仅在浏览器请求升级时发送 `Connection: upgrade`，修复远程访问 Docker
+  dev stack 时登录页循环刷新。([#4250])
+- **运行时：** JSONL 批量事件按 run 分组写入，避免跨多个 run 的批次全落入首个文件。([#4938])
+- **运行时：** 恢复独立 LangGraph Studio 兼容：图入口、文件式 app、系统助手发现与
+  `langgraph dev` 工作流重新可用。([#4760]、[#4838])
+- **网关：** 只在 `/messages/page` 中把 `turn_duration` 标到 run 的最后一条 AI 消息。([#4755])
+- **网关：** 跨越 event 分页上限仍保持精确历史归因，旧 AI 消息不再归到后续 run。([#4953])
+- **网关：** MCP task worker 停止时以 HTTP 503 拒绝取消请求。([#4963])
+- **中间件：** 修复动态上下文目标、列表字符串净化、重复无效工具占位符，以及摘要误
+  压缩当前用户请求等四个上下文问题。([#4667]、[#4668]、[#4693]、[#4882])
+- **中间件：** 恢复向模型说明 `write_todos` 工具的系统 prompt 注入。([#4735])
+- **智能体：** SQL agent-store 签名改为内容敏感，时间戳复用时注册表也不会继续提供旧路由。([#4709])
+- **工具：** 使用运行时用户解析待展示文件，避免有效 artifact 被误判在 outputs 外。([#4677])
+- **工具：** 强引用延迟子智能体清理任务，防止 GC 销毁待执行清理并泄漏记录与锁。([#4928])
+- **子智能体：** 每个后台执行使用服务端 execution ID，复用 provider tool-call ID 的
+  并发 run 不再覆盖、轮询或取消彼此状态。([#4758])
+- **Harness：** 把 ACP workspace 创建与 MCP 配置加载移出事件循环。([#4965])
+- **MCP：** 收到 task snapshot 时拒绝非有限 `poll_after_seconds`。([#4750])
+- **MCP：** OAuth token 交换中以配置的 `grant_type` 为准，`extra_token_params` 不再能
+  静默切换 flow。([#4860])
+- **MCP：** 从工作区变更排除内部 stdio 临时目录 `.mcp/tmp`。([#4898])
+- **MCP：** 持久任务提交中途取消时同时取消远端任务。([#4933])
+- **沙箱：** 接受文档中的 E2B reconciliation 配置字段。([#4772])
+- **沙箱：** 按文件、挂载及整个上传过程限制 E2B mount 上传的大小、文件数和时间。([#4812]、[#4842])
+- **沙箱：** 保留 E2B 同步文件名尾部空白并容忍越界远端 mtime。([#4861])
+- **沙箱：** 配置解析时拒绝 Redis 所有权中的非有限租约时间值。([#4960])
+- **沙箱：** 结构化技能读取经沙箱 provider 路径映射解析，与 `ls`/shell 使用同一启用状态投影。([#4792])
+- **技能：** moderation scanner 支持 Responses API content block，合法技能管理决策不再误判不可解析。([#4936])
+- **记忆：** Honcho 与 Mem0 在配置解析时拒绝非正或非有限的 timeout/字符上限。([#4783]、[#4823])
+- **记忆：** 自定义智能体 bootstrap 事实限定到所选智能体 bucket。([#4804])
+- **Artifact：** Windows 支持原子保存；读取响应提供 SHA-256 ETag，使普通 HTTP LAN
+  等无 `crypto.subtle` 环境也能预览和编辑。([#4629]、[#4865])
+- **前端：** 长 run 前后保持会话顺序稳定，用户消息不再重复或落到自身步骤之后。([#4620]、[#4660])
+- **前端：** HTML artifact 注入 base href 时不再把 `<header>` 误判为 `<head>`。([#4625])
+- **前端：** 落地页案例通过公开只读 `/showcase/` 路由打开。([#4635])
+- **前端：** 聊天页按置顶状态排序。([#4643])
+- **前端：** Markdown inline code 中的 `<think>` 保持原样，并恢复纯 reasoning 回合的复制按钮。([#4647])
+- **前端：** 模型加载失败时显示工作区错误 banner 与重试操作。([#4840])
+- **前端：** 后续回合流式输出时仍保留已完成助手消息的复制等操作。([#4844])
+- **前端：** Browser Live 重连成功后保持新连接，不再立即拆除并再次重连。([#4951])
+- **前端：** 复制 Lark 授权链接时复用 clipboard fallback。([#4767])
+- **前端：** 统一使用“DeerFlow”大小写并修复落地页 “What's New” 标题。([#4970])
+- **渠道：** 用固定 worker pool 与有界队列限制入站流量，关闭时等待真实跨线程任务。([#4800]、[#4816])
+- **渠道：** 飞书、Telegram 与企业微信发送附件时把文件 IO 移到 worker 线程。([#4633])
+- **渠道：** Telegram connection identity 查询回到 Gateway 事件循环执行。([#4815])
+- **飞书：** 接收文件保持事件循环非阻塞，避免重名覆盖、越界写入，并让单个附件失败不阻塞其余消息。([#4627]、[#4903])
+- **钉钉：** 命令分类前剥离前导 `@bot`，群聊中的 `/new` 等命令可被识别。([#4724])
+- **Discord：** 渠道停止后不再启动 typing-indicator 循环。([#4752])
+- **企业微信：** 序列化 WebSocket 启停并等待 SDK 接收任务真正结束。([#4762])
+- **Buzz：** 用持久 seen-id store 丢弃重连后的重复事件。([#4888])
+- **Lark：** 沙箱内 CLI lock 目录保持可写，含凭据的 config 根目录仍为只读。([#4701])
+- **调度器：** 手动触发也遵守全局 `max_concurrent_runs`，达到上限返回 HTTP 409。([#4769])
+- **调度器：** 读取时转换序列化的任务时间戳。([#4785])
+- **调度器：** 支持安全的多实例恢复，启动时不会把 peer 的活动 run 当成本地残留；
+  通过 `scheduler.multi_instance` 显式启用。([#4713])
+- **调度器：** busy 的定时 occurrence 改为进入持久队列而非跳过，由
+  `scheduler.queue_timeout_seconds` 限制等待并可跨 Gateway 重启。([#4918])
+- **CLI：** headless `--print`、`--json` 与 `--cli` 新增 `--recursion-limit`。([#4615])
+- **开发：** backend `make dev` 的 Uvicorn watcher 排除运行时状态，智能体写文件不再重启 Gateway。([#4759])
+- **开发：** 诊断脚本按自身位置解析路径，可从任意工作目录运行根诊断命令。([#4736])
+- **Docker：** 加固本地与容器启动：`make up` 等待健康检查，允许缺失 `.env`，生产
+  环境可写 extensions 配置，运行数据不进入构建上下文，日志命令正确解析 checkout，
+  默认回环 origin 可完成 dev setup hydration。([#4658]、[#4806]、[#4852]、[#4853]、[#4956]、[#4959])
 
 ### 性能优化
 
@@ -362,6 +580,8 @@
 - **消息：** 按组为工具调用结果建立索引。([#4411])
 - **前端：** 流式渲染按帧预算合并，而非逐 chunk 渲染。([#4425])
 - **前端：** 不再在每个流式 chunk 上重新推导消息内容。([#4441])
+- **沙箱：** `read_file` 只从沙箱读取请求的行范围，不再先获取整个文件。([#3824])
+- **浏览器：** Browser Live 进度帧改用 JPEG 编码，减小传输负载。([#4836])
 
 ### 安全
 
@@ -381,6 +601,52 @@
   。([#3855]、[#3985]、[#3982]、[#4203])
 - **认证：** 在 access-token 生命周期内持久化 `csrf_token` cookie。([#3872])
 - **存储：** 不再在 checkpoint 状态中持久化 base64 图片数据。([#4140])
+- **MCP：** 拒绝 run metadata 中的旧版 MCP 凭据。([#4448])
+- **MCP：** 在配置 API 中限制 stdio launcher 参数与环境变量，防止 allowlist 中的
+  `npx`/`uvx` 注册被参数或环境变量转化为任意代码执行。([#4617])
+- **认证：** 加固登录后 `next` 路径校验。([#4587])
+- **运行时：** 在智能体、上传、ThreadData、记忆与技能中遵循 LangGraph Server 的
+  已认证用户身份，并拒绝客户端提供的身份字段。([#4538])
+- **前端：** 分离 origin 部署中，模型、工作区变更和 range artifact 请求会发送 session cookie。([#4827])
+- **前端：** 恢复自定义 Streamdown rehype 链的净化，artifact Markdown 与记忆设置
+  摘要不再能渲染 `javascript:` 链接或 `on*` handler 等恶意 HTML。([#4987])
+- **技能：** 投影技能文件改为复制而非 hardlink，沙箱写入不能再修改规范来源；所有
+  平台（含 Windows）遇到漂移的投影命名空间都会 fail closed。([#4825]、[#4830])
+- **脚本：** support bundle 中任意位置的 secret-shaped key（如 `db_pass`、
+  `signing_key`）都会脱敏。([#4242])
+
+### 文档
+
+- **文档：** 说明生产 Docker 下 `LocalSandboxProvider` 如何解析
+  `sandbox.mounts[].host_path`，并给出 Gateway bind-mount 与配置示例。([#3833])
+- **文档：** 说明 Crawl4AI >= 0.9 需要 bearer token。([#4518])
+- **文档：** 记录 GitHub 入站去重 TTL 语义及不会被去重的重投递，并收紧测试。([#4274])
+- **文档：** 更新智能体 `AGENTS.md` 与 `ARCHITECTURE.md` 指南。([#4817])
+- **文档：** 新增 Honcho 记忆后端专门指南，并在 README 加入长期记忆入口。([#4822])
+
+### 内部改进
+
+- **测试：** 前端单元测试迁移到 rstest，并在 DOM 环境运行 hook 级测试。([#3703]、[#4453])
+- **测试：** live client 测试要求显式 opt-in。([#4482])
+- **测试：** LLM 错误测试替身不再复用共享 `FakeError`。([#4744])
+- **测试：** 工具输出测试用自构造失败条件替代魔法不可写绝对路径。([#4722])
+- **测试：** 新增多回合消息流图集成不变量测试。([#3708])
+- **测试：** 使用 Monocle Test Tools 新增 trace 行为测试，校验路由、工具调用和 token/时长成本。([#4025])
+- **测试：** 覆盖 MCP 层中被动技能的工具可见性。([#4247])
+- **测试：** 为感知租约的孤儿恢复增加 SQL 与并发 reconciler 覆盖。([#4427])
+- **测试：** 恢复 memory updater 回归测试。([#4490])
+- **测试：** 锁定 Gateway offline banner 的 POST logout 行为。([#4506])
+- **测试：** 在 SkillScan 测试中记录已知 instance-client 假阴性。([#4644])
+- **重构：** 抽取并测试前端 placeholder 检测工具。([#3783])
+- **重构：** 合并 E2B client 生命周期 helper，并在 warm-pool 淘汰时复用 kill helper。([#4262]、[#4298])
+- **重构：** 命名 E2B capacity ledger 的 meta-field 数量，使 admission offset 明确。([#4764])
+- **开发：** blocking-IO detector 的调用图追踪 self/cls 属性链和本地别名。([#4200])
+- **CI：** 发布 lark-cli-init 与 lark-broker 镜像。([#4558])
+- **开发：** host 侧 pnpm 调用统一经带 Corepack fallback 的 runner。([#4405])
+- **基准：** 新增隔离的 checkpoint channel-mode 基准，对比 `full` 与 `delta` 的延迟、存储和回放。([#4395])
+- **依赖：** 升级 `cryptography` 49.0.0 -> 50.0.0、`postcss` 8.4.31 -> 8.5.25、
+  `h2` 4.3.0 -> 4.4.1、两个 `langgraph-checkpoint-*` 3.1.0 -> 3.1.1，以及
+  `nanoid` 5.1.6 -> 5.1.16。([#4681]、[#4683]、[#4737]、[#4738]、[#4747]、[#4748])
 
 
 ## [2.0.0] — 2026-06-15
@@ -1166,3 +1432,210 @@ DeerFlow 2.0 是围绕"超级智能体"框架的彻底重写，核心包含子�
 [#4468]: https://github.com/bytedance/deer-flow/pull/4468
 [#4469]: https://github.com/bytedance/deer-flow/pull/4469
 [#4471]: https://github.com/bytedance/deer-flow/pull/4471
++[#3183]: https://github.com/bytedance/deer-flow/pull/3183
+[#3396]: https://github.com/bytedance/deer-flow/pull/3396
+[#3442]: https://github.com/bytedance/deer-flow/pull/3442
+[#3565]: https://github.com/bytedance/deer-flow/pull/3565
+[#3703]: https://github.com/bytedance/deer-flow/pull/3703
+[#3708]: https://github.com/bytedance/deer-flow/pull/3708
+[#3783]: https://github.com/bytedance/deer-flow/pull/3783
+[#3824]: https://github.com/bytedance/deer-flow/pull/3824
+[#3833]: https://github.com/bytedance/deer-flow/pull/3833
+[#4025]: https://github.com/bytedance/deer-flow/pull/4025
+[#4178]: https://github.com/bytedance/deer-flow/pull/4178
+[#4200]: https://github.com/bytedance/deer-flow/pull/4200
+[#4210]: https://github.com/bytedance/deer-flow/pull/4210
+[#4242]: https://github.com/bytedance/deer-flow/pull/4242
+[#4247]: https://github.com/bytedance/deer-flow/pull/4247
+[#4250]: https://github.com/bytedance/deer-flow/pull/4250
+[#4262]: https://github.com/bytedance/deer-flow/pull/4262
+[#4266]: https://github.com/bytedance/deer-flow/pull/4266
+[#4274]: https://github.com/bytedance/deer-flow/pull/4274
+[#4275]: https://github.com/bytedance/deer-flow/pull/4275
+[#4284]: https://github.com/bytedance/deer-flow/pull/4284
+[#4293]: https://github.com/bytedance/deer-flow/pull/4293
+[#4298]: https://github.com/bytedance/deer-flow/pull/4298
+[#4301]: https://github.com/bytedance/deer-flow/pull/4301
+[#4302]: https://github.com/bytedance/deer-flow/pull/4302
+[#4314]: https://github.com/bytedance/deer-flow/pull/4314
+[#4360]: https://github.com/bytedance/deer-flow/pull/4360
+[#4377]: https://github.com/bytedance/deer-flow/pull/4377
+[#4382]: https://github.com/bytedance/deer-flow/pull/4382
+[#4384]: https://github.com/bytedance/deer-flow/pull/4384
+[#4395]: https://github.com/bytedance/deer-flow/pull/4395
+[#4405]: https://github.com/bytedance/deer-flow/pull/4405
+[#4406]: https://github.com/bytedance/deer-flow/pull/4406
+[#4423]: https://github.com/bytedance/deer-flow/pull/4423
+[#4427]: https://github.com/bytedance/deer-flow/pull/4427
+[#4429]: https://github.com/bytedance/deer-flow/pull/4429
+[#4439]: https://github.com/bytedance/deer-flow/pull/4439
+[#4443]: https://github.com/bytedance/deer-flow/pull/4443
+[#4448]: https://github.com/bytedance/deer-flow/pull/4448
+[#4453]: https://github.com/bytedance/deer-flow/pull/4453
+[#4472]: https://github.com/bytedance/deer-flow/pull/4472
+[#4480]: https://github.com/bytedance/deer-flow/pull/4480
+[#4482]: https://github.com/bytedance/deer-flow/pull/4482
+[#4486]: https://github.com/bytedance/deer-flow/pull/4486
+[#4489]: https://github.com/bytedance/deer-flow/pull/4489
+[#4490]: https://github.com/bytedance/deer-flow/pull/4490
+[#4493]: https://github.com/bytedance/deer-flow/pull/4493
+[#4497]: https://github.com/bytedance/deer-flow/pull/4497
+[#4500]: https://github.com/bytedance/deer-flow/pull/4500
+[#4501]: https://github.com/bytedance/deer-flow/pull/4501
+[#4504]: https://github.com/bytedance/deer-flow/pull/4504
+[#4505]: https://github.com/bytedance/deer-flow/pull/4505
+[#4506]: https://github.com/bytedance/deer-flow/pull/4506
+[#4509]: https://github.com/bytedance/deer-flow/pull/4509
+[#4510]: https://github.com/bytedance/deer-flow/pull/4510
+[#4512]: https://github.com/bytedance/deer-flow/pull/4512
+[#4513]: https://github.com/bytedance/deer-flow/pull/4513
+[#4516]: https://github.com/bytedance/deer-flow/pull/4516
+[#4518]: https://github.com/bytedance/deer-flow/pull/4518
+[#4519]: https://github.com/bytedance/deer-flow/pull/4519
+[#4524]: https://github.com/bytedance/deer-flow/pull/4524
+[#4527]: https://github.com/bytedance/deer-flow/pull/4527
+[#4528]: https://github.com/bytedance/deer-flow/pull/4528
+[#4530]: https://github.com/bytedance/deer-flow/pull/4530
+[#4533]: https://github.com/bytedance/deer-flow/pull/4533
+[#4534]: https://github.com/bytedance/deer-flow/pull/4534
+[#4535]: https://github.com/bytedance/deer-flow/pull/4535
+[#4538]: https://github.com/bytedance/deer-flow/pull/4538
+[#4539]: https://github.com/bytedance/deer-flow/pull/4539
+[#4540]: https://github.com/bytedance/deer-flow/pull/4540
+[#4556]: https://github.com/bytedance/deer-flow/pull/4556
+[#4558]: https://github.com/bytedance/deer-flow/pull/4558
+[#4559]: https://github.com/bytedance/deer-flow/pull/4559
+[#4564]: https://github.com/bytedance/deer-flow/pull/4564
+[#4570]: https://github.com/bytedance/deer-flow/pull/4570
+[#4574]: https://github.com/bytedance/deer-flow/issues/4574
+[#4575]: https://github.com/bytedance/deer-flow/pull/4575
+[#4577]: https://github.com/bytedance/deer-flow/pull/4577
+[#4578]: https://github.com/bytedance/deer-flow/pull/4578
+[#4582]: https://github.com/bytedance/deer-flow/pull/4582
+[#4584]: https://github.com/bytedance/deer-flow/pull/4584
+[#4587]: https://github.com/bytedance/deer-flow/pull/4587
+[#4589]: https://github.com/bytedance/deer-flow/pull/4589
+[#4590]: https://github.com/bytedance/deer-flow/pull/4590
+[#4596]: https://github.com/bytedance/deer-flow/pull/4596
+[#4599]: https://github.com/bytedance/deer-flow/pull/4599
+[#4600]: https://github.com/bytedance/deer-flow/pull/4600
+[#4604]: https://github.com/bytedance/deer-flow/pull/4604
+[#4611]: https://github.com/bytedance/deer-flow/issues/4611
+[#4615]: https://github.com/bytedance/deer-flow/pull/4615
+[#4617]: https://github.com/bytedance/deer-flow/pull/4617
+[#4618]: https://github.com/bytedance/deer-flow/pull/4618
+[#4620]: https://github.com/bytedance/deer-flow/pull/4620
+[#4623]: https://github.com/bytedance/deer-flow/pull/4623
+[#4624]: https://github.com/bytedance/deer-flow/pull/4624
+[#4625]: https://github.com/bytedance/deer-flow/pull/4625
+[#4627]: https://github.com/bytedance/deer-flow/pull/4627
+[#4629]: https://github.com/bytedance/deer-flow/pull/4629
+[#4631]: https://github.com/bytedance/deer-flow/pull/4631
+[#4633]: https://github.com/bytedance/deer-flow/pull/4633
+[#4634]: https://github.com/bytedance/deer-flow/pull/4634
+[#4635]: https://github.com/bytedance/deer-flow/pull/4635
+[#4636]: https://github.com/bytedance/deer-flow/pull/4636
+[#4638]: https://github.com/bytedance/deer-flow/pull/4638
+[#4639]: https://github.com/bytedance/deer-flow/pull/4639
+[#4643]: https://github.com/bytedance/deer-flow/pull/4643
+[#4644]: https://github.com/bytedance/deer-flow/pull/4644
+[#4647]: https://github.com/bytedance/deer-flow/pull/4647
+[#4649]: https://github.com/bytedance/deer-flow/pull/4649
+[#4657]: https://github.com/bytedance/deer-flow/pull/4657
+[#4658]: https://github.com/bytedance/deer-flow/pull/4658
+[#4659]: https://github.com/bytedance/deer-flow/pull/4659
+[#4660]: https://github.com/bytedance/deer-flow/pull/4660
+[#4665]: https://github.com/bytedance/deer-flow/pull/4665
+[#4667]: https://github.com/bytedance/deer-flow/pull/4667
+[#4668]: https://github.com/bytedance/deer-flow/pull/4668
+[#4677]: https://github.com/bytedance/deer-flow/pull/4677
+[#4681]: https://github.com/bytedance/deer-flow/pull/4681
+[#4683]: https://github.com/bytedance/deer-flow/pull/4683
+[#4684]: https://github.com/bytedance/deer-flow/pull/4684
+[#4690]: https://github.com/bytedance/deer-flow/pull/4690
+[#4693]: https://github.com/bytedance/deer-flow/pull/4693
+[#4701]: https://github.com/bytedance/deer-flow/pull/4701
+[#4703]: https://github.com/bytedance/deer-flow/pull/4703
+[#4707]: https://github.com/bytedance/deer-flow/pull/4707
+[#4709]: https://github.com/bytedance/deer-flow/pull/4709
+[#4713]: https://github.com/bytedance/deer-flow/pull/4713
+[#4719]: https://github.com/bytedance/deer-flow/pull/4719
+[#4722]: https://github.com/bytedance/deer-flow/pull/4722
+[#4724]: https://github.com/bytedance/deer-flow/pull/4724
+[#4727]: https://github.com/bytedance/deer-flow/pull/4727
+[#4730]: https://github.com/bytedance/deer-flow/pull/4730
+[#4735]: https://github.com/bytedance/deer-flow/pull/4735
+[#4736]: https://github.com/bytedance/deer-flow/pull/4736
+[#4737]: https://github.com/bytedance/deer-flow/pull/4737
+[#4738]: https://github.com/bytedance/deer-flow/pull/4738
+[#4744]: https://github.com/bytedance/deer-flow/pull/4744
+[#4745]: https://github.com/bytedance/deer-flow/pull/4745
+[#4747]: https://github.com/bytedance/deer-flow/pull/4747
+[#4748]: https://github.com/bytedance/deer-flow/pull/4748
+[#4750]: https://github.com/bytedance/deer-flow/pull/4750
+[#4752]: https://github.com/bytedance/deer-flow/pull/4752
+[#4755]: https://github.com/bytedance/deer-flow/pull/4755
+[#4758]: https://github.com/bytedance/deer-flow/pull/4758
+[#4759]: https://github.com/bytedance/deer-flow/pull/4759
+[#4760]: https://github.com/bytedance/deer-flow/pull/4760
+[#4762]: https://github.com/bytedance/deer-flow/pull/4762
+[#4764]: https://github.com/bytedance/deer-flow/pull/4764
+[#4767]: https://github.com/bytedance/deer-flow/pull/4767
+[#4769]: https://github.com/bytedance/deer-flow/pull/4769
+[#4772]: https://github.com/bytedance/deer-flow/pull/4772
+[#4780]: https://github.com/bytedance/deer-flow/pull/4780
+[#4783]: https://github.com/bytedance/deer-flow/pull/4783
+[#4785]: https://github.com/bytedance/deer-flow/pull/4785
+[#4789]: https://github.com/bytedance/deer-flow/pull/4789
+[#4792]: https://github.com/bytedance/deer-flow/pull/4792
+[#4797]: https://github.com/bytedance/deer-flow/pull/4797
+[#4800]: https://github.com/bytedance/deer-flow/pull/4800
+[#4804]: https://github.com/bytedance/deer-flow/pull/4804
+[#4806]: https://github.com/bytedance/deer-flow/pull/4806
+[#4812]: https://github.com/bytedance/deer-flow/pull/4812
+[#4815]: https://github.com/bytedance/deer-flow/pull/4815
+[#4816]: https://github.com/bytedance/deer-flow/pull/4816
+[#4817]: https://github.com/bytedance/deer-flow/pull/4817
+[#4822]: https://github.com/bytedance/deer-flow/pull/4822
+[#4823]: https://github.com/bytedance/deer-flow/pull/4823
+[#4825]: https://github.com/bytedance/deer-flow/pull/4825
+[#4827]: https://github.com/bytedance/deer-flow/pull/4827
+[#4830]: https://github.com/bytedance/deer-flow/pull/4830
+[#4833]: https://github.com/bytedance/deer-flow/pull/4833
+[#4836]: https://github.com/bytedance/deer-flow/pull/4836
+[#4838]: https://github.com/bytedance/deer-flow/pull/4838
+[#4840]: https://github.com/bytedance/deer-flow/pull/4840
+[#4842]: https://github.com/bytedance/deer-flow/pull/4842
+[#4844]: https://github.com/bytedance/deer-flow/pull/4844
+[#4846]: https://github.com/bytedance/deer-flow/pull/4846
+[#4848]: https://github.com/bytedance/deer-flow/pull/4848
+[#4852]: https://github.com/bytedance/deer-flow/pull/4852
+[#4853]: https://github.com/bytedance/deer-flow/pull/4853
+[#4860]: https://github.com/bytedance/deer-flow/pull/4860
+[#4861]: https://github.com/bytedance/deer-flow/pull/4861
+[#4863]: https://github.com/bytedance/deer-flow/pull/4863
+[#4865]: https://github.com/bytedance/deer-flow/pull/4865
+[#4868]: https://github.com/bytedance/deer-flow/pull/4868
+[#4877]: https://github.com/bytedance/deer-flow/pull/4877
+[#4882]: https://github.com/bytedance/deer-flow/pull/4882
+[#4887]: https://github.com/bytedance/deer-flow/pull/4887
+[#4888]: https://github.com/bytedance/deer-flow/pull/4888
+[#4898]: https://github.com/bytedance/deer-flow/pull/4898
+[#4903]: https://github.com/bytedance/deer-flow/pull/4903
+[#4911]: https://github.com/bytedance/deer-flow/pull/4911
+[#4918]: https://github.com/bytedance/deer-flow/pull/4918
+[#4928]: https://github.com/bytedance/deer-flow/pull/4928
+[#4933]: https://github.com/bytedance/deer-flow/pull/4933
+[#4936]: https://github.com/bytedance/deer-flow/pull/4936
+[#4938]: https://github.com/bytedance/deer-flow/pull/4938
+[#4951]: https://github.com/bytedance/deer-flow/pull/4951
+[#4953]: https://github.com/bytedance/deer-flow/pull/4953
+[#4956]: https://github.com/bytedance/deer-flow/pull/4956
+[#4959]: https://github.com/bytedance/deer-flow/pull/4959
+[#4960]: https://github.com/bytedance/deer-flow/pull/4960
+[#4963]: https://github.com/bytedance/deer-flow/pull/4963
+[#4965]: https://github.com/bytedance/deer-flow/pull/4965
+[#4970]: https://github.com/bytedance/deer-flow/pull/4970
+[#4983]: https://github.com/bytedance/deer-flow/pull/4983
+[#4987]: https://github.com/bytedance/deer-flow/pull/4987
+[#4998]: https://github.com/bytedance/deer-flow/pull/4998

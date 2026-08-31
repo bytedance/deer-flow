@@ -992,7 +992,7 @@ redis = [
     { name = "redis" },
 ]
 tenki = [
-    { name = "tenki-sandbox" },
+    { name = "tenki" },
 ]
 tui = [
     { name = "textual" },
@@ -1049,7 +1049,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'redis'", specifier = ">=5.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0,<3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
-    { name = "tenki-sandbox", marker = "extra == 'tenki'", specifier = ">=0.4.0" },
+    { name = "tenki", marker = "extra == 'tenki'", specifier = ">=1.0.0" },
     { name = "textual", marker = "extra == 'tui'", specifier = ">=0.80" },
     { name = "tiktoken", specifier = ">=0.8.0" },
 ]
@@ -4540,8 +4540,8 @@ name = "standard-aifc"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
-    { name = "standard-chunk", marker = "python_full_version >= '3.13'" },
+    { name = "audioop-lts" },
+    { name = "standard-chunk" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/53/6050dc3dde1671eb3db592c13b55a8005e5040131f7509cef0215212cb84/standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43", size = 15240, upload-time = "2024-10-30T16:01:31.772Z" }
 wheels = [
@@ -4624,17 +4624,17 @@ wheels = [
 ]
 
 [[package]]
-name = "tenki-sandbox"
-version = "0.4.0"
+name = "tenki"
+version = "1.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grpcio" },
     { name = "protobuf" },
     { name = "websocket-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/8d/58/f6527c63b2e4c94fd00a48ba4bd93ef52de22dbc72e247110949a17511f6/tenki_sandbox-0.4.0.tar.gz", hash = "sha256:2836e6e7100dfc81715b4d93ecfe80e3f055867498cb9f34be921a02969bb15f", size = 179392, upload-time = "2026-07-17T22:18:09.869Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/68/d9/1669b9ffe9b729a854985918ec84f39abf1ba032764a00bd105459e7e97d/tenki-1.0.2.tar.gz", hash = "sha256:131947e54758674f814a66699d3b65518adc9f093a62ea6dddbd4394cbc771c4", size = 240024, upload-time = "2026-08-27T19:40:32.85Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/f7/3c02da98793dc0e56230c520064d7d233c6e0edab13b410c031e1cfe7fd9/tenki_sandbox-0.4.0-py3-none-any.whl", hash = "sha256:76d5ece2e1607b43705587d86277e983ef43601a86993077e379be8033a40b3e", size = 155246, upload-time = "2026-07-17T22:18:08.383Z" },
+    { url = "https://files.pythonhosted.org/packages/98/ef/06486b129744c3f7293f9b1f1ea60055104db4d4ad03483c6857c57c0bbb/tenki-1.0.2-py3-none-any.whl", hash = "sha256:6259651ed243e071e88d789fa86a7c570954ec5f0372a40bcccc2d4b9ae2e342", size = 164788, upload-time = "2026-08-27T19:40:30.915Z" },
 ]
 
 [[package]]

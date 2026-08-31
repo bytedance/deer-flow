@@ -87,6 +87,21 @@ def test_local_storage_accepts_external_custom_skill_directory_symlink(tmp_path:
     assert storage.validate_skill_file_path(linked_file) == external_file
 
 
+def test_load_skills_discovers_parenthesized_portable_allowed_tools(tmp_path: Path):
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "custom" / "tavily-cli"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: tavily-cli\ndescription: Tavily CLI\nallowed-tools: Bash(tvly *)\n---\n\n# Tavily CLI\n",
+        encoding="utf-8",
+    )
+
+    skills = get_or_new_skill_storage(skills_path=skills_root).load_skills(enabled_only=False)
+
+    skill = next(skill for skill in skills if skill.name == "tavily-cli")
+    assert skill.allowed_tools == ("Bash(tvly *)",)
+
+
 def test_load_skills_stops_at_skill_package_boundary(tmp_path: Path):
     """SKILL.md files inside an existing skill package are support data, not skills."""
     skills_root = tmp_path / "skills"
