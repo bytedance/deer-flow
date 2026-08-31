@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from deerflow.subagents.status_contract import (
+    SUBAGENT_ACCEPTANCE_VERDICT_KEY,
     SUBAGENT_ERROR_KEY,
     SUBAGENT_METADATA_TEXT_MAX_CHARS,
     SUBAGENT_MODEL_NAME_KEY,
@@ -49,6 +50,67 @@ def test_stop_reason_values_match_contract():
 def test_make_subagent_additional_kwargs_includes_status():
     kwargs = make_subagent_additional_kwargs("completed")
     assert kwargs == {SUBAGENT_STATUS_KEY: "completed"}
+
+
+def test_make_subagent_additional_kwargs_carries_acceptance_verdict():
+    verdict = {
+        "source": "acceptance_criteria",
+        "requirement": "deterministic_leaf_checks",
+        "acceptance_resolved": False,
+        "checks": [
+            {
+                "criterion": "tests_passed:pytest tests/test_x.py",
+                "kind": "tests_passed",
+                "value": "pytest tests/test_x.py",
+                "status": "unverified",
+                "detail": "command criteria require command-level evidence",
+            }
+        ],
+    }
+    kwargs = make_subagent_additional_kwargs("completed", result="done", acceptance_verdict=verdict)
+    assert kwargs[SUBAGENT_ACCEPTANCE_VERDICT_KEY] == verdict
+    structured = read_subagent_result_metadata(kwargs)
+    assert structured is not None
+    assert structured["acceptance_verdict"] == verdict
+
+
+def test_malformed_acceptance_verdict_is_dropped():
+    verdict = {
+        "source": "acceptance_criteria",
+        "requirement": "deterministic_leaf_checks",
+        "acceptance_resolved": True,
+        "checks": [
+            {
+                "criterion": "tests_passed:pytest",
+                "kind": "tests_passed",
+                "value": "pytest",
+                "status": "unverified",
+                "detail": "not checked",
+            }
+        ],
+    }
+    kwargs = make_subagent_additional_kwargs("completed", result="done", acceptance_verdict=verdict)
+    assert SUBAGENT_ACCEPTANCE_VERDICT_KEY not in kwargs
+
+
+def test_acceptance_verdict_is_only_carried_for_completed_status():
+    verdict = {
+        "source": "acceptance_criteria",
+        "requirement": "deterministic_leaf_checks",
+        "acceptance_resolved": True,
+        "checks": [
+            {
+                "criterion": "file:/mnt/user-data/outputs/report.md exists",
+                "kind": "file_exists",
+                "value": "/mnt/user-data/outputs/report.md",
+                "status": "satisfied",
+                "detail": "file exists",
+            }
+        ],
+    }
+    kwargs = make_subagent_additional_kwargs("failed", error="boom", acceptance_verdict=verdict)
+    assert SUBAGENT_ACCEPTANCE_VERDICT_KEY not in kwargs
+    assert read_subagent_result_metadata(kwargs).get("acceptance_verdict") is None
 
 
 def test_make_subagent_additional_kwargs_carries_terminal_runtime_metadata():

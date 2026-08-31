@@ -20,6 +20,7 @@ from deerflow.extensions import resolve_run_extensions
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
+from deerflow.subagents.acceptance_verification import AcceptanceVerdict, evaluate_acceptance_criteria, parse_acceptance_criteria
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
 from deerflow.subagents.executor import (
@@ -235,6 +236,7 @@ def _task_result_command(
     usage: dict[str, int] | None = None,
     tool_receipts: list[dict] | None = None,
     receipt_verdict: dict | None = None,
+    acceptance_verdict: dict | None = None,
 ) -> Command:
     content, metadata_error = format_subagent_result_message(status, result=result, error=error, stop_reason=stop_reason)
     return Command(
@@ -253,11 +255,45 @@ def _task_result_command(
                         token_usage=usage,
                         tool_receipts=tool_receipts,
                         receipt_verdict=receipt_verdict,
+                        acceptance_verdict=acceptance_verdict,
                     ),
                 )
             ]
         }
     )
+
+
+async def _evaluate_acceptance_verdict(
+    acceptance_criteria: list[str] | None,
+    runtime: Runtime | None,
+) -> AcceptanceVerdict | None:
+    """Run deterministic acceptance checks after a child reaches a terminal state.
+
+    File inspection is synchronous across the sandbox implementations, so it
+    runs off the parent event loop. Any missing runtime/sandbox is represented
+    as ``unverified`` by the checker rather than being treated as success.
+    """
+    if not acceptance_criteria:
+        return None
+    # Import lazily: ``sandbox.tools`` imports the built-in tool registry, which
+    # imports this module. Keeping the dependency inside the terminal path
+    # avoids an import cycle during middleware-ordering discovery.
+    from deerflow.sandbox.tools import ensure_sandbox_initialized_async
+
+    sandbox = None
+    needs_file_check = any(kind in {"file_exists", "file_non_empty", "file_written"} for _, kind, _ in parse_acceptance_criteria(acceptance_criteria))
+    if runtime is not None and needs_file_check:
+        try:
+            # Reuse/acquire through the normal helper so the current
+            # sandbox:execute authorization is checked even when a sandbox
+            # already exists in runtime state. A direct provider lookup would
+            # bypass that policy re-check.
+            sandbox = await ensure_sandbox_initialized_async(runtime)
+        except Exception:
+            # Missing runtime policy, provider, or workspace is evidence that
+            # the criterion cannot be decided; it is never a passing result.
+            sandbox = None
+    return await asyncio.to_thread(evaluate_acceptance_criteria, acceptance_criteria, sandbox=sandbox)
 
 
 @tool("task", parse_docstring=True)
@@ -577,14 +613,18 @@ async def task_tool(
             # Check if task completed, failed, or timed out
             if result.status == SubagentStatus.COMPLETED:
                 _report_subagent_usage(runtime, result)
+                acceptance_verdict = await _evaluate_acceptance_verdict(acceptance_criteria, runtime)
+                completed_event = {
+                    "type": "task_completed",
+                    "task_id": tool_call_id,
+                    "result": result.result,
+                    "usage": usage,
+                    "model_name": effective_model,
+                }
+                if acceptance_verdict is not None:
+                    completed_event["acceptance_verdict"] = acceptance_verdict
                 await aemit_custom_event(
-                    {
-                        "type": "task_completed",
-                        "task_id": tool_call_id,
-                        "result": result.result,
-                        "usage": usage,
-                        "model_name": effective_model,
-                    },
+                    completed_event,
                     writer=writer,
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} completed after {poll_count} polls")
@@ -610,6 +650,7 @@ async def task_tool(
                     usage=usage,
                     tool_receipts=receipts,
                     receipt_verdict=receipt_verdict,
+                    acceptance_verdict=acceptance_verdict,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)

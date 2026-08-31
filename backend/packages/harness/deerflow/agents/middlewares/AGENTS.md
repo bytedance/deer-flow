@@ -1,6 +1,6 @@
 ### Middleware Chain
 
-Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values.
+Persisted delegation verdicts are untrusted durable context; ledger rendering revalidates them and ignores malformed values. Acceptance verdicts are parent-side deterministic file checks; command/resource criteria remain `UNVERIFIED` and verdicts are only carried for completed delegations.
 
 Lead-agent middlewares are assembled in strict order across three functions: the shared base in `packages/harness/deerflow/agents/middlewares/tool_error_handling_middleware.py` (`_build_runtime_middlewares`, exposed via `build_lead_runtime_middlewares`), then the lead-only middlewares appended in `packages/harness/deerflow/agents/lead_agent/agent.py` (`build_middlewares`). Items marked *(optional)* are appended only when their config/runtime condition holds, so the live chain length varies.
 

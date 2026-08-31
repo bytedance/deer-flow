@@ -535,3 +535,24 @@ class TestReceiptVerdictRendering:
 
         assert "write report" in rendered
         assert "citations:" not in rendered
+
+    def test_acceptance_verdict_is_rendered_and_unverified_is_visible(self):
+        acceptance = {
+            "source": "acceptance_criteria",
+            "requirement": "deterministic_leaf_checks",
+            "acceptance_resolved": False,
+            "checks": [
+                {
+                    "criterion": "tests_passed:pytest tests/test_x.py",
+                    "kind": "tests_passed",
+                    "value": "pytest tests/test_x.py",
+                    "status": "unverified",
+                    "detail": "command criteria require command-level evidence",
+                }
+            ],
+        }
+        message = _completed_task_message("c1", None)
+        message.additional_kwargs["subagent_acceptance_verdict"] = acceptance
+        rendered = render_delegation_ledger(extract_delegations([_ai_task_call("c1", "run tests"), message]))
+        assert "acceptance: 1 UNVERIFIED" in rendered
+        assert "UNVERIFIED is not a pass" in rendered
