@@ -470,6 +470,18 @@ def _submit_to_isolated_loop_in_context(
     return context.run(_submit)
 
 
+def run_on_isolated_subagent_loop[T](coro: Coroutine[Any, Any, T]) -> Future[T]:
+    """Schedule a coroutine on the process-owned persistent subagent loop.
+
+    Unlike ``asyncio.create_task`` on the caller's loop, work submitted here
+    survives teardown of a short-lived caller loop — e.g. the ``asyncio.run()``
+    used by the synchronous tool wrapper cancels caller-loop tasks on exit —
+    so registry cleanup scheduled from a failing poller still runs after the
+    caller loop is gone.
+    """
+    return asyncio.run_coroutine_threadsafe(coro, _get_isolated_subagent_loop())
+
+
 def _copy_isolated_subagent_context() -> Context:
     """Copy ambient context without loop-bound parent graph callbacks.
 
@@ -1639,3 +1651,24 @@ def cleanup_background_task(execution_id: str) -> None:
                 execution_id,
                 result.status.value if hasattr(result.status, "value") else result.status,
             )
+
+
+def force_cleanup_background_task(execution_id: str) -> None:
+    """Remove a background task entry unconditionally.
+
+    Last resort for interrupted unwind paths where the registry entry exists
+    but its result object can no longer be read (persistent status-lookup /
+    status-object failure), so :func:`cleanup_background_task` — which reads
+    the entry to check terminality — cannot succeed. Cooperative cancellation
+    has already been requested by then; leaking the entry forever is worse
+    than dropping it. The subagent thread keeps its own reference to the
+    result object, so a later ``try_set_terminal`` on the removed object is
+    harmless.
+
+    Args:
+        execution_id: The execution ID to remove.
+    """
+    with _background_tasks_lock:
+        _background_tasks.pop(execution_id, None)
+        _background_futures.pop(execution_id, None)
+    logger.warning("Force-cleaned background execution %s after unreadable status", execution_id)
