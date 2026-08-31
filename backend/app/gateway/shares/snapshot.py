@@ -48,11 +48,43 @@ _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
 # character references and JSON consumers decode ``\uXXXX`` before display,
 # so the classification shadow must collapse them like any other separator
 # encoding while the original bytes stay cut out of the public output.
-_HTML_SEPARATOR_ENTITY_RE = re.compile(
-    r"&(?:#0*(?:47|92)|#x0*(?:2f|5c)|sol|bsol);",
+# Round-8 adversarial pass: encodings compose, so the entity decoder also
+# yields the *introducers* — ``&#37;``/``&percnt;`` decode to ``%`` (feeding
+# the percent-decoding path: ``&#37;2F`` → ``%2F`` → ``/``) and
+# ``&#38;``/``&amp;`` decode to ``&`` so a following collapse pass unwraps
+# ``&amp;#47;``; ``\u005c`` yields ``\`` so an adjacent ``u002f`` collapses
+# on the next pass. That is why the collapse runs to a bounded fixpoint.
+_HTML_ENTITY_RE = re.compile(
+    r"&(?:#0*(?:47|92|37|38)|#x0*(?:2f|5c|25|26)|sol|bsol|percnt|amp);",
     re.IGNORECASE,
 )
-_UNICODE_SEPARATOR_ESCAPE_RE = re.compile(r"u(?:002f|005c|2f|5c)", re.IGNORECASE)
+_ENTITY_CODEPOINTS = {0x2F: "/", 0x5C: "/", 0x25: "%", 0x26: "&"}
+_ENTITY_NAMES = {"sol": "/", "bsol": "/", "percnt": "%", "amp": "&"}
+_UNICODE_SEPARATOR_ESCAPE_RE = re.compile(r"u(?:002f|2f|\{0*2f\})", re.IGNORECASE)
+_UNICODE_BACKSLASH_ESCAPE_RE = re.compile(r"u(?:005c|5c|\{0*5c\})", re.IGNORECASE)
+# Depth bound for nested encodings, matching ``_decoded_reference``'s
+# three-layer percent-decoding loop: ``&amp;amp;#47;`` needs all three.
+_COLLAPSE_MAX_PASSES = 3
+
+
+def _decode_entity(text: str, index: int) -> tuple[str, int] | None:
+    """Decode one character reference at *index* into (char, end_index)."""
+    match = _HTML_ENTITY_RE.match(text, index)
+    if match is None:
+        return None
+    body = match.group(0)[1:-1].lower()
+    if body.startswith("#"):
+        digits = body[1:]
+        base = 10
+        if digits.startswith("x"):
+            digits = digits[1:]
+            base = 16
+        char = _ENTITY_CODEPOINTS.get(int(digits.lstrip("0") or "0", base))
+    else:
+        char = _ENTITY_NAMES.get(body)
+    if char is None:
+        return None
+    return char, match.end()
 
 
 class ShareSnapshotTooLarge(Exception):
@@ -217,20 +249,9 @@ def _strip_think_blocks_outside_markdown_code(text: str) -> str:
     return stripped
 
 
-def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, int]]]:
-    """Normalize escape and backslash separators for classification.
-
-    Returns the normalized text plus, for every normalized character, the
-    ``(first, last)`` original index it was produced from, so a match found in
-    the normalized text can be cut out of the original — escaped bytes must
-    never survive into the public output. A run of backslashes before a ``/``
-    collapses into that single ``/`` (JSON ``\\/`` escapes at any depth);
-    remaining backslashes are treated as Windows-style separators. Separator
-    characters arriving as HTML character references (``&#47;``, ``&sol;``,
-    …) or JSON/JS unicode escapes (``\\u002f``, any casing, any backslash
-    depth) collapse the same way: both decode to a real separator before
-    display, so neither may survive classification in encoded form.
-    """
+def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """One normalization pass: returns the pass's output plus, per output
+    character, the ``(first, last)`` input index it was produced from."""
     normalized: list[str] = []
     spans: list[tuple[int, int]] = []
     i = 0
@@ -238,16 +259,25 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
     while i < n:
         char = text[i]
         if char == "&":
-            entity = _HTML_SEPARATOR_ENTITY_RE.match(text, i)
+            entity = _decode_entity(text, i)
             if entity is not None:
-                normalized.append("/")
-                spans.append((i, entity.end() - 1))
-                i = entity.end()
+                decoded, end = entity
+                normalized.append(decoded)
+                spans.append((i, end - 1))
+                i = end
                 continue
         if char == "\\":
             run_end = i
             while run_end < n and text[run_end] == "\\":
                 run_end += 1
+            backslash_escape = _UNICODE_BACKSLASH_ESCAPE_RE.match(text, run_end)
+            if backslash_escape is not None:
+                # Yield the backslash itself: a u002f escape it introduces
+                # collapses on the next pass.
+                normalized.append("\\")
+                spans.append((i, backslash_escape.end() - 1))
+                i = backslash_escape.end()
+                continue
             unicode_escape = _UNICODE_SEPARATOR_ESCAPE_RE.match(text, run_end)
             if unicode_escape is not None:
                 normalized.append("/")
@@ -268,6 +298,36 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
         spans.append((i, i))
         i += 1
     return "".join(normalized), spans
+
+
+def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Normalize escape and backslash separators for classification.
+
+    Returns the normalized text plus, for every normalized character, the
+    ``(first, last)`` original index it was produced from, so a match found in
+    the normalized text can be cut out of the original — escaped bytes must
+    never survive into the public output. A run of backslashes before a ``/``
+    collapses into that single ``/`` (JSON ``\\/`` escapes at any depth);
+    remaining backslashes are treated as Windows-style separators. Separator
+    characters arriving as HTML character references (``&#47;``, ``&sol;``,
+    …) or JSON/JS unicode escapes (``\\u002f``, any casing, any backslash
+    depth) collapse the same way: both decode to a real separator before
+    display, so neither may survive classification in encoded form.
+
+    Because encodings compose (``&amp;#47;``, ``&#37;2F``, ``\\u005cu002f``),
+    the pass runs repeatedly until it stabilizes (bounded by
+    ``_COLLAPSE_MAX_PASSES``, the same depth the percent-decoding loop
+    allows); spans are composed across passes so every cut still lands on
+    original bytes.
+    """
+    normalized, spans = _collapse_separators_once(text)
+    for _ in range(_COLLAPSE_MAX_PASSES - 1):
+        collapsed, collapsed_spans = _collapse_separators_once(normalized)
+        if collapsed == normalized:
+            break
+        normalized = collapsed
+        spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
+    return normalized, spans
 
 
 def _decoded_reference(value: str) -> str:

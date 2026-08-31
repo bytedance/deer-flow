@@ -622,3 +622,31 @@ def test_sanitize_share_title_neutralizes_entity_and_unicode_separators():
     assert "user-data" not in title
     assert "x.csv" not in title
     assert "y.csv" not in title
+
+
+def test_neutralize_composed_separator_encodings():
+    """Round-8 adversarial pass: encodings compose. An entity-encoded percent
+    introducer, nested ampersand entities, and an escaped unicode escape must
+    classify exactly like their decoded forms — while ordinary percent and
+    ampersand text stays byte-identical."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    # Entity-encoded percent introducer: &#37;2F → %2F → / (the percent path
+    # finishes the decoding the entity pass started).
+    assert neutralize("see &#37;2Fapi&#37;2Fthreads&#37;2Fthread-secret&#37;2Fuploads&#37;2Fq4.pdf") == "see [private artifact omitted]"
+    assert neutralize("see &#37;5Capi&#37;5Cthreads&#37;5Ct1&#37;5Cuploads&#37;5Cf.pdf") == "see [private artifact omitted]"
+    # Nested entities: &amp;#47; (and the numeric &#38;#47;) → &#47; → /.
+    assert neutralize("see &amp;#47;api&amp;#47;threads&amp;#47;t1&amp;#47;uploads&amp;#47;f.pdf") == "see [private artifact omitted]"
+    assert neutralize("see &#38;#47;api&#38;#47;threads&#38;#47;t1&#38;#47;uploads&#38;#47;f.pdf") == "see [private artifact omitted]"
+    # Escaped unicode escape: \u005c is a backslash, so u002f after it
+    # collapses on the next pass.
+    assert neutralize("\\u005Cu002fapi\\u005Cu002fthreads\\u005Cu002ft1\\u005Cu002fuploads\\u005Cu002ff.pdf") == "[private artifact omitted]"
+    # ES6 code-point escapes compose with the same machinery.
+    assert neutralize(r"es6 \u{2F}api\u{2F}threads\u{2F}t1\u{2F}uploads\u{2F}f.pdf") == "es6 [private artifact omitted]"
+    assert neutralize(r"es6 \u{5C}api\u{5C}threads\u{5C}t1\u{5C}uploads\u{5C}f.pdf") == "es6 [private artifact omitted]"
+    # A legitimate non-separator codepoint reference stays public.
+    assert neutralize(r"cjk block U+2F8CB written \u{2F8CB} stays") == r"cjk block U+2F8CB written \u{2F8CB} stays"
+    # Public percent/ampersand content passes through verbatim, including a
+    # public API path whose separators are entity-encoded.
+    assert neutralize("save &#37;20 today &amp; enjoy") == "save &#37;20 today &amp; enjoy"
+    assert neutralize("public API at &#37;2Fapi&#37;2Fv1&#37;2Fstatus stays") == "public API at &#37;2Fapi&#37;2Fv1&#37;2Fstatus stays"

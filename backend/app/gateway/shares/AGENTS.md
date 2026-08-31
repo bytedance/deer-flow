@@ -30,9 +30,11 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   titles (at create time and again on public read). Classification runs on a
   separator-normalized shadow of the text that also decodes percent-encoding,
   JSON `\/` escapes, HTML character references, and `\uXXXX` unicode escapes,
-  while the original bytes are what get replaced — public content is emitted
-  unchanged, and the cut stops at the first structural terminator so public
-  prose after a reference survives — no run/thread/user
+  including their compositions (an entity-encoded percent introducer, nested
+  ampersand entities, an escaped `\u005c\u002f` pair) via a bounded fixpoint
+  pass, while the original bytes are what get replaced — public content is
+  emitted unchanged, and the cut stops at the first structural terminator so
+  public prose after a reference survives — no run/thread/user
   identifiers, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the
   page order only. Rows are sanitized per page, so the 2000 cap counts
