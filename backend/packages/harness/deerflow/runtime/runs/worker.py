@@ -1354,10 +1354,29 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, False)
 
         await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+        _schedule_bridge_cleanup(bridge, run_id)
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
+
+
+_bridge_cleanup_tasks: set[asyncio.Task[None]] = set()
+
+
+def _on_bridge_cleanup_done(task: asyncio.Task[None], run_id: str) -> None:
+    _bridge_cleanup_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("Stream bridge cleanup failed for run %s: %s", run_id, exc)
+
+
+def _schedule_bridge_cleanup(bridge: StreamBridge, run_id: str, delay: float = 60) -> asyncio.Task[None]:
+    task = asyncio.create_task(bridge.cleanup(run_id, delay=delay))
+    _bridge_cleanup_tasks.add(task)
+    task.add_done_callback(lambda t: _on_bridge_cleanup_done(t, run_id))
+    return task
 
 
 # ---------------------------------------------------------------------------
