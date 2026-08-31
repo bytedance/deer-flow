@@ -3369,3 +3369,51 @@ async def test_start_run_stamps_the_run_record_without_caller_metadata(_stub_app
 
     assert record.metadata[DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
     assert config["metadata"][DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"
+
+
+def test_build_run_config_merges_metadata_onto_a_copy(_stub_app_config):
+    """The nested values of ``request_config`` are reference copies of
+    ``body.config``, so an in-place metadata merge would write server-stamped
+    keys through into the client's request body before it is persisted as the
+    kwargs echo -- contaminating the "what the client sent" record."""
+    from app.gateway.services import build_run_config
+
+    caller_metadata = {"caller_key": "kept"}
+    request_config = {"metadata": caller_metadata}
+
+    config = build_run_config("thread-copy-merge", request_config, {DEERFLOW_TRACE_METADATA_KEY: "gateway-issued"})
+
+    assert config["metadata"] == {"caller_key": "kept", DEERFLOW_TRACE_METADATA_KEY: "gateway-issued"}
+    assert caller_metadata == {"caller_key": "kept"}
+
+
+@pytest.mark.anyio
+async def test_start_run_strips_forged_trace_id_from_the_kwargs_echo(_stub_app_config):
+    """``create_or_reject`` persists ``body.config`` as ``runs.kwargs_json``,
+    which the runs API serves back. A forged ``deerflow_trace_id`` in
+    ``config.metadata`` or ``config.context`` must neither survive there nor be
+    replaced by a server value written through into the caller's request body:
+    the id is ignored as an input on that surface, so any echo of it only
+    manufactures disagreement with the header, the logs, and the run record."""
+    from deerflow.trace_context import request_trace_context
+
+    forged_config = {
+        "metadata": {DEERFLOW_TRACE_METADATA_KEY: "forged-in-config", "caller_key": "kept"},
+        "context": {DEERFLOW_TRACE_METADATA_KEY: "forged-in-context", "model_name": "default"},
+    }
+    body = _run_create_request(
+        metadata={DEERFLOW_TRACE_METADATA_KEY: "forged-by-caller"},
+        config=forged_config,
+    )
+
+    with request_trace_context("gateway-issued"):
+        record, config = await _start_run_capturing_config(body, "thread-trace-echo")
+
+    echoed = record.kwargs["config"]
+    assert DEERFLOW_TRACE_METADATA_KEY not in echoed["metadata"]
+    assert DEERFLOW_TRACE_METADATA_KEY not in echoed["context"]
+    assert echoed["metadata"]["caller_key"] == "kept"
+    # The caller's own request body is not mutated by the merge either.
+    assert forged_config["metadata"][DEERFLOW_TRACE_METADATA_KEY] == "forged-in-config"
+    # The live run config still carries the authoritative id.
+    assert config["metadata"][DEERFLOW_TRACE_METADATA_KEY] == "gateway-issued"

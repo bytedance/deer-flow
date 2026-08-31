@@ -793,7 +793,15 @@ def build_run_config(
             external_values.pop(INTERNAL_CHECKPOINT_MODE_KEY, None)
 
     if metadata:
-        config.setdefault("metadata", {}).update(metadata)
+        # Merged onto a copy: config["metadata"] is the same dict object as the
+        # caller's body.config["metadata"] (the passthrough above copies
+        # references), and an in-place update would write server-stamped keys
+        # -- the trace id -- through into the request body that is persisted
+        # and echoed as the run's kwargs.
+        existing_metadata = config.get("metadata")
+        merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+        merged_metadata.update(metadata)
+        config["metadata"] = merged_metadata
     return config
 
 
