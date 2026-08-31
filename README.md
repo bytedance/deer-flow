@@ -1260,6 +1260,8 @@ Windows configuration validation.
 
 This host-path alias is intentionally Windows-only. POSIX local deployments
 continue to use the configured virtual `container_path` in tool arguments.
+Sandbox mount changes require a Gateway restart so authorization and provider
+path mappings remain aligned.
 For `.cmd`/`.bat` program paths and arguments, the Windows wrapper rejects `%`,
 `^`, quotes, and control characters because `cmd.exe` expands or interprets
 those characters before launch; other shell metacharacters are quoted.

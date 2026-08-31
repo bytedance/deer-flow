@@ -1194,7 +1194,7 @@ def test_validate_local_bash_command_paths_still_blocks_non_mount_paths() -> Non
 def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
     """_get_custom_mounts should cache after first successful load."""
     # Clear any existing cache
-    for attribute in ("_cached", "_cached_at"):
+    for attribute in ("_cached",):
         if hasattr(_get_custom_mounts, attribute):
             monkeypatch.delattr(_get_custom_mounts, attribute)
 
@@ -1217,8 +1217,7 @@ def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
         result = _get_custom_mounts()
         assert len(result) == 2
         get_config.reset_mock()
-        with patch("deerflow.sandbox.tools.time.monotonic", return_value=_get_custom_mounts._cached_at):
-            assert _get_custom_mounts() == result
+        assert _get_custom_mounts() == result
         get_config.assert_not_called()
 
     # After caching, should return cached value even without mock
@@ -1227,9 +1226,6 @@ def test_get_custom_mounts_caching(monkeypatch, tmp_path) -> None:
 
     # Cleanup
     monkeypatch.delattr(_get_custom_mounts, "_cached")
-    for attribute in ("_cached_at",):
-        if hasattr(_get_custom_mounts, attribute):
-            monkeypatch.delattr(_get_custom_mounts, attribute)
 
 
 def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) -> None:
@@ -1256,13 +1252,11 @@ def test_get_custom_mounts_filters_nonexistent_host_path(monkeypatch, tmp_path) 
 
     # Cleanup
     monkeypatch.delattr(_get_custom_mounts, "_cached")
-    if hasattr(_get_custom_mounts, "_cached_at"):
-        monkeypatch.delattr(_get_custom_mounts, "_cached_at")
 
 
-def test_get_custom_mounts_refreshes_when_configured_mounts_change(monkeypatch, tmp_path) -> None:
-    """A removed mount must stop authorizing its former host path."""
-    for attribute in ("_cached", "_cached_at"):
+def test_get_custom_mounts_stays_frozen_until_provider_restart(monkeypatch, tmp_path) -> None:
+    """The tool snapshot stays aligned with the startup provider mapping."""
+    for attribute in ("_cached",):
         if hasattr(_get_custom_mounts, attribute):
             monkeypatch.delattr(_get_custom_mounts, attribute)
 
@@ -1283,9 +1277,13 @@ def test_get_custom_mounts_refreshes_when_configured_mounts_change(monkeypatch, 
         )
     )
 
-    monkeypatch.setattr("deerflow.sandbox.tools._CUSTOM_MOUNTS_CACHE_TTL_SECONDS", 0, raising=False)
-    with patch("deerflow.config.get_app_config", side_effect=[first, second]):
+    with patch("deerflow.config.get_app_config", side_effect=[first, second]) as get_config:
         assert _get_custom_mounts()[0].container_path == "/mnt/mounted"
+        assert _get_custom_mounts()[0].container_path == "/mnt/mounted"
+        assert get_config.call_count == 1
+
+    monkeypatch.delattr(_get_custom_mounts, "_cached")
+    with patch("deerflow.config.get_app_config", return_value=second):
         assert _get_custom_mounts() == []
 
 

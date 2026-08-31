@@ -660,6 +660,9 @@ sandbox:
 ```
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
+`sandbox` is startup-only infrastructure, so changes to `sandbox.mounts` or their
+host/container mappings require a Gateway restart; this keeps tool authorization
+aligned with the provider's acquire-time path table.
 
 #### Sandbox container network exposure and hardening
 

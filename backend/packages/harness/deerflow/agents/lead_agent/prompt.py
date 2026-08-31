@@ -994,6 +994,7 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     if app_config is None:
         try:
             from deerflow.config import get_app_config
+            from deerflow.sandbox.security import uses_local_sandbox_provider
 
             config = get_app_config()
         except Exception:
@@ -1002,6 +1003,8 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     else:
         config = app_config
 
+    from deerflow.sandbox.security import uses_local_sandbox_provider
+
     mounts = config.sandbox.mounts or []
 
     if not mounts:
@@ -1009,7 +1012,7 @@ def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
 
     lines = []
     host_path_notes = []
-    trusted_local_windows = os.name == "nt" and "LocalSandboxProvider" in str(getattr(config.sandbox, "use", ""))
+    trusted_local_windows = os.name == "nt" and uses_local_sandbox_provider(config)
     for mount in mounts:
         access = "read-only" if mount.read_only else "read-write"
         mount_line = f"- Custom mount: `{mount.container_path}` - Host directory mapped into the sandbox ({access})"

@@ -5,7 +5,6 @@ import os
 import posixpath
 import re
 import shlex
-import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
@@ -78,7 +77,6 @@ _MAX_GLOB_MAX_RESULTS = 1000
 _DEFAULT_GREP_MAX_RESULTS = 100
 _MAX_GREP_MAX_RESULTS = 500
 _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
-_CUSTOM_MOUNTS_CACHE_TTL_SECONDS = 1.0
 
 # Maximum bytes accepted in a single non-append write_file call (issue #3189).
 # Oversized single-shot writes correlate with LLM streaming chunk-gap timeouts
@@ -386,13 +384,12 @@ def _is_acp_workspace_path(path: str) -> bool:
 def _get_custom_mounts():
     """Get custom volume mounts from sandbox config.
 
-    Result is cached after the first successful config load. The hot path uses
-    the cached list directly; after a short TTL, config and mount roots are
-    rechecked so changes are eventually reflected without probing every call.
+    Result is cached after the first successful config load. Sandbox mounts are
+    startup-only infrastructure, so this snapshot must stay aligned with the
+    provider's acquire-time path mappings until the Gateway restarts.
     """
     cached = getattr(_get_custom_mounts, "_cached", None)
-    cached_at = getattr(_get_custom_mounts, "_cached_at", None)
-    if cached is not None and cached_at is not None and time.monotonic() - cached_at < _CUSTOM_MOUNTS_CACHE_TTL_SECONDS:
+    if cached is not None:
         return cached
 
     try:
@@ -401,15 +398,14 @@ def _get_custom_mounts():
         config = get_app_config()
         configured_mounts = list(config.sandbox.mounts or []) if config.sandbox else []
         # Only include mounts whose host_path exists, consistent with
-        # LocalSandboxProvider._setup_path_mappings(). The periodic refresh
-        # bounds how long a removed mount can remain authorized.
+        # LocalSandboxProvider._setup_path_mappings(). Both snapshots are
+        # intentionally frozen together for the provider lifetime.
         mounts = [mount for mount in configured_mounts if _mount_host_path_exists(mount.host_path)]
         _get_custom_mounts._cached = mounts  # type: ignore[attr-defined]
-        _get_custom_mounts._cached_at = time.monotonic()  # type: ignore[attr-defined]
         return mounts
     except Exception:
-        # Do not replace a last-known-good cache on a transient config error.
-        # Returning an empty list fails closed once the cache has expired.
+        # If config loading fails, return an empty list without caching so a
+        # later startup/test retry can pick up the real configuration.
         return []
 
 
@@ -438,7 +434,7 @@ def _get_custom_mount_for_path(path: str):
     return best
 
 
-def _looks_like_configured_host_path(path: str, _mounts) -> bool:
+def _looks_like_configured_host_path(path: str) -> bool:
     """Return whether *path* is a host-path spelling handled by the adapter.
 
     Windows drive and Git Bash paths are sent through the adapter so an
@@ -462,7 +458,7 @@ def normalize_local_tool_path(path: str) -> str:
     mounts = _get_custom_mounts()
     if _is_skills_path(path) or _is_acp_workspace_path(path) or path.startswith(f"{VIRTUAL_PATH_PREFIX}/") or _is_custom_mount_path(path):
         return path
-    if not _looks_like_configured_host_path(path, mounts):
+    if not _looks_like_configured_host_path(path):
         return path
     return normalize_host_path(path, mounts)
 

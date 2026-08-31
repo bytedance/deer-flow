@@ -110,8 +110,8 @@ def _quote_cmd_argument(value: str) -> str:
     return f'"{value}"' if not value or any(char.isspace() or char in _CMD_META_CHARS for char in value) else value
 
 
-def _build_cmd_invocation(args: list[str]) -> str:
-    return " ".join(_quote_cmd_argument(value) for value in args)
+def _build_cmd_invocation(program_path: str, args: list[str]) -> str:
+    return " ".join(["call", _quote_cmd_program_path(program_path), *(_quote_cmd_argument(value) for value in args)])
 
 
 def _quote_cmd_program_path(value: str) -> str:
@@ -636,7 +636,7 @@ class LocalSandbox(Sandbox):
             shell = self._find_first_available_shell(("cmd.exe", "cmd"))
             if shell is None:
                 raise RuntimeError("cmd.exe is required to run .cmd/.bat programs")
-            command_line = " ".join(["call", _quote_cmd_program_path(resolved_program), *(_quote_cmd_argument(value) for value in resolved_args)])
+            command_line = _build_cmd_invocation(resolved_program, resolved_args)
             # Passing nested quotes as a list makes Python escape them for
             # CommandLineToArgvW; cmd.exe then sees the backslashes literally.
             # Build the complete process command line after validating every

@@ -112,6 +112,18 @@ def test_execute_program_uses_cmd_call_for_cmd_files(monkeypatch) -> None:
     assert calls[0] == f'{shell_path} /d /s /c "{expected_command}"'
 
 
+def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: ("ok", "", 0, False)))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    with patch.object(local_sandbox, "_build_cmd_invocation", wraps=local_sandbox._build_cmd_invocation) as helper:
+        sandbox.execute_program("/root/tools/build.cmd", ["--release"])
+
+    helper.assert_called_once()
+
+
 def test_execute_program_allows_parentheses_in_configured_cmd_program_path(monkeypatch) -> None:
     monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[list[str] | str] = []
