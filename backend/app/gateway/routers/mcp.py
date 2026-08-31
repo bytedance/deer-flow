@@ -614,6 +614,11 @@ def _ensure_no_masked_secrets(server: McpServerConfigResponse) -> None:
             if _contains_masked_sensitive_extra_value(str(key), value):
                 reject(f"headers_from_context extra config key '{key}'")
 
+    for tool_name, tool_override in server.tools.items():
+        for key, value in (tool_override.model_extra or {}).items():
+            if _contains_masked_sensitive_extra_value(str(key), value):
+                reject(f"tools override '{tool_name}' extra config key '{key}'")
+
 
 def _merge_extra_value_preserving_masked(key: str, incoming_value: Any, existing_value: Any, *, existing_present: bool) -> Any:
     if incoming_value == _MASKED_VALUE and _is_sensitive_extra_key(key):
@@ -832,6 +837,10 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
         # an operator store a secret-bearing key that round-trips through PUT.
         masked_ch_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.headers_from_context.model_extra or {}).items()}
         masked_headers_from_context = server.headers_from_context.model_copy(update=masked_ch_extra)
+    masked_tools = {}
+    for tool_name, tool_override in server.tools.items():
+        masked_tool_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (tool_override.model_extra or {}).items()}
+        masked_tools[tool_name] = tool_override.model_copy(update=masked_tool_extra)
     masked_extra = {key: _MASKED_VALUE if _is_sensitive_extra_key(key) else _mask_sensitive_extra_value(value) for key, value in (server.model_extra or {}).items()}
     return server.model_copy(
         update={
@@ -840,6 +849,7 @@ def _mask_server_config(server: McpServerConfigResponse) -> McpServerConfigRespo
             "oauth": masked_oauth,
             "user_auth": masked_user_auth,
             "headers_from_context": masked_headers_from_context,
+            "tools": masked_tools,
             **masked_extra,
         }
     )
@@ -1033,12 +1043,36 @@ def _merge_preserving_secrets(
             # are restored from the stored block.
             merged_context_headers = incoming_ch.model_copy(update=merged_ch_extra)
 
+    merged_tools = {}
+    for tool_name, incoming_tool in incoming.tools.items():
+        base_tool = existing.tools.get(tool_name)
+        base_tool_extra = (base_tool.model_extra or {}) if base_tool is not None else {}
+        merged_tool_extra: dict[str, Any] = {}
+        for key, value in (incoming_tool.model_extra or {}).items():
+            merged_tool_extra[key] = _merge_extra_value_preserving_masked(
+                key,
+                value,
+                base_tool_extra.get(key),
+                existing_present=key in base_tool_extra,
+            )
+        if preserve_omitted_fields:
+            for key, value in base_tool_extra.items():
+                if key not in (incoming_tool.model_extra or {}):
+                    merged_tool_extra[key] = value
+        merged_routing = incoming_tool.routing
+        if preserve_omitted_fields and base_tool is not None and "routing" not in incoming_tool.model_fields_set:
+            merged_routing = base_tool.routing
+        merged_tools[tool_name] = incoming_tool.model_copy(
+            update={"routing": merged_routing, **merged_tool_extra},
+        )
+
     update = {
         "env": merged_env,
         "headers": merged_headers,
         "oauth": merged_oauth,
         "user_auth": merged_user_auth,
         "headers_from_context": merged_context_headers,
+        "tools": merged_tools,
     }
     if preserve_omitted_fields and "user_auth" not in incoming.model_fields_set:
         update["user_auth"] = existing.user_auth
@@ -1495,7 +1529,8 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
     """Update one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        _validate_mcp_update_request(McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}))
+        if body.server.enabled:
+            _validate_mcp_update_request(McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}))
         reloaded_servers = await asyncio.to_thread(_apply_mcp_server_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
