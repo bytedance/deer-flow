@@ -387,6 +387,14 @@ _SHELL_OPERATORS = ";&|"
 _ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
+def _carries_summary_shape(text: str) -> bool:
+    """Whether *text* carries any recognized test-summary shape (pass, fail,
+    or zero-test veto). The pass shapes match as substrings, so
+    subagent-chosen strings — a ``cd`` argument, a ``CDPATH`` value — must
+    not be allowed to lend the recorded tail a summary shape."""
+    return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text))
+
+
 def _is_silent_segment(tokens: list[str]) -> bool:
     """Whether a preceding segment is provably output-free, by invocation
     form — not by executable name alone: ``pushd``/``popd`` print the
@@ -396,21 +404,32 @@ def _is_silent_segment(tokens: list[str]) -> bool:
     script emits (the subagent controls the filesystem and can craft one),
     so sourced prefixes are never provably silent.
 
-    ``cd`` stays classified silent: it only prints via CDPATH (a bare path,
-    never a test-summary shape) and the workspace ``cd dir &&`` wrapper is
-    the norm — bash_tool auto-prefixes it for every local command.
+    ``cd`` is silent only when it cannot print a summary shape: with CDPATH
+    set it prints the resolved destination — subagent-chosen text. One
+    ``mkdir 'all tests passed'`` plus ``cd`` into it (or a shaped CDPATH
+    value, which becomes part of the printed path) lends the tail a pass
+    shape, so a ``cd`` whose argument carries a summary shape — or one
+    preceded by a shaped ``CDPATH=`` assignment — is not provably silent.
+    The everyday shape-free ``cd dir &&`` wrapper stays silent (bash_tool
+    auto-prefixes it for every local command).
     """
     stripped = _strip_env_assignments(tokens)
     if not stripped:
         return True  # pure VAR=value assignments
+    assignments = tokens[: len(tokens) - len(stripped)]
     executable = os.path.basename(stripped[0])
     args = stripped[1:]
     if executable == "cd":
-        return True
+        if any(_carries_summary_shape(arg) for arg in args):
+            return False
+        return not any(assignment.startswith("CDPATH=") and _carries_summary_shape(assignment) for assignment in assignments)
     if executable == "export":
         # ``export A=1`` / ``export NAME`` print nothing; bare ``export``
-        # and ``export -p`` print the environment.
-        return bool(args) and "-p" not in args
+        # and ``export -p`` print the environment. A shaped CDPATH value
+        # re-opens the cd print channel above.
+        if not args or "-p" in args:
+            return False
+        return not any(arg.startswith("CDPATH=") and _carries_summary_shape(arg) for arg in args)
     if executable == "unset":
         return bool(args)
     # pushd/popd (print the stack), umask/ulimit (print forms), source/. and
@@ -608,6 +627,14 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
             index += 1
         if not found:
             return "no_match"
+    if negated and not _criterion_scopes_selection(expected):
+        # A criterion with no positional selection target (bare ``pytest``,
+        # ``make test``) stands for the runner's DEFAULT selection: any
+        # negating option narrows it, and there is no consumed criterion
+        # token for the overlap check below to catch it with —
+        # ``pytest --ignore tests/security`` never ran the selection the
+        # criterion means.
+        return "unprovable"
     # An expected target negated elsewhere in the same command was excluded
     # even though a positional occurrence matched — the passing summary comes
     # from the remaining targets. The overlap check is by path/nodeid

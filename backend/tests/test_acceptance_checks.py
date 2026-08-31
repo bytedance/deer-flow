@@ -800,6 +800,60 @@ class TestTestsPassedLeaf:
             assert leaf["checked"] is False, wrapped
             assert leaf["detail"] == "recorded output is not attributable to the matched segment", wrapped
 
+    def test_cdpath_print_lends_no_pass_shape(self):
+        """PR review: one ``mkdir`` plus one ``export`` mints a passing
+        summary for a quiet command — CDPATH makes ``cd`` print the resolved
+        destination, and the pass shapes match as substrings."""
+        executions = [_bash_execution("export CDPATH=.; cd 'all tests passed'; make test", output_tail="all tests passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+        assert leaf["detail"] == "recorded output is not attributable to the matched segment"
+
+    def test_cd_argument_with_fail_shape_is_not_silent(self):
+        """A shaped destination is untrusted in the failing direction too —
+        attribution fails closed (UNVERIFIED, not a does-not-hold)."""
+        executions = [_bash_execution("CDPATH=. cd '1 failed'; make test", output_tail="1 failed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_shaped_cdpath_value_is_not_silent(self):
+        """The CDPATH value becomes part of the path ``cd`` prints, so a
+        shaped value opens the same channel with an innocent ``cd`` arg."""
+        executions = [_bash_execution("export CDPATH='all tests passed'; cd x; make test", output_tail="all tests passed/x")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_shape_free_cd_wrapper_stays_silent(self):
+        """The everyday CDPATH + ``cd dir`` wrapper keeps matching."""
+        executions = [_bash_execution("export CDPATH=.; cd backend; make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    @pytest.mark.parametrize(
+        ("command", "criterion"),
+        (
+            ("pytest --ignore tests/security", "pytest"),
+            ("pytest --deselect tests/test_slow.py", "pytest"),
+            ("python -m pytest --ignore tests/security", "python -m pytest"),
+        ),
+    )
+    def test_bare_criterion_any_negating_option_is_unprovable(self, command, criterion):
+        """PR review: a bare criterion stands for the runner's default
+        selection — any negating option narrows it, and no consumed
+        criterion token exists for the overlap check to catch it with."""
+        executions = [_bash_execution(command, output_tail="7 passed")]
+        verdict = check_acceptance_criteria([f"tests_passed:{criterion}"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False, command
+        assert leaf["detail"] == "matching segment cannot be proven to have executed", command
+
     def test_redirected_final_segment_output_is_not_test_evidence(self):
         """PR review: ``<``/``>`` are word characters to the parser, so a
         redirection is invisible to the matcher — ``pytest tests/ > /dev/null``

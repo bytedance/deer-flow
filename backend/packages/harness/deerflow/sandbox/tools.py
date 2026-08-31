@@ -1659,9 +1659,12 @@ def _truncate_bash_output(output: str, max_chars: int) -> str:
     ``_BASH_EXIT_MARKER_TAIL_RE``): its budget comes out of the tail, not
     out of the status evidence.
 
-    The returned string (including the truncation marker) is guaranteed to be
-    no longer than max_chars characters. Pass max_chars=0 to disable truncation
-    and return the full output unchanged.
+    The returned string (including the truncation marker) is no longer than
+    the EFFECTIVE limit, ``max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)`` —
+    the 32-char floor is applied before anything else (even when the output
+    carries no exit marker) so a trailing marker always stays preservable,
+    meaning a configured limit in 1..31 yields up to 32 chars. Pass
+    max_chars=0 to disable truncation and return the full output unchanged.
     """
     if max_chars == 0:
         return output
