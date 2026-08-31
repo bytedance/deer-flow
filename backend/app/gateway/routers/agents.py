@@ -589,4 +589,26 @@ async def delete_agent(name: str) -> None:
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
 
+    # Best-effort: drop buffered memory extraction for this agent so a debounce
+    # timer cannot resurrect per-agent memory after the files are gone (#5037).
+    # Failure here must not fail the already-successful delete.
+    try:
+        from deerflow.agents.memory.manager import get_memory_manager
+        from deerflow.config.memory_config import get_memory_config
+
+        if get_memory_config().enabled:
+            cancelled = get_memory_manager().cancel_by_agent(name, user_id=user_id)
+            if cancelled:
+                logger.info(
+                    "Cancelled %d pending memory update(s) for deleted agent '%s'",
+                    cancelled,
+                    name,
+                )
+    except Exception:
+        logger.warning(
+            "Failed to cancel pending memory updates for deleted agent '%s' (non-fatal)",
+            name,
+            exc_info=True,
+        )
+
     logger.info(f"Deleted agent '{name}'")

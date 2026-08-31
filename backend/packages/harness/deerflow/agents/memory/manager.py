@@ -314,6 +314,27 @@ class MemoryManager(BaseModel):
         """
         raise NotImplementedError(f"clear_memory not supported by {type(self).__name__}")
 
+    def cancel_by_agent(
+        self,
+        agent_name: str | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> int:
+        """Cancel buffered memory-extraction work for a scope.
+
+        Backends without a debounce queue have nothing to cancel and inherit
+        the default ``0``. DeerMem drops matching pending contexts so a deleted
+        or cleared agent cannot be resurrected by a late timer fire.
+
+        ``agent_name=None`` cancels all buffered work for ``user_id`` (or the
+        whole process-local queue when ``user_id`` is also ``None``). An
+        explicit agent name cancels only that agent's pending contexts.
+
+        Returns:
+            Number of pending contexts cancelled. Default: ``0``.
+        """
+        return 0
+
     def import_memory(
         self,
         memory_data: dict[str, Any],
