@@ -173,6 +173,14 @@ async def _finalize_interrupted_subagent(
             else:
                 terminal_result = waited
         except asyncio.CancelledError:
+            # The shielded wait surfaces an outer cancellation here. The
+            # cancellation branch REQUIRES this absorb — re-raising would
+            # abort the unwind before the deferred-cleanup attachment. The
+            # generic-error branch shares this helper, so a cancellation
+            # landing inside its grace wait is absorbed too; that branch
+            # re-checks task.cancelling() after the unwind and re-raises
+            # CancelledError so the node still ends as an interrupted run
+            # (see the unwind call site in task_tool).
             pass
 
         # Report whatever the subagent collected (even if we timed out).
@@ -209,7 +217,7 @@ async def _finalize_interrupted_subagent(
 
 
 def _deliver_final_usage_report(
-    runtime: Runtime,
+    usage_recorder: Any,
     result: Any,
     report_loop: asyncio.AbstractEventLoop | None,
     *,
@@ -227,7 +235,13 @@ def _deliver_final_usage_report(
     normally and a generic poller error becomes an error ``ToolMessage``, both
     handing control back to the lead agent — so ``call_soon_threadsafe``
     delivers the report on the journal's own loop, serialized with every other
-    journal access.
+    journal access. ``usage_recorder`` is likewise resolved at unwind time:
+    the deferred cleaner must retain only the handler, not the whole
+    ``runtime`` (whose journal and event store belong to the parent run and
+    would be pinned for the cleaner's whole poll budget otherwise).
+
+    A ``None`` recorder means this run has no journal at all — skip without
+    touching any loop.
 
     On the synchronous ``asyncio.run`` path the loop may already be closed by
     the time the deferred cleaner reaches a terminal result. The report is
@@ -240,6 +254,9 @@ def _deliver_final_usage_report(
     snapshot's ``usage_reported`` flag so records accumulated after the
     snapshot are counted; the journal itself dedupes by ``source_run_id``.
     """
+    if usage_recorder is None:
+        logger.debug("Deferred final usage report for execution %s skipped: no usage recorder on this run", execution_id)
+        return
     if report_loop is None:
         logger.info(
             "Dropping deferred final usage report for execution %s: no parent loop captured (%d usage records unaccounted)",
@@ -251,7 +268,7 @@ def _deliver_final_usage_report(
         # A lambda, not plain arguments: call_soon_threadsafe forwards keyword
         # arguments to the loop machinery (only ``context`` is its own), so
         # passing ``final=True`` through it raises TypeError.
-        report_loop.call_soon_threadsafe(lambda: _report_subagent_usage(runtime, result, final=True))
+        report_loop.call_soon_threadsafe(lambda: _report_usage_records(usage_recorder, result, final=True))
     except Exception:
         # Loop closed between the capture and this call, or scheduling was
         # rejected — same drop rationale and same info-level visibility.
@@ -265,7 +282,7 @@ def _deliver_final_usage_report(
 
 
 async def _deferred_cleanup_subagent_task(
-    runtime: Runtime,
+    usage_recorder: Any,
     execution_id: str,
     trace_id: str,
     max_polls: int,
@@ -273,6 +290,12 @@ async def _deferred_cleanup_subagent_task(
     report_loop: asyncio.AbstractEventLoop | None = None,
 ) -> None:
     """Keep polling an interrupted subagent until it can be safely removed.
+
+    Only the resolved usage recorder is retained (plus ids and the captured
+    report loop) — never the whole ``runtime``: the strongly-referenced
+    cleanup task lives for up to the full poll budget, and through
+    ``runtime`` it would pin the parent run's journal and event store for
+    that entire window.
 
     On a terminal result, schedule the subagent's FINAL usage report (deltas
     since the unwind snapshot included) onto the parent run's loop BEFORE
@@ -296,7 +319,7 @@ async def _deferred_cleanup_subagent_task(
         elif _is_subagent_terminal(result):
             # Never-raise by contract: delivery problems (closed parent loop)
             # are logged inside and must not block the registry removal.
-            _deliver_final_usage_report(runtime, result, report_loop, execution_id=execution_id)
+            _deliver_final_usage_report(usage_recorder, result, report_loop, execution_id=execution_id)
             cleanup_background_task(execution_id)
             return
         if cleanup_poll_count >= max_polls:
@@ -367,14 +390,18 @@ def _schedule_deferred_subagent_cleanup(
     unwind path that is already handling an error.
     """
     logger.debug(f"[trace={trace_id}] Scheduling deferred cleanup for cancelled execution {execution_id}")
-    # The unwind paths run on the parent run's loop; capture it so the
-    # deferred final usage report can be delivered back onto the loop that
-    # owns the RunJournal (see ``_deliver_final_usage_report``).
+    # Resolve both cross-loop dependencies here, on the unwind path's loop:
+    # the parent run's loop, so the deferred final usage report can be
+    # delivered back onto the loop that owns the RunJournal (see
+    # ``_deliver_final_usage_report``), and the usage recorder itself, so the
+    # cleaner retains only the handler instead of pinning the whole
+    # ``runtime`` (journal + event store) for its whole poll budget.
     try:
         report_loop: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
     except RuntimeError:
         report_loop = None
-    coro = _deferred_cleanup_subagent_task(runtime, execution_id, trace_id, max_polls, report_loop=report_loop)
+    usage_recorder = _find_usage_recorder(runtime)
+    coro = _deferred_cleanup_subagent_task(usage_recorder, execution_id, trace_id, max_polls, report_loop=report_loop)
     try:
         cleanup_handle = run_on_isolated_subagent_loop(coro)
     except Exception:
@@ -440,31 +467,43 @@ def _summarize_usage(records: list[dict] | None) -> dict | None:
     }
 
 
-def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False) -> None:
-    """Report subagent token usage to the parent RunJournal, if available.
+def _report_usage_records(recorder: Any, result: Any, *, final: bool = False) -> None:
+    """Deliver usage records to a resolved recorder (flag-gated, never raises).
 
-    Each subagent task's snapshot must be reported only once (guarded by
-    usage_reported). The deferred cleaner's final report passes ``final=True``
-    to bypass that flag: records accumulated after the snapshot are still
-    delivered, and the journal dedupes per ``source_run_id`` so nothing is
-    double-counted. Both call sites run on the parent run's loop — directly
-    from the poller, or via ``call_soon_threadsafe`` from the deferred
-    cleaner — preserving the journal's ``deerflow_loop_bound`` contract.
+    Shared core of both report paths: the unwind reports directly with a
+    runtime (resolving the recorder on the parent loop), while the deferred
+    cleaner delivers onto the parent loop with the recorder resolved at
+    unwind time — retaining only the handler, never the whole ``runtime``
+    (which pins the run's journal and event store for the cleaner's whole
+    poll budget otherwise).
     """
     if not final and getattr(result, "usage_reported", True):
         return
     records = getattr(result, "token_usage_records", None) or []
     if not records:
         return
-    journal = _find_usage_recorder(runtime)
-    if journal is None:
+    if recorder is None:
         logger.debug("No usage recorder found in runtime callbacks — subagent token usage not recorded")
         return
     try:
-        journal.record_external_llm_usage_records(records)
+        recorder.record_external_llm_usage_records(records)
         result.usage_reported = True
     except Exception:
         logger.warning("Failed to report subagent token usage", exc_info=True)
+
+
+def _report_subagent_usage(runtime: Any, result: Any, *, final: bool = False) -> None:
+    """Report subagent token usage to the parent RunJournal, if available.
+
+    Each subagent task's snapshot must be reported only once (guarded by
+    usage_reported). The deferred cleaner's final report bypasses that flag
+    via ``final=True``: records accumulated after the snapshot are still
+    delivered, and the journal dedupes per ``source_run_id`` so nothing is
+    double-counted. Both call sites run on the parent run's loop — directly
+    from the poller, or via ``call_soon_threadsafe`` from the deferred
+    cleaner — preserving the journal's ``deerflow_loop_bound`` contract.
+    """
+    _report_usage_records(_find_usage_recorder(runtime), result, final=final)
 
 
 def _get_runtime_app_config(runtime: Any) -> "AppConfig | None":
@@ -1019,4 +1058,12 @@ async def task_tool(
                 exc_info=True,
             )
         await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count, grace_seconds=_UNEXPECTED_EXIT_GRACE_SECONDS)
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
+            # A graph-node cancellation landed inside the grace wait and was
+            # absorbed by the shared unwind (its never-raise contract catches
+            # CancelledError so the deferred-cleanup attachment still runs).
+            # Honour it here rather than reporting a tool failure: the node
+            # must end as an interrupted run, not a failed tool call.
+            raise asyncio.CancelledError
         raise

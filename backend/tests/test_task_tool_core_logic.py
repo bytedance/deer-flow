@@ -1799,8 +1799,6 @@ def test_deferred_cleanup_drops_final_usage_when_parent_loop_closed(monkeypatch)
     a ``to_thread`` report would instead race the journal from a foreign
     thread while some other run's loop may still touch it."""
     config = _make_subagent_config()
-    reported: list = []
-    reported_finals: list = []
     cleanup_calls: list[str] = []
     cancel_calls: list[str] = []
     emit_calls = 0
@@ -1817,6 +1815,22 @@ def test_deferred_cleanup_drops_final_usage_when_parent_loop_closed(monkeypatch)
         usage_reported=True,
         token_usage_records=[{"source_run_id": "run-1", "total_tokens": 10}],
     )
+
+    class LoopPinnedJournal:
+        """Real-recorder path: captures the running loop of every call, so a
+        cross-thread report surfaces as a wrong-loop (or no-loop) entry."""
+
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, list]] = []
+
+        def record_external_llm_usage_records(self, records):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = None
+            self.calls.append((loop, list(records)))
+
+    journal = LoopPinnedJournal()
 
     persistent_loop = asyncio.new_event_loop()
     loop_thread = threading.Thread(target=persistent_loop.run_forever, name="test-final-usage-cleanup-loop", daemon=True)
@@ -1863,20 +1877,29 @@ def test_deferred_cleanup_drops_final_usage_when_parent_loop_closed(monkeypatch)
     monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id_arg: cancel_calls.append(execution_id_arg))
     monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda execution_id_arg: cleanup_calls.append(execution_id_arg))
     monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", transport_to_persistent_loop)
-    monkeypatch.setattr(
-        task_tool_module,
-        "_report_subagent_usage",
-        # Faithful to the real gating: a non-final report returns early when
-        # the snapshot flag is set, only final=True bypasses it.
-        lambda runtime, r, **kwargs: None if (not kwargs.get("final", False) and getattr(r, "usage_reported", False)) else (reported.append(r), reported_finals.append(kwargs.get("final", False))),
-    )
     monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    runtime = SimpleNamespace(
+        state={
+            "sandbox": {"sandbox_id": "local"},
+            "thread_data": {
+                "workspace_path": "/tmp/workspace",
+                "uploads_path": "/tmp/uploads",
+                "outputs_path": "/tmp/outputs",
+            },
+        },
+        context={"thread_id": "thread-1"},
+        config={
+            "metadata": {"model_name": "ark-model", "trace_id": "trace-1"},
+            "callbacks": [journal],
+        },
+    )
 
     try:
         with pytest.raises(RuntimeError, match="status emit boom"):
             _run_task_tool(
-                runtime=_make_runtime(),
+                runtime=runtime,
                 description="test",
                 prompt="p",
                 subagent_type="general-purpose",
@@ -1890,18 +1913,15 @@ def test_deferred_cleanup_drops_final_usage_when_parent_loop_closed(monkeypatch)
 
         # The deferred cleaner reaches terminal off the caller thread and
         # removes the entry. The caller loop is closed by then, so the
-        # loop-pinned final report is dropped: the stub accepts ``final=``
-        # (via **kwargs), so if the delivery had gone through a worker
-        # thread instead, reported_finals would contain True here.
+        # loop-pinned final report is dropped: the recorder is real and
+        # present (resolved at unwind time), so an empty journal proves the
+        # drop is loop-based — a worker-thread report would have recorded
+        # with no running loop instead.
         deadline = time.monotonic() + 10.0
         while time.monotonic() < deadline and not cleanup_calls:
             time.sleep(0.05)
         assert cleanup_calls == [execution_id], "deferred cleanup must remove the terminal entry"
-        # The result is still RUNNING at unwind time (it only reaches terminal
-        # from the deferred cleaner's thread), so no snapshot report ran
-        # either; nothing here may call into the journal once the loop closed.
-        assert reported == [], "no report may fire after the caller loop closed — the final one must be dropped, not threaded in"
-        assert reported_finals.count(True) == 0, "closed parent loop must drop the final report, not deliver it cross-thread"
+        assert journal.calls == [], "closed parent loop must drop the final report, not deliver it cross-thread"
     finally:
         for handle in scheduled_handles:
             try:
@@ -2061,6 +2081,111 @@ def test_deferred_final_usage_reported_on_parent_loop_with_real_recorder(monkeyp
         parent_loop.call_soon_threadsafe(parent_loop.stop)
         parent_thread.join(timeout=5)
         parent_loop.close()
+
+
+@pytest.mark.asyncio
+async def test_unexpected_error_grace_wait_cancellation_is_honored(monkeypatch):
+    """A graph-node cancellation landing inside the generic-error grace wait
+    must surface as CancelledError, not the original poller error.
+
+    The shared unwind absorbs CancelledError (its never-raise contract keeps
+    the deferred-cleanup attachment alive), so without the post-unwind
+    ``task.cancelling()`` re-check the node would end as a failed tool call
+    instead of an interrupted run."""
+    config = _make_subagent_config()
+    cancel_calls: list[str] = []
+    emit_calls = 0
+    unwind_entered = asyncio.Event()
+    execution_id = "exec-grace-cancel"
+
+    async def fail_on_status_emit(event, *, writer=None):
+        nonlocal emit_calls
+        emit_calls += 1
+        if emit_calls >= 2:
+            raise RuntimeError("status emit boom")
+        return None
+
+    async def absorbing_finalize(runtime_arg, execution_id_arg, trace_id_arg, max_polls, grace_seconds=None):
+        # Mimic the production unwind: park inside the grace wait and absorb
+        # the outer cancellation, then return so the tool's generic-error
+        # branch continues past the unwind.
+        unwind_entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            pass
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(
+        task_tool_module,
+        "SubagentExecutor",
+        type("DummyExecutor", (), {"__init__": lambda self, **kwargs: None, "execute_async": lambda self, prompt, task_id=None: execution_id}),
+    )
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: config)
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]))
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module, "aemit_custom_event", fail_on_status_emit)
+    monkeypatch.setattr(task_tool_module, "request_cancel_background_task", lambda execution_id_arg: cancel_calls.append(execution_id_arg))
+    monkeypatch.setattr(task_tool_module, "_finalize_interrupted_subagent", absorbing_finalize)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    coroutine = getattr(task_tool_module.task_tool, "coroutine", None)
+    assert coroutine is not None
+    tool_task = asyncio.create_task(
+        coroutine(
+            runtime=_make_runtime(),
+            description="test",
+            prompt="p",
+            subagent_type="general-purpose",
+            tool_call_id="tc-grace-cancel",
+        )
+    )
+    await asyncio.wait_for(unwind_entered.wait(), timeout=10.0)
+    tool_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await tool_task
+    assert cancel_calls == [execution_id]
+
+
+@pytest.mark.asyncio
+async def test_deferred_cleanup_does_not_retain_runtime(monkeypatch):
+    """The deferred cleaner must retain only the resolved usage recorder and
+    ids — never the whole ``runtime``. The strongly-referenced cleanup task
+    lives for up to the full poll budget; through ``runtime`` it would pin
+    the parent run's journal and event store for that entire window, worst
+    on the polling-timeout path where a stuck subagent pins its run's
+    journal for a second full timeout after the tool already returned."""
+    orig_sleep = asyncio.sleep
+    current_loop = asyncio.get_running_loop()
+
+    def transport_to_current_loop(coro):
+        return asyncio.run_coroutine_threadsafe(coro, current_loop)
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    # Never terminal: the cleaner keeps polling for its whole budget.
+    monkeypatch.setattr(task_tool_module, "get_background_task_result", lambda _: _make_result(FakeSubagentStatus.RUNNING, ai_messages=[]))
+    monkeypatch.setattr(task_tool_module, "cleanup_background_task", lambda _: None)
+    monkeypatch.setattr(task_tool_module, "run_on_isolated_subagent_loop", transport_to_current_loop)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", lambda _: orig_sleep(0))
+
+    # SimpleNamespace rejects weakref; a plain class instance does not. Only
+    # runtime.config is read on the scheduling path (recorder resolution).
+    class WeakrefableRuntime:
+        config = {"metadata": {"model_name": "ark-model", "trace_id": "trace-1"}}
+
+    runtime = WeakrefableRuntime()
+    runtime_ref = weakref.ref(runtime)
+    handle = task_tool_module._schedule_deferred_subagent_cleanup(runtime, "exec-retain", "trace-retain", 50)
+    assert handle in task_tool_module._deferred_cleanup_tasks
+    del runtime
+    gc.collect()
+
+    assert runtime_ref() is None, "deferred cleanup must not pin the run runtime (journal + event store) for its poll budget"
+
+    # Let the cleaner exhaust its budget (no-op sleeps) so the handle settles.
+    await asyncio.wait_for(asyncio.wrap_future(handle), timeout=10.0)
+    task_tool_module._deferred_cleanup_tasks.discard(handle)
 
 
 def test_execute_async_failure_leaves_no_background_residue(monkeypatch):
