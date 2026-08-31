@@ -307,10 +307,13 @@ extensions:
     - deerflow.agents.middlewares.my_middleware:MyMiddleware
 ```
 
-Configured middleware runs in both the lead-agent and subagent pipelines after
-the built-in middleware and optional loop/token guards, but before the
-terminal-response, safety, and clarification tail. Treat middleware class paths
-as trusted operator configuration because loading one executes Python code.
+Configured middleware runs after the built-in middleware and optional loop/token
+guards. On the lead-agent pipeline, it runs before the terminal-response,
+model-length, safety, and clarification tail; subagents have no
+terminal-response, model-length, or clarification stage, so configured middleware is
+followed by the optional safety guard and durable-context, summarization,
+date-context, and system-message-coalescing middlewares. Treat middleware class
+paths as trusted operator configuration because loading one executes Python code.
 Lead-agent-only embedded callers can instead pass middleware instances through
 `DeerFlowClient(middlewares=[...])` or
 `create_deerflow_agent(extra_middleware=[...])`. Both embedded APIs affect only
