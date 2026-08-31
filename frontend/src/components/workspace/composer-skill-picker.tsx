@@ -1,7 +1,7 @@
 "use client";
 
 import { BlocksIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { PromptInputButton } from "@/components/ai-elements/prompt-input";
 import {
@@ -44,6 +44,11 @@ export function ComposerSkillPicker({
 }: ComposerSkillPickerProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  // A pick hands focus to the composer's inline editor (applySkillSuggestion
+  // focuses it via rAF). Radix's close-time restore would otherwise pull
+  // focus back to this trigger after that rAF — plain dismissals keep the
+  // default restore.
+  const pickedRef = useRef(false);
   const selectableSkills = useMemo(() => getSelectableSkills(skills), [skills]);
 
   return (
@@ -52,13 +57,23 @@ export function ComposerSkillPicker({
         <DialogTrigger asChild>
           <PromptInputButton
             aria-label={t.inputBox.skillPickerLabel}
+            className="px-2!"
+            data-testid="skill-picker-button"
             disabled={(disabled ?? false) || selectableSkills.length === 0}
           >
             <BlocksIcon className="size-3" />
           </PromptInputButton>
         </DialogTrigger>
       </Tooltip>
-      <DialogContent className="overflow-hidden p-0 sm:max-w-[400px]">
+      <DialogContent
+        className="overflow-hidden p-0 sm:max-w-[400px]"
+        onCloseAutoFocus={(event) => {
+          if (pickedRef.current) {
+            pickedRef.current = false;
+            event.preventDefault();
+          }
+        }}
+      >
         <DialogTitle className="sr-only">
           {t.inputBox.skillPickerLabel}
         </DialogTitle>
@@ -75,6 +90,7 @@ export function ComposerSkillPicker({
                   key={skill.name}
                   value={`${skill.name} ${skill.description}`}
                   onSelect={() => {
+                    pickedRef.current = true;
                     setOpen(false);
                     onPick(skill);
                   }}

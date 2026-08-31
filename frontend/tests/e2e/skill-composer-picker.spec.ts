@@ -52,7 +52,7 @@ test.describe("Composer skill picker", () => {
       const draft = "run the quarterly report";
       await textarea.fill(draft);
 
-      await page.getByRole("button", { name: "Skills" }).click();
+      await page.getByTestId("skill-picker-button").click();
       const search = page.getByPlaceholder(/search skills/i);
       await expect(search).toBeVisible();
       // Search narrows the list; picking the item closes the picker and
@@ -74,7 +74,7 @@ test.describe("Composer skill picker", () => {
 
       // Re-picking with a skill already active must swap the chip and keep
       // the draft — the same capture-and-reseed path runs from chip mode.
-      await page.getByRole("button", { name: "Skills" }).click();
+      await page.getByTestId("skill-picker-button").click();
       await expect(search).toBeVisible();
       await search.fill("frontend");
       await page.getByRole("option", { name: /frontend-design/ }).click();
@@ -84,6 +84,13 @@ test.describe("Composer skill picker", () => {
       ).toBeVisible();
       await expect(composer).toHaveText(draft);
 
+      // Pin the focus handoff: after the dialog closes, focus is contested
+      // between Radix's restore (back to the toolbar trigger) and the
+      // composer's post-pick rAF. The picker's whole point is going straight
+      // from browsing to typing, so the editor must win — locator.press()
+      // would focus the element itself and hide a regression, hence the
+      // explicit assertion before it.
+      await expect(composer).toBeFocused();
       await composer.press("End");
       await composer.press("Enter");
 
