@@ -60,7 +60,11 @@ middleware exemption is prefix-based, so two contract tests pin that nothing
 non-GET may mount under `/api/shares/`). Properties: per-request
 expiry/revocation checks with indistinguishable 404s for unknown/revoked/
 expired; all success and known 404 paths carry `Referrer-Policy: no-referrer`
-and `Cache-Control: no-store` through response or exception headers; per-IP
+and `Cache-Control: no-store` and
+`Content-Security-Policy: frame-ancestors 'none'` (the page must not be
+framed — a real conversation embedded in a phishing page lends it
+credibility; frame-ancestors is response-header-only, so it belongs on the
+Gateway) through response or exception headers; per-IP
 resolve throttle (in-memory, per-worker — a courtesy control,
 the token is 256-bit unguessable; the bucket key uses the deployment-wide
 trusted-proxy model from `app.gateway.client_ip`, shared with the login

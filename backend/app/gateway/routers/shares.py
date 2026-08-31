@@ -54,6 +54,11 @@ _public_resolve_hits: dict[str, list[float]] = {}
 _PUBLIC_RESPONSE_HEADERS = {
     "Referrer-Policy": "no-referrer",
     "Cache-Control": "no-store",
+    # The bearer-URL page must not be embeddable: a framed real conversation
+    # lends credibility to phishing. frame-ancestors can ONLY be a response
+    # header (a <meta> CSP cannot express it), which is why this lives here
+    # and not in the frontend page.
+    "Content-Security-Policy": "frame-ancestors 'none'",
 }
 
 

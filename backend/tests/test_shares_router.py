@@ -278,6 +278,7 @@ def test_public_get_resolves_snapshot_without_thread_access(tmp_path):
     # served the moment the server rejects them.
     assert response.headers["Referrer-Policy"] == "no-referrer"
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
 
 
 def test_public_get_is_exempt_from_auth_middleware(tmp_path):
@@ -295,6 +296,7 @@ def test_public_get_is_exempt_from_auth_middleware(tmp_path):
     assert response.status_code == 404  # route verdict, not middleware 401
     assert response.headers["Referrer-Policy"] == "no-referrer"
     assert response.headers["Cache-Control"] == "no-store"
+    assert response.headers["Content-Security-Policy"] == "frame-ancestors 'none'"
 
 
 # ── The sharpest edges: auth-disabled mode and null-owner threads ─────────
