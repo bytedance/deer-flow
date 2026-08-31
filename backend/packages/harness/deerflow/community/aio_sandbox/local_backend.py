@@ -11,6 +11,7 @@ import ipaddress
 import json
 import logging
 import os
+import posixpath
 import shlex
 import socket
 import subprocess
@@ -522,6 +523,7 @@ class LocalContainerBackend(SandboxBackend):
         sandbox_id: str,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
+        config_mount_exclusion_root: str | None = None,
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
@@ -532,6 +534,10 @@ class LocalContainerBackend(SandboxBackend):
             thread_id: Thread ID for which the sandbox is being created. Useful for backends that want to organize sandboxes by thread.
             sandbox_id: Deterministic sandbox identifier (used in container name).
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
+            config_mount_exclusion_root: Exclude config-level mounts at or
+                below this container path. Policy-scoped skill projections use
+                this to prevent a nested operator mount from overlaying an
+                excluded skill back into the restricted view.
             user_id: User bucket already reflected in extra_mounts. Accepted for
                 interface compatibility with remote backends.
             provision_lark_cli_runtime: Ignored — the local backend provisions the
@@ -559,7 +565,12 @@ class LocalContainerBackend(SandboxBackend):
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
             try:
-                container_id = self._start_container(container_name, port, extra_mounts)
+                container_id = self._start_container(
+                    container_name,
+                    port,
+                    extra_mounts,
+                    config_mount_exclusion_root=config_mount_exclusion_root,
+                )
                 break
             except RuntimeError as exc:
                 release_port(port)
@@ -788,6 +799,8 @@ class LocalContainerBackend(SandboxBackend):
         container_name: str,
         port: int,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        config_mount_exclusion_root: str | None = None,
     ) -> str:
         """Start a new container.
 
@@ -795,6 +808,8 @@ class LocalContainerBackend(SandboxBackend):
             container_name: Name for the container.
             port: Host port to map to container port 8080.
             extra_mounts: Additional volume mounts.
+            config_mount_exclusion_root: Config-level mounts at or below this
+                container root are omitted for this container only.
 
         Returns:
             The container ID.
@@ -957,8 +972,21 @@ class LocalContainerBackend(SandboxBackend):
         for key, value in self._environment.items():
             cmd.extend(["-e", f"{key}={value}"])
 
-        # Config-level volume mounts
+        # Config-level volume mounts. A policy-scoped skills view owns its
+        # complete container subtree; keeping a more-specific config mount
+        # would let Docker overlay an excluded skill inside that view.
+        exclusion_root = None
+        if config_mount_exclusion_root is not None:
+            exclusion_root = posixpath.normpath(config_mount_exclusion_root.rstrip("/") or "/")
+
         for mount in self._config_mounts:
+            mount_path = posixpath.normpath(str(mount.container_path).rstrip("/") or "/")
+            if exclusion_root is not None and (mount_path == exclusion_root or mount_path.startswith(exclusion_root.rstrip("/") + "/")):
+                logger.info(
+                    "Skipping config mount inside policy-scoped skills root: %s",
+                    mount.container_path,
+                )
+                continue
             cmd.extend(
                 _format_container_mount(
                     self._runtime,
