@@ -18,15 +18,44 @@ data:
         keepalive_timeout 65;
         types_hash_max_size 2048;
 
-        # Share URLs carry the raw bearer token in the path (#4548); the
-        # token is the sole credential for the snapshot, so it must never
-        # reach the access log. Masked lines keep the route but drop the
-        # secret. Same masking as docker/nginx/*.conf.
-        map $request $masked_request {
-            default                                                                $request;
-            "~*^(?<share_head>[A-Z]+ +/(?:share|api/shares)/)[^ ]*(?<share_tail> +HTTP/.*)$" $share_head***$share_tail;
+        # Share URLs carry the raw bearer token in the path (#4548). Classify
+        # the normalized URI so reversible percent-encoding of the route
+        # cannot evade masking, then render only a constant route label. A
+        # second raw-request guard drops any bearer that appears elsewhere,
+        # including a query string. Referer, User-Agent, and remote user are
+        # client-controlled and can carry the same bearer URL, so every
+        # logged field is masked. Same contract as docker/nginx/*.conf,
+        # pinned by test_share_token_log_masking.py for all three configs.
+        map $uri $share_log_path {
+            default                    "";
+            "~^/share/"                "/share/***";
+            "~^/api/shares/"           "/api/shares/***";
         }
-        log_format masked_access '$remote_addr - $remote_user [$time_local] "$masked_request" $status $body_bytes_sent "$http_referer" "$http_user_agent"';
+        map $request $request_has_share_token {
+            default 0;
+            "~*(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5f)(?:[A-Za-z0-9_-]|%[0-9a-f]{2})+" 1;
+        }
+        map "$share_log_path:$request_has_share_token" $masked_request {
+            default             $request;
+            "/share/***:0"     "$request_method $share_log_path $server_protocol";
+            "/share/***:1"     "$request_method $share_log_path $server_protocol";
+            "/api/shares/***:0" "$request_method $share_log_path $server_protocol";
+            "/api/shares/***:1" "$request_method $share_log_path $server_protocol";
+            ":1"                "$request_method *** $server_protocol";
+        }
+        map $http_referer $masked_referer {
+            default $http_referer;
+            "~*(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5f)(?:[A-Za-z0-9_-]|%[0-9a-f]{2})+" dfs_***;
+        }
+        map $http_user_agent $masked_user_agent {
+            default $http_user_agent;
+            "~*(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5f)(?:[A-Za-z0-9_-]|%[0-9a-f]{2})+" dfs_***;
+        }
+        map $remote_user $masked_remote_user {
+            default $remote_user;
+            "~*(?:d|%64)(?:f|%66)(?:s|%73)(?:_|%5f)(?:[A-Za-z0-9_-]|%[0-9a-f]{2})+" dfs_***;
+        }
+        log_format masked_access '$remote_addr - $masked_remote_user [$time_local] "$masked_request" $status $body_bytes_sent "$masked_referer" "$masked_user_agent"';
         access_log /dev/stdout masked_access;
         error_log /dev/stderr;
 

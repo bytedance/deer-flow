@@ -33,11 +33,26 @@ _FENCED_CODE_RE = re.compile(
 )
 _INLINE_CODE_RE = re.compile(r"(?P<ticks>`+).*?(?P=ticks)", re.DOTALL)
 _MARKDOWN_LINK_RE = re.compile(r"!?\[(?P<label>[^\]]*)\]\((?P<target>[^)]+)\)")
+# Word-initial branches (``api/…``, ``mnt/…``) only fire at a token boundary:
+# ``fooapi/threads/…`` is public text, not a relative reference. The
+# separator-led branches need no guard — a private path starting mid-token
+# still classifies on its own shape.
 _REFERENCE_RE = re.compile(
-    r"(?:https?://|/|%[0-9A-Fa-f]{2}|mnt(?=[\\/]|%[0-9A-Fa-f]{2}))[^\s<>\"]+",
+    r"(?:https?://|/|%[0-9A-Fa-f]{2}|(?<!\w)(?:api(?=/threads/)|mnt(?=[\\/]|%[0-9A-Fa-f]{2})))[^\s<>\"]+",
     re.IGNORECASE,
 )
 _PRIVATE_REFERENCE_MARKER = "[private artifact omitted]"
+
+# Separator entities (round 8): ``/`` and ``\`` as HTML numeric/hex/named
+# character references, and as JSON/JS ``\uXXXX`` escapes. CommonMark decodes
+# character references and JSON consumers decode ``\uXXXX`` before display,
+# so the classification shadow must collapse them like any other separator
+# encoding while the original bytes stay cut out of the public output.
+_HTML_SEPARATOR_ENTITY_RE = re.compile(
+    r"&(?:#0*(?:47|92)|#x0*(?:2f|5c)|sol|bsol);",
+    re.IGNORECASE,
+)
+_UNICODE_SEPARATOR_ESCAPE_RE = re.compile(r"u(?:002f|005c|2f|5c)", re.IGNORECASE)
 
 
 class ShareSnapshotTooLarge(Exception):
@@ -210,7 +225,11 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
     the normalized text can be cut out of the original — escaped bytes must
     never survive into the public output. A run of backslashes before a ``/``
     collapses into that single ``/`` (JSON ``\\/`` escapes at any depth);
-    remaining backslashes are treated as Windows-style separators.
+    remaining backslashes are treated as Windows-style separators. Separator
+    characters arriving as HTML character references (``&#47;``, ``&sol;``,
+    …) or JSON/JS unicode escapes (``\\u002f``, any casing, any backslash
+    depth) collapse the same way: both decode to a real separator before
+    display, so neither may survive classification in encoded form.
     """
     normalized: list[str] = []
     spans: list[tuple[int, int]] = []
@@ -218,10 +237,23 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
     n = len(text)
     while i < n:
         char = text[i]
+        if char == "&":
+            entity = _HTML_SEPARATOR_ENTITY_RE.match(text, i)
+            if entity is not None:
+                normalized.append("/")
+                spans.append((i, entity.end() - 1))
+                i = entity.end()
+                continue
         if char == "\\":
             run_end = i
             while run_end < n and text[run_end] == "\\":
                 run_end += 1
+            unicode_escape = _UNICODE_SEPARATOR_ESCAPE_RE.match(text, run_end)
+            if unicode_escape is not None:
+                normalized.append("/")
+                spans.append((i, unicode_escape.end() - 1))
+                i = unicode_escape.end()
+                continue
             if run_end < n and text[run_end] == "/":
                 normalized.append("/")
                 spans.append((i, run_end))
@@ -259,6 +291,24 @@ def _decoded_reference(value: str) -> str:
 # because only the classification/cut bound is trimmed.
 _REFERENCE_TRAILING_PUNCTUATION = ".,;:!?)]}\"'`*_~(|[<"
 
+# Where the cut stops while a matched reference runs past its structural
+# end (round 8): prose and markdown delimiters terminate the private path
+# (``/uploads`'s`` and ``/uploads,then`` must keep their suffix bytes), while
+# URL structure (``/``, ``?``, ``#``, consumed by the scan before this set
+# is consulted) continues it so a query string or nested path can never
+# survive the cut. Dots continue (filenames) and are handled by the
+# trailing-punctuation trim instead.
+_REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
+
+# Owner-scoped API surface (round 8): every ``/api/threads/{id}/<segment>``
+# route is private, not just the artifacts/uploads pair — each carries the
+# internal thread id and several are owner-only exports. The leading
+# separator is optional so a relative Markdown destination or a bare path
+# in running text classifies identically instead of publishing a
+# live-looking private link.
+_API_THREAD_REFERENCE_RE = re.compile(r"(?:^|/)api/threads/[^/?#\s]+/", re.IGNORECASE)
+_MNT_USER_DATA_RE = re.compile(r"(?:^|/)mnt/user-data", re.IGNORECASE)
+
 
 def _trim_reference_punctuation(value: str) -> str:
     return value.rstrip(_REFERENCE_TRAILING_PUNCTUATION)
@@ -266,16 +316,40 @@ def _trim_reference_punctuation(value: str) -> str:
 
 def _is_private_reference(value: str) -> bool:
     decoded = _trim_reference_punctuation(_decoded_reference(value)).lower()
-    return "/mnt/user-data" in decoded or decoded.startswith("mnt/user-data") or re.search(r"/api/threads/[^/\s?#]+/(?:artifacts|uploads)(?:[/\s?#.,;:!?)\]}\"'`*_~(|\[<]|$)", decoded) is not None
+    return _MNT_USER_DATA_RE.search(decoded) is not None or _API_THREAD_REFERENCE_RE.search(decoded) is not None
+
+
+def _private_reference_cut_end(value: str) -> int | None:
+    """Index just past the private path inside *value* (a normalized-shadow
+    slice): the path continues through URL structure and in-segment bytes,
+    and stops at the first prose/markdown terminator or whitespace."""
+    prefix = _API_THREAD_REFERENCE_RE.search(value) or _MNT_USER_DATA_RE.search(value)
+    if prefix is None:
+        return None
+    end = prefix.end()
+    n = len(value)
+    while end < n:
+        char = value[end]
+        if char in "/?#":
+            end += 1
+            continue
+        if char in _REFERENCE_CUT_TERMINATORS or char.isspace():
+            break
+        end += 1
+    return end
 
 
 def _neutralize_private_references(text: str) -> str:
     """Remove owner-only artifact paths from an otherwise public transcript.
 
     Classification runs on the separator-normalized shadow of the text (JSON
-    ``\\/`` escapes, encoded or raw), while replacements are applied to the
-    original text: normalized matching is what catches escaped private
-    references, but public content must keep its exact original bytes.
+    ``\\/`` escapes, percent-encoding, HTML character references, and
+    ``\\uXXXX`` unicode escapes — raw or in any combination), while
+    replacements are applied to the original text: normalized matching is
+    what catches escaped private references, but public content must keep
+    its exact original bytes. The cut spans exactly the private path and
+    stops at the first structural terminator, so public prose after the
+    reference survives.
     """
     normalized, spans = _collapse_separators_with_offsets(text)
 
@@ -307,11 +381,18 @@ def _neutralize_private_references(text: str) -> str:
         edits.append((begin, stop, f"{label} {_PRIVATE_REFERENCE_MARKER}".strip()))
 
     def replace_raw(match: re.Match[str]) -> None:
-        if not _is_private_reference(match.group(0)):
+        value = match.group(0)
+        if not _is_private_reference(value):
             return
-        # Keep the trailing sentence punctuation out of the cut so the
-        # public text keeps its own ``.``/``,``/``)`` after the marker.
-        kept = _trim_reference_punctuation(match.group(0))
+        # The cut spans exactly the private path: it ends at the first
+        # structural terminator (URL structure continues the path, prose
+        # delimiters stay in the public output), and trailing sentence
+        # punctuation is kept out of the cut so the public text keeps its
+        # own ``.``/``,``/``)`` after the marker.
+        cut_end = _private_reference_cut_end(value)
+        if cut_end is None:
+            cut_end = len(value)
+        kept = _trim_reference_punctuation(value[:cut_end])
         stop_index = match.start() + len(kept)
         begin, stop = original_span(match.start(), stop_index)
         edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))

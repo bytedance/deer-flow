@@ -23,6 +23,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NGINX_CONFIGS = (
     REPO_ROOT / "docker/nginx/nginx.conf",
     REPO_ROOT / "docker/nginx/nginx.local.conf",
+    # The Helm chart ships its own nginx config; it must carry the same
+    # masking contract as the Docker configs, so it joins the same sweep.
+    REPO_ROOT / "deploy/helm/deer-flow/templates/configmap-nginx.yaml",
 )
 
 _TOKEN = "dfs_A9z-_0123456789abcdefghijklmnopqrstuv"

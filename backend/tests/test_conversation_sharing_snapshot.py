@@ -520,3 +520,105 @@ def test_markdown_label_and_structural_adjacency_are_redacted():
     assert neutralize("**/api/threads/t1/uploads** is where the files are") == "**[private artifact omitted]** is where the files are"
     # Bracket adjacency from the markdown shape itself.
     assert "thread" not in neutralize("[see /api/threads/t1/uploads](https://example.com/public)")
+
+
+def test_neutralize_html_entity_separators():
+    """Round 8 P1: HTML character references decode to real separators before
+    display, so classification must collapse them in the shadow while the
+    original entity bytes stay cut out of the public output."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("see &#47;api&#47;threads&#47;thread-secret&#47;uploads&#47;q4.pdf now") == "see [private artifact omitted] now"
+    assert neutralize("hex form &#x2F;api&#x2F;threads&#x2F;thread-secret&#x2F;uploads&#x2F;q.pdf") == "hex form [private artifact omitted]"
+    assert neutralize("&sol;mnt&sol;user-data&sol;x.tsv") == "[private artifact omitted]"
+    assert neutralize("backslash entity &#92;api&#92;threads&#92;t1&#92;uploads&#92;f.pdf") == "backslash entity [private artifact omitted]"
+    # Non-separator entities are public markup and pass through verbatim.
+    assert neutralize("fish &amp; chips &#65; ok") == "fish &amp; chips &#65; ok"
+
+
+def test_neutralize_unicode_escaped_separators():
+    """Round 8 P2: JSON/JS ``\\uXXXX`` separator escapes must not survive
+    classification — they decode to a real path in any JSON consumer."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("see \\u002Fapi\\u002Fthreads\\u002Fthread-secret\\u002Fuploads\\u002Fq4.pdf") == "see [private artifact omitted]"
+    assert neutralize("\\u005Capi\\u005Cthreads\\u005Ct1\\u005Cuploads\\u005Cf.pdf") == "[private artifact omitted]"
+    # The doubled-backslash form (a literal backslash before the escape).
+    assert neutralize("\\\\u002Fmnt\\\\u002Fuser-data\\\\u002Fx.pdf") == "[private artifact omitted]"
+    # Non-separator escapes are public text and pass through verbatim.
+    assert neutralize("unicode \\u0041 stays") == "unicode \\u0041 stays"
+
+
+def test_cut_stops_at_first_structural_terminator():
+    """Round 8 P2: the cut must end at the first structural terminator after
+    the private path instead of eating the whole greedy regex token — public
+    suffix bytes would otherwise be frozen out of the immutable snapshot."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("Check `/api/threads/t1/uploads`'s contents.") == "Check `[private artifact omitted]`'s contents."
+    assert neutralize("See /api/threads/t1/uploads,then continue.") == "See [private artifact omitted],then continue."
+    # URL structure continues the path: nested private paths inside a query
+    # string must not survive the earlier cut boundary.
+    assert neutralize("go /api/threads/t1/uploads?next=/api/threads/t2/uploads/x") == "go [private artifact omitted]"
+
+
+def test_neutralize_references_without_leading_separator():
+    """Round 8 P2: a relative reference with no leading separator classifies
+    the same way, so a live-looking Markdown destination cannot publish the
+    owner's thread id and artifact path."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("report at api/threads/8f3a/uploads/q4.pdf") == "report at [private artifact omitted]"
+    assert neutralize("[report](api/threads/8f3a/uploads/q4.pdf)") == "report [private artifact omitted]"
+    # The word-initial trigger needs a token boundary: mid-word lookalikes
+    # are public text, not references (a separator-led prefix still catches
+    # the real path on its own shape).
+    assert neutralize("see fooapi/threads/8f3a/uploads") == "see fooapi/threads/8f3a/uploads"
+
+
+def test_owner_scoped_thread_routes_are_redacted():
+    """Round 8 P3: every ``/api/threads/{id}/<segment>`` route carries the
+    internal thread id (and some are owner-only exports), so the private set
+    is no longer limited to the artifacts/uploads pair."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    assert neutralize("/api/threads/8f3a/subagent-batches/b1/results.jsonl exported") == "[private artifact omitted] exported"
+    assert neutralize("state at /api/threads/8f3a/state, ok") == "state at [private artifact omitted], ok"
+    assert neutralize("history /api/threads/8f3a/history.") == "history [private artifact omitted]."
+    # A bare thread path names no owner-scoped subresource and stays public.
+    assert neutralize("thread /api/threads/8f3a mentioned") == "thread /api/threads/8f3a mentioned"
+
+
+async def test_snapshot_neutralizes_entity_and_unicode_escaped_private_references():
+    """Message-level regression for both round-8 separator-encoding forms."""
+    private_text = " ".join(
+        [
+            "entity: &#47;api&#47;threads&#47;thread-secret&#47;uploads&#47;q4.pdf",
+            "named: &sol;mnt&sol;user-data&sol;x.csv",
+            "unicode: \\u002Fapi\\u002Fthreads\\u002Fthread-secret\\u002Fartifacts\\u002Fa.pdf",
+            "public &#65; stays",
+        ]
+    )
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "ai", "content": private_text})], False
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        snapshot = await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    content = snapshot["messages"][0]["content"]
+    assert "thread-secret" not in content
+    assert "user-data" not in content
+    assert "q4.pdf" not in content
+    assert "x.csv" not in content
+    assert "a.pdf" not in content
+    assert "[private artifact omitted]" in content
+    assert "&#65;" in content
+
+
+def test_sanitize_share_title_neutralizes_entity_and_unicode_separators():
+    title = sanitize_share_title("Report &#47;mnt&#47;user-data&#47;x.csv and \\u002Fmnt\\u002Fuser-data\\u002Fy.csv")
+    assert "user-data" not in title
+    assert "x.csv" not in title
+    assert "y.csv" not in title

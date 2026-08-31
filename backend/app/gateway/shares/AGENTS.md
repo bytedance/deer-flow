@@ -23,12 +23,16 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   only bare strings and explicit `text` / `output_text` blocks; reasoning,
   thinking, and tool-call blocks are ignored, and inline assistant `<think>`
   sections are stripped outside Markdown code examples. Owner-only
-  `/mnt/user-data` and thread artifact/upload references (including
-  percent-encoded and JSON-escaped separator forms — classification runs on a
-  separator-normalized shadow of the text, while the original bytes are what
-  get replaced, so public content is emitted unchanged) are replaced with a
+  `/mnt/user-data` and thread-route references — any
+  `/api/threads/{id}/<segment>` path, not just artifacts/uploads, with or
+  without a leading separator — are replaced with a
   public omission marker in both messages and
-  titles (at create time and again on public read) — no run/thread/user
+  titles (at create time and again on public read). Classification runs on a
+  separator-normalized shadow of the text that also decodes percent-encoding,
+  JSON `\/` escapes, HTML character references, and `\uXXXX` unicode escapes,
+  while the original bytes are what get replaced — public content is emitted
+  unchanged, and the cut stops at the first structural terminator so public
+  prose after a reference survives — no run/thread/user
   identifiers, tool arguments, or debug data. The scan pages arrive
   newest-page-first with each page internally ascending; the builder flips the
   page order only. Rows are sanitized per page, so the 2000 cap counts
@@ -93,15 +97,16 @@ Token-in-URL leakage also has repository-level log and diagnostic controls
   five-value access-log tuple for `AccessFormatter`; the canonical redaction
   primitive also rejects `dfs_…` values during trace-id normalization so
   structured logs and tracing metadata cannot bypass message redaction.
-- **nginx access logs** — both shipped configs mask share tokens in the request
+- **nginx access logs** — all three shipped configs (both Docker configs and
+  the Helm chart's configmap) mask share tokens in the request
   line (`$masked_request`) by classifying the normalized `$uri` and then
   emitting a constant route label; a raw-request fallback also catches tokens
   in query strings. The client-controlled Referer is masked in
   `$masked_referer` before writing the `combined`-format `masked_access`
   record; User-Agent and Basic-auth remote-user fields have equivalent masks.
   The matchers recognize literal and percent-encoded tokens. The regression
-  test renders the config's full log format, so a dropped or loosened mask
-  fails CI. nginx
+  test sweeps every config, so a dropped or loosened mask — or a shipped
+  config that leaves the sweep — fails CI. nginx
   `error_log` messages embed the full request line, severity does not redact
   them (nginx trac #2193: crit-level failures still append the request
   line), and the output cannot be format-masked — so the dedicated `^~`
