@@ -35,7 +35,7 @@ from deerflow.subagents.status_contract import (
     make_subagent_additional_kwargs,
 )
 from deerflow.tools.types import Runtime
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -430,7 +430,11 @@ async def task_tool(
     # None outside that path (embedded client, standalone LangGraph Server), where
     # the executor keeps its process-singleton fallback.
     run_extensions = resolve_run_extensions(parent_context)
-    deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+    # Request-level correlation id, distinct from the short ``trace_id`` above
+    # that labels this one subagent execution in log prefixes. The parent
+    # runtime context is authoritative (worker._bind_trace_id always fills it);
+    # the ambient fallback covers tools invoked outside a Gateway run.
+    deerflow_trace_id = resolve_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY))
 
     parent_available_skills = metadata.get("available_skills")
     if parent_available_skills is not None:

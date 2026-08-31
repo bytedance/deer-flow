@@ -23,8 +23,10 @@ config_version: 38
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
 
-# Request trace correlation for Gateway logs, HTTP response headers, and
-# Langfuse metadata. Disabled by default to preserve existing HTTP/log output.
+# Trace ids are always issued and always returned in the `X-Trace-Id` response
+# header; this block controls log output only — whether records carry a
+# `trace_id` field, and in which format. Off by default because enabling it
+# changes the log format. Restart required (see reload_boundary.py).
 logging:
   enhance:
     enabled: false

@@ -715,16 +715,38 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 #### Request Trace Correlation
 
-Gateway request trace correlation is disabled by default so existing HTTP responses and log formats stay unchanged. To enable it, set:
+Every Gateway HTTP response carries an `X-Trace-Id` header. The id is inherited
+from an inbound `X-Trace-Id` when the caller sends one and generated otherwise, so
+a proxy or an upstream service can pin one id across services. It needs no
+configuration and cannot be turned off.
+
+The same id stays attached to work that outlives the HTTP response: the detached
+run task, any subagents it delegates to, and the background memory-update threads.
+It is recorded as `deerflow_trace_id` on the run record (visible in the runs API),
+in the thread's checkpoint metadata, and in Langfuse traces. Scheduled tasks, MCP
+task notification runs, and IM channel messages start outside HTTP and mint their
+own id per occurrence.
+
+Log records carry that id only when enhanced logging is on:
 
 ```yaml
 logging:
   enhance:
-    enabled: true
-    format: text
+    enabled: true   # print trace_id into log records
+    format: text    # or json
 ```
 
-When enabled, every Gateway HTTP response includes `X-Trace-Id`, logs include `trace_id`, and Langfuse traces created by that request include `metadata.deerflow_trace_id` with the same value.
+This is off by default because turning it on changes the log format. `logging` is
+restart-required, so edit `config.yaml` and restart the Gateway. The setting
+affects log output only — the id, the response header, and the run metadata are
+unaffected.
+
+`deerflow_trace_id` is a DeerFlow correlation id: it is not a run id, and it is not
+a provider's native trace id. It is not a lookup key either — nothing resolves a
+thread or a run from it; use it to correlate log lines. A `deerflow_trace_id` sent
+in a run request's `metadata` or `config.context` is ignored and overwritten, so
+the response header, the logs, and the persisted run can never disagree. To pin a
+correlation id, send the `X-Trace-Id` header.
 
 Gateway run history also records one terminal `run.delivery` receipt per run,
 including zero-output and crash-recovered runs. The receipt is persisted before

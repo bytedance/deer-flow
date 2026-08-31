@@ -43,7 +43,7 @@ from deerflow.subagents.report_contract import (
 )
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.utils.messages import message_content_to_text
 
@@ -586,7 +586,9 @@ class SubagentExecutor:
             run_id: Parent run id, so delegated guardrail decisions attribute to
                 the same run as the lead agent.
             deerflow_trace_id: DeerFlow request-level correlation id propagated
-                from the parent run for Langfuse metadata correlation.
+                from the parent run for Langfuse metadata correlation. Falls
+                back to the ambient trace so the attribute is always a real
+                id, never ``None``.
             extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
@@ -633,7 +635,10 @@ class SubagentExecutor:
         # subagent's GuardrailMiddleware sees the same provenance as the lead.
         self.is_internal = is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
-        self.deerflow_trace_id = deerflow_trace_id
+        # Resolved, not stored raw: the attribute is part of the non-nullable
+        # trace contract, and ``_aexecute`` rebinds it because a subagent runs
+        # on the isolated loop thread where the parent ContextVar may be gone.
+        self.deerflow_trace_id = resolve_trace_id(deerflow_trace_id)
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
         # extension generation: a concurrent ``set_loaded_extensions()`` between
@@ -1031,7 +1036,14 @@ class SubagentExecutor:
         return state, final_tools, deferred_setup
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
-        """Execute after acquiring the process-wide native-subagent slot."""
+        """Execute after acquiring the process-wide native-subagent slot.
+
+        Rebinds the parent's request trace id for the whole execution. Sync
+        callers reach here on the persistent isolated loop thread, which is
+        entered through a copied ``Context`` -- so the binding is usually
+        still intact and this is a no-op -- but the id also travels as data
+        precisely because that copy is not guaranteed on every path.
+        """
         result = result_holder
         if result is None:
             result = SubagentResult(
@@ -1039,21 +1051,22 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
-        try:
-            capacity = self.execution_capacity or get_subagent_execution_capacity()
-            async with capacity.slot():
-                with result._state_lock:
-                    if not result.status.is_terminal:
-                        result.status = SubagentStatus.RUNNING
-                        result.started_at = datetime.now()
-                return await self._aexecute_admitted(task, result)
-        except SubagentCapacityError as exc:
-            result.try_set_terminal(
-                SubagentStatus.FAILED,
-                error=str(exc),
-                admission_failure=True,
-            )
-            return result
+        with ensure_trace_context(self.deerflow_trace_id):
+            try:
+                capacity = self.execution_capacity or get_subagent_execution_capacity()
+                async with capacity.slot():
+                    with result._state_lock:
+                        if not result.status.is_terminal:
+                            result.status = SubagentStatus.RUNNING
+                            result.started_at = datetime.now()
+                    return await self._aexecute_admitted(task, result)
+            except SubagentCapacityError as exc:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=str(exc),
+                    admission_failure=True,
+                )
+                return result
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -1223,8 +1236,7 @@ class SubagentExecutor:
             # (including False); attributes copied again on write-back.
             context["is_internal"] = self.is_internal
             context["authz_attributes"] = dict(self.authz_attributes)
-            if self.deerflow_trace_id:
-                context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")

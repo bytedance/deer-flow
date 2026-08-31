@@ -31,6 +31,7 @@ from packaging.version import Version
 
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
+from deerflow.trace_context import request_trace_context
 
 # Module names that need to be mocked to break circular imports
 _MOCKED_MODULE_NAMES = [
@@ -3343,6 +3344,50 @@ class TestSubagentTracingWiring:
         # cannot displace the token-accounting callback).
         assert len(callbacks) >= 2, "existing callbacks must be preserved when tracing is injected"
         assert result.status.value == SubagentStatus.COMPLETED.value
+
+    def test_deerflow_trace_id_is_never_none(self, classes):
+        """The attribute is part of the non-nullable trace contract: consumers
+        write it into the child runtime context unconditionally, so an
+        undelegated id must resolve rather than propagate ``None``."""
+        executor = self._make_executor(classes, deerflow_trace_id=None)
+
+        assert executor.deerflow_trace_id
+
+    def test_deerflow_trace_id_falls_back_to_the_ambient_trace(self, classes):
+        with request_trace_context("ambient-trace-1"):
+            executor = self._make_executor(classes, deerflow_trace_id=None)
+
+        assert executor.deerflow_trace_id == "ambient-trace-1"
+
+    @pytest.mark.anyio
+    async def test_aexecute_rebinds_the_parent_trace_on_the_isolated_loop(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Sync callers reach execution on the persistent isolated loop thread,
+        where the parent ContextVar is not guaranteed to have survived. The id
+        also travels as data precisely so it can be rebound here."""
+        from deerflow.trace_context import get_current_trace_id
+
+        executor = self._make_executor(classes, deerflow_trace_id="parent-trace-1")
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        seen: list[str | None] = []
+        original = executor._aexecute_admitted
+
+        async def capture(*args, **kwargs):
+            seen.append(get_current_trace_id())
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(executor, "_aexecute_admitted", capture)
+
+        await executor._aexecute("do something")
+
+        assert seen == ["parent-trace-1"]
 
     @pytest.mark.anyio
     async def test_aexecute_injects_langfuse_session_user_and_trace_name(

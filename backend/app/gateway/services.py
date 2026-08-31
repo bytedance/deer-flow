@@ -77,6 +77,7 @@ from deerflow.runtime.secret_context import (
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -1521,12 +1522,19 @@ async def launch_scheduled_thread_run(
     )
     scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
     idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
-    record = await start_run(
-        body,
-        thread_id,
-        request,
-        idempotency_key=idempotency_key,
-    )
+    # Non-HTTP entry point: the lifespan scheduler calls this with a synthetic
+    # request, so TraceMiddleware never runs. The scope is opened per launch,
+    # never around the poller loop, or every scheduled run would collapse onto
+    # one id. Reached from inside an HTTP request -- a manual trigger, or the
+    # scheduler service's own per-occurrence scope -- ensure_trace_context
+    # keeps that trace instead of minting a competing one.
+    with ensure_trace_context():
+        record = await start_run(
+            body,
+            thread_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
@@ -1598,14 +1606,18 @@ async def launch_mcp_task_notification_run(
         feedback_keys=None,
     )
     idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    # Non-HTTP entry point, same as launch_scheduled_thread_run above: the MCP
+    # task service drives this from its own background loop, so one scope per
+    # notification keeps every delivery attempt separately correlatable.
     try:
-        record = await start_run(
-            body,
-            thread_id,
-            request,
-            idempotency_key=idempotency_key,
-            require_existing_thread=True,
-        )
+        with ensure_trace_context():
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                idempotency_key=idempotency_key,
+                require_existing_thread=True,
+            )
     except HTTPException as exc:
         if exc.status_code == 409:
             raise ConflictError(str(exc.detail)) from exc

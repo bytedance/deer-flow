@@ -73,11 +73,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
-from deerflow.trace_context import (
-    DEERFLOW_TRACE_METADATA_KEY,
-    is_trace_id_from_request_header,
-    resolve_deerflow_trace_id,
-)
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
@@ -558,6 +554,32 @@ class _SubagentEventBuffer:
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
 
 
+def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
+    """Record the current request trace id on the runtime context and metadata.
+
+    The ContextVar is the only source. A ``deerflow_trace_id`` the caller sent
+    in ``config["metadata"]`` is overwritten rather than read: honouring it
+    would let the persisted run disagree with the ``X-Trace-Id`` and the log
+    lines the same request already produced, which is the correlation the id
+    exists to provide in the first place.
+
+    The two destinations serve different purposes. ``runtime_ctx`` is the
+    carrier across boundaries the ContextVar does not cross -- subagent
+    delegation, the memory update running on a Timer/executor thread -- while
+    ``config["metadata"]`` is persisted with the checkpoint and is what makes a
+    finished run traceable after the fact.
+    """
+    trace_id = ensure_trace_id()
+    runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    incoming_metadata = config.get("metadata")
+    # Replaced rather than mutated through: this mapping can be shared with the
+    # caller's request body.
+    merged_metadata = dict(incoming_metadata) if isinstance(incoming_metadata, dict) else {}
+    merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    config["metadata"] = merged_metadata
+    return trace_id
+
+
 async def run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
@@ -827,14 +849,7 @@ async def run_agent(
             task_store,
             extensions,
         )
-        incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
-        deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
-        if deerflow_trace_id:
-            runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
-            if is_trace_id_from_request_header():
-                merged_metadata = dict(incoming_metadata)
-                merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
-                config["metadata"] = merged_metadata
+        deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a

@@ -12,6 +12,20 @@ This section accumulates work toward the **2.1.0** milestone
 
 ### ⚠ Breaking changes
 
+- **gateway:** Request trace ids are now issued unconditionally, and every
+  Gateway HTTP response carries an `X-Trace-Id` header. Previously both were
+  gated behind `logging.enhance.enabled`, which now controls **log output
+  only** — whether records carry a `trace_id` field, and in which format. The
+  header cannot be turned off; installations running the default
+  `enabled: false` will start seeing it after upgrading. Scheduled tasks, MCP
+  task notification runs, IM channel messages, and the embedded
+  `DeerFlowClient` bind an id per unit of work, so the id also reaches the run
+  record, the checkpoint metadata, and Langfuse traces that previously had
+  none. A `deerflow_trace_id` supplied in a run request's `metadata` or
+  `config.context` is now ignored and overwritten so the response header, the
+  logs, and the persisted run cannot disagree — send the `X-Trace-Id` request
+  header to pin a correlation id across services. `logging` remains
+  restart-required. No config keys were added or removed. ([#XXXX])
 - **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
   projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
   used; Docker/AIO and hostPath deployments derive projection paths from
