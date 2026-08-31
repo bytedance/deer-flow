@@ -360,10 +360,12 @@ class BuzzChannel(Channel):
         Seen-event scheduling is quiesced before even the already-stopped guard.
         A relay task abandoned after the bounded wait can therefore record late
         ids as dirty state, but cannot attach new callbacks to a channel the
-        service may remove. ``start()`` explicitly resumes that scheduling.
+        service may remove. A repeated ``stop()`` drains that dirty state, while
+        ``start()`` explicitly resumes automatic scheduling.
         """
         self._seen_events.quiesce()
         if not self._running and self._stop_complete:
+            await self._seen_events.aflush()
             return
         self._stop_complete = False
         self._running = False

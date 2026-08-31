@@ -121,8 +121,8 @@ async def test_channel_stop_retries_seen_event_flush_after_cancellation(tmp_path
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
 
 
-async def test_abandoned_relay_record_stays_unscheduled_until_channel_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A relay task resuming after stop must not leave detached file work."""
+async def test_abandoned_relay_records_are_drained_by_retried_stop_or_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Late relay records stay unscheduled but remain reachable to cleanup."""
     path = tmp_path / "buzz-seen-events.json"
     seen_events = BuzzSeenEventStore(path)
     channel, _ = _channel(path, seen_events=seen_events)
@@ -155,11 +155,20 @@ async def test_abandoned_relay_record_stays_unscheduled_until_channel_restarts(t
     stopped_view = BuzzSeenEventStore(path)
     assert not await stopped_view.aseen(_CHANNEL_ID, "late-event")
 
+    await channel.stop()
+    retried_stop_view = BuzzSeenEventStore(path)
+    assert await retried_stop_view.aseen(_CHANNEL_ID, "late-event")
+
+    await seen_events.arecord(_CHANNEL_ID, "restart-event")
+    await asyncio.sleep(0.05)
+    still_stopped_view = BuzzSeenEventStore(path)
+    assert not await still_stopped_view.aseen(_CHANNEL_ID, "restart-event")
+
     monkeypatch.setattr(buzz_nostr, "parse_private_key", lambda _value: buzz_nostr.NostrKeys(secret=b"", pubkey_hex=_BOT_PUBLIC))
     channel._spawn_connection = lambda: None
     await channel.start()
     await asyncio.sleep(0.05)
 
     restarted_view = BuzzSeenEventStore(path)
-    assert await restarted_view.aseen(_CHANNEL_ID, "late-event")
+    assert await restarted_view.aseen(_CHANNEL_ID, "restart-event")
     await channel.stop()
