@@ -57,3 +57,10 @@ def test_embedded_middleware_scope_is_explicit(path: Path) -> None:
     content = (REPO_ROOT / path).read_text(encoding="utf-8")
     marker = "这两个嵌入式 API 仅作用于主 Agent 链" if "/zh/" in path.as_posix() else "Both embedded APIs affect only the lead-agent pipeline"
     assert marker in " ".join(content.split())
+
+
+@pytest.mark.parametrize("path", MIDDLEWARE_GUIDES, ids=str)
+def test_lifecycle_return_contract_is_explicit(path: Path) -> None:
+    content = (REPO_ROOT / path).read_text(encoding="utf-8")
+    marker = "生命周期钩子可以返回状态更新字典" if "/zh/" in path.as_posix() else "Lifecycle hooks can return a dictionary of state updates"
+    assert marker in " ".join(content.split())

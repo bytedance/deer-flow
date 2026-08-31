@@ -232,6 +232,8 @@ class MyMiddleware(AgentMiddleware[AgentState]):
         return None
 ```
 
+生命周期钩子可以返回状态更新字典，LangChain 会将其合并到 Agent 状态中；仅观察时返回 `None`。
+
 对于运维配置的部署，请通过导入路径注册零参数构造的类：
 
 ```yaml

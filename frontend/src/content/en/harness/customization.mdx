@@ -41,6 +41,9 @@ class AuditMiddleware(AgentMiddleware[AgentState]):
         return None
 ```
 
+Lifecycle hooks can return a dictionary of state updates, which LangChain merges
+into the agent state; return `None` when observing only.
+
 For an operator-managed deployment, the class must have a zero-argument constructor and be importable by the Gateway process:
 
 ```yaml
