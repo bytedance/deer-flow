@@ -1688,6 +1688,46 @@ test("reconnected turn order leaves a resent turn after an interrupted run untou
   ).toEqual([interruptedStep, human, newStep]);
 });
 
+test("reconnected turn order keeps interrupted uniform-run history in its original turn", () => {
+  // Branch-seeded and mocked feeds can stamp every message with one run_id.
+  // Without a terminal answer, that synthetic id cannot prove that the older
+  // tool step belongs to the newer human turn.
+  const human1 = {
+    id: "human-1",
+    type: "human",
+    content: "First question",
+    run_id: "run-x",
+  } as Message;
+  const interruptedStep = {
+    id: "step-1",
+    type: "ai",
+    content: "Working on the first question",
+    tool_calls: [{ id: "tc-1", name: "web_search", args: {} }],
+    run_id: "run-x",
+  } as unknown as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second question",
+    run_id: "run-x",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Working on the second question",
+    run_id: "run-x",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      interruptedStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, interruptedStep, human2, step2]);
+});
+
 test("reconnected turn order only moves steps of the sandwiched run in multi-turn history", () => {
   const human1 = { id: "human-1", type: "human", content: "First" } as Message;
   const step1 = {

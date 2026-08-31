@@ -90,11 +90,19 @@ Each mount has these fixed limits:
 The full sandbox creation pass also allows 512 MiB and 2,000 files. Skill
 projections and configured mounts share this budget.
 
-The pass has a cooperative 120-second deadline. The provider checks it before
+The pass has a cooperative deadline controlled by
+``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
 each mount, during directory preflight, and before each SDK write. The deadline
 does not interrupt active filesystem or E2B SDK calls.
 
 The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
+
+For policy-scoped turns, clearing the four managed remote skill categories and
+uploading their prepared projection is one per-user/thread/skills-root critical
+section, shared with acquire and release. The provider snapshots that canonical
+root at startup and carries it through warm-pool identity and E2B metadata; a VM
+from another root is never adopted. A second policy sync cannot reset the remote
+tree until the first upload pass has completed.
 
 An invalid mount does not block later mounts.
 

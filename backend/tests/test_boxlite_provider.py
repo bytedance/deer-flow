@@ -18,6 +18,7 @@ import pytest
 
 from deerflow.community.boxlite.box import BoxliteBox
 from deerflow.community.boxlite.provider import BoxliteProvider, _import_simplebox
+from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 _LEGACY_COLLIDING_IDENTITIES = (
     ("user-9721", "thread-9721"),
@@ -476,6 +477,48 @@ def test_acquire_reclaims_from_warm_pool(monkeypatch):
     assert sid2 not in provider._warm_pool
 
 
+@pytest.mark.asyncio
+async def test_acquire_async_propagates_request_trace_context(monkeypatch):
+    """acquire_async must carry request ContextVars into the worker thread.
+
+    Regression test (#5089): the dedicated-executor bridge replaced the
+    inherited ``to_thread`` acquire (which copies contextvars). Without an
+    explicit ``copy_context`` the worker thread reads the trace id bound by
+    ``request_trace_context()`` as unset and logs ``trace_id=-``.
+    """
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider.get_app_config",
+        lambda: _stub_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.community.boxlite.provider._import_simplebox",
+        lambda: _FakeBox,
+    )
+
+    provider = BoxliteProvider()
+    provider._loop.run = _fake_run
+
+    seen: list[str | None] = []
+    original = BoxliteProvider._acquire_scope_locked
+
+    def spy(self, key, sandbox_id):
+        # Runs inside the executor worker thread, under the copied context.
+        seen.append(get_current_trace_id())
+        return original(self, key, sandbox_id)
+
+    monkeypatch.setattr(BoxliteProvider, "_acquire_scope_locked", spy)
+
+    try:
+        with request_trace_context("trace-boxlite-5089"):
+            sid = await provider.acquire_async("thread-1", user_id="u1")
+        assert sid
+        assert seen == ["trace-boxlite-5089"]
+    finally:
+        # _fake_run uses asyncio.run, which cannot run inside this test's event
+        # loop thread; shut down on a worker thread so box close() completes.
+        await asyncio.to_thread(provider.shutdown)
+
+
 def test_explicit_recent_reclaim_skip_avoids_health_check(monkeypatch):
     """A configured skip window can reclaim recently released boxes without a ping."""
     monkeypatch.setattr(
@@ -873,7 +916,9 @@ def test_reset_parks_running_resources_for_later_cleanup(monkeypatch):
     assert provider._warm_pool[sid_active][0] is active_box
     assert provider._warm_pool[sid_warm][0] is warm_box
     assert provider._thread_boxes == {}
-    assert provider._acquire_locks == {}
+    with pytest.raises(RuntimeError, match="closed"):
+        with provider._acquire_serializer.hold("k"):
+            pass
     assert not active_box._closed
     assert not warm_box._closed
     assert not provider._shutdown_called
@@ -1226,3 +1271,21 @@ def test_failed_health_check_does_not_remove_swapped_warm_entry(monkeypatch):
     )
     assert not replacement.is_closed
     provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+
+
+def test_sandbox_id_none_user_quirk_pinned():
+    """BoxLite passes user_id through raw; None renders as the literal "None".
+
+    Quirk pinned per RFC #4741 §2.2 (its _thread_key uses "" instead, so the
+    two disagree). NOT fixed here — unifying the resolution is a separate
+    behavior-changing decision with its own follow-up issue.
+    """
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")

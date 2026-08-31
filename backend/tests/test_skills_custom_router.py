@@ -6,6 +6,7 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -134,6 +135,157 @@ def test_install_skill_archive_runs_security_scan(monkeypatch, tmp_path):
         }
     ]
     assert refresh_calls == [("refresh", "default")]
+
+
+def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp_path):
+    installed_paths: list[Path] = []
+    refresh_calls: list[str] = []
+
+    class _Storage:
+        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+            installed_paths.append(archive_path)
+            assert archive_path.name.endswith(".skill")
+            assert archive_path.read_bytes() == b"skill archive bytes"
+            return {
+                "success": True,
+                "skill_name": "uploaded-skill",
+                "message": "Skill installed successfully",
+            }
+
+    async def _refresh(user_id: str) -> None:
+        refresh_calls.append(user_id)
+
+    config = SimpleNamespace()
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: _Storage())
+    monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
+
+    app = _make_test_app(config)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={
+                "archive": (
+                    "uploaded-skill.skill",
+                    b"skill archive bytes",
+                    "application/octet-stream",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["skill_name"] == "uploaded-skill"
+    assert refresh_calls == ["default"]
+    assert len(installed_paths) == 1
+    assert not installed_paths[0].exists()
+
+
+def test_upload_skill_archive_rejects_non_skill_extension(monkeypatch):
+    install_called = False
+
+    class _Storage:
+        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+            nonlocal install_called
+            install_called = True
+            return {}
+
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: _Storage())
+    app = _make_test_app(SimpleNamespace())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"archive": ("not-a-skill.zip", b"zip bytes", "application/zip")},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Skill archive filename must end with .skill"
+    assert install_called is False
+
+
+def test_upload_skill_archive_keeps_multipart_openapi_contract():
+    app = _make_test_app(SimpleNamespace())
+
+    operation = app.openapi()["paths"]["/api/skills/install/upload"]["post"]
+    request_body = operation["requestBody"]
+    archive_schema = request_body["content"]["multipart/form-data"]["schema"]
+
+    assert request_body["required"] is True
+    assert archive_schema["required"] == ["archive"]
+    assert archive_schema["properties"]["archive"] == {"type": "string", "format": "binary"}
+
+
+def test_upload_skill_archive_rejects_oversized_payload(monkeypatch):
+    install_called = False
+    copy_called = False
+
+    class _Storage:
+        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+            nonlocal install_called
+            install_called = True
+            return {}
+
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: _Storage())
+
+    def _unexpected_copy(source):
+        nonlocal copy_called
+        copy_called = True
+        raise AssertionError("oversized upload reached the post-parse copy")
+
+    monkeypatch.setattr(skills_router, "_copy_uploaded_skill_archive", _unexpected_copy)
+    app = _make_test_app(SimpleNamespace())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/skills/install/upload",
+            files={"archive": ("demo.skill", b"four", "application/octet-stream")},
+        )
+
+    assert response.status_code == 413
+    assert "upload limit" in response.json()["detail"]
+    assert install_called is False
+    assert copy_called is False
+
+
+@pytest.mark.asyncio
+async def test_bounded_skill_archive_stream_rejects_declared_oversize_before_read(monkeypatch):
+    stream_read = False
+
+    class _Request:
+        headers = {"content-length": "5"}
+
+        async def stream(self):
+            nonlocal stream_read
+            stream_read = True
+            yield b"never-read"
+
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_MULTIPART_OVERHEAD_BYTES", 1)
+    stream = skills_router._bounded_skill_archive_request_stream(_Request())
+
+    with pytest.raises(skills_router._SkillArchiveUploadTooLargeError):
+        await anext(stream)
+
+    assert stream_read is False
+
+
+@pytest.mark.asyncio
+async def test_bounded_skill_archive_stream_rejects_chunked_oversize(monkeypatch):
+    class _Request:
+        headers = {}
+
+        async def stream(self):
+            yield b"123"
+            yield b"45"
+
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    monkeypatch.setattr(skills_router, "_MAX_SKILL_ARCHIVE_MULTIPART_OVERHEAD_BYTES", 1)
+    stream = skills_router._bounded_skill_archive_request_stream(_Request())
+
+    assert await anext(stream) == b"123"
+    with pytest.raises(skills_router._SkillArchiveUploadTooLargeError):
+        await anext(stream)
 
 
 def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_path):

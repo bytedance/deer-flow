@@ -1,0 +1,88 @@
+{
+  "grader_version": "deterministic-overlap-v1",
+  "groups": [
+    {
+      "accuracy": 0.3,
+      "cases": 10,
+      "correct": 3,
+      "policy": "confidence",
+      "scenario": "access_help",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.9,
+      "cases": 10,
+      "correct": 9,
+      "policy": "hybrid-v1",
+      "scenario": "access_help",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.8,
+      "cases": 10,
+      "correct": 8,
+      "policy": "confidence",
+      "scenario": "confidence_control",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.7,
+      "cases": 10,
+      "correct": 7,
+      "policy": "hybrid-v1",
+      "scenario": "confidence_control",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.3,
+      "cases": 10,
+      "correct": 3,
+      "policy": "confidence",
+      "scenario": "confirmation_help",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 1.0,
+      "cases": 10,
+      "correct": 10,
+      "policy": "hybrid-v1",
+      "scenario": "confirmation_help",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.9,
+      "cases": 10,
+      "correct": 9,
+      "policy": "confidence",
+      "scenario": "noisy_signal_control",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.9,
+      "cases": 10,
+      "correct": 9,
+      "policy": "hybrid-v1",
+      "scenario": "noisy_signal_control",
+      "source": "longmemeval"
+    },
+    {
+      "accuracy": 0.2,
+      "cases": 5,
+      "correct": 1,
+      "policy": "confidence",
+      "scenario": "correction_reserve",
+      "source": "synthetic"
+    },
+    {
+      "accuracy": 1.0,
+      "cases": 5,
+      "correct": 5,
+      "policy": "hybrid-v1",
+      "scenario": "correction_reserve",
+      "source": "synthetic"
+    }
+  ],
+  "protocol_id": "deermem-hybrid-v1-pr4789-reproduction-v1",
+  "qa_capacity": 7,
+  "schema_version": 1
+}

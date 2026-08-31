@@ -15,7 +15,11 @@ from langchain_mcp_adapters.interceptors import MCPToolCallRequest
 from pydantic import ValidationError
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, McpUserScopedAuthConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import (
+    apply_header_overrides,
+    header_spellings,
+    illegal_header_value_reason,
+)
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
 from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
 
@@ -62,6 +66,81 @@ def test_override_does_not_mutate_the_base():
     base = {"Authorization": DISCOVERY}
     apply_header_overrides(base, {"authorization": "Bearer new"})
     assert base == {"Authorization": DISCOVERY}
+
+
+# ---------------------------------------------------------------------------
+# illegal_header_value_reason
+#
+# The boundary mirrors what the transport enforces: the MCP clients hand
+# ``dict[str, str]`` headers to httpx, which encodes ``str`` values as ASCII
+# (raising UnicodeEncodeError before h11 ever sees the value); h11's
+# field_vchar is ``[^\x00\s]`` with SP/HTAB allowed only between visible
+# characters. Values the transport accepts must not be rejected here.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Bearer sk-token\n",
+        "Bearer sk-token\r",
+        "a\r\nX-Injected: b",
+        "a\x00b",
+        "a\x0bb",
+        "a\x0cb",
+        " leading-space",
+        "trailing-space ",
+        "trailing-tab\t",
+        "caf\xe9",  # Latin-1 high byte: h11 would send it, but httpx encodes str values as ASCII first
+        "\u043f\u0430\u0440\u043e\u043b\u044c",
+    ],
+)
+def test_transport_rejected_values_are_flagged(value):
+    assert illegal_header_value_reason(value) is not None
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Bearer sk-token",
+        "Bearer abc\tdef",
+        "two words",
+        "a\x7fb",  # DEL: ASCII-encodable, and h11's field_vchar accepts it
+    ],
+)
+def test_transport_accepted_values_are_not_flagged(value):
+    assert illegal_header_value_reason(value) is None
+
+
+def test_reason_never_repeats_the_value():
+    reason = illegal_header_value_reason("sk-secret-value\n")
+    assert reason is not None
+    assert "sk-secret-value" not in reason
+
+
+def test_validator_mirrors_the_mcp_http_client_encoding_boundary():
+    """Pin the boundary against the real client the headers are handed to.
+
+    ``build_server_params`` passes ``dict[str, str]`` headers through the MCP
+    SDK's ``create_mcp_http_client`` into ``httpx.AsyncClient``, which encodes
+    ``str`` header values as ASCII at construction time. A value the validator
+    accepts must construct that client; the canonical counter-example — a
+    Latin-1 high byte h11 itself would happily send — must be flagged by the
+    validator, because httpx raises ``UnicodeEncodeError`` before h11 runs.
+    That exception names the offending character rather than the credential, so
+    what the denial buys here is an actionable error instead of an encode
+    failure raised from inside the client.
+    """
+    from mcp.shared._httpx_utils import create_mcp_http_client
+
+    assert illegal_header_value_reason("Bearer caf\xe9") is not None
+    with pytest.raises(UnicodeEncodeError):
+        create_mcp_http_client(headers={"Authorization": "Bearer caf\xe9"})
+
+    for value in ("Bearer sk-token", "Bearer abc\tdef ghi", "a\x7fb"):
+        assert illegal_header_value_reason(value) is None
+        client = create_mcp_http_client(headers={"X-Tenant-Token": value})
+        assert client.headers["X-Tenant-Token"] == value
 
 
 # ---------------------------------------------------------------------------

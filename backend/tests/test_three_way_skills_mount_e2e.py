@@ -21,7 +21,10 @@ from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox import PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 from deerflow.sandbox.tools import read_file_tool
-from deerflow.skills.projection import rebuild_skill_projections
+from deerflow.skills.projection import (
+    ensure_thread_skill_projection,
+    rebuild_skill_projections,
+)
 from deerflow.skills.storage import reset_user_skill_storage
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
@@ -374,6 +377,146 @@ class TestThreeWayMountEndToEnd:
             structured_disabled_again = read_file_tool.func(runtime=runtime, description="read disabled skill", path=virtual_path)
             assert "SECRET_PROCEDURE" not in structured_disabled_again
             assert "disabled" in structured_disabled_again.lower()
+
+    def test_local_agent_allowlist_is_enforced_by_every_filesystem_path(
+        self,
+        tmp_path,
+    ):
+        skills_root = tmp_path / "skills"
+        _write_skill(skills_root / "public", "allowed-skill", "ALLOWED_MARKER")
+        _write_skill(skills_root / "public", "excluded-skill", "EXCLUDED_MARKER")
+        (skills_root / "custom").mkdir(parents=True)
+        paths = Paths(base_dir=tmp_path)
+        cfg = _build_config(skills_root)
+        extensions = ExtensionsConfig()
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=cfg),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+            patch(
+                "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+                return_value=extensions,
+            ),
+            patch(
+                "deerflow.config.extensions_config.get_extensions_config",
+                return_value=extensions,
+            ),
+        ):
+            storage = UserScopedSkillStorage(
+                "user-1",
+                host_path=str(skills_root),
+                app_config=cfg,
+            )
+            projection = ensure_thread_skill_projection(
+                storage,
+                "thread-policy",
+                {"allowed-skill"},
+            )
+            assert projection is not None
+            provider = LocalSandboxProvider()
+            sandbox_id = provider.acquire("thread-policy", user_id="user-1")
+            sandbox = provider.get(sandbox_id)
+            assert sandbox is not None
+
+            mappings = {mapping.container_path: mapping for mapping in sandbox.path_mappings}
+            assert set(path for path in mappings if path.startswith("/mnt/skills")) == {"/mnt/skills"}
+            assert Path(mappings["/mnt/skills"].local_path) == projection.public.parent
+
+            listing = "\n".join(sandbox.list_dir("/mnt/skills", max_depth=4))
+            assert "allowed-skill" in listing
+            assert "excluded-skill" not in listing
+            assert "EXCLUDED_MARKER" not in sandbox.execute_command("find /mnt/skills -name SKILL.md -print -exec cat {} \\;")
+
+            excluded_path = "/mnt/skills/public/excluded-skill/SKILL.md"
+            with pytest.raises(FileNotFoundError):
+                sandbox.read_file(excluded_path)
+            globbed, _ = sandbox.glob("/mnt/skills", "**/SKILL.md")
+            assert any("allowed-skill" in path for path in globbed)
+            assert all("excluded-skill" not in path for path in globbed)
+            grepped, _ = sandbox.grep(
+                "/mnt/skills",
+                "EXCLUDED_MARKER",
+                literal=True,
+            )
+            assert grepped == []
+
+            absolute_read = sandbox.execute_command(f"cat {excluded_path}")
+            relative_read = sandbox.execute_command("cd /mnt/skills/public && cat excluded-skill/SKILL.md")
+            python_read = sandbox.execute_command("python3 -c \"from pathlib import Path; print(Path('/mnt/skills/public/excluded-skill/SKILL.md').read_text())\"")
+            symlink_read = sandbox.execute_command("ln -s /mnt/skills/public/excluded-skill /mnt/skills/public/excluded-link && cat /mnt/skills/public/excluded-link/SKILL.md")
+            for result in (
+                absolute_read,
+                relative_read,
+                python_read,
+                symlink_read,
+            ):
+                assert "EXCLUDED_MARKER" not in result
+                assert "Exit Code:" in result
+
+    def test_local_empty_agent_allowlist_exposes_no_business_skill(
+        self,
+        tmp_path,
+    ):
+        skills_root = tmp_path / "skills"
+        _write_skill(skills_root / "public", "public-skill", "PUBLIC_MARKER")
+        (skills_root / "custom").mkdir(parents=True)
+        paths = Paths(base_dir=tmp_path)
+        cfg = _build_config(skills_root)
+        extensions = ExtensionsConfig()
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=cfg),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+            patch(
+                "deerflow.config.extensions_config.ExtensionsConfig.from_file",
+                return_value=extensions,
+            ),
+            patch(
+                "deerflow.config.extensions_config.get_extensions_config",
+                return_value=extensions,
+            ),
+        ):
+            storage = UserScopedSkillStorage(
+                "user-1",
+                host_path=str(skills_root),
+                app_config=cfg,
+            )
+            storage.write_custom_skill(
+                "custom-skill",
+                "SKILL.md",
+                "---\nname: custom-skill\ndescription: CUSTOM_MARKER\n---\n",
+            )
+            projection = ensure_thread_skill_projection(
+                storage,
+                "thread-empty-policy",
+                set(),
+            )
+            assert projection is not None
+            provider = LocalSandboxProvider()
+            sandbox_id = provider.acquire(
+                "thread-empty-policy",
+                user_id="user-1",
+            )
+            sandbox = provider.get(sandbox_id)
+            assert sandbox is not None
+
+            listing = "\n".join(sandbox.list_dir("/mnt/skills", max_depth=4))
+            assert "public-skill" not in listing
+            assert "custom-skill" not in listing
+            shell_listing = sandbox.execute_command("ls -R /mnt/skills")
+            assert "public-skill" not in shell_listing
+            assert "custom-skill" not in shell_listing
+            assert "MARKER" not in sandbox.execute_command("find /mnt/skills -name SKILL.md -print -exec cat {} \\;")
+            with pytest.raises(FileNotFoundError):
+                sandbox.read_file("/mnt/skills/public/public-skill/SKILL.md")
+            globbed, _ = sandbox.glob("/mnt/skills", "**/SKILL.md")
+            assert globbed == []
+            grepped, _ = sandbox.grep(
+                "/mnt/skills",
+                "MARKER",
+                literal=True,
+            )
+            assert grepped == []
 
     # ── AioSandboxProvider ──────────────────────────────────────────────
 
