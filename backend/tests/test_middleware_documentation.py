@@ -104,3 +104,36 @@ def test_middleware_order_includes_configured_extension_tail(path: Path) -> None
     )
     positions = [content.index(marker) for marker in markers]
     assert positions == sorted(positions)
+
+
+@pytest.mark.parametrize("path", MIDDLEWARE_GUIDES, ids=str)
+def test_subagent_summarization_optionality_is_explicit(path: Path) -> None:
+    content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    marker = (
+        "因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。"
+        if "/zh/" in path.as_posix()
+        else "so configured middleware is followed by the optional safety guard, `DurableContextMiddleware`, optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`."
+    )
+    assert marker in content
+
+
+@pytest.mark.parametrize(
+    "path",
+    (
+        Path("frontend/src/content/en/harness/middlewares.mdx"),
+        Path("frontend/src/content/zh/harness/middlewares.mdx"),
+    ),
+    ids=str,
+)
+def test_runtime_middleware_summary_includes_current_guards(path: Path) -> None:
+    content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
+    marker = (
+        "运行时中间件（输入/输出清理、线程数据、上传、沙箱与审计、悬空工具调用修补、LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）"
+        if "/zh/" in path.as_posix()
+        else (
+            "Runtime middlewares (input/output sanitization, thread data, uploads, sandbox and audit, "
+            "dangling tool-call patching, LLM/tool error handling, plus tool receipts, authorization/guardrail, "
+            "read-before-write, and tool-progress guards when enabled)"
+        )
+    )
+    assert marker in content

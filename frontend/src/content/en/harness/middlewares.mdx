@@ -29,7 +29,7 @@ This design keeps the agent core simple and stable while allowing rich, composab
 
 The middleware chain is built once per agent invocation, based on the current configuration and request parameters. The middlewares run in a defined order:
 
-1. Runtime middlewares (error handling, thread data, uploads, dangling tool call patching)
+1. Runtime middlewares (input/output sanitization, thread data, uploads, sandbox and audit, dangling tool-call patching, LLM/tool error handling, plus tool receipts, authorization/guardrail, read-before-write, and tool-progress guards when enabled)
 2. `DynamicContextMiddleware` — current date and optional memory context
 3. `SkillActivationMiddleware` — slash-skill activation
 4. `SkillToolPolicyMiddleware` — filters skill tools to the active skill
@@ -263,6 +263,6 @@ extensions:
     - my_company.deerflow_middlewares:MyMiddleware
 ```
 
-Configured middleware runs after the built-in middleware and optional loop/token guards. On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response, model-length, or clarification stage, so configured middleware is followed by the optional safety guard and durable-context, summarization, date-context, and system-message-coalescing middlewares. Treat middleware paths as trusted configuration because loading one executes Python code. Embedded callers can instead pass instances through `DeerFlowClient(middlewares=[...])` or `create_deerflow_agent(extra_middleware=[...])`. Both embedded APIs affect only the lead-agent pipeline; neither forwards middleware to subagents.
+Configured middleware runs after the built-in middleware and optional loop/token guards. On the lead-agent pipeline, it runs before the terminal-response, model-length, safety, and clarification tail; subagents have no terminal-response, model-length, or clarification stage, so configured middleware is followed by the optional safety guard, `DurableContextMiddleware`, optional `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and `SystemMessageCoalescingMiddleware`. Treat middleware paths as trusted configuration because loading one executes Python code. Embedded callers can instead pass instances through `DeerFlowClient(middlewares=[...])` or `create_deerflow_agent(extra_middleware=[...])`. Both embedded APIs affect only the lead-agent pipeline; neither forwards middleware to subagents.
 
 Choose the registration path by ownership and placement. The fixed-slot (not deprecated) `extensions.middlewares` list is accepted in `config.yaml` and `extensions_config.json` (`config.yaml` wins) and applies to both lead and subagent pipelines. Packaged extensions registered through the top-level `plugins:` list contribute middleware at semantic extension points. Contributor code that needs committed, programmatic lead-only wiring can use `build_middlewares(..., custom_middlewares=[MyMiddleware()])`.
