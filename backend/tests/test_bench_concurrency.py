@@ -129,6 +129,53 @@ def test_summarize_handles_empty_results_without_crashing() -> None:
     assert summary["throughput_ops_per_s"] == 0.0
 
 
+def test_summarize_surfaces_crashed_worker_diagnostics_not_just_a_count() -> None:
+    """crashed_workers stays an int count (existing contract) but the
+    stderr each crashed worker actually printed must also be reachable
+    from the summary -- previously captured in run_workers() and then
+    discarded, leaving an all-crashed sweep with zero explanation of why."""
+    workers = [
+        {"worker_id": 0, "results": [_result(True, 0.001)]},
+        {"worker_id": 1, "crashed": True, "stderr": "OperationalError: unable to open database file", "results": []},
+        {"worker_id": 2, "crashed": True, "stderr": "sqlite3.IntegrityError: UNIQUE constraint failed", "results": []},
+    ]
+    summary = bench.summarize(workers, wall_time=1.0, n_workers=3, ops_per_worker=1)
+    assert summary["crashed_workers"] == 2
+    assert summary["crashed_worker_errors"] == [
+        {"worker_id": 1, "stderr": "OperationalError: unable to open database file"},
+        {"worker_id": 2, "stderr": "sqlite3.IntegrityError: UNIQUE constraint failed"},
+    ]
+
+
+def test_summary_indicates_failure_for_an_all_crashed_sweep() -> None:
+    """The exact scenario the reviewer's repro produced: every worker
+    crashed, so the summary looks well-formed (completed_ops: 0,
+    throughput_ops_per_s: 0.0) but represents no real measurement at all.
+    main() must treat this as a failure (nonzero exit), not a quiet 0-op
+    result -- this pins the check that decides that, independent of
+    main()'s argparse/subprocess machinery."""
+    workers = [
+        {"worker_id": 0, "crashed": True, "stderr": "boom", "results": []},
+        {"worker_id": 1, "crashed": True, "stderr": "boom", "results": []},
+    ]
+    summary = bench.summarize(workers, wall_time=1.0, n_workers=2, ops_per_worker=4)
+    assert bench.summary_indicates_failure(summary) is True
+
+
+def test_summary_indicates_failure_when_completed_ops_falls_short_without_a_crash() -> None:
+    """Defense in depth: even if crashed_workers is 0, fewer completed ops
+    than expected must still count as a failure rather than being silently
+    accepted as a (misleadingly short) real measurement."""
+    summary = {"crashed_workers": 0, "completed_ops": 3, "expected_total_ops": 4}
+    assert bench.summary_indicates_failure(summary) is True
+
+
+def test_summary_indicates_failure_is_false_for_a_clean_run() -> None:
+    workers = [{"worker_id": 0, "results": [_result(True, 0.001) for _ in range(4)]}]
+    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=4)
+    assert bench.summary_indicates_failure(summary) is False
+
+
 def test_summarize_throughput_matches_completed_ops_over_wall_time() -> None:
     workers = [{"worker_id": 0, "results": [_result(True, 0.001) for _ in range(50)]}]
     summary = bench.summarize(workers, wall_time=5.0, n_workers=1, ops_per_worker=50)

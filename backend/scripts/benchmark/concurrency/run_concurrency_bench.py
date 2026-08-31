@@ -48,6 +48,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "checkpoint"))
 from checkpoint_bench_common import percentile  # noqa: E402
 
 WORKER_SCRIPT = Path(__file__).parent / "worker.py"
+# One absolute path, shared by the seeder (this file) and every worker
+# process (worker.py's make_session_factory). DatabaseConfig.sqlite_dir
+# resolves relative strings against the CALLER's CWD, not this file's
+# location -- passing the literal ".deer-flow/bench_data" meant the
+# orchestrator (running from wherever it was invoked) and the workers
+# (spawned with cwd=BACKEND_DIR) could silently resolve to two different
+# directories whenever this script is invoked from outside backend/,
+# leaving workers pointed at a DB the seeder never created (or already
+# removed).
+SQLITE_BENCH_DIR = str(BACKEND_DIR / ".deer-flow" / "bench_data")
 # The orchestrator itself is already running under the correct interpreter
 # (`uv run python ...`, per this file's own usage docstring above) -- reuse
 # it for workers instead of a second hard-coded venv path that silently
@@ -66,10 +76,10 @@ async def seed_baseline(backend: str, pg_url: str, pg_schema: str, n_users: int 
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
 
     if backend == "sqlite":
-        sqlite_dir = BACKEND_DIR / ".deer-flow" / "bench_data"
+        sqlite_dir = Path(SQLITE_BENCH_DIR)
         if sqlite_dir.exists():
             shutil.rmtree(sqlite_dir)
-        cfg = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/bench_data")
+        cfg = DatabaseConfig(backend="sqlite", sqlite_dir=SQLITE_BENCH_DIR)
     else:
         # pg_schema is a unique, disposable schema for this benchmark run
         # (see main()) -- never "public" or any schema a real deployment
@@ -126,11 +136,13 @@ async def drop_isolated_schema(pg_url: str, pg_schema: str) -> None:
 
 def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: float, known_emails: list[str], pg_url: str, pg_schema: str):
     emails_arg = ",".join(known_emails)
-    procs = []
+    procs = []  # list of (worker_id, Popen) -- worker_id kept alongside so a
+    # crashed worker's diagnostics can be attributed to the right id below,
+    # instead of the placeholder "worker_id": None every crash used to get.
     for wid in range(n_workers):
         cmd = PYTHON + [str(WORKER_SCRIPT), backend, str(wid), str(ops_per_worker), str(read_ratio), emails_arg, pg_url, pg_schema]
         p = subprocess.Popen(cmd, cwd=str(BACKEND_DIR), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        procs.append(p)
+        procs.append((wid, p))
 
     # Start barrier: wait for every worker to print READY (connection
     # established, right before its own timed loop -- see worker.py) before
@@ -143,11 +155,11 @@ def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: f
     # closes its stdout, so readline() returns "" rather than hanging;
     # run_workers() below reports that same worker as crashed via its
     # nonzero returncode either way.
-    for p in procs:
+    for _wid, p in procs:
         p.stdout.readline()
 
     t_start = time.perf_counter()
-    for p in procs:
+    for _wid, p in procs:
         try:
             p.stdin.write("GO\n")
             p.stdin.flush()
@@ -156,15 +168,21 @@ def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: f
             pass  # worker already exited -- nothing to release
 
     worker_outputs = []
-    for p in procs:
+    for wid, p in procs:
         stdout, stderr = p.communicate()
         if p.returncode != 0:
-            worker_outputs.append({"worker_id": None, "crashed": True, "stderr": stderr[-2000:], "results": []})
+            # Surfaced immediately (not just embedded in the summary JSON)
+            # so a crash is visible in real time, not just discoverable by
+            # someone reading crashed_workers back out of the final report.
+            print(f"--- worker {wid} crashed (exit {p.returncode}): {stderr[-2000:]} ---", file=sys.stderr)
+            worker_outputs.append({"worker_id": wid, "crashed": True, "stderr": stderr[-2000:], "results": []})
             continue
         try:
             worker_outputs.append(json.loads(stdout.strip().splitlines()[-1]))
         except Exception as e:
-            worker_outputs.append({"worker_id": None, "crashed": True, "stderr": f"parse error: {e}; stdout={stdout[-500:]}; stderr={stderr[-500:]}", "results": []})
+            msg = f"parse error: {e}; stdout={stdout[-500:]}; stderr={stderr[-500:]}"
+            print(f"--- worker {wid} produced unparseable output: {msg} ---", file=sys.stderr)
+            worker_outputs.append({"worker_id": wid, "crashed": True, "stderr": msg, "results": []})
     wall_time = time.perf_counter() - t_start
     return worker_outputs, wall_time
 
@@ -172,9 +190,11 @@ def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: f
 def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: int) -> dict:
     all_results = []
     crashed = 0
+    crashed_worker_errors = []
     for w in worker_outputs:
         if w.get("crashed"):
             crashed += 1
+            crashed_worker_errors.append({"worker_id": w.get("worker_id"), "stderr": w.get("stderr")})
             continue
         all_results.extend(w["results"])
 
@@ -203,6 +223,7 @@ def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: 
         "expected_total_ops": n_workers * ops_per_worker,
         "completed_ops": total_ops,
         "crashed_workers": crashed,
+        "crashed_worker_errors": crashed_worker_errors,
         "errors": len(errors),
         "error_types": err_types,
         "wall_time_s": round(wall_time, 3),
@@ -212,6 +233,18 @@ def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: 
         "latency_p99_ms": round(pct(0.99) * 1000, 3) if pct(0.99) is not None else None,
         "latency_max_ms": round(latencies[-1] * 1000, 3) if latencies else None,
     }
+
+
+def summary_indicates_failure(summary: dict) -> bool:
+    """True if this worker-count sweep's summary represents a broken run,
+    not a real measurement -- a crashed worker, or a worker that returned
+    fewer results than expected without being marked crashed. Without this
+    check, an all-crashed sweep still produces a well-formed-looking
+    summary (crashed_workers: N, completed_ops: 0,
+    throughput_ops_per_s: 0.0) that main() used to accept and exit 0 for,
+    indistinguishable from a real (if uneventful) measurement to anything
+    checking the exit code or scripting around --out."""
+    return summary["crashed_workers"] > 0 or summary["completed_ops"] != summary["expected_total_ops"]
 
 
 def main():
@@ -227,6 +260,15 @@ def main():
 
     worker_counts = [int(x) for x in args.workers.split(",")]
     all_summaries = []
+    # A sweep where every worker crashed still produces a well-formed
+    # summary (crashed_workers, completed_ops: 0, throughput_ops_per_s:
+    # 0.0) -- exiting 0 for that made a broken run indistinguishable from
+    # a real (if uneventful) measurement to anything checking the exit
+    # code, and let a garbage --out file sit next to a real one the same
+    # way. Tracked across the whole worker-count sweep, not just the last
+    # iteration, so one bad n_workers value in the middle doesn't get
+    # masked by later ones succeeding.
+    had_failure = False
 
     # One disposable schema for this ENTIRE invocation (reused across the
     # worker-count sweep below, dropped once at the very end) -- --pg-url
@@ -246,6 +288,8 @@ def main():
             summary["backend"] = args.backend
             all_summaries.append(summary)
             print(json.dumps(summary, indent=2), file=sys.stderr)
+            if summary_indicates_failure(summary):
+                had_failure = True
     finally:
         if pg_schema:
             print(f"--- dropping isolated schema {pg_schema} ---", file=sys.stderr)
@@ -255,7 +299,14 @@ def main():
     output = json.dumps(result, indent=2)
     if args.out:
         Path(args.out).write_text(output)
+    # Printed unconditionally, failure or not -- a broken run's diagnostics
+    # (crashed_worker_errors, the mismatched op counts) are exactly what's
+    # needed to debug it, so the JSON goes out before the exit code below
+    # can make anything piping/discarding stdout on a nonzero exit lose it.
     print(output)
+
+    if had_failure:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

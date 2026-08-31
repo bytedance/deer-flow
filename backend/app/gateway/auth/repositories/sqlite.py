@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
-from deerflow.persistence.user.model import UserRow
+from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 
 def _is_oauth_identity_violation(exc: IntegrityError) -> bool:
@@ -50,7 +50,7 @@ def _is_oauth_identity_violation(exc: IntegrityError) -> bool:
     orig = exc.orig
     constraint_name = getattr(orig, "constraint_name", None)
     if constraint_name is not None:
-        return constraint_name == "idx_users_oauth_identity"
+        return constraint_name == OAUTH_IDENTITY_INDEX_NAME
     message = str(orig).lower()
     return "oauth_provider" in message and "oauth_id" in message
 

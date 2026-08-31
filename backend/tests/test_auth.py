@@ -496,6 +496,61 @@ def test_create_user_real_oauth_conflict_still_reported_correctly(tmp_path):
     asyncio.run(_run())
 
 
+# _is_oauth_identity_violation is a pure function of the driver exception --
+# the two tests above already cover the SQLite branch end-to-end (real
+# engine, real IntegrityError). The Postgres/asyncpg branch (constraint_name)
+# had ZERO non-skipped coverage: its only guard,
+# test_oauth_identity_uniqueness_enforced_end_to_end, needs a real Postgres
+# and is skipped in CI (no workflow sets DEERFLOW_TEST_POSTGRES_URL). These
+# pin both arms with stub driver errors -- no DB of either kind required --
+# so a future rename of OAUTH_IDENTITY_INDEX_NAME or a change to the
+# fallback message check has a non-opt-in test to break.
+def test_is_oauth_identity_violation_matches_postgres_constraint_name():
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _is_oauth_identity_violation
+    from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME
+
+    exc = SimpleNamespace(orig=SimpleNamespace(constraint_name=OAUTH_IDENTITY_INDEX_NAME))
+    assert _is_oauth_identity_violation(exc) is True
+
+
+def test_is_oauth_identity_violation_rejects_other_postgres_constraints():
+    """A primary-key (or any other) constraint name on the SAME table must
+    not be misclassified as the OAuth index -- this is the Postgres-side
+    equivalent of the SQLite primary-key-violation regression test above."""
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _is_oauth_identity_violation
+
+    exc = SimpleNamespace(orig=SimpleNamespace(constraint_name="users_pkey"))
+    assert _is_oauth_identity_violation(exc) is False
+
+
+def test_is_oauth_identity_violation_matches_sqlite_message():
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _is_oauth_identity_violation
+
+    orig = sqlite3.IntegrityError("UNIQUE constraint failed: users.oauth_provider, users.oauth_id")
+    exc = SimpleNamespace(orig=orig)
+    assert _is_oauth_identity_violation(exc) is True
+
+
+def test_is_oauth_identity_violation_rejects_sqlite_email_violation():
+    """sqlite3 has no constraint_name -- a different UNIQUE violation on
+    the same table (email) must not match on a bare "oauth" substring."""
+    import sqlite3
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import _is_oauth_identity_violation
+
+    orig = sqlite3.IntegrityError("UNIQUE constraint failed: users.email")
+    exc = SimpleNamespace(orig=orig)
+    assert _is_oauth_identity_violation(exc) is False
+
+
 def test_update_user_raises_when_row_concurrently_deleted(tmp_path):
     """Concurrent-delete during update_user must hard-fail, not silently no-op.
 

@@ -33,14 +33,24 @@ from uuid import uuid4
 # subprocess with cwd already set to BACKEND_DIR, but this file is also
 # runnable/importable on its own, so it derives its own sys.path entry
 # rather than relying on the parent's cwd).
-sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+BACKEND_DIR = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(BACKEND_DIR))
 
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy import text  # noqa: E402
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
-from app.gateway.auth.models import User
-from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from deerflow.config.database_config import DatabaseConfig
+from app.gateway.auth.models import User  # noqa: E402
+from app.gateway.auth.repositories.sqlite import SQLiteUserRepository  # noqa: E402
+from deerflow.config.database_config import DatabaseConfig  # noqa: E402
+
+# Must be the exact same absolute path run_concurrency_bench.py's
+# seed_baseline() computes (SQLITE_BENCH_DIR there) -- DatabaseConfig
+# resolves a relative sqlite_dir against the CALLER's CWD, so a shared
+# relative literal here and there silently pointed the seeder and the
+# workers at different directories whenever this script is invoked from
+# outside backend/ (the seeder ran in-process from the invoker's own CWD;
+# workers are spawned with cwd=BACKEND_DIR, which don't necessarily match).
+SQLITE_BENCH_DIR = str(BACKEND_DIR / ".deer-flow" / "bench_data")
 
 
 def read_count(n_ops: int, read_ratio: float) -> int:
@@ -84,7 +94,7 @@ def make_session_factory(backend: str, pg_url: str, pg_schema: str):
     back to whatever the connection's default search_path happens to be.
     """
     if backend == "sqlite":
-        cfg = DatabaseConfig(backend="sqlite", sqlite_dir=".deer-flow/bench_data")
+        cfg = DatabaseConfig(backend="sqlite", sqlite_dir=SQLITE_BENCH_DIR)
         url = cfg.app_sqlalchemy_url
         engine = create_async_engine(url, connect_args={"timeout": 30})
     else:

@@ -18,6 +18,17 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
 
+# Single source of truth for the index name, shared with
+# app.gateway.auth.repositories.sqlite._is_oauth_identity_violation (which
+# has to match a Postgres driver error's constraint_name against exactly
+# this string). Previously that name was a separate hardcoded literal
+# there, with no test catching the two drifting apart. Migration files
+# under persistence/migrations/versions/ intentionally do NOT import this
+# -- migrations are frozen historical DDL, not a live view of the model --
+# so 0018_oauth_identity_pg_partial.py keeps its own literal by
+# convention (consistent with every other revision in that package).
+OAUTH_IDENTITY_INDEX_NAME = "idx_users_oauth_identity"
+
 
 class UserRow(Base):
     __tablename__ = "users"
@@ -66,7 +77,7 @@ class UserRow(Base):
         # so it stays smaller and cheaper to maintain as the
         # plain-password-account rows (the common case) accumulate.
         Index(
-            "idx_users_oauth_identity",
+            OAUTH_IDENTITY_INDEX_NAME,
             "oauth_provider",
             "oauth_id",
             unique=True,
