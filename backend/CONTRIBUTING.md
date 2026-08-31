@@ -315,10 +315,13 @@ followed by the optional safety guard, `DurableContextMiddleware`, optional
 `SummarizationMiddleware`, then `SubagentDateContextMiddleware` and
 `SystemMessageCoalescingMiddleware`. Treat middleware class paths as trusted
 operator configuration because loading one executes Python code.
-Lead-agent-only embedded callers can instead pass middleware instances through
-`DeerFlowClient(middlewares=[...])` or
-`create_deerflow_agent(extra_middleware=[...])`. Both embedded APIs affect only
-the lead-agent pipeline; neither forwards middleware to subagents.
+Embedded callers can instead use `DeerFlowClient(middlewares=[...])`, which
+builds the full lead-agent chain and places middleware before its
+terminal-response, model-length, safety, and clarification tail.
+`create_deerflow_agent(extra_middleware=[...])` instead builds a smaller
+feature-based lead-agent chain; unanchored extras are placed immediately before
+`ClarificationMiddleware` (anchored extras follow their `@Next`/`@Prev`
+placement). Neither API forwards middleware to subagents.
 
 Choose the registration path by ownership and placement. The fixed-slot (not deprecated)
 `extensions.middlewares` list is accepted in `config.yaml` and

@@ -51,7 +51,7 @@ extensions:
     - my_company.deerflow_middlewares:AuditMiddleware
 ```
 
-配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[AuditMiddleware()])` 或 `create_deerflow_agent(extra_middleware=[AuditMiddleware()])`。这两个嵌入式 API 仅作用于主 Agent 链，不会把中间件转发给子 Agent。
+配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[AuditMiddleware()])`；它构建完整的主 Agent 链，并将中间件放在其终态响应、模型长度、安全和澄清尾部之前。`create_deerflow_agent(extra_middleware=[AuditMiddleware()])` 则构建较小的按功能组装的主 Agent 链；未锚定的额外中间件会紧接在 `ClarificationMiddleware` 之前放置（锚定中间件遵循其 `@Next`/`@Prev` 位置）。两个 API 均不会将中间件转发给子 Agent。
 
 应根据配置的所有者和插入位置选择注册方式。固定槽位（并未弃用）`extensions.middlewares` 可写在 `config.yaml` 或 `extensions_config.json` 中（前者优先），并同时作用于主 Agent 和子 Agent。通过顶层 `plugins:` 注册的打包扩展可在语义化扩展点贡献中间件。若贡献代码需要可提交、可编程且仅作用于主 Agent 的接线，请使用 `build_middlewares(..., custom_middlewares=[AuditMiddleware()])`。
 

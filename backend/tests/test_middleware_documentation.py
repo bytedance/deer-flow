@@ -55,8 +55,26 @@ def test_documented_registration_apis_exist() -> None:
 @pytest.mark.parametrize("path", MIDDLEWARE_GUIDES, ids=str)
 def test_embedded_middleware_scope_is_explicit(path: Path) -> None:
     content = (REPO_ROOT / path).read_text(encoding="utf-8")
-    marker = "这两个嵌入式 API 仅作用于主 Agent 链" if "/zh/" in path.as_posix() else "Both embedded APIs affect only the lead-agent pipeline"
-    assert marker in " ".join(content.split())
+    markers = (
+        (
+            "DeerFlowClient(middlewares=[",
+            "builds the full lead-agent chain",
+            "create_deerflow_agent(extra_middleware=[",
+            "builds a smaller feature-based lead-agent chain",
+            "Neither API forwards middleware to subagents.",
+        )
+        if "/zh/" not in path.as_posix()
+        else (
+            "DeerFlowClient(middlewares=[",
+            "构建完整的主 Agent 链",
+            "create_deerflow_agent(extra_middleware=[",
+            "构建较小的按功能组装的主 Agent 链",
+            "两个 API 均不会将中间件转发给子 Agent。",
+        )
+    )
+    normalized = " ".join(content.split())
+    positions = [normalized.index(marker) for marker in markers]
+    assert positions == sorted(positions)
 
 
 @pytest.mark.parametrize("path", MIDDLEWARE_GUIDES, ids=str)
@@ -129,15 +147,15 @@ def test_runtime_middleware_summary_includes_current_guards(path: Path) -> None:
     content = " ".join((REPO_ROOT / path).read_text(encoding="utf-8").split())
     marker = (
         "运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → "
-        "`ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱与审计、悬空工具调用修补、"
-        "LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）"
+        "`ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱、悬空工具调用修补和 LLM 错误处理；"
+        "工具回执（如启用）、授权/guardrail（如启用）、沙箱审计、读前写后（如启用）、工具进度（如启用）和工具错误处理随后执行）"
         if "/zh/" in path.as_posix()
         else (
             "Runtime middlewares (`InputSanitizationMiddleware` for input sanitization → `ToolOutputBudgetMiddleware` "
             "for output-budget truncation → `ToolResultSanitizationMiddleware` for tool-result sanitization, then thread data, "
-            "uploads, sandbox and audit, "
-            "dangling tool-call patching, LLM/tool error handling, plus tool receipts, authorization/guardrail, "
-            "read-before-write, and tool-progress guards when enabled)"
+            "uploads, sandbox, dangling tool-call patching, and LLM error handling; tool receipts (if enabled), "
+            "authorization/guardrail (if enabled), sandbox audit, read-before-write (if enabled), tool progress (if enabled), "
+            "and tool error handling follow)"
         )
     )
     assert marker in content

@@ -25,7 +25,7 @@ import { Callout } from "nextra/components";
 
 中间件链在每次 Agent 调用时根据当前配置和请求参数构建一次。中间件按定义的顺序运行：
 
-1. 运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → `ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱与审计、悬空工具调用修补、LLM/工具错误处理；工具回执、授权/guardrail、读前写后和工具进度防护按配置启用）
+1. 运行时中间件（`InputSanitizationMiddleware` 输入清理 → `ToolOutputBudgetMiddleware` 输出预算截断 → `ToolResultSanitizationMiddleware` 工具结果清理，随后是线程数据、上传、沙箱、悬空工具调用修补和 LLM 错误处理；工具回执（如启用）、授权/guardrail（如启用）、沙箱审计、读前写后（如启用）、工具进度（如启用）和工具错误处理随后执行）
 2. `DynamicContextMiddleware` — 当前日期和可选记忆上下文
 3. `SkillActivationMiddleware` — slash skill 激活
 4. `SkillToolPolicyMiddleware` — 将技能工具限制为当前激活的技能
@@ -246,6 +246,6 @@ extensions:
     - my_company.deerflow_middlewares:MyMiddleware
 ```
 
-配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以通过 `DeerFlowClient(middlewares=[...])` 或 `create_deerflow_agent(extra_middleware=[...])` 传入实例。这两个嵌入式 API 仅作用于主 Agent 链，不会把中间件转发给子 Agent。
+配置的中间件会在内置中间件及可选的循环/token 保护之后加载。对于主 Agent 链，它位于终态响应、模型长度、安全和澄清尾部之前；子 Agent 链没有终态响应、模型长度或澄清阶段，因此配置中间件之后会继续执行可选的安全防护、`DurableContextMiddleware`、可选的 `SummarizationMiddleware`，随后是 `SubagentDateContextMiddleware` 和 `SystemMessageCoalescingMiddleware`。中间件路径会执行 Python 代码，因此应视为可信配置。嵌入式调用方也可以使用 `DeerFlowClient(middlewares=[...])`；它构建完整的主 Agent 链，并将中间件放在其终态响应、模型长度、安全和澄清尾部之前。`create_deerflow_agent(extra_middleware=[...])` 则构建较小的按功能组装的主 Agent 链；未锚定的额外中间件会紧接在 `ClarificationMiddleware` 之前放置（锚定中间件遵循其 `@Next`/`@Prev` 位置）。两个 API 均不会将中间件转发给子 Agent。
 
 应根据配置的所有者和插入位置选择注册方式。固定槽位（并未弃用）`extensions.middlewares` 可写在 `config.yaml` 或 `extensions_config.json` 中（前者优先），并同时作用于主 Agent 和子 Agent。通过顶层 `plugins:` 注册的打包扩展可在语义化扩展点贡献中间件。若贡献代码需要可提交、可编程且仅作用于主 Agent 的接线，请使用 `build_middlewares(..., custom_middlewares=[MyMiddleware()])`。
