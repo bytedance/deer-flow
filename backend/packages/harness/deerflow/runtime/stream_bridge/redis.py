@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - only hit when the optional extra is mi
         "Or switch to stream_bridge.type: memory in config.yaml for single-process deployment."
     ) from None
 
-from .base import END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
+from .base import DEFAULT_HEARTBEAT_INTERVAL_SECONDS, END_SENTINEL, HEARTBEAT_SENTINEL, StreamBridge, StreamEvent, StreamGap, StreamItem
 
 logger = logging.getLogger(__name__)
 
@@ -64,10 +64,12 @@ class RedisStreamBridge(StreamBridge):
         redis_url: str,
         queue_maxsize: int = 256,
         key_prefix: str = "deerflow:stream_bridge",
+        heartbeat_interval: float = DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
         max_connections: int | None = None,
         stream_ttl_seconds: int | None = 86400,
         client: Redis | None = None,
     ) -> None:
+        super().__init__(heartbeat_interval=heartbeat_interval)
         self._redis_url = redis_url
         self._maxsize = max(1, queue_maxsize)
         self._key_prefix = key_prefix.rstrip(":")
@@ -227,8 +229,9 @@ class RedisStreamBridge(StreamBridge):
         run_id: str,
         *,
         last_event_id: str | None = None,
-        heartbeat_interval: float = 15.0,
+        heartbeat_interval: float | None = None,
     ) -> AsyncIterator[StreamItem]:
+        heartbeat_interval = self._resolve_heartbeat_interval(heartbeat_interval)
         key = self._stream_key(run_id)
         stream_id = await self._resolve_start_stream_id(key, last_event_id)
         gap_detection_enabled = last_event_id is not None and self._parse_stream_id(last_event_id) is not None

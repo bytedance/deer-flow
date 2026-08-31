@@ -42,6 +42,14 @@ def test_provisioner_accepts_canonical_thread_ids(provisioner_module, thread_id:
     assert request.thread_id == thread_id
 
 
+def test_provisioner_request_defaults_skills_container_path(provisioner_module) -> None:
+    request = provisioner_module.CreateSandboxRequest(
+        sandbox_id="sandbox-validation",
+    )
+
+    assert request.skills_container_path == "/mnt/skills"
+
+
 class _RecordingCoreV1:
     def __init__(
         self,
@@ -230,6 +238,41 @@ def test_create_sandbox_route_builds_expected_skills_mount_layout(
     mount_names = [mount.name for mount in pod.spec.containers[0].volume_mounts]
     assert volume_names == expected_mount_names
     assert mount_names == expected_mount_names
+
+
+def test_create_sandbox_route_threads_custom_skills_root_into_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(
+        event_loop_thread_id=-1,
+        ready_after_service_reads={"sandbox-custom-skills": 1},
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    categories = ("public", "custom", "legacy", "integrations")
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-custom-skills",
+            thread_id="thread-1",
+            user_id="alice",
+            skills_container_path="/custom-skills",
+            extra_mounts=[
+                provisioner_module.ExtraMount(
+                    host_path=(f"/.deer-flow/users/alice/threads/thread-1/skills_view/{category}"),
+                    container_path=f"/custom-skills/{category}",
+                    read_only=True,
+                )
+                for category in categories
+            ],
+        )
+    )
+
+    assert response.status == "Running"
+    pod = fake_core_v1.created_pod_specs["sandbox-custom-skills"]
+    mount_paths = {mount.mount_path for mount in pod.spec.containers[0].volume_mounts}
+    assert not any(path.startswith("/mnt/skills") for path in mount_paths)
+    assert {f"/custom-skills/{category}" for category in categories} <= mount_paths
 
 
 def test_create_sandbox_retries_transient_service_read_errors(monkeypatch: pytest.MonkeyPatch, provisioner_module) -> None:

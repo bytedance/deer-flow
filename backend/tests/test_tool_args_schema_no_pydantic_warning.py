@@ -239,7 +239,7 @@ def test_task_tool_description_is_optional_but_discoverable() -> None:
     parameters = convert_to_openai_tool(task_tool)["function"]["parameters"]
 
     assert parameters["required"] == ["prompt", "subagent_type"]
-    assert list(parameters["properties"]) == ["prompt", "subagent_type", "description"]
+    assert list(parameters["properties"]) == ["prompt", "subagent_type", "acceptance_criteria", "description"]
     assert parameters["properties"]["description"]["description"]
 
     validated = task_tool.tool_call_schema.model_validate({"prompt": "go", "subagent_type": "general-purpose"})

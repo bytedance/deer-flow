@@ -1,10 +1,12 @@
 """Configuration for stream bridge."""
 
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 StreamBridgeType = Literal["memory", "redis"]
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
+MAX_HEARTBEAT_INTERVAL_SECONDS = 86_400.0
 
 
 class StreamBridgeConfig(BaseModel):
@@ -20,16 +22,24 @@ class StreamBridgeConfig(BaseModel):
     )
     queue_maxsize: int = Field(
         default=256,
+        ge=1,
         description="Maximum number of events retained per run (memory bridge queue size / redis stream MAXLEN).",
+    )
+    heartbeat_interval_seconds: float = Field(
+        default=DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        gt=0,
+        le=MAX_HEARTBEAT_INTERVAL_SECONDS,
+        allow_inf_nan=False,
+        description=("Idle seconds between stream heartbeats (maximum 86400). Applies to SSE clients, non-streaming wait requests, and internal stream subscribers."),
     )
     max_connections: int | None = Field(
         default=None,
         description=(
             "Max Redis connections in the pool for the redis stream bridge. Each live SSE "
-            "client holds one connection blocked in XREAD ... BLOCK for up to heartbeat_interval "
-            "(15s), so hundreds of concurrent clients open hundreds of connections. Leave unset "
-            "for redis-py's default (effectively unbounded), or set a ceiling sized for peak "
-            "concurrent SSE clients. Only applies to the redis bridge."
+            "client holds one connection blocked in XREAD ... BLOCK for up to the configured "
+            "heartbeat_interval_seconds, so hundreds of concurrent clients open hundreds of "
+            "connections. Leave unset for redis-py's default (effectively unbounded), or set a "
+            "ceiling sized for peak concurrent SSE clients. Only applies to the redis bridge."
         ),
     )
     stream_ttl_seconds: int = Field(
@@ -46,6 +56,14 @@ class StreamBridgeConfig(BaseModel):
         ge=0,
         description=("Seconds to wait after publishing an END marker for a recovered orphaned run before deleting the stream key. Gives reconnecting SSE clients time to drain the end signal. Only applies to the redis bridge."),
     )
+
+    @field_validator("heartbeat_interval_seconds", mode="before")
+    @classmethod
+    def reject_boolean_heartbeat_interval(cls, value: Any) -> Any:
+        """Reject booleans before Pydantic coerces them to floats."""
+        if isinstance(value, bool):
+            raise ValueError("heartbeat_interval_seconds must be a number, not a boolean")
+        return value
 
 
 # Global configuration instance — None means no stream bridge is configured

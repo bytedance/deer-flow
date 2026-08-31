@@ -490,8 +490,11 @@ the only execution path, which keeps operational mistakes off the table. See
 ### Testing
 
 ```bash
-# Offline backend suite (live external-API tests are excluded)
+# Default offline backend suite (live external-API and blocking-I/O tests are excluded)
 make test
+
+# Strict blocking-I/O suite
+make test-blocking-io
 
 # Explicit real-API DeerFlowClient integration suite
 make test-live
