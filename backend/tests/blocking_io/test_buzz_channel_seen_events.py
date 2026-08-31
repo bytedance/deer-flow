@@ -119,3 +119,47 @@ async def test_channel_stop_retries_seen_event_flush_after_cancellation(tmp_path
 
     restarted = BuzzSeenEventStore(path)
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
+
+
+async def test_abandoned_relay_record_stays_unscheduled_until_channel_restarts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A relay task resuming after stop must not leave detached file work."""
+    path = tmp_path / "buzz-seen-events.json"
+    seen_events = BuzzSeenEventStore(path)
+    channel, _ = _channel(path, seen_events=seen_events)
+    relay_started = asyncio.Event()
+    release_abandoned_relay = asyncio.Event()
+
+    async def cancellation_resistant_relay() -> None:
+        relay_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            await release_abandoned_relay.wait()
+            await seen_events.arecord(_CHANNEL_ID, "late-event")
+
+    monkeypatch.setattr("app.channels.buzz.STOP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.01)
+    channel._task = asyncio.create_task(cancellation_resistant_relay())
+    channel._running = True
+    channel.bus.subscribe_outbound(channel._on_outbound)
+    await relay_started.wait()
+
+    abandoned_relay = channel._task
+    assert abandoned_relay is not None
+    await channel.stop()
+    release_abandoned_relay.set()
+    await abandoned_relay
+    assert await seen_events.aseen(_CHANNEL_ID, "late-event")
+
+    await asyncio.sleep(0.05)
+    stopped_view = BuzzSeenEventStore(path)
+    assert not await stopped_view.aseen(_CHANNEL_ID, "late-event")
+
+    monkeypatch.setattr(buzz_nostr, "parse_private_key", lambda _value: buzz_nostr.NostrKeys(secret=b"", pubkey_hex=_BOT_PUBLIC))
+    channel._spawn_connection = lambda: None
+    await channel.start()
+    await asyncio.sleep(0.05)
+
+    restarted_view = BuzzSeenEventStore(path)
+    assert await restarted_view.aseen(_CHANNEL_ID, "late-event")
+    await channel.stop()

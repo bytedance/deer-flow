@@ -41,8 +41,11 @@ generation dirty for fail-open replay rather than hanging shutdown. The
 in-flight worker write is shielded and retained if Gateway cancellation
 interrupts shutdown, so a retried stop awaits it instead of racing it with a
 second snapshot; every final attempt also removes its coalescing timer before
-returning. The synchronous ``seen()`` / ``record()`` / ``flush()`` methods
-remain for tests and tooling that run outside an event loop.
+returning. ``BuzzChannel`` quiesces automatic scheduling before stop and resumes
+it after start, so a timed-out relay task that records after the stop boundary
+leaves data dirty for fail-open replay without creating detached file work. The
+synchronous ``seen()`` / ``record()`` / ``flush()`` methods remain for tests and
+tooling that run outside an event loop.
 """
 
 from __future__ import annotations
@@ -90,6 +93,7 @@ class BuzzSeenEventStore:
         self._load_lock = threading.Lock()
         self._dirty = False
         self._generation = 0
+        self._quiesced = False
         self._flush_handle: asyncio.TimerHandle | None = None
         self._flush_task: asyncio.Task[bool] | None = None
         # The loop the pending handle was scheduled on. TimerHandle has no
@@ -174,6 +178,8 @@ class BuzzSeenEventStore:
         callers had before coalescing existed.
         """
         self._dirty = True
+        if self._quiesced:
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -187,6 +193,21 @@ class BuzzSeenEventStore:
                 self._flush_handle.cancel()
             self._flush_loop = loop
             self._flush_handle = loop.call_later(FLUSH_DELAY_SECONDS, self._flush_scheduled)
+
+    def quiesce(self) -> None:
+        """Disable automatic persistence while retaining late records as dirty."""
+        self._quiesced = True
+        if self._flush_handle is not None:
+            self._flush_handle.cancel()
+            self._flush_handle = None
+
+    def resume(self) -> None:
+        """Resume automatic persistence and schedule any retained dirty state."""
+        if not self._quiesced:
+            return
+        self._quiesced = False
+        if self._dirty:
+            self._request_flush()
 
     def _flush_task_on_current_loop(self) -> asyncio.Task[bool] | None:
         """Return the pending flush only when it belongs to the running loop."""

@@ -294,6 +294,7 @@ class BuzzChannel(Channel):
         # ChannelService retains this instance specifically so cleanup can be
         # retried.
         self._stop_complete = True
+        self._seen_events.quiesce()
         self._publish = self.bus.publish_inbound  # test seam (discord.py idiom)
 
     @property
@@ -317,6 +318,7 @@ class BuzzChannel(Channel):
         self.bus.subscribe_outbound(self._on_outbound)
         self._spawn_connection()
         self._running = True
+        self._seen_events.resume()
         logger.info("[buzz] channel started (relay=%s pubkey=%s allowed_users=%d)", self._relay_url, self._keys.pubkey_hex, len(self._allowed_users))
 
     def _spawn_connection(self) -> None:
@@ -354,7 +356,13 @@ class BuzzChannel(Channel):
         ``_stop_complete`` is set only after the final seen-event flush. Keeping
         those states separate lets ChannelService retry this same instance when
         its outer shutdown timeout cancels ``stop()`` mid-cleanup.
+
+        Seen-event scheduling is quiesced before even the already-stopped guard.
+        A relay task abandoned after the bounded wait can therefore record late
+        ids as dirty state, but cannot attach new callbacks to a channel the
+        service may remove. ``start()`` explicitly resumes that scheduling.
         """
+        self._seen_events.quiesce()
         if not self._running and self._stop_complete:
             return
         self._stop_complete = False
