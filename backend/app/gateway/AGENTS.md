@@ -1,6 +1,6 @@
 ### Gateway API (`app/gateway/`)
 
-FastAPI on port 8001; health check: `GET /health`. `GATEWAY_ENABLE_DOCS=false` disables `/docs`, `/redoc`, `/openapi.json` in production (default enabled).
+FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
 
 Durable MCP task notifications are internal Agent runs: keep the trusted delivery instruction outside the user-input boundary and frame the serialized remote event payload as untrusted text before model invocation. These runs use strict thread existence/ownership admission so an event from a task that outlives its deleted chat is dead-lettered rather than recreating the thread.
 

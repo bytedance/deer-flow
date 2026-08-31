@@ -16,6 +16,7 @@ from deerflow.sandbox.tools import (
     _is_acp_workspace_path,
     _is_custom_mount_path,
     _is_skills_path,
+    _mask_source_roots,
     _reject_path_traversal,
     _resolve_acp_workspace_path,
     _resolve_and_validate_user_data_path,
@@ -256,6 +257,31 @@ def test_mask_local_paths_cache_does_not_retain_per_thread_sources() -> None:
     cache_info = _compiled_mask_patterns.cache_info()
     assert cache_info.currsize == 1
     assert cache_info.misses == 1
+
+
+def test_mask_local_paths_caches_dynamic_source_resolution_per_root() -> None:
+    """A batched glob/grep must not repeat ``realpath`` for every match."""
+    _compiled_mask_patterns.cache_clear()
+    _mask_source_roots.cache_clear()
+
+    try:
+        with (
+            patch("deerflow.sandbox.tools._get_skills_container_path", return_value="/mnt/skills"),
+            patch("deerflow.sandbox.tools._get_skills_host_path", return_value="/srv/deer-flow/skills"),
+            patch("deerflow.sandbox.tools._get_acp_workspace_host_path", return_value=None),
+            patch("deerflow.config.paths.get_paths", side_effect=RuntimeError("skip user paths")),
+            patch("deerflow.sandbox.tools.os.path.realpath", side_effect=lambda path: path) as realpath,
+        ):
+            for _ in range(200):
+                masked = mask_local_paths_in_output("created /tmp/deer-flow/threads/t1/user-data/workspace/result.txt", _THREAD_DATA)
+                assert masked == "created /mnt/user-data/workspace/result.txt"
+
+        # One stable skills root plus the workspace/uploads/outputs/thread roots.
+        assert realpath.call_count == 5
+        assert _mask_source_roots.cache_info().maxsize == 256
+    finally:
+        _compiled_mask_patterns.cache_clear()
+        _mask_source_roots.cache_clear()
 
 
 def test_mask_local_paths_stable_across_repeated_and_batched_calls() -> None:

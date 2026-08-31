@@ -930,30 +930,31 @@ class RunJournal(BaseCallbackHandler):
         """Flush the terminal journal and release all run-scoped references."""
         if self._closed:
             return
-        try:
-            await self.flush()
-        finally:
-            self._closed = True
-            self._store = None
-            self._progress_reporter = None
-            self._buffer.clear()
-            self._pending_flush_tasks.clear()
-            self._pending_progress_task = None
-            self._pending_progress_delayed = False
-            self._progress_dirty = False
-            self._tokens_by_model.clear()
-            self._counted_llm_run_ids.clear()
-            self._counted_external_source_ids.clear()
-            self._counted_message_llm_run_ids.clear()
-            self._llm_start_times.clear()
-            self._seen_llm_starts.clear()
-            self._current_run_tool_call_names.clear()
-            self._persisted_tool_message_identities.clear()
-            self._produced_artifacts.clear()
-            self._produced_artifact_keys.clear()
-            self._last_ai_msg = None
-            self._first_human_msg = None
-            self._llm_error_fallback_message = None
+        # A failed terminal write returns its batch to ``_buffer``. Keep the
+        # store and all buffered state attached so a later close/flush can retry
+        # instead of silently discarding the tail of the run event stream.
+        await self.flush()
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        self._buffer.clear()
+        self._pending_flush_tasks.clear()
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._tokens_by_model.clear()
+        self._counted_llm_run_ids.clear()
+        self._counted_external_source_ids.clear()
+        self._counted_message_llm_run_ids.clear()
+        self._llm_start_times.clear()
+        self._seen_llm_starts.clear()
+        self._current_run_tool_call_names.clear()
+        self._persisted_tool_message_identities.clear()
+        self._produced_artifacts.clear()
+        self._produced_artifact_keys.clear()
+        self._last_ai_msg = None
+        self._first_human_msg = None
+        self._llm_error_fallback_message = None
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""

@@ -102,6 +102,7 @@ _checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, 
 # Coalesce terminal full collections so the cycles have a bounded lifetime
 # without paying for a stop-the-world collection on every run.
 _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS = 10.0
+_TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS = 0.1
 _terminal_cycle_collection_guard = threading.Lock()
 _terminal_cycle_collection_last_at = time.monotonic()
 _terminal_cycle_collection_scheduled_loops: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
@@ -122,28 +123,45 @@ def _schedule_terminal_cycle_collection() -> None:
         delay = max(0.0, _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS - elapsed)
         _terminal_cycle_collection_scheduled_loops.add(loop)
 
-    def _collect() -> None:
+    async def _collect() -> None:
         global _terminal_cycle_collection_last_at
 
-        with _terminal_cycle_collection_guard:
-            _terminal_cycle_collection_scheduled_loops.discard(loop)
-            now = time.monotonic()
-            if now - _terminal_cycle_collection_last_at < _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS:
-                return
-            _terminal_cycle_collection_last_at = now
+        try:
+            with _terminal_cycle_collection_guard:
+                now = time.monotonic()
+                if now - _terminal_cycle_collection_last_at < _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS:
+                    return
+                _terminal_cycle_collection_last_at = now
 
-        started_at = time.perf_counter()
-        collected = gc.collect()
-        logger.debug(
-            "Terminal cyclic GC collected %d object(s) in %.3f seconds",
-            collected,
-            time.perf_counter() - started_at,
-        )
+            started_at = time.perf_counter()
+            # Do not run a heap walk synchronously from the event-loop timer.
+            # CPython's collector can still contend for the GIL, so surface slow
+            # passes below rather than claiming this removes every pause.
+            collected = await loop.run_in_executor(None, gc.collect)
+            duration = time.perf_counter() - started_at
+            if duration >= _TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS:
+                logger.info(
+                    "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+                    collected,
+                    duration,
+                )
+            else:
+                logger.debug(
+                    "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+                    collected,
+                    duration,
+                )
+        finally:
+            with _terminal_cycle_collection_guard:
+                _terminal_cycle_collection_scheduled_loops.discard(loop)
+
+    def _start_collection() -> None:
+        _create_contextless_task(_collect())
 
     # A blank Context prevents the timer itself from retaining the completed
     # run. The loop owns the TimerHandle; the WeakSet never keeps a test or
     # short-lived embedded-client event loop alive.
-    loop.call_later(delay, _collect, context=Context())
+    loop.call_later(delay, _start_collection, context=Context())
 
 
 async def _close_agent_stream(stream: Any) -> None:

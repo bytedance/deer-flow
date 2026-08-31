@@ -1,5 +1,7 @@
 import asyncio
 import copy
+import logging
+import threading
 import weakref
 from contextlib import suppress
 from contextvars import ContextVar
@@ -820,34 +822,49 @@ async def test_terminal_cleanup_tasks_do_not_inherit_run_context():
 
 
 @pytest.mark.anyio
-async def test_terminal_cycle_collection_is_coalesced_and_contextless(monkeypatch):
+async def test_terminal_cycle_collection_is_coalesced_contextless_and_off_loop(monkeypatch, caplog):
     import deerflow.runtime.runs.worker as worker_module
 
     marker: ContextVar[str | None] = ContextVar("terminal_gc_marker", default=None)
-    seen: list[str | None] = []
+    loop_thread_id = threading.get_ident()
+    seen: list[tuple[str | None, int]] = []
     loop = asyncio.get_running_loop()
     collected = asyncio.Event()
 
     def collect() -> int:
-        seen.append(marker.get())
-        collected.set()
+        seen.append((marker.get(), threading.get_ident()))
+        loop.call_soon_threadsafe(collected.set)
         return 7
 
     monkeypatch.setattr(worker_module, "_TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(worker_module, "_TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS", 0.0)
     monkeypatch.setattr(worker_module, "_terminal_cycle_collection_last_at", 0.0)
     monkeypatch.setattr(worker_module.gc, "collect", collect)
     with worker_module._terminal_cycle_collection_guard:
         worker_module._terminal_cycle_collection_scheduled_loops.discard(loop)
 
+    caplog.set_level(logging.INFO, logger=worker_module.__name__)
     token = marker.set("run-context")
     try:
         worker_module._schedule_terminal_cycle_collection()
         worker_module._schedule_terminal_cycle_collection()
         await asyncio.wait_for(collected.wait(), timeout=1)
+
+        async def wait_until_finished() -> None:
+            while True:
+                with worker_module._terminal_cycle_collection_guard:
+                    if loop not in worker_module._terminal_cycle_collection_scheduled_loops:
+                        return
+                await asyncio.sleep(0)
+
+        await asyncio.wait_for(wait_until_finished(), timeout=1)
     finally:
         marker.reset(token)
 
-    assert seen == [None]
+    assert len(seen) == 1
+    assert seen[0][0] is None
+    assert seen[0][1] != loop_thread_id
+    assert "Terminal cyclic GC collected 7 object(s)" in caplog.text
 
 
 @pytest.mark.anyio

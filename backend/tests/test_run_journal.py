@@ -52,6 +52,39 @@ async def test_close_flushes_and_detaches_runtime_dependencies():
     assert reporter_ref() is None
 
 
+@pytest.mark.anyio
+async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
+    class FailOnceRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            if self.put_batch_calls == 1:
+                raise RuntimeError("transient store failure")
+            return await super().put_batch(events)
+
+    store = FailOnceRunEventStore()
+    journal = RunJournal("r-close-retry", "t-close-retry", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert len(journal._buffer) == 1
+
+    await journal.close()
+
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    events = await store.list_events("t-close-retry", "r-close-retry")
+    assert [event["event_type"] for event in events] == ["middleware:test"]
+
+
 @pytest.fixture
 def journal_setup():
     store = MemoryRunEventStore()

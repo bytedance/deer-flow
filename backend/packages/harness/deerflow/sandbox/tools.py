@@ -761,12 +761,15 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
+@lru_cache(maxsize=256)
 def _mask_source_roots(host_base: str) -> tuple[str, ...]:
     """Return lexical and filesystem-resolved spellings without ``pathlib``.
 
     ``PurePath`` interns every path component. That is useful for long-lived
     paths but wasteful for one-off thread IDs, because evicting DeerFlow's LRU
-    does not shrink the interpreter's intern/allocator high-water mark.
+    does not shrink the interpreter's intern/allocator high-water mark. The
+    bounded cache avoids repeating ``realpath`` walks for every glob/grep match
+    without retaining an unbounded set of thread roots.
     """
     raw = os.path.normpath(host_base)
     resolved = os.path.realpath(host_base)
@@ -850,7 +853,8 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
         return output
 
     result = output
-    for pattern, base, virtual in _compiled_mask_patterns(tuple(stable_sources)) if stable_sources else ():
+    static_patterns = _compiled_mask_patterns(tuple(stable_sources)) if stable_sources else ()
+    for pattern, base, virtual in static_patterns:
 
         def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
             matched_path = match.group(0)
