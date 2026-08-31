@@ -2,7 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { KeyRoundIcon, PlusIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -133,6 +133,13 @@ function InteractivePatSettingsPage() {
   const [created, setCreated] = useState<PatCreated | null>(null);
   const [copied, setCopied] = useState(false);
   const [revoking, setRevoking] = useState<PatSummary | null>(null);
+  // Synchronous double-submit latches. TanStack's isPending only flips after
+  // an async re-render, so two clicks in the same window both observe the
+  // stale false — minting two tokens (the second overwrites the first
+  // show-once value) or firing a second DELETE that 404s behind the success
+  // toast. A ref is the only guard that closes the in-flight batch gap.
+  const createLatchedRef = useRef(false);
+  const revokeLatchedRef = useRef(false);
 
   const storeUnavailable = error instanceof PatStoreUnavailableError;
   const nameValid = name.trim().length > 0;
@@ -184,9 +191,11 @@ function InteractivePatSettingsPage() {
 
   async function handleCreate() {
     // Belt-and-braces next to the disabled submit button: a second minted
-    // token is unrecoverable for the user who never saw the first one.
-    if (create.isPending) return;
+    // token is unrecoverable for the user who never saw the first one. The
+    // ref latch covers the pre-re-render window isPending cannot see.
+    if (createLatchedRef.current || create.isPending) return;
     const days = EXPIRY_CHOICES.find((choice) => choice.value === expiry)?.days;
+    createLatchedRef.current = true;
     try {
       const result = await create.mutateAsync({
         name: name.trim(),
@@ -205,6 +214,8 @@ function InteractivePatSettingsPage() {
         return;
       }
       toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      createLatchedRef.current = false;
     }
   }
 
@@ -223,7 +234,11 @@ function InteractivePatSettingsPage() {
   }
 
   async function handleRevoke() {
-    if (revoking === null) return;
+    // Same synchronous latch as creation: the confirm button's disabled
+    // attribute lands one render too late to stop a true double-click, and
+    // the second DELETE 404s behind the first success toast.
+    if (revoking === null || revokeLatchedRef.current) return;
+    revokeLatchedRef.current = true;
     try {
       await revoke.mutateAsync(revoking.id);
       toast.success(t.settings.tokens.revoked);
@@ -239,6 +254,8 @@ function InteractivePatSettingsPage() {
         return;
       }
       toast.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      revokeLatchedRef.current = false;
     }
   }
 

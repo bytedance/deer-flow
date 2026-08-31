@@ -249,6 +249,44 @@ describe("PatSettingsPage", () => {
     expect(patsMockState.revokeHookCalls).toBe(0);
   });
 
+  it("latches create against a true double-click before isPending renders", () => {
+    // Never-resolving mutation = the in-flight window: a second click lands
+    // before TanStack's pending state re-renders, and without the sync latch
+    // both clicks mint a token (the second overwrites the first show-once).
+    const mutate = rs.fn(() => new Promise<never>(() => undefined));
+    patsMockState.createMutate = mutate;
+
+    renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    // Creation starts with zero scopes selected (explicit-grant default),
+    // so grant one before submitting.
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
+  it("latches revoke the same way", () => {
+    const mutate = rs.fn(() => new Promise<never>(() => undefined));
+    patsMockState.revokeMutate = mutate;
+    patsMockState.pats = [activePat()];
+
+    renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByLabelText("Revoke"));
+    const confirm = screen.getByText("Revoke token");
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
   it("shows the empty state when no tokens exist", () => {
     renderWithQueryClient(<PatSettingsPage />);
 
