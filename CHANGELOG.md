@@ -25,7 +25,7 @@ This section accumulates work toward the **2.1.0** milestone
   `config.context` is now ignored and overwritten so the response header, the
   logs, and the persisted run cannot disagree — send the `X-Trace-Id` request
   header to pin a correlation id across services. `logging` remains
-  restart-required. No config keys were added or removed. ([#XXXX])
+  restart-required. No config keys were added or removed. ([#5119])
 - **skills:** Sandboxes now reserve `/mnt/skills` for managed enabled-only
   projections. `DEER_FLOW_HOST_SKILLS_PATH` and `SKILLS_HOST_PATH` are no longer
   used; Docker/AIO and hostPath deployments derive projection paths from
@@ -421,25 +421,25 @@ This section accumulates work toward the **2.1.0** milestone
   disagree with the `X-Trace-Id` and the log lines from the same request. The
   id is now stamped once at the trust boundary, `config.context` is closed off
   the same way, and a thread's own metadata is no longer seeded with the
-  run-scoped id of whichever run created it. ([#XXXX])
+  run-scoped id of whichever run created it. ([#5119])
 - **gateway:** Expose `X-Trace-Id` in `Access-Control-Expose-Headers`. It is not
   CORS-safelisted, so split-origin browser clients — the ones that cannot read
   the Gateway's logs either — could not read the correlation id they are meant
-  to quote in a bug report. ([#XXXX])
+  to quote in a bug report. ([#5119])
 - **gateway:** Keep `X-Trace-Id` on unhandled-exception 500s. Starlette's
   `ServerErrorMiddleware` emits those through the raw send outside every user
   middleware, so the 500 for a server bug — the response most in need of
   correlation — was the only one shipped without the id. `TraceMiddleware` now
   sends its own 500 carrying the header before re-raising; the server's
   exception logging is untouched and mid-stream failures propagate unchanged.
-  ([#XXXX])
+  ([#5119])
 - **gateway:** Strip a forged `deerflow_trace_id` from the persisted request
   echo. `body.config` is stored verbatim as `runs.kwargs_json` and served back
   by the runs API, so a forged id in `config.metadata` or `config.context`
   survived on that one surface while every other carried the real id.
   `redact_config_secrets` now drops the key from both containers, and
   `build_run_config` merges run metadata onto a copy so the server-stamped id
-  can no longer be written through into the caller's request body. ([#XXXX])
+  can no longer be written through into the caller's request body. ([#5119])
 - **artifacts:** Keep explicit full-file loading scoped to the source thread, so a same-path artifact in another conversation keeps its 1 MiB preview. ([#4634])
 - **sandbox:** `SandboxAuditMiddleware` no longer blocks ordinary command
   substitution that only captures output. The rule now judges *position* instead
@@ -2125,3 +2125,4 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#4983]: https://github.com/bytedance/deer-flow/pull/4983
 [#4987]: https://github.com/bytedance/deer-flow/pull/4987
 [#4998]: https://github.com/bytedance/deer-flow/pull/4998
+[#5119]: https://github.com/bytedance/deer-flow/pull/5119
