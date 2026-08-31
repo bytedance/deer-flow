@@ -35,9 +35,11 @@ captures an immutable payload on the event loop and writes it through
 ``asyncio.to_thread``; a generation counter keeps records that arrive during
 that write dirty for the next flush. ``aseen()`` likewise offloads the initial
 file load, and ``BuzzChannel.stop()`` awaits ``aflush()`` so clean shutdown is
-durable before it returns. The synchronous ``seen()`` / ``record()`` /
-``flush()`` methods remain for tests and tooling that run outside an event
-loop.
+durable before it returns. That final flush is bounded: it waits for an existing
+write and attempts at most one newer snapshot, leaving any still-moving
+generation dirty for fail-open replay rather than hanging shutdown. The
+synchronous ``seen()`` / ``record()`` / ``flush()`` methods remain for tests and
+tooling that run outside an event loop.
 """
 
 from __future__ import annotations
@@ -97,25 +99,29 @@ class BuzzSeenEventStore:
         with self._load_lock:
             if self._loaded:
                 return
-            self._loaded = True
-            if self._path is None:
-                return
             try:
-                if not self._path.exists():
+                if self._path is None:
                     return
-                raw = json.loads(self._path.read_text(encoding="utf-8"))
-            except Exception:
-                logger.warning("[buzz] unreadable seen-event store, starting fresh (costs at most one replayed reply)", exc_info=True)
-                return
-            if not isinstance(raw, dict):
-                return
-            for channel_id, ids in raw.items():
-                if not isinstance(ids, list):
-                    continue
-                clean = deque((str(i) for i in ids if i), maxlen=MAX_IDS_PER_CHANNEL)
-                self._ids[str(channel_id)] = clean
-                self._sets[str(channel_id)] = set(clean)
-            self._enforce_channel_cap()
+                try:
+                    if not self._path.exists():
+                        return
+                    raw = json.loads(self._path.read_text(encoding="utf-8"))
+                except Exception:
+                    logger.warning("[buzz] unreadable seen-event store, starting fresh (costs at most one replayed reply)", exc_info=True)
+                    return
+                if not isinstance(raw, dict):
+                    return
+                for channel_id, ids in raw.items():
+                    if not isinstance(ids, list):
+                        continue
+                    clean = deque((str(i) for i in ids if i), maxlen=MAX_IDS_PER_CHANNEL)
+                    self._ids[str(channel_id)] = clean
+                    self._sets[str(channel_id)] = set(clean)
+                self._enforce_channel_cap()
+            finally:
+                # Publish only after every loaded entry is visible. Async hot
+                # paths may read this flag without taking ``_load_lock``.
+                self._loaded = True
 
     def _snapshot(self) -> dict[str, list[str]]:
         return {channel: list(ids) for channel, ids in self._ids.items()}
@@ -207,21 +213,29 @@ class BuzzSeenEventStore:
             self._request_flush()
 
     async def aflush(self) -> None:
-        """Persist pending records without performing file IO on the event loop."""
+        """Make one bounded final persist without blocking the event loop."""
         if self._flush_handle is not None:
             self._flush_handle.cancel()
             self._flush_handle = None
 
         pending = self._flush_task
+        current_loop = asyncio.get_running_loop()
         if pending is not None and pending is not asyncio.current_task():
-            await pending
+            if pending.get_loop() is current_loop and not pending.cancelled():
+                await pending
+            elif self._flush_task is pending:
+                # Tasks are loop-pinned just like TimerHandles. A cancelled
+                # task retained from a closed test/tooling loop cannot be
+                # awaited here; discard it and persist the dirty snapshot on
+                # the current loop instead.
+                self._flush_task = None
 
-        while self._dirty:
-            generation = self._generation
-            if not await self._flush_once():
-                break
-            if generation == self._generation:
-                break
+        # One final snapshot keeps shutdown bounded even if an abandoned relay
+        # task is still recording. If that snapshot becomes stale, ``_dirty``
+        # deliberately remains set: the documented fail-open cost is replay on
+        # restart, never an unbounded Gateway shutdown.
+        if self._dirty:
+            await self._flush_once()
 
         if self._flush_handle is not None:
             self._flush_handle.cancel()
@@ -257,7 +271,8 @@ class BuzzSeenEventStore:
         """Async counterpart of :meth:`seen` for Gateway event-loop callers."""
         if not event_id:
             return False
-        await asyncio.to_thread(self._ensure_loaded)
+        if not self._loaded:
+            await asyncio.to_thread(self._ensure_loaded)
         return event_id in self._sets.get(channel_id, ())
 
     def record(self, channel_id: str, event_id: str) -> None:
@@ -271,7 +286,8 @@ class BuzzSeenEventStore:
         """Record an event without performing file IO on the event loop."""
         if not channel_id or not event_id:
             return
-        await asyncio.to_thread(self._ensure_loaded)
+        if not self._loaded:
+            await asyncio.to_thread(self._ensure_loaded)
         self._record_loaded(channel_id, event_id)
 
     def _record_loaded(self, channel_id: str, event_id: str) -> None:

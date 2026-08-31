@@ -7,6 +7,8 @@ clean stop durable before it returns.
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,92 @@ async def test_async_replay_guard_round_trips_without_blocking_the_event_loop(tm
     store = BuzzSeenEventStore(path)
 
     await store.arecord(_CHANNEL_ID, "event-1")
+    await store.aflush()
+
+    restarted = BuzzSeenEventStore(path)
+    assert await restarted.aseen(_CHANNEL_ID, "event-1")
+
+
+async def test_loaded_store_does_not_dispatch_hot_path_lookups_to_a_thread(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the cold file load needs the shared worker pool."""
+    store = BuzzSeenEventStore(tmp_path / "buzz-seen-events.json")
+    assert not await store.aseen(_CHANNEL_ID, "event-1")
+
+    async def unexpected_to_thread(*_args, **_kwargs):
+        raise AssertionError("loaded seen-event store used the worker pool")
+
+    monkeypatch.setattr(asyncio, "to_thread", unexpected_to_thread)
+
+    await store.arecord(_CHANNEL_ID, "event-1")
+    assert await store.aseen(_CHANNEL_ID, "event-1")
+
+
+async def test_event_recorded_during_a_write_survives_the_follow_up_flush(tmp_path: Path) -> None:
+    """An in-flight snapshot must not mark a newer generation as clean."""
+    path = tmp_path / "buzz-seen-events.json"
+    store = BuzzSeenEventStore(path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    snapshots: list[dict[str, list[str]]] = []
+    write_snapshot = store._write_snapshot
+
+    def pause_first_write(payload: dict[str, list[str]]) -> bool:
+        snapshots.append(payload)
+        if len(snapshots) == 1:
+            write_started.set()
+            assert release_write.wait(timeout=2)
+        return write_snapshot(payload)
+
+    store._write_snapshot = pause_first_write
+    await store.arecord(_CHANNEL_ID, "event-1")
+    flush = asyncio.create_task(store.aflush())
+
+    assert await asyncio.to_thread(write_started.wait, 2)
+    await store.arecord(_CHANNEL_ID, "event-2")
+    release_write.set()
+    await flush
+    await store.aflush()
+
+    restarted = BuzzSeenEventStore(path)
+    assert await restarted.aseen(_CHANNEL_ID, "event-1")
+    assert await restarted.aseen(_CHANNEL_ID, "event-2")
+
+
+async def test_final_flush_is_bounded_while_records_keep_arriving(tmp_path: Path) -> None:
+    """Shutdown must return instead of chasing an active producer forever."""
+    store = BuzzSeenEventStore(tmp_path / "buzz-seen-events.json")
+    await store.arecord(_CHANNEL_ID, "event-0")
+    loop = asyncio.get_running_loop()
+    snapshots: list[dict[str, list[str]]] = []
+    write_snapshot = store._write_snapshot
+
+    def record_during_first_writes(payload: dict[str, list[str]]) -> bool:
+        snapshots.append(payload)
+        if len(snapshots) <= 3:
+            future = asyncio.run_coroutine_threadsafe(store.arecord(_CHANNEL_ID, f"late-{len(snapshots)}"), loop)
+            future.result(timeout=2)
+        return write_snapshot(payload)
+
+    store._write_snapshot = record_during_first_writes
+    await store.aflush()
+
+    assert len(snapshots) <= 2
+    assert await store.aseen(_CHANNEL_ID, "late-1")
+
+
+async def test_final_flush_ignores_a_task_from_a_closed_event_loop(tmp_path: Path) -> None:
+    """A stale loop-owned task must not abort shutdown on the current loop."""
+    path = tmp_path / "buzz-seen-events.json"
+    store = BuzzSeenEventStore(path)
+
+    def leave_cancelled_task_from_closed_loop() -> None:
+        async def seed() -> None:
+            await store.arecord(_CHANNEL_ID, "event-1")
+            store._flush_task = asyncio.create_task(asyncio.sleep(60))
+
+        asyncio.run(seed())
+
+    await asyncio.to_thread(leave_cancelled_task_from_closed_loop)
     await store.aflush()
 
     restarted = BuzzSeenEventStore(path)
