@@ -685,8 +685,8 @@ LocalSandbox 还会提供 `run_host_program`，用于运行 `.exe`、`.cmd`/`.ba
 而 `/c/projects` 这样的单字母 POSIX 根目录只在 Windows 配置校验时拒绝。
 主机路径别名仅适用于 Windows；POSIX 本地部署仍应在工具参数中使用配置的虚拟路径。
 修改沙盒挂载后需要重启 Gateway，以保持授权结果与沙盒路径映射一致。
-对于 `.cmd`/`.bat` 程序路径和参数，Windows 包装器会拒绝 `%`、`^`、引号和
-控制字符，因为 `cmd.exe` 会在启动前展开或解释这些字符；其他 shell 元字符会被加引号。
+对于 `.cmd`/`.bat` 程序路径和参数，绝对路径参数必须位于配置的挂载目录下。
+Windows 包装器会拒绝 `%`、`^`、引号和控制字符，因为 `cmd.exe` 会在启动前展开或解释这些字符；其他 shell 元字符会被加引号。
 
 ### Context Engineering
 

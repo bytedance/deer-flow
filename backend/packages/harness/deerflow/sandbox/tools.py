@@ -1263,7 +1263,7 @@ def _is_non_path_literal_fragment(fragment: str) -> bool:
     return False
 
 
-def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> None:
+def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState | None) -> str:
     """Validate absolute paths in local-sandbox bash commands.
 
     This validation is only a best-effort guard for the explicit
@@ -1307,6 +1307,8 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
         raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+
+    return command
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
@@ -1918,8 +1920,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
                 return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
             ensure_thread_directories_exist(runtime)
             thread_data = get_thread_data(runtime)
-            command = normalize_local_command(command)
-            validate_local_bash_command_paths(command, thread_data)
+            command = validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
             command = _apply_cwd_prefix(command, thread_data)
             # POSIX-only: the Windows local sandbox may execute via

@@ -68,7 +68,7 @@ def run_host_program_tool(
     Args:
         description: Explain why the program is being run.
         program_path: Program path, as a configured virtual or Windows host path. For ``.cmd``/``.bat`` files, paths containing ``%`` or ``^`` are not supported by the Windows command wrapper.
-        args: Optional program arguments. Configured host paths in arguments are normalized; ``%``, ``^``, quotes, and control characters are not supported for batch arguments.
+        args: Optional program arguments. Configured host paths in arguments are normalized; absolute argument paths must resolve inside a configured mount. ``%``, ``^``, quotes, and control characters are not supported for batch arguments.
         cwd: Optional working directory, as a configured virtual or Windows host path.
         timeout: Optional wall-clock timeout in seconds.
     """

@@ -121,12 +121,29 @@ def _quote_cmd_program_path(value: str) -> str:
     return f'"{value}"'
 
 
+def _program_argument_candidate(value: str) -> str:
+    return value.partition("=")[2] if "=" in value else value
+
+
+def _is_absolute_program_argument(value: str) -> bool:
+    candidate = _program_argument_candidate(value)
+    normalized = candidate.replace("\\", "/")
+    return bool(re.match(r"^[A-Za-z]:/", normalized) or normalized.startswith("//") or candidate.startswith("\\") or normalized == "/mnt" or normalized.startswith("/mnt/"))
+
+
 def _resolve_program_argument(sandbox: "LocalSandbox", value: str) -> str:
     if "=" in value:
         prefix, separator, candidate = value.partition("=")
         if sandbox._find_path_mapping(candidate):
             return f"{prefix}{separator}{sandbox._resolve_path(candidate)}"
-    return sandbox._resolve_path(value) if sandbox._find_path_mapping(value) else value
+        if _is_absolute_program_argument(candidate):
+            raise PermissionError("program argument path must be inside a configured sandbox mount")
+        return value
+    if sandbox._find_path_mapping(value):
+        return sandbox._resolve_path(value)
+    if _is_absolute_program_argument(value):
+        raise PermissionError("program argument path must be inside a configured sandbox mount")
+    return value
 
 
 def _is_windows_native_program_platform() -> bool:
@@ -611,7 +628,8 @@ class LocalSandbox(Sandbox):
         Batch paths are quoted separately from model arguments so common
         directory names such as ``Program Files (x86)`` remain runnable. Paths
         containing ``%`` or ``^`` are rejected because cmd.exe expands or
-        interprets those characters before the batch file starts.
+        interprets those characters before the batch file starts. Absolute
+        argument paths must resolve through a configured sandbox mount.
         """
         _validate_extra_env(env)
         if not _is_windows_native_program_platform():

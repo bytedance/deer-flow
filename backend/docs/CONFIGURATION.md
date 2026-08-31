@@ -706,9 +706,10 @@ run Windows host programs. Keep every mount `container_path` as a POSIX virtual
 path. Drive-prefixed values such as `C:/projects` are rejected on every OS;
 slash-prefixed single-letter roots such as `/c/projects` are rejected during
 Windows configuration validation but remain valid POSIX roots on POSIX hosts.
-For `.cmd`/`.bat` program paths and arguments, the Windows wrapper rejects `%`,
-`^`, quotes, and control characters because `cmd.exe` expands or interprets
-those characters before launch; other shell metacharacters are quoted.
+For `.cmd`/`.bat` program paths and arguments, absolute argument paths must be
+under configured mounts. The Windows wrapper rejects `%`, `^`, quotes, and
+control characters because `cmd.exe` expands or interprets those characters
+before launch; other shell metacharacters are quoted.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`

@@ -41,6 +41,10 @@ def _windows_path(path: str) -> str:
     return str(Path(path).resolve()).replace("/", "\\")
 
 
+def _native_path(path: str) -> str:
+    return str(Path(path).resolve())
+
+
 def test_execute_program_launches_exe_without_shell(monkeypatch) -> None:
     monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     calls: list[tuple[list[str], float, dict[str, str] | None, str | None]] = []
@@ -65,7 +69,7 @@ def test_execute_program_launches_exe_without_shell(monkeypatch) -> None:
     assert args == [
         _windows_path(str(_LAUNCHER_ROOT / "tools" / "app.exe")),
         "--config",
-        _windows_path(str(_LAUNCHER_ROOT / "config.tfx-dms")),
+        _native_path(str(_LAUNCHER_ROOT / "config.tfx-dms")),
     ]
     assert timeout == 7
     assert cwd == _windows_path(str(_LAUNCHER_ROOT / "tools"))
@@ -84,7 +88,7 @@ def test_execute_program_resolves_virtual_path_embedded_in_key_value_arg(monkeyp
 
     sandbox.execute_program("/root/tools/app.exe", ["--config=/root/config.tfx-dms"])
 
-    assert calls[0][1] == f"--config={_windows_path(str(_LAUNCHER_ROOT / 'config.tfx-dms'))}"
+    assert calls[0][1] == f"--config={_native_path(str(_LAUNCHER_ROOT / 'config.tfx-dms'))}"
 
 
 def test_execute_program_uses_cmd_call_for_cmd_files(monkeypatch) -> None:
@@ -122,6 +126,17 @@ def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> Non
         sandbox.execute_program("/root/tools/build.cmd", ["--release"])
 
     helper.assert_called_once()
+
+
+@pytest.mark.parametrize("argument", [r"\\host\share\tool.exe", r"--tool=\\host\share\tool.exe"])
+def test_execute_program_rejects_unmapped_absolute_argument(argument: str, monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"))
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: ("ok", "", 0, False)))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    with pytest.raises(PermissionError, match="program argument"):
+        sandbox.execute_program("/root/tools/build.cmd", [argument])
 
 
 def test_execute_program_allows_parentheses_in_configured_cmd_program_path(monkeypatch) -> None:
@@ -206,6 +221,7 @@ def test_execute_program_quotes_cmd_arguments_with_spaces(monkeypatch) -> None:
         return "ok", "", 0, False
 
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"))
     sandbox = LocalSandbox("t", [_MOUNT])
 
     sandbox.execute_program("/root/tools/build.cmd", ["hello world"])
@@ -248,7 +264,7 @@ def test_execute_program_uses_powershell_file_for_ps1(monkeypatch) -> None:
             "-File",
             _windows_path(str(_LAUNCHER_ROOT / "tools" / "build.ps1")),
             "-Config",
-            _windows_path(str(_LAUNCHER_ROOT / "config.tfx-dms")),
+            _native_path(str(_LAUNCHER_ROOT / "config.tfx-dms")),
         ]
     ]
 

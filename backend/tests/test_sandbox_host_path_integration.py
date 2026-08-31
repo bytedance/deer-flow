@@ -19,6 +19,7 @@ from deerflow.tools.builtins.run_host_program_tool import run_host_program_tool
 from deerflow.tools.builtins.view_image_tool import view_image_tool
 
 run_host_program_module = importlib.import_module("deerflow.tools.builtins.run_host_program_tool")
+sandbox_tools = importlib.import_module("deerflow.sandbox.tools")
 
 _THREAD_DATA = {
     "workspace_path": r"C:\Users\lichen\thread-workspace",
@@ -88,6 +89,7 @@ def test_bash_tool_normalizes_configured_host_path_before_validation() -> None:
         patch("deerflow.sandbox.tools.ensure_thread_directories_exist"),
         patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
         patch("deerflow.sandbox.tools.is_host_bash_allowed", return_value=True),
+        patch.object(sandbox_tools, "normalize_local_command", wraps=sandbox_tools.normalize_local_command) as normalize,
         patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
         patch("deerflow.sandbox.tools.get_app_config", return_value=_config()),
         patch("deerflow.sandbox.tools._lark_cli_env_from_runtime", return_value=None),
@@ -101,6 +103,7 @@ def test_bash_tool_normalizes_configured_host_path_before_validation() -> None:
     assert result == "ok"
     assert len(calls) == 1
     assert calls[0].endswith("find /root -mindepth 1 -maxdepth 1 -type d")
+    normalize.assert_called_once()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows host-path compatibility")
