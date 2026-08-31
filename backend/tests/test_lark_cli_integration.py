@@ -259,7 +259,7 @@ def _stage_non_executable_sandbox_runtime(root: Path) -> None:
 
 
 def test_validate_lark_cli_sandbox_runtime_accepts_non_executable_files_on_windows_hosts(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(lark_cli.os, "name", "nt")
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="nt"))
     root = tmp_path / "runtime"
     _stage_non_executable_sandbox_runtime(root)
 
@@ -267,7 +267,7 @@ def test_validate_lark_cli_sandbox_runtime_accepts_non_executable_files_on_windo
 
 
 def test_validate_lark_cli_sandbox_runtime_rejects_non_executable_files_on_posix_hosts(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(lark_cli.os, "name", "posix")
+    monkeypatch.setattr(lark_cli, "os", SimpleNamespace(name="posix"))
     root = tmp_path / "runtime"
     _stage_non_executable_sandbox_runtime(root)
 

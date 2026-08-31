@@ -429,15 +429,18 @@ def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
         raise ValueError("Managed Lark CLI sandbox runtime root must be a regular directory, not a symlink.")
     for path in root.rglob("*"):
         if path.is_symlink():
-            raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink: {path}")
+            raise ValueError(f"Managed Lark CLI sandbox runtime must not contain a symlink: {path.as_posix()}")
         if not (path.is_dir() or path.is_file()):
-            raise ValueError(f"Managed Lark CLI sandbox runtime contains an unsupported file type: {path}")
+            raise ValueError(f"Managed Lark CLI sandbox runtime contains an unsupported file type: {path.as_posix()}")
     for relative in (Path("bin/lark-cli"), *(Path(f"linux-{arch}/lark-cli") for arch in LARK_CLI_LINUX_ARCHES)):
         candidate = root / relative
         if not candidate.is_file():
             raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative.as_posix()}")
-        # Linux sandbox binaries are prepared on the Gateway host. NTFS/Python does
-        # not preserve POSIX executable bits; chmod happens later inside the sandbox.
+        # NTFS cannot represent POSIX executable bits. The Windows→Linux bind mount
+        # is expected to present these files as executable (Docker Desktop
+        # gRPC-FUSE/virtiofs typically synthesizes 0755); this check is skipped on
+        # Windows because the host mode is unrepresentable, not because anything
+        # later chmods the read-only sandbox mount.
         if os.name != "nt" and candidate.stat().st_mode & 0o111 == 0:
             raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative.as_posix()}")
 
