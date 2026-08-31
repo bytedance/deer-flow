@@ -3,6 +3,9 @@ import { getBackendBaseURL } from "@/core/config";
 
 import type { Skill } from "./type";
 
+// Keep this in lockstep with `_MAX_SKILL_ARCHIVE_UPLOAD_BYTES` in
+// `backend/app/gateway/routers/skills.py`; nginx and Ingress allow 101 MiB so
+// multipart framing fits around the same 100 MiB archive limit.
 export const MAX_SKILL_ARCHIVE_UPLOAD_BYTES = 100 * 1024 * 1024;
 
 export interface SkillSecurityFinding {
@@ -74,17 +77,19 @@ function parseSecurityFindings(value: unknown): SkillSecurityFinding[] {
 export function formatSkillSecurityFindings(
   findings: SkillSecurityFinding[],
 ): string {
-  return findings
-    .slice(0, 3)
-    .map((finding) => {
-      const location = finding.file
-        ? `${finding.file}${finding.line === null ? "" : `:${finding.line}`}`
-        : finding.line === null
-          ? "archive"
-          : `archive:${finding.line}`;
-      return `${finding.severity} ${finding.rule_id} · ${location}: ${finding.message}${finding.remediation ? ` ${finding.remediation}` : ""}`;
-    })
-    .join("\n");
+  const lines = findings.slice(0, 3).map((finding) => {
+    const location = finding.file
+      ? `${finding.file}${finding.line === null ? "" : `:${finding.line}`}`
+      : finding.line === null
+        ? "archive"
+        : `archive:${finding.line}`;
+    return `${finding.severity} ${finding.rule_id} · ${location}: ${finding.message}${finding.remediation ? ` ${finding.remediation}` : ""}`;
+  });
+  const omittedCount = findings.length - lines.length;
+  if (omittedCount > 0) {
+    lines.push(`... and ${omittedCount} more`);
+  }
+  return lines.join("\n");
 }
 
 async function readErrorDetail(response: Response): Promise<SkillErrorDetail> {

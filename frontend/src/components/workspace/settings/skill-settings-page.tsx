@@ -81,6 +81,8 @@ function SkillSettingsList({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
     useUploadSkillArchive();
+  const isArchiveUploadDisabled =
+    isUploading || !isAdmin || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
@@ -124,7 +126,11 @@ function SkillSettingsList({
         error.findings.length > 0
       ) {
         toast.error(error.message, {
-          description: formatSkillSecurityFindings(error.findings),
+          description: (
+            <span className="whitespace-pre-line">
+              {formatSkillSecurityFindings(error.findings)}
+            </span>
+          ),
         });
       } else {
         toast.error(
@@ -151,7 +157,7 @@ function SkillSettingsList({
             ref={fileInputRef}
             type="file"
             accept=".skill"
-            disabled={isUploading}
+            disabled={isArchiveUploadDisabled}
             className="sr-only"
             onChange={handleSkillArchive}
           />
@@ -159,9 +165,7 @@ function SkillSettingsList({
             <Button
               size="sm"
               variant="outline"
-              disabled={
-                isUploading || env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true"
-              }
+              disabled={isArchiveUploadDisabled}
               onClick={() => fileInputRef.current?.click()}
             >
               {isUploading ? (

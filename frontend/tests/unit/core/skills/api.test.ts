@@ -133,4 +133,22 @@ describe("skills api", () => {
       }),
     );
   });
+
+  test("limits formatted findings and reports how many remain", () => {
+    const findings = Array.from({ length: 5 }, (_, index) => ({
+      rule_id: `rule-${index + 1}`,
+      severity: "HIGH",
+      file: `scripts/run-${index + 1}.py`,
+      line: index + 1,
+      message: `Finding ${index + 1}.`,
+      remediation: null,
+    }));
+
+    expect(formatSkillSecurityFindings(findings).split("\n")).toEqual([
+      "HIGH rule-1 · scripts/run-1.py:1: Finding 1.",
+      "HIGH rule-2 · scripts/run-2.py:2: Finding 2.",
+      "HIGH rule-3 · scripts/run-3.py:3: Finding 3.",
+      "... and 2 more",
+    ]);
+  });
 });
