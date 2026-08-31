@@ -230,9 +230,16 @@ class BuzzSeenEventStore:
         pending = self._flush_task_on_current_loop()
         if pending is not None and pending is not asyncio.current_task():
             if not pending.cancelled():
-                await pending
-            elif self._flush_task is pending:
-                # A cancelled task cannot make the dirty snapshot durable.
+                try:
+                    await pending
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                    logger.warning("[buzz] in-flight seen-event flush was cancelled during final persist; retrying")
+                except Exception:
+                    logger.warning("[buzz] in-flight seen-event flush failed during final persist; retrying", exc_info=True)
+            if self._flush_task is pending and pending.done():
                 self._flush_task = None
 
         # One final snapshot keeps shutdown bounded even if an abandoned relay
@@ -242,7 +249,7 @@ class BuzzSeenEventStore:
         if self._dirty:
             await self._flush_once()
 
-        if self._flush_handle is not None:
+        if self._flush_handle is not None and not self._dirty:
             self._flush_handle.cancel()
             self._flush_handle = None
 

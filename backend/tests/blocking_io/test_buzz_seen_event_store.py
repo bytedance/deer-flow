@@ -47,7 +47,7 @@ async def test_loaded_store_does_not_dispatch_hot_path_lookups_to_a_thread(tmp_p
     assert await store.aseen(_CHANNEL_ID, "event-1")
 
 
-async def test_event_recorded_during_a_write_survives_the_follow_up_flush(tmp_path: Path) -> None:
+async def test_event_recorded_during_a_write_survives_the_follow_up_flush(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An in-flight snapshot must not mark a newer generation as clean."""
     path = tmp_path / "buzz-seen-events.json"
     store = BuzzSeenEventStore(path)
@@ -65,39 +65,59 @@ async def test_event_recorded_during_a_write_survives_the_follow_up_flush(tmp_pa
 
     store._write_snapshot = pause_first_write
     await store.arecord(_CHANNEL_ID, "event-1")
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.01)
     flush = asyncio.create_task(store.aflush())
 
     assert await asyncio.to_thread(write_started.wait, 2)
     await store.arecord(_CHANNEL_ID, "event-2")
     release_write.set()
     await flush
-    await store.aflush()
+    await asyncio.sleep(0.05)
 
     restarted = BuzzSeenEventStore(path)
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
     assert await restarted.aseen(_CHANNEL_ID, "event-2")
 
 
-async def test_final_flush_is_bounded_while_records_keep_arriving(tmp_path: Path) -> None:
+async def test_final_flush_is_bounded_while_records_keep_arriving(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Shutdown must return instead of chasing an active producer forever."""
     store = BuzzSeenEventStore(tmp_path / "buzz-seen-events.json")
-    await store.arecord(_CHANNEL_ID, "event-0")
-    loop = asyncio.get_running_loop()
+    first_write_started = threading.Event()
+    release_first_write = threading.Event()
+    second_write_started = threading.Event()
+    release_second_write = threading.Event()
     snapshots: list[dict[str, list[str]]] = []
     write_snapshot = store._write_snapshot
 
-    def record_during_first_writes(payload: dict[str, list[str]]) -> bool:
+    def pause_bounded_writes(payload: dict[str, list[str]]) -> bool:
         snapshots.append(payload)
-        if len(snapshots) <= 3:
-            future = asyncio.run_coroutine_threadsafe(store.arecord(_CHANNEL_ID, f"late-{len(snapshots)}"), loop)
-            future.result(timeout=2)
+        if len(snapshots) == 1:
+            first_write_started.set()
+            assert release_first_write.wait(timeout=2)
+        elif len(snapshots) == 2:
+            second_write_started.set()
+            assert release_second_write.wait(timeout=2)
         return write_snapshot(payload)
 
-    store._write_snapshot = record_during_first_writes
-    await store.aflush()
+    store._write_snapshot = pause_bounded_writes
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.01)
+    await store.arecord(_CHANNEL_ID, "event-0")
+    assert await asyncio.to_thread(first_write_started.wait, 2)
 
-    assert len(snapshots) <= 2
-    assert await store.aseen(_CHANNEL_ID, "late-1")
+    # Keep later timers beyond the test window: this test measures only the
+    # existing in-flight write plus aflush()'s one final snapshot.
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 60)
+    final_flush = asyncio.create_task(store.aflush())
+    await store.arecord(_CHANNEL_ID, "late-1")
+    release_first_write.set()
+
+    assert await asyncio.to_thread(second_write_started.wait, 2)
+    await store.arecord(_CHANNEL_ID, "late-2")
+    release_second_write.set()
+    await final_flush
+
+    assert len(snapshots) == 2
+    assert await store.aseen(_CHANNEL_ID, "late-2")
 
 
 async def test_final_flush_ignores_a_task_from_a_closed_event_loop(tmp_path: Path) -> None:
@@ -114,6 +134,38 @@ async def test_final_flush_ignores_a_task_from_a_closed_event_loop(tmp_path: Pat
 
     await asyncio.to_thread(leave_cancelled_task_from_closed_loop)
     await store.aflush()
+
+    restarted = BuzzSeenEventStore(path)
+    assert await restarted.aseen(_CHANNEL_ID, "event-1")
+
+
+async def test_final_flush_recovers_when_an_in_flight_flush_task_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A background persistence failure must not escape channel shutdown."""
+    path = tmp_path / "buzz-seen-events.json"
+    store = BuzzSeenEventStore(path)
+    write_started = threading.Event()
+    release_write = threading.Event()
+    write_snapshot = store._write_snapshot
+    write_count = 0
+
+    def fail_first_write(payload: dict[str, list[str]]) -> bool:
+        nonlocal write_count
+        write_count += 1
+        if write_count == 1:
+            write_started.set()
+            assert release_write.wait(timeout=2)
+            raise RuntimeError("worker pool is shutting down")
+        return write_snapshot(payload)
+
+    store._write_snapshot = fail_first_write
+    monkeypatch.setattr(buzz_seen_events, "FLUSH_DELAY_SECONDS", 0.01)
+    await store.arecord(_CHANNEL_ID, "event-1")
+    assert await asyncio.to_thread(write_started.wait, 2)
+
+    final_flush = asyncio.create_task(store.aflush())
+    await asyncio.sleep(0)
+    release_write.set()
+    await final_flush
 
     restarted = BuzzSeenEventStore(path)
     assert await restarted.aseen(_CHANNEL_ID, "event-1")
