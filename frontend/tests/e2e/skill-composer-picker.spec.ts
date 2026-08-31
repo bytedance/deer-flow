@@ -71,6 +71,19 @@ test.describe("Composer skill picker", () => {
         name: /how can i assist you/i,
       });
       await expect(composer).toHaveText(draft);
+
+      // Re-picking with a skill already active must swap the chip and keep
+      // the draft — the same capture-and-reseed path runs from chip mode.
+      await page.getByRole("button", { name: "Skills" }).click();
+      await expect(search).toBeVisible();
+      await search.fill("frontend");
+      await page.getByRole("option", { name: /frontend-design/ }).click();
+      await expect(search).toBeHidden();
+      await expect(
+        page.getByRole("button", { name: "Remove /frontend-design" }),
+      ).toBeVisible();
+      await expect(composer).toHaveText(draft);
+
       await composer.press("End");
       await composer.press("Enter");
 
@@ -93,7 +106,7 @@ test.describe("Composer skill picker", () => {
                 )
                 .join("")
             : "";
-      expect(text.startsWith("/data-analysis ")).toBe(true);
+      expect(text.startsWith("/frontend-design ")).toBe(true);
       expect(text).toContain(draft);
       // The picker's contract ends at the wire: selection rode the message as
       // the /name prefix through the existing slash activation path (asserted
