@@ -469,7 +469,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
         return {"messages": [patched]}
 
     def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:
-        """Suppress a clarification and tell the agent to proceed.
+        """Suppress a clarification and apply the unattended safety policy.
 
         Returns a plain ToolMessage (not a ``Command(goto=END)``) so the
         agent loop continues instead of ending — the agent receives this
@@ -482,9 +482,11 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             id=self._stable_message_id(tool_call_id, "proceed-without-clarification"),
             content=(
                 "Clarification is disabled in this context — the human is not present "
-                "to answer synchronously. Do not ask for confirmation. Proceed with your "
-                "best judgment, carry out the requested action, and state any assumptions "
-                "you made in your final response."
+                "to answer synchronously. Do not ask for confirmation. Proceed only when "
+                "the request can be handled with minimal-risk, reversible assumptions. "
+                "If ambiguity affects an irreversible or high-risk action, do not perform "
+                "it; report a structured blocked outcome with the missing decision. State "
+                "any assumptions you made in your final response."
             ),
             tool_call_id=tool_call_id,
             name=ASK_CLARIFICATION_TOOL_NAME,
