@@ -732,7 +732,7 @@ class DeerFlowClient:
         # Per-step set/reset keeps LangGraph node execution and its log
         # records inside the binding while returning control to the caller
         # with the ContextVar restored.
-        inner = self._stream_without_trace_context(message, thread_id=thread_id, **kwargs)
+        inner = self._stream_turn(message, thread_id=thread_id, **kwargs)
         _EXHAUSTED = object()
         try:
             while True:
@@ -750,7 +750,7 @@ class DeerFlowClient:
         finally:
             inner.close()
 
-    def _stream_without_trace_context(
+    def _stream_turn(
         self,
         message: str,
         *,
