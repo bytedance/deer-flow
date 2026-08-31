@@ -881,8 +881,10 @@ class RunManager:
             record.updated_at = _now_iso()
 
         await self._persist_status(record, RunStatus.error, error=error)
-        # This run has no attached worker task, so no ``run_agent`` finalization
-        # will ever schedule terminal-record eviction for it. Do it here.
+        # The run may never reach ``run_agent`` finalization (e.g. when the
+        # worker task could not be attached), so schedule eviction here. On
+        # paths that still finalize through ``run_agent``, the duplicate
+        # ``schedule_cleanup`` is a harmless no-op for fresh run ids.
         self.schedule_cleanup(run_id)
         return True
 
@@ -1891,11 +1893,21 @@ class RunManager:
     def schedule_cleanup(self, run_id: str, *, delay: float = 300) -> asyncio.Task[None] | None:
         """Schedule terminal-record eviction from the in-memory registries.
 
-        Terminal runs are evicted only when a durable RunStore backs this
-        manager: after eviction, history is still served by the store
-        fallback in ``get()`` / ``list_by_thread()``. Without a store,
-        eviction would erase the run's history entirely, so memory-only mode
-        keeps the previous retain-forever behaviour and this returns ``None``.
+        Terminal runs are evicted only when a RunStore backs this manager:
+        after eviction, history is still served by the store fallback in
+        ``get()`` / ``list_by_thread()``. Without a store, eviction would
+        erase the run's history entirely, so a store-less manager keeps the
+        previous retain-forever behaviour and this returns ``None``.
+
+        Note the gate is ``store is not None``, not "durable": the production
+        Gateway (``app/gateway/deps.py``) always wires a store —
+        ``RunRepository`` for SQL backends, ``MemoryRunStore`` for
+        ``database.backend=memory`` — so eviction is active in every real
+        deployment, including the memory backend. There, eviction frees the
+        heavyweight ``RunRecord`` (finished task, abort event, stream state)
+        even though ``MemoryRunStore`` itself retains the row for the process
+        lifetime; it bounds the in-memory record registries rather than the
+        store's own history.
 
         The returned task (``None`` above) is kept strongly referenced so it
         cannot be garbage-collected mid-delay, and :meth:`shutdown` cancels
