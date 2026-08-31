@@ -71,3 +71,30 @@ def test_small_op_counts_still_get_an_exact_mix() -> None:
         schedule = _schedule(n_ops=n_ops, read_ratio=0.7)
         assert len(schedule) == n_ops
         assert schedule.count(True) == round(n_ops * 0.7)
+
+
+def test_sqlite_worker_engine_matches_the_app_connection_pragmas(tmp_path, monkeypatch) -> None:
+    """synchronous and foreign_keys are per-connection PRAGMAs: without the
+    worker mirroring the app's connect listener
+    (persistence/engine.py::_enable_sqlite_wal) it runs at SQLite's
+    synchronous=FULL / foreign_keys=OFF defaults, and its measured write
+    path pays a heavier per-commit fsync than the deployment being
+    benchmarked -- overstating SQLite's cost in the direction that flatters
+    the 'use Postgres' conclusion."""
+    import asyncio
+
+    from sqlalchemy import text
+
+    monkeypatch.setattr(worker, "SQLITE_BENCH_DIR", str(tmp_path))
+
+    async def _check() -> None:
+        engine, _sf = worker.make_session_factory("sqlite", pg_url="", pg_schema="")
+        try:
+            async with engine.connect() as conn:
+                assert (await conn.execute(text("PRAGMA synchronous"))).scalar() == 1  # NORMAL
+                assert (await conn.execute(text("PRAGMA foreign_keys"))).scalar() == 1  # ON
+                assert (await conn.execute(text("PRAGMA journal_mode"))).scalar().lower() == "wal"
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_check())

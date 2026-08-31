@@ -170,6 +170,25 @@ def test_summary_indicates_failure_when_completed_ops_falls_short_without_a_cras
     assert bench.summary_indicates_failure(summary) is True
 
 
+def test_summary_indicates_failure_when_every_op_errored_without_a_crash() -> None:
+    """A sweep where every op ran to completion but raised (e.g. every write
+    hitting OperationalError) has crashed_workers == 0 and
+    completed_ops == expected_total_ops, so the two checks above accept it.
+    errors > 0 must also disqualify it -- the PR's conclusions rest on
+    '0 errors on both backends'."""
+    workers = [
+        {
+            "worker_id": 0,
+            "results": [_result(False, 0.5, err="OperationalError: database is locked", op="write") for _ in range(4)],
+        }
+    ]
+    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=4)
+    assert summary["crashed_workers"] == 0
+    assert summary["completed_ops"] == summary["expected_total_ops"] == 4
+    assert summary["errors"] == 4
+    assert bench.summary_indicates_failure(summary) is True
+
+
 def test_summary_indicates_failure_is_false_for_a_clean_run() -> None:
     workers = [{"worker_id": 0, "results": [_result(True, 0.001) for _ in range(4)]}]
     summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=4)

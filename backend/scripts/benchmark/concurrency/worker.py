@@ -36,7 +36,7 @@ from uuid import uuid4
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(BACKEND_DIR))
 
-from sqlalchemy import text  # noqa: E402
+from sqlalchemy import event, text  # noqa: E402
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine  # noqa: E402
 
 from app.gateway.auth.models import User  # noqa: E402
@@ -51,6 +51,21 @@ from deerflow.config.database_config import DatabaseConfig  # noqa: E402
 # outside backend/ (the seeder ran in-process from the invoker's own CWD;
 # workers are spawned with cwd=BACKEND_DIR, which don't necessarily match).
 SQLITE_BENCH_DIR = str(BACKEND_DIR / ".deer-flow" / "bench_data")
+
+# The exact per-connection PRAGMAs the app sets on every SQLite connection
+# (deerflow/persistence/engine.py::_enable_sqlite_wal). journal_mode is
+# persistent so WAL would be picked up incidentally from the seeder's engine,
+# but synchronous and foreign_keys are per-connection: without this a worker
+# runs at SQLite's synchronous=FULL / foreign_keys=OFF defaults and its write
+# path pays a different (heavier) per-commit fsync cost than the deployment
+# being modelled. Kept in sync with that listener by hand -- there are only
+# these four lines and both sites cite each other.
+_APP_SQLITE_PRAGMAS = (
+    "PRAGMA journal_mode=WAL;",
+    "PRAGMA synchronous=NORMAL;",
+    "PRAGMA foreign_keys=ON;",
+    "PRAGMA busy_timeout=30000;",
+)
 
 
 def read_count(n_ops: int, read_ratio: float) -> int:
@@ -97,6 +112,15 @@ def make_session_factory(backend: str, pg_url: str, pg_schema: str):
         cfg = DatabaseConfig(backend="sqlite", sqlite_dir=SQLITE_BENCH_DIR)
         url = cfg.app_sqlalchemy_url
         engine = create_async_engine(url, connect_args={"timeout": 30})
+
+        @event.listens_for(engine.sync_engine, "connect")
+        def _match_app_sqlite_pragmas(dbapi_conn, _record):  # noqa: ARG001 — SQLAlchemy contract
+            cursor = dbapi_conn.cursor()
+            try:
+                for pragma in _APP_SQLITE_PRAGMAS:
+                    cursor.execute(pragma)
+            finally:
+                cursor.close()
     else:
         cfg = DatabaseConfig(backend="postgres", postgres_url=pg_url, postgres_schema=pg_schema)
         url = cfg.app_sqlalchemy_url

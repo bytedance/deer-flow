@@ -237,14 +237,23 @@ def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: 
 
 def summary_indicates_failure(summary: dict) -> bool:
     """True if this worker-count sweep's summary represents a broken run,
-    not a real measurement -- a crashed worker, or a worker that returned
-    fewer results than expected without being marked crashed. Without this
-    check, an all-crashed sweep still produces a well-formed-looking
-    summary (crashed_workers: N, completed_ops: 0,
-    throughput_ops_per_s: 0.0) that main() used to accept and exit 0 for,
-    indistinguishable from a real (if uneventful) measurement to anything
-    checking the exit code or scripting around --out."""
-    return summary["crashed_workers"] > 0 or summary["completed_ops"] != summary["expected_total_ops"]
+    not a real measurement:
+
+    - a crashed worker, or fewer completed results than expected without a
+      crash -- an all-crashed sweep still produces a well-formed-looking
+      summary (crashed_workers: N, completed_ops: 0,
+      throughput_ops_per_s: 0.0);
+    - any failed op (errors > 0). This benchmark's conclusions rest on
+      "0 errors on both backends"; a sweep where every op completed but
+      raised (e.g. writes hitting OperationalError) has completed_ops ==
+      expected and 0 crashes, so it would otherwise pass as a clean
+      measurement. The error breakdown stays in the printed JSON either
+      way -- this only stops the exit code from calling it clean."""
+    return (
+        summary["crashed_workers"] > 0
+        or summary["completed_ops"] != summary["expected_total_ops"]
+        or summary.get("errors", 0) > 0
+    )
 
 
 def main():
