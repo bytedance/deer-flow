@@ -918,6 +918,54 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False
         assert leaf["detail"] == "no matching bash execution recorded"
 
+    def test_cd_to_an_out_of_scope_absolute_path_is_unprovable(self):
+        """Self-audit: the criterion's relative target resolves in whatever
+        directory the wrapper sets — ``/tmp/fake`` is fully subagent-
+        controlled and outside every thread data root, so its ``tests/``
+        cannot certify the criterion's."""
+        executions = [_bash_execution("cd /tmp/fake && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    def test_cd_dotdot_escape_is_unprovable(self):
+        executions = [_bash_execution("cd ../../tmp/fake && pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        (
+            "cd ~ && pytest tests/",  # subagent-writable home
+            "cd && pytest tests/",  # bare cd goes HOME
+            "cd - && pytest tests/",  # prints OLDPWD
+            "cd backend/../../x && pytest tests/",  # lexical walk-out
+            "cd /mnt/user-data/../etc && pytest tests/",  # normalized escape
+            "cd /ws/thread/user-data/workspace2 && pytest tests/",  # sibling of an allowed root
+        ),
+    )
+    def test_cd_escape_forms_are_unprovable(self, wrapped):
+        executions = [_bash_execution(wrapped, output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["checked"] is False, wrapped
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        (
+            "cd backend && pytest tests/",  # relative, stays inside
+            "cd backend/pkg && pytest tests/",  # relative descent
+            "cd /mnt/user-data/workspace && pytest tests/",  # virtual data root
+            "cd /ws/thread/user-data/workspace && pytest tests/",  # absolute workspace path
+        ),
+    )
+    def test_in_scope_cd_wrappers_still_match(self, wrapped):
+        executions = [_bash_execution(wrapped, output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True, wrapped
+
     def test_or_chain_success_is_unprovable(self):
         """``true || make test`` succeeding: make test may have been skipped."""
         executions = [_bash_execution("true || make test", output_tail="3 passed")]
@@ -1577,3 +1625,30 @@ class TestRendering:
 
     def test_segment_renders_nothing_without_leaves(self):
         assert render_acceptance_segment({"source": "s", "requirement": "r", "leaves": [], "unchecked": [], "all_hold": True}) == ""
+
+
+class TestKnownBoundaries:
+    """Pinned, consciously accepted Layer 2 boundaries — execution evidence
+    only (``_LIMITATION``), never claim correctness. Do not "fix" these
+    without re-scoping the layer; the tests exist so the accepted behavior
+    is visible and deliberate."""
+
+    def test_bare_criterion_trusts_any_path_spelling_of_the_executable(self):
+        """A bare criterion leaves the runner to PATH: ``./pytest`` — even a
+        subagent-crafted same-name script — is accepted evidence. Leads that
+        need executable certainty must spell the absolute path, which then
+        requires the same normalized path (directional matching)."""
+        executions = [_bash_execution("./pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_runner_semantics_are_trusted(self):
+        """The recorded exit status and summary text mean what the runner
+        says: a Makefile that swallows test failures or a runner exiting 0
+        on failure is outside the text layer (claim correctness — PR5 judge
+        / RFC §6 re-execution)."""
+        executions = [_bash_execution("make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test"], thread_data=THREAD_DATA, bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True

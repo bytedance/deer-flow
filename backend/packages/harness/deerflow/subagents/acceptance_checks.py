@@ -395,7 +395,40 @@ def _carries_summary_shape(text: str) -> bool:
     return bool(_TEST_PASS_SHAPE_RE.search(text) or _TEST_FAIL_SHAPE_RE.search(text) or _TEST_ZERO_SHAPE_RE.search(text))
 
 
-def _is_silent_segment(tokens: list[str]) -> bool:
+def _cd_target_in_scope(target: str, thread_data: Mapping[str, Any] | None) -> bool:
+    """Whether a preceding ``cd`` target provably keeps the criterion's
+    relative path-like targets resolving inside the thread's data roots.
+
+    A relative target with no ``..`` component descends from the current
+    directory without escaping it; an absolute target must sit under the
+    thread's workspace/outputs/uploads paths or the virtual data prefix
+    (``/mnt/user-data/...``) — the roots a subagent is expected to work in,
+    so ``cd /mnt/user-data/workspace && …`` and the local auto-prefix stay
+    verifiable. ``cd /tmp/fake && pytest tests/`` (a directory the subagent
+    fully controls, outside any data root), ``cd ../out`` (walks out),
+    ``~`` spellings (the subagent's home), and ``-`` (prints OLDPWD) are
+    all out. A symlink INSIDE an allowed root pointing out is a
+    filesystem-layer concern this text matcher cannot see — see the Known
+    boundaries note in subagents/AGENTS.md.
+    """
+    if not target or target == "-" or target.startswith("~"):
+        return False
+    normalized = os.path.normpath(target.replace("\\", "/"))
+    if normalized.startswith("/"):
+        roots = [VIRTUAL_PATH_PREFIX]
+        for key in ("workspace_path", "outputs_path", "uploads_path"):
+            value = (thread_data or {}).get(key)
+            if isinstance(value, str) and value:
+                roots.append(value)
+        for root in roots:
+            normalized_root = os.path.normpath(root.replace("\\", "/"))
+            if normalized == normalized_root or normalized.startswith(normalized_root + "/"):
+                return True
+        return False
+    return ".." not in normalized.split("/")
+
+
+def _is_silent_segment(tokens: list[str], thread_data: Mapping[str, Any] | None = None) -> bool:
     """Whether a preceding segment is provably output-free, by invocation
     form — not by executable name alone: ``pushd``/``popd`` print
     the directory stack, ``umask``/``ulimit`` print on several forms, and
@@ -408,14 +441,19 @@ def _is_silent_segment(tokens: list[str]) -> bool:
     summary shape (``export 'all tests passed'; make test``) — and valid
     argument forms mutate shell state (see ``_segment_pollutes_state``).
 
-    ``cd`` is silent only when its argument is literal and shape-free:
-    with CDPATH set it prints the resolved destination — subagent-chosen
-    text — so a shaped (``mkdir 'all tests passed'``) or runtime-expanded
-    (``cd $D``, ``cd all*``) argument could lend the tail a summary shape.
-    Behavior-changing assignments that feed the print (``CDPATH=``) are
-    state pollution and degrade the match upstream; the everyday
-    shape-free ``cd dir &&`` wrapper stays silent (bash_tool auto-prefixes
-    it for every local command).
+    ``cd`` is silent only with exactly one argument that is literal and
+    shape-free: with CDPATH set it prints the resolved destination —
+    subagent-chosen text — so a shaped (``mkdir 'all tests passed'``) or
+    runtime-expanded (``cd $D``, ``cd all*``) argument could lend the tail
+    a summary shape. The target must also stay in scope
+    (``_cd_target_in_scope``): the criterion's relative path-like targets
+    resolve in whatever directory the wrapper sets, and an out-of-scope
+    ``cd /tmp/fake`` would let a subagent-crafted directory certify them.
+    Bare ``cd`` (goes HOME) and ``cd old new`` (substitution) are likewise
+    unprovable. Behavior-changing assignments that feed the print
+    (``CDPATH=``) are state pollution and degrade the match upstream; the
+    everyday shape-free ``cd dir &&`` wrapper stays silent (bash_tool
+    auto-prefixes it for every local command).
     """
     stripped = _strip_env_assignments(tokens)
     if not stripped:
@@ -423,7 +461,12 @@ def _is_silent_segment(tokens: list[str]) -> bool:
     executable = os.path.basename(stripped[0])
     args = stripped[1:]
     if executable == "cd":
-        return not any(_carries_summary_shape(arg) or _EXPANSION_CHAR_RE.search(arg) or _GLOB_CHAR_RE.search(arg) for arg in args)
+        if len(args) != 1:
+            return False
+        target = args[0]
+        if _carries_summary_shape(target) or _EXPANSION_CHAR_RE.search(target) or _GLOB_CHAR_RE.search(target):
+            return False
+        return _cd_target_in_scope(target, thread_data)
     # pushd/popd (print the stack), umask/ulimit (print forms), export/unset
     # (see the docstring), source/. and every other executable are not
     # provably silent.
@@ -939,7 +982,7 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
 _REDIRECTION_CHAR_RE = re.compile(r"[<>]")
 
 
-def _output_attribution(executed_command: str) -> str | None:
+def _output_attribution(executed_command: str, thread_data: Mapping[str, Any] | None = None) -> str | None:
     """Why the recorded output tail cannot be attributed to the matched
     final segment, or ``None`` when it can.
 
@@ -960,12 +1003,12 @@ def _output_attribution(executed_command: str) -> str | None:
     segments, _ops = parsed
     if any(_REDIRECTION_CHAR_RE.search(token) for token in segments[-1]):
         return "matched segment redirects its output; the recorded tail is not test evidence"
-    if not all(_is_silent_segment(segment) for segment in segments[:-1]):
+    if not all(_is_silent_segment(segment, thread_data) for segment in segments[:-1]):
         return "recorded output is not attributable to the matched segment"
     return None
 
 
-def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None) -> AcceptanceLeaf:
+def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]] | None, thread_data: Mapping[str, Any] | None = None) -> AcceptanceLeaf:
     base: AcceptanceLeaf = {"criterion": "", "family": "tests_passed", "checked": False, "holds": False, "detail": ""}
     matches: list[tuple[str, dict[str, Any]]] = []
     for execution in bash_executions or []:
@@ -1016,7 +1059,7 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
             base["detail"] = f"latest matching run recorded status={status or 'unknown'}"
         return base
     output_tail = str(latest.get("output_tail") or "")
-    unattributable = _output_attribution(str(latest.get("command") or ""))
+    unattributable = _output_attribution(str(latest.get("command") or ""), thread_data)
     if unattributable is not None:
         # Neither a pass nor a fail shape here can be trusted either way.
         base["detail"] = unattributable
@@ -1093,7 +1136,7 @@ def check_acceptance_criteria(
         elif written_match is not None:
             leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
         elif tests_match is not None:
-            leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions)
+            leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, thread_data)
         else:
             leaf = AcceptanceLeaf(criterion="", family="undecidable", checked=False, holds=False, detail="not deterministically checkable")
         leaf["criterion"] = criterion
