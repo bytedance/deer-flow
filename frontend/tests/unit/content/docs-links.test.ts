@@ -105,6 +105,9 @@ describe("documentation content links", () => {
       expect(source).toContain("agents_api.enabled");
       expect(source).toContain("agent_storage.backend: file");
       expect(source).toContain("agent_storage.backend: db");
+      expect(source).toContain("database.backend: sqlite");
+      expect(source).toContain("database.backend: postgres");
+      expect(source).toContain("backend/scripts/migrate_agents_to_db.py");
       expect(source).toContain("users/{user_id}/agents/{name}/config.yaml");
       expect(source).not.toContain("display_name");
     }
