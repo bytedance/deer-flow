@@ -56,16 +56,17 @@ export async function updateMCPConfig(config: MCPConfig) {
 async function mutateMCPServerConfig(
   path: string,
   method: "POST" | "PUT" | "DELETE",
-  body: unknown,
+  body: unknown | undefined,
   fallback: string,
 ) {
-  const response = await fetch(`${getBackendBaseURL()}${path}`, {
-    method,
-    headers: {
+  const request: RequestInit = { method };
+  if (body !== undefined) {
+    request.headers = {
       "Content-Type": "application/json",
-    },
-    body: JSON.stringify(body),
-  });
+    };
+    request.body = JSON.stringify(body);
+  }
+  const response = await fetch(`${getBackendBaseURL()}${path}`, request);
   if (!response.ok) {
     throw new MCPConfigRequestError(
       response.status,
@@ -95,9 +96,9 @@ export function updateMCPServer(serverName: string, server: MCPServerConfig) {
 
 export function deleteMCPServer(serverName: string) {
   return mutateMCPServerConfig(
-    "/api/mcp/config/server",
+    `/api/mcp/config/servers/${encodeURIComponent(serverName)}`,
     "DELETE",
-    { server_name: serverName },
+    undefined,
     "Failed to delete MCP server",
   );
 }

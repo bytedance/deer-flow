@@ -177,11 +177,11 @@ describe("MCP server CRUD mutation", () => {
     {
       variables: {
         operation: "delete" as const,
-        serverName: "github",
+        serverName: "team/tools",
       },
-      path: "/api/mcp/config/server",
+      path: "/api/mcp/config/servers/team%2Ftools",
       method: "DELETE",
-      body: { server_name: "github" },
+      body: undefined,
     },
   ])(
     "sends a targeted $method request and invalidates the config",
@@ -202,13 +202,35 @@ describe("MCP server CRUD mutation", () => {
       const [url, request] = mockedFetch.mock.calls[0] as [string, RequestInit];
       expect(url.endsWith(path)).toBe(true);
       expect(request.method).toBe(method);
-      expect(JSON.parse(request.body as string)).toEqual(body);
+      if (body === undefined) {
+        expect(request.body).toBeUndefined();
+      } else {
+        expect(JSON.parse(request.body as string)).toEqual(body);
+      }
       expect(invalidateQueries).toHaveBeenCalledWith({
         queryKey: ["mcpConfig"],
       });
       expect(mockedToastError).not.toHaveBeenCalled();
     },
   );
+
+  it("keeps an empty server name addressable without a DELETE body", async () => {
+    mockedFetch.mockResolvedValue(
+      new Response(JSON.stringify({ mcp_servers: {} }), { status: 200 }),
+    );
+    const client = makeClient();
+    rs.spyOn(client, "invalidateQueries").mockResolvedValue();
+    const mutation = client
+      .getMutationCache()
+      .build(client, getMCPServerMutationOptions(client));
+
+    await mutation.execute({ operation: "delete", serverName: "" });
+
+    const [url, request] = mockedFetch.mock.calls[0] as [string, RequestInit];
+    expect(url.endsWith("/api/mcp/config/servers/")).toBe(true);
+    expect(request.method).toBe("DELETE");
+    expect(request.body).toBeUndefined();
+  });
 
   it("surfaces the Gateway rejection detail without invalidating", async () => {
     const detail =

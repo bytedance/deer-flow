@@ -13,7 +13,8 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
 from app.gateway.deps import require_admin_user
 from app.gateway.routers import mcp as mcp_router
@@ -24,7 +25,6 @@ from app.gateway.routers.mcp import (
     McpOAuthConfigResponse,
     McpServerConfigResponse,
     McpServerConfigUpdateRequest,
-    McpServerDeleteRequest,
     McpServerStateUpdateRequest,
     _mask_server_config,
     _merge_preserving_secrets,
@@ -1460,7 +1460,7 @@ async def test_state_and_delete_validate_expanded_document_before_writing(operat
         else:
             await delete_mcp_server(
                 _request_with_role("admin"),
-                McpServerDeleteRequest(server_name="target"),
+                "target",
             )
 
     assert exc_info.value.status_code == 400
@@ -1615,12 +1615,164 @@ async def test_delete_mcp_server_accepts_empty_name_and_preserves_siblings(monke
 
     response = await delete_mcp_server(
         _request_with_role("admin"),
-        McpServerDeleteRequest(server_name=""),
+        "",
     )
 
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
     assert persisted["mcpServers"] == {"sibling": original_sibling}
     assert set(response.mcp_servers) == {"sibling"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["create", "bulk"])
+async def test_mcp_create_without_existing_config_uses_resolvable_project_root(operation, monkeypatch, tmp_path):
+    project_dir = tmp_path / "project"
+    working_dir = tmp_path / "runtime" / "nested"
+    project_dir.mkdir()
+    working_dir.mkdir(parents=True)
+    expected_path = project_dir / "extensions_config.json"
+
+    def resolve_created_config(_config_path=None):
+        return expected_path if expected_path.exists() else None
+
+    monkeypatch.chdir(working_dir)
+    monkeypatch.setattr(mcp_router, "project_root", lambda: project_dir, raising=False)
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", resolve_created_config)
+    monkeypatch.setattr(mcp_router, "get_extensions_config", lambda: SimpleNamespace(skills={}))
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: ExtensionsConfig.from_file(str(expected_path)))
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    body = McpConfigUpdateRequest(mcp_servers={"added": McpServerConfigResponse(command="npx")})
+    if operation == "create":
+        response = await create_mcp_servers(_request_with_role("admin"), body)
+    else:
+        response = await update_mcp_configuration(_request_with_role("admin"), body)
+
+    assert expected_path.is_file()
+    assert resolve_created_config() == expected_path
+    assert set(response.mcp_servers) == {"added"}
+    assert not (working_dir.parent / "extensions_config.json").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["get", "bulk", "create", "update", "delete", "state"])
+@pytest.mark.parametrize(
+    ("raw_config", "expected_detail"),
+    [
+        ("{not-json", "not valid JSON"),
+        ("[]", "Extensions configuration must be a JSON object"),
+        ('{"mcpServers": [], "skills": {}}', "`mcpServers` must be a JSON object"),
+    ],
+)
+async def test_mcp_config_endpoints_map_invalid_operator_document_to_400(endpoint, raw_config, expected_detail, monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    config_path.write_text(raw_config, encoding="utf-8")
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    request = _request_with_role("admin")
+    with pytest.raises(HTTPException) as exc_info:
+        if endpoint == "get":
+            await get_mcp_configuration(request)
+        elif endpoint == "bulk":
+            await update_mcp_configuration(
+                request,
+                McpConfigUpdateRequest(mcp_servers={"target": McpServerConfigResponse(command="npx")}),
+            )
+        elif endpoint == "create":
+            await create_mcp_servers(
+                request,
+                McpConfigUpdateRequest(mcp_servers={"added": McpServerConfigResponse(command="npx")}),
+            )
+        elif endpoint == "update":
+            await update_mcp_server(
+                request,
+                McpServerConfigUpdateRequest(
+                    server_name="target",
+                    server=McpServerConfigResponse(command="npx"),
+                ),
+            )
+        elif endpoint == "delete":
+            await delete_mcp_server(request, "target")
+        else:
+            await update_mcp_server_state(
+                request,
+                McpServerStateUpdateRequest(server_name="target", enabled=False),
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail.startswith("Invalid MCP configuration: ")
+    assert expected_detail in exc_info.value.detail
+    assert config_path.read_text(encoding="utf-8") == raw_config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint", ["get", "update", "state"])
+async def test_mcp_config_endpoints_map_invalid_stored_server_to_400(endpoint, monkeypatch, tmp_path):
+    config_path = tmp_path / "extensions_config.json"
+    raw_config = '{"mcpServers": {"target": "not-an-object"}, "skills": {}}'
+    config_path.write_text(raw_config, encoding="utf-8")
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda _config_path=None: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    request = _request_with_role("admin")
+    with pytest.raises(HTTPException) as exc_info:
+        if endpoint == "get":
+            await get_mcp_configuration(request)
+        elif endpoint == "update":
+            await update_mcp_server(
+                request,
+                McpServerConfigUpdateRequest(
+                    server_name="target",
+                    server=McpServerConfigResponse(command="npx"),
+                ),
+            )
+        else:
+            await update_mcp_server_state(
+                request,
+                McpServerStateUpdateRequest(server_name="target", enabled=False),
+            )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail.startswith("Invalid MCP configuration: mcpServers.target: ")
+    assert config_path.read_text(encoding="utf-8") == raw_config
+
+
+@pytest.mark.parametrize(
+    ("server_name", "request_path"),
+    [
+        ("", "/api/mcp/config/servers/"),
+        ("team/tools", "/api/mcp/config/servers/team%2Ftools"),
+    ],
+)
+def test_delete_mcp_server_route_uses_bodyless_path_parameter(server_name, request_path, monkeypatch):
+    deleted_names: list[str] = []
+
+    async def allow_admin(_request, *, detail):
+        assert detail == _ADMIN_REQUIRED_DETAIL
+
+    def fake_delete(name: str):
+        deleted_names.append(name)
+        return {}
+
+    monkeypatch.setattr(mcp_router, "require_admin_user", allow_admin)
+    monkeypatch.setattr(mcp_router, "_apply_mcp_server_delete", fake_delete)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+
+    app = FastAPI()
+    app.router.redirect_slashes = False
+    app.include_router(mcp_router.router)
+    delete_route = next(route for route in app.routes if getattr(route, "path", None) == "/api/mcp/config/servers/{server_name:path}" and "DELETE" in route.methods)
+    assert delete_route.body_field is None
+
+    with TestClient(app) as client:
+        response = client.request("DELETE", request_path)
+
+    assert response.status_code == 200
+    assert response.json() == {"mcp_servers": {}}
+    assert deleted_names == [server_name]
 
 
 @pytest.mark.asyncio
@@ -1638,12 +1790,19 @@ async def test_delete_mcp_server_accepts_empty_name_and_preserves_siblings(monke
                 server=McpServerConfigResponse(command="npx"),
             ),
         ),
-        (delete_mcp_server, McpServerDeleteRequest(server_name="existing")),
     ],
 )
 async def test_targeted_mcp_server_crud_requires_admin(handler, body):
     with pytest.raises(HTTPException) as exc_info:
         await handler(_request_with_role("user"), body)
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_delete_mcp_server_requires_admin():
+    with pytest.raises(HTTPException) as exc_info:
+        await delete_mcp_server(_request_with_role("user"), "existing")
 
     assert exc_info.value.status_code == 403
 

@@ -4,7 +4,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, NoReturn
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -22,6 +22,7 @@ from deerflow.config.extensions_config import (
     normalize_mcp_transport_alias,
     reload_extensions_config,
 )
+from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import reset_mcp_tools_cache
 
@@ -524,15 +525,6 @@ class McpServerConfigUpdateRequest(BaseModel):
     server: McpServerConfigResponse = Field(
         ...,
         description="Complete replacement configuration for the selected MCP server",
-    )
-
-
-class McpServerDeleteRequest(BaseModel):
-    """Request model for deleting one MCP server configuration."""
-
-    server_name: str = Field(
-        ...,
-        description="Name of the existing MCP server to delete",
     )
 
 
@@ -1108,18 +1100,35 @@ async def get_mcp_configuration(request: Request) -> McpConfigResponse:
     return McpConfigResponse(mcp_servers=servers)
 
 
+def _raise_invalid_mcp_configuration(detail: str, *, cause: Exception | None = None) -> NoReturn:
+    error = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"Invalid MCP configuration: {detail}",
+    )
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
+def _validation_error_summary(exc: ValidationError) -> str:
+    errors = exc.errors(include_url=False, include_input=False)
+    return "; ".join(f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}" for error in errors)
+
+
+def _mcp_server_response_from_raw(server_name: str, raw_server: Any) -> McpServerConfigResponse:
+    try:
+        return McpServerConfigResponse.model_validate(raw_server)
+    except ValidationError as exc:
+        _raise_invalid_mcp_configuration(f"mcpServers.{server_name}: {_validation_error_summary(exc)}", cause=exc)
+
+
 def _validate_extensions_config_candidate(raw_data: dict) -> None:
     """Reject a runtime-invalid candidate without changing its placeholders."""
     try:
         resolved_data = ExtensionsConfig.resolve_env_variables(raw_data)
         ExtensionsConfig.model_validate(resolved_data)
     except ValidationError as exc:
-        errors = exc.errors(include_url=False, include_input=False)
-        summary = "; ".join(f"{'.'.join(str(part) for part in error['loc']) or 'config'}: {error['msg']}" for error in errors)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid MCP configuration: {summary}",
-        ) from exc
+        _raise_invalid_mcp_configuration(_validation_error_summary(exc), cause=exc)
 
 
 def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
@@ -1135,26 +1144,23 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
     # same sidecar path for the complete read-modify-write cycle.
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
-        config_path = Path.cwd().parent / "extensions_config.json"
+        config_path = project_root() / "extensions_config.json"
         logger.info(f"No existing extensions config found. Creating new config at: {config_path}")
 
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
         # Load raw (un-resolved) JSON from disk to use as the merge source.
         # This preserves $VAR placeholders in env values and top-level keys
         # like mcpInterceptors that would otherwise be lost.
-        raw_servers: dict[str, dict] = {}
+        raw_data = _load_raw_extensions_config(config_path, create=True)
+        raw_servers = _raw_mcp_servers(raw_data)
         raw_other_keys: dict = {}
         raw_skills: dict[str, dict] | None = None
-        if config_path is not None and config_path.exists():
-            with open(config_path, encoding="utf-8") as f:
-                raw_data = json.load(f)
-            raw_servers = raw_data.get("mcpServers", {})
-            if isinstance(raw_data.get("skills"), dict):
-                raw_skills = raw_data["skills"]
-            # Preserve any top-level keys beyond mcpServers/skills
-            for key, value in raw_data.items():
-                if key not in ("mcpServers", "skills"):
-                    raw_other_keys[key] = value
+        if isinstance(raw_data.get("skills"), dict):
+            raw_skills = raw_data["skills"]
+        # Preserve any top-level keys beyond mcpServers/skills
+        for key, value in raw_data.items():
+            if key not in ("mcpServers", "skills"):
+                raw_other_keys[key] = value
 
         # Merge incoming server configs with raw on-disk secrets
         merged_servers: dict[str, McpServerConfigResponse] = {}
@@ -1163,7 +1169,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
             if raw_server is not None:
                 merged = _merge_preserving_secrets(
                     incoming,
-                    McpServerConfigResponse(**raw_server),
+                    _mcp_server_response_from_raw(name, raw_server),
                 )
             else:
                 merged = incoming
@@ -1206,19 +1212,17 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
                 detail=f"MCP server '{body.server_name}' not found",
             )
 
-        with open(config_path, encoding="utf-8") as f:
-            raw_data = json.load(f)
-
-        raw_servers = raw_data.get("mcpServers", {})
-        raw_server = raw_servers.get(body.server_name) if isinstance(raw_servers, dict) else None
-        if not isinstance(raw_server, dict):
+        raw_data = _load_raw_extensions_config(config_path, create=False)
+        raw_servers = _raw_mcp_servers(raw_data)
+        if body.server_name not in raw_servers:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"MCP server '{body.server_name}' not found",
             )
+        raw_server = raw_servers[body.server_name]
+        target_server = _mcp_server_response_from_raw(body.server_name, raw_server)
 
         if body.enabled:
-            target_server = McpServerConfigResponse(**raw_server)
             _validate_mcp_update_request(
                 McpConfigUpdateRequest(
                     mcp_servers={body.server_name: target_server},
@@ -1239,7 +1243,7 @@ def _mcp_config_path(*, create: bool) -> Path:
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
         if create:
-            config_path = Path.cwd().parent / "extensions_config.json"
+            config_path = project_root() / "extensions_config.json"
             logger.info("No existing extensions config found. Creating new config at: %s", config_path)
         else:
             raise HTTPException(
@@ -1251,10 +1255,16 @@ def _mcp_config_path(*, create: bool) -> Path:
 
 def _load_raw_extensions_config(config_path: Path, *, create: bool) -> dict:
     if config_path.exists():
-        with open(config_path, encoding="utf-8") as f:
-            raw_data = json.load(f)
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                raw_data = json.load(f)
+        except json.JSONDecodeError as exc:
+            _raise_invalid_mcp_configuration(
+                f"Extensions configuration is not valid JSON: {exc.msg} at line {exc.lineno} column {exc.colno}",
+                cause=exc,
+            )
         if not isinstance(raw_data, dict):
-            raise ValueError("Extensions configuration must be a JSON object")
+            _raise_invalid_mcp_configuration("Extensions configuration must be a JSON object")
         return raw_data
     if not create:
         raise HTTPException(
@@ -1267,13 +1277,13 @@ def _load_raw_extensions_config(config_path: Path, *, create: bool) -> dict:
 def _raw_mcp_servers(raw_data: dict) -> dict[str, dict]:
     raw_servers = raw_data.get("mcpServers", {})
     if not isinstance(raw_servers, dict):
-        raise ValueError("`mcpServers` must be a JSON object")
+        _raise_invalid_mcp_configuration("`mcpServers` must be a JSON object")
     return raw_servers
 
 
 def _mcp_server_responses_from_raw(raw_data: dict) -> dict[str, McpServerConfigResponse]:
     """Build editable API models without expanding environment placeholders."""
-    return {name: McpServerConfigResponse.model_validate(server) for name, server in _raw_mcp_servers(raw_data).items()}
+    return {name: _mcp_server_response_from_raw(name, server) for name, server in _raw_mcp_servers(raw_data).items()}
 
 
 def _load_raw_mcp_server_responses() -> dict[str, McpServerConfigResponse]:
@@ -1326,16 +1336,16 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
         raw_data = _load_raw_extensions_config(config_path, create=False)
         raw_servers = _raw_mcp_servers(raw_data)
-        raw_server = raw_servers.get(body.server_name)
-        if not isinstance(raw_server, dict):
+        if body.server_name not in raw_servers:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"MCP server '{body.server_name}' not found",
             )
+        existing_server = _mcp_server_response_from_raw(body.server_name, raw_servers[body.server_name])
 
         merged = _merge_preserving_secrets(
             body.server,
-            McpServerConfigResponse(**raw_server),
+            existing_server,
             preserve_omitted_fields=False,
         )
         _ensure_no_masked_secrets(merged)
@@ -1349,24 +1359,24 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         return _mcp_server_responses_from_raw(raw_data)
 
 
-def _apply_mcp_server_delete(body: McpServerDeleteRequest) -> dict:
+def _apply_mcp_server_delete(server_name: str) -> dict:
     """Atomically remove one server while preserving every sibling entry."""
     config_path = _mcp_config_path(create=False)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
         raw_data = _load_raw_extensions_config(config_path, create=False)
         raw_servers = _raw_mcp_servers(raw_data)
-        if body.server_name not in raw_servers:
+        if server_name not in raw_servers:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"MCP server '{body.server_name}' not found",
+                detail=f"MCP server '{server_name}' not found",
             )
 
-        del raw_servers[body.server_name]
+        del raw_servers[server_name]
         raw_data["mcpServers"] = raw_servers
         _validate_extensions_config_candidate(raw_data)
         atomic_write_extensions_config(config_path, raw_data)
 
-        logger.info("Deleted MCP server: %s", body.server_name)
+        logger.info("Deleted MCP server: %s", server_name)
         reload_extensions_config()
         return _mcp_server_responses_from_raw(raw_data)
 
@@ -1499,16 +1509,16 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
 
 
 @router.delete(
-    "/mcp/config/server",
+    "/mcp/config/servers/{server_name:path}",
     response_model=McpConfigResponse,
     summary="Delete MCP Server",
     description="Delete one MCP server without replacing sibling configurations.",
 )
-async def delete_mcp_server(request: Request, body: McpServerDeleteRequest) -> McpConfigResponse:
+async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResponse:
     """Delete one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, body)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, server_name)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
@@ -1516,7 +1526,7 @@ async def delete_mcp_server(request: Request, body: McpServerDeleteRequest) -> M
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to delete MCP server %s: %s", body.server_name, e, exc_info=True)
+        logger.error("Failed to delete MCP server %s: %s", server_name, e, exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete MCP server: {str(e)}")
 
 

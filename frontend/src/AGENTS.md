@@ -18,6 +18,11 @@
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
    `["mcpConfig"]` only after success.
+   Server management uses targeted `POST /api/mcp/config/servers`,
+   `PUT /api/mcp/config/server`, and bodyless
+   `DELETE /api/mcp/config/servers/{server_name}` mutations. Delete names are
+   percent-encoded, including legacy empty and slash-containing names; every
+   successful mutation invalidates `["mcpConfig"]` only after the response.
    Current-chat MCP background tasks use `core/background-tasks`: the header
    trigger is hidden for new/mock/static-demo threads and unless `/api/features`
    reports the startup-scoped `mcp_tasks` capability; the list query is disabled
