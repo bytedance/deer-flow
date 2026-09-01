@@ -464,7 +464,9 @@ def test_shutdown_stops_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     remote = _FakeRemote("remote")
     box = _box(remote, default_env={"BASE": "1"})
-    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1"
+    # A nonzero exit with non-empty output keeps the authoritative marker
+    # (LocalSandbox parity) instead of losing the failure.
+    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1\nExit Code: 7"
     _, opts = remote.commands.calls[-1]
     assert opts is not None
     assert opts.envs == {"BASE": "1", "EXTRA": "2"}

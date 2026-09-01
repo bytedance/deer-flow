@@ -89,6 +89,10 @@ class TenkiSandbox(Sandbox):
             can evict the dead sandbox.
     """
 
+    #: Every call is a fresh ``sh -lc`` exec in the sandbox — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,
@@ -268,8 +272,10 @@ class TenkiSandbox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────

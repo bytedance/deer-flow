@@ -4343,3 +4343,365 @@ class TestToolReceiptHarvest:
 
         assert result.status == SubagentStatus.COMPLETED
         assert result.tool_receipts is None
+
+
+class TestBashExecutionHarvest:
+    """RFC #4651 PR4: the executor harvests bounded bash command/output
+    evidence so the parent can anchor ``tests_passed`` acceptance leaves."""
+
+    def _final_state(self, classes):
+        ai = classes["AIMessage"](
+            content="",
+            tool_calls=[
+                {"name": "bash", "args": {"command": "make test", "description": "run tests"}, "id": "tc-1", "type": "tool_call"},
+                {"name": "write_file", "args": {"file_path": "a.md", "content": "x"}, "id": "tc-2", "type": "tool_call"},
+            ],
+        )
+        tool_ok = classes["ToolMessage"](content=".....\n12 passed in 1.0s\n", tool_call_id="tc-1", name="bash")
+        tool_other = classes["ToolMessage"](content="wrote a.md", tool_call_id="tc-2", name="write_file")
+        return {"messages": [classes["HumanMessage"](content="task"), ai, tool_ok, tool_other]}
+
+    def test_harvests_only_bash_family_calls_with_bounded_fields(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        executions = executor_module._harvest_bash_executions(self._final_state(classes))
+
+        assert executions is not None
+        assert len(executions) == 1
+        entry = executions[0]
+        assert entry["tool_call_id"] == "tc-1"
+        assert entry["tool_name"] == "bash"
+        assert entry["command"] == "make test"
+        assert entry["status"] == "success"
+        assert "12 passed" in entry["output_tail"]
+
+    def test_status_comes_from_tool_meta_when_present(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        tool_msg = state["messages"][2]
+        tool_msg.additional_kwargs["deerflow_tool_meta"] = {"status": "error"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+
+    def test_nonzero_exit_code_marker_overrides_meta_success(self, classes, monkeypatch):
+        """PR review: a failing test run returns ordinary text ending in
+        ``Exit Code: N`` — tool_meta stays success, so the pass summary would
+        otherwise satisfy the leaf. The recorded status must be the shell's."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "12 passed, 1 error in 2.0s\nExit Code: 1"
+        state["messages"][2].additional_kwargs["deerflow_tool_meta"] = {"status": "success"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+        assert "12 passed" in executions[0]["output_tail"]
+
+    def test_command_exited_with_code_marker_is_error(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "Command exited with code 3"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+
+    def test_exited_with_code_phrase_inside_output_is_not_a_marker(self, classes, monkeypatch):
+        """PR review: remote providers use ``Command exited with code N``
+        only as the COMPLETE output — a successful command that prints the
+        phrase while exercising an error path must not record failure."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "validating error path: Command exited with code 3\n5 passed"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "success"
+
+    def test_zero_exit_code_marker_is_success(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "12 passed\nExit Code: 0"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "success"
+
+    def test_marker_text_is_recorded_as_status_marker(self, classes, monkeypatch):
+        """PR review: the entry must carry the marker the status was derived
+        from, so the leaf detail can report what was seen instead of asserting
+        a failure indistinguishable from the command's own trailing text."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "green\nExit Code: 5"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+        assert executions[0]["status_marker"] == "Exit Code: 5"
+
+    def test_remote_form_records_its_marker_text(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "Command exited with code 3"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status_marker"] == "Command exited with code 3"
+
+    def test_meta_status_without_marker_records_none(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        executions = executor_module._harvest_bash_executions(self._final_state(classes))
+
+        assert executions[0]["status"] == "success"
+        assert executions[0]["status_marker"] is None
+
+    def test_timeout_marker_is_error(self, classes, monkeypatch):
+        """A command killed on timeout carries Exit Code: 124 after the
+        notice — partial passing output must not record success."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "12 passed\nCommand timed out after 30 seconds and was terminated. ...\nExit Code: 124"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+
+    def test_signal_signed_exit_code_is_error(self, classes, monkeypatch):
+        """PR review: a signal-killed local subprocess reports a signed
+        marker (Exit Code: -9) — it must record failure, not fall back to
+        the meta success of an ordinary bash return."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "5 passed\nExit Code: -9"
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["status"] == "error"
+
+    @pytest.mark.anyio
+    async def test_evidence_accumulated_survives_history_compaction(self, classes, base_config, mock_agent, msg, monkeypatch):
+        """PR review: subagent summarization removes earlier AI/ToolMessages
+        from the stream, so a terminal-only scan would lose the matching test
+        execution and falsely render UNVERIFIED. Per-chunk accumulation must
+        retain it even when a later chunk no longer carries the messages."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        ai_with_call = classes["AIMessage"](
+            content="",
+            tool_calls=[{"name": "bash", "args": {"command": "make test"}, "id": "tc-1", "type": "tool_call"}],
+        )
+        chunk_with_test_run = {"messages": [msg.human("Do something"), ai_with_call, msg.tool("12 passed", "tc-1", name="bash")]}
+        # Compacted history: the test-run messages are gone from later chunks.
+        compacted_chunk = {"messages": [msg.human("Do something"), msg.ai("Done", "msg-9")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([chunk_with_test_run, compacted_chunk])
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            acceptance_criteria=["tests_passed:make test"],
+        )
+        with (
+            patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+        ):
+            result = await executor._aexecute_admitted("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.bash_executions is not None
+        assert [e["command"] for e in result.bash_executions] == ["make test"]
+
+    def test_output_tail_is_bounded(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        state["messages"][2].content = "x" * 5000
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert len(executions[0]["output_tail"]) == 1000
+
+    def test_long_command_is_capped_and_flagged_truncated(self, classes, monkeypatch):
+        """PR review: the matcher must know the command lost its suffix."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+        state = self._final_state(classes)
+        long_command = "make test " + "--long-option " * 60
+        state["messages"][1].tool_calls[0]["args"]["command"] = long_command
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        entry = executions[0]
+        assert len(entry["command"]) == 500
+        assert entry["command_truncated"] is True
+
+    def test_short_command_is_not_flagged(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        executions = executor_module._harvest_bash_executions(self._final_state(classes))
+
+        assert executions[0]["command_truncated"] is False
+
+    def test_entries_carry_producing_sandbox_shell_persistence(self, classes, monkeypatch):
+        """PR review (P1): the provenance stamp is resolved from the state
+        that carried the evidence — the subagent's own graph state — not the
+        parent task runtime, so a parent that delegated before touching a
+        sandbox cannot mis-adjudicate persistent-session evidence as
+        trusted."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        class _PersistentShellSandbox:
+            persistent_shell_sessions = True
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _PersistentShellSandbox()))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-1"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["shell_persistent"] is True
+
+    def test_fresh_process_sandbox_stamps_false(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        class _OneShotSandbox:
+            persistent_shell_sessions = False
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _OneShotSandbox()))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-1"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["shell_persistent"] is False
+
+    def test_undeclared_sandbox_capability_stamps_none(self, classes, monkeypatch):
+        """PR review (P2): a custom provider that never declared
+        ``persistent_shell_sessions`` is UNKNOWN, not fresh-shell — silence
+        cannot be read as a clean-environment proof."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        class _UndeclaredSandbox:
+            pass
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _UndeclaredSandbox()))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-1"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["shell_persistent"] is None
+
+    def test_unidentifiable_sandbox_stamps_none(self, classes, monkeypatch):
+        """No sandbox channel in the evidence-carrying state → unknown
+        provenance; the acceptance matcher fails closed on it."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        executions = executor_module._harvest_bash_executions(self._final_state(classes))
+
+        assert executions[0]["shell_persistent"] is None
+
+    def test_no_bash_calls_returns_empty_list(self, classes, monkeypatch):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        assert executor_module._harvest_bash_executions({"messages": [classes["HumanMessage"](content="task")]}) == []
+
+    def test_empty_state_returns_none(self, classes):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+
+        assert executor_module._harvest_bash_executions(None) is None
+        assert executor_module._harvest_bash_executions({}) is None
+
+    @pytest.mark.anyio
+    async def test_completed_run_attaches_bash_executions_only_with_criteria(self, classes, base_config, mock_agent, msg, monkeypatch):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        ai_with_call = classes["AIMessage"](
+            content="",
+            tool_calls=[{"name": "bash", "args": {"command": "make test"}, "id": "tc-1", "type": "tool_call"}],
+        )
+        final_state = {"messages": [msg.human("Do something"), ai_with_call, msg.tool("12 passed", "tc-1", name="bash"), msg.ai("Done", "msg-9")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            acceptance_criteria=["tests_passed:make test"],
+        )
+        with (
+            patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+        ):
+            result = await executor._aexecute_admitted("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.bash_executions is not None
+        assert [e["command"] for e in result.bash_executions] == ["make test"]
+
+    @pytest.mark.anyio
+    async def test_completed_run_with_criteria_but_no_bash_calls_publishes_empty_list(self, classes, base_config, mock_agent, msg, monkeypatch):
+        """PR review: the empty list is observable — "the stream carried no
+        bash-family tool calls" stays distinguishable from the ``None`` cases
+        (no criteria, pre-stream end, harvest failure), the same split
+        ``tool_receipts`` already makes."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        final_state = {"messages": [msg.human("Do something"), msg.ai("Done", "msg-9")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            acceptance_criteria=["tests_passed:make test"],
+        )
+        with (
+            patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+        ):
+            result = await executor._aexecute_admitted("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.bash_executions == []
+
+    @pytest.mark.anyio
+    async def test_completed_run_without_criteria_harvests_nothing(self, classes, base_config, mock_agent, msg, monkeypatch):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_state = {"messages": [msg.human("Do something"), msg.ai("Done", "msg-9")]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with (
+            patch.object(executor, "_build_initial_state", new=AsyncMock(return_value=({}, [], None))),
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+        ):
+            result = await executor._aexecute_admitted("Do something")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.bash_executions is None
