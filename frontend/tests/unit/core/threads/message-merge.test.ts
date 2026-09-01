@@ -16,6 +16,7 @@ import {
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  mergeThreadValues,
   parseThreadMessagesPageResponse,
   pruneConfirmedTransientMessages,
   reconcileThreadHistoryRows,
@@ -2132,4 +2133,36 @@ test("refresh reconstructs the same 1-to-6 order from run events without a bridg
       (message) => message.content,
     ),
   ).toEqual(["1", "2", "3", "4", "5", "6"]);
+});
+
+test("mergeThreadValues preserves todos when a later state omits them", () => {
+  expect(
+    mergeThreadValues(
+      {
+        title: "Thread",
+        todos: [{ content: "Keep me", status: "in_progress" }],
+      },
+      {
+        title: "Thread",
+      },
+    ),
+  ).toEqual({
+    title: "Thread",
+    todos: [{ content: "Keep me", status: "in_progress" }],
+  });
+});
+
+test("mergeThreadValues allows explicit todo clearing", () => {
+  expect(
+    mergeThreadValues(
+      {
+        todos: [{ content: "Done", status: "completed" }],
+      },
+      {
+        todos: [],
+      },
+    ),
+  ).toEqual({
+    todos: [],
+  });
 });
