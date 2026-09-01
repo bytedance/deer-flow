@@ -14,7 +14,11 @@ from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
-from deerflow.sandbox.lease import get_sandbox_lease_manager
+from deerflow.sandbox.lease import (
+    get_sandbox_lease_manager,
+    release_sandbox_execution_lease,
+    release_sandbox_execution_lease_async,
+)
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
@@ -621,7 +625,7 @@ def test_wrap_tool_call_does_not_override_non_dict_update() -> None:
     assert result is cmd
 
 
-def test_wrap_tool_call_releases_lease_when_command_jumps_to_end() -> None:
+def test_wrap_tool_call_defers_terminal_lease_release_to_outer_run_fence() -> None:
     provider = _AsyncOnlyProvider()
     owner_id = "agent:terminal"
     state: dict = {"sandbox": {"sandbox_id": "async-sandbox"}}
@@ -630,6 +634,7 @@ def test_wrap_tool_call_releases_lease_when_command_jumps_to_end() -> None:
         thread_id="thread-1",
         user_id="user-1",
         sandbox_lease_owner_id=owner_id,
+        sandbox_id="async-sandbox",
     )
     set_sandbox_provider(provider)
     try:
@@ -643,6 +648,8 @@ def test_wrap_tool_call_releases_lease_when_command_jumps_to_end() -> None:
             request,
             lambda _: Command(goto=END),
         )
+        assert provider.released_ids == []
+        release_sandbox_execution_lease(request.runtime.context)
     finally:
         reset_sandbox_provider()
 
@@ -686,7 +693,7 @@ async def test_awrap_tool_call_passthrough_when_sandbox_already_in_state() -> No
 
 
 @pytest.mark.anyio
-async def test_awrap_tool_call_releases_lease_when_command_jumps_to_end() -> None:
+async def test_awrap_tool_call_defers_terminal_lease_release_to_outer_run_fence() -> None:
     provider = _AsyncOnlyProvider()
     owner_id = "agent:async-terminal"
     state: dict = {"sandbox": {"sandbox_id": "async-sandbox"}}
@@ -695,6 +702,7 @@ async def test_awrap_tool_call_releases_lease_when_command_jumps_to_end() -> Non
         thread_id="thread-1",
         user_id="user-1",
         sandbox_lease_owner_id=owner_id,
+        sandbox_id="async-sandbox",
     )
     set_sandbox_provider(provider)
     try:
@@ -708,10 +716,66 @@ async def test_awrap_tool_call_releases_lease_when_command_jumps_to_end() -> Non
             request,
             lambda _: asyncio.sleep(0, result=Command(goto=END)),
         )
+        assert provider.released_ids == []
+        await release_sandbox_execution_lease_async(request.runtime.context)
     finally:
         reset_sandbox_provider()
 
     assert isinstance(result, Command)
+    assert provider.released_ids == ["async-sandbox"]
+
+
+@pytest.mark.anyio
+async def test_parallel_terminal_command_does_not_release_while_sibling_handler_runs() -> None:
+    provider = _AsyncOnlyProvider()
+    owner_id = "agent:parallel-terminal"
+    state: dict = {"sandbox": {"sandbox_id": "async-sandbox"}}
+    request = _make_tool_call_request(state)
+    request.runtime.context.update(
+        thread_id="thread-1",
+        user_id="user-1",
+        sandbox_lease_owner_id=owner_id,
+        sandbox_id="async-sandbox",
+    )
+    sibling_started = asyncio.Event()
+    allow_sibling_finish = asyncio.Event()
+
+    async def sibling_handler(_: ToolCallRequest) -> ToolMessage:
+        sibling_started.set()
+        await allow_sibling_finish.wait()
+        return ToolMessage(content="done", tool_call_id="call-2", name="bash")
+
+    async def terminal_handler(_: ToolCallRequest) -> Command:
+        await sibling_started.wait()
+        return Command(goto=END)
+
+    set_sandbox_provider(provider)
+    try:
+        get_sandbox_lease_manager(provider).retain(
+            owner_id,
+            "async-sandbox",
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+        middleware = SandboxMiddleware()
+        sibling_task = asyncio.create_task(middleware.awrap_tool_call(request, sibling_handler))
+        terminal_task = asyncio.create_task(middleware.awrap_tool_call(request, terminal_handler))
+
+        terminal_result = await terminal_task
+
+        assert isinstance(terminal_result, Command)
+        assert not sibling_task.done()
+        assert provider.released_ids == []
+
+        allow_sibling_finish.set()
+        sibling_result = await sibling_task
+        assert isinstance(sibling_result, ToolMessage)
+        assert provider.released_ids == []
+
+        await release_sandbox_execution_lease_async(request.runtime.context)
+    finally:
+        reset_sandbox_provider()
+
     assert provider.released_ids == ["async-sandbox"]
 
 

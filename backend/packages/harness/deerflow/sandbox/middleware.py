@@ -7,7 +7,6 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
-from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
@@ -490,37 +489,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return None
         return SandboxMiddleware._read_sandbox_id_from_state(runtime.state)
 
-    @staticmethod
-    def _jumps_to_end(result: ToolMessage | Command) -> bool:
-        if not isinstance(result, Command):
-            return False
-        goto = result.goto
-        if goto == END:
-            return True
-        return isinstance(goto, (list, tuple)) and END in goto
-
-    @staticmethod
-    def _release_request_lease(request: ToolCallRequest) -> None:
-        runtime = request.runtime
-        if runtime is None:
-            return
-        owner_id = sandbox_lease_owner(runtime.context)
-        if owner_id is None:
-            return
-        provider = get_sandbox_provider()
-        get_sandbox_lease_manager(provider).release(owner_id)
-
-    @staticmethod
-    async def _release_request_lease_async(request: ToolCallRequest) -> None:
-        runtime = request.runtime
-        if runtime is None:
-            return
-        owner_id = sandbox_lease_owner(runtime.context)
-        if owner_id is None:
-            return
-        provider = get_sandbox_provider()
-        await get_sandbox_lease_manager(provider).release_async(owner_id)
-
     @override
     def wrap_tool_call(
         self,
@@ -529,10 +497,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> ToolMessage | Command:
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = handler(request)
-        if self._jumps_to_end(result):
-            # A tool Command may bypass the after_agent node entirely. Release
-            # any lease established by an earlier sandbox tool in this run.
-            self._release_request_lease(request)
         if prev_sandbox_id is not None:
             return result
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
@@ -548,8 +512,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
     ) -> ToolMessage | Command:
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = await handler(request)
-        if self._jumps_to_end(result):
-            await self._release_request_lease_async(request)
         if prev_sandbox_id is not None:
             return result
         curr_sandbox_id = self._read_sandbox_id_from_request(request)

@@ -119,6 +119,161 @@ def test_repeated_acquire_for_same_owner_does_not_reacquire_provider() -> None:
     assert provider.acquire_calls == [("thread-1", "user-1")]
 
 
+class _BlockingLookupProvider(_LeaseProvider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lookup_started = threading.Event()
+        self.allow_lookup = threading.Event()
+        self._block_next_lookup = False
+        self._lookup_control = threading.Lock()
+
+    def arm_lookup(self) -> None:
+        with self._lookup_control:
+            self._block_next_lookup = True
+
+    def get(self, sandbox_id):
+        with self._lookup_control:
+            block_lookup = self._block_next_lookup
+            self._block_next_lookup = False
+        if block_lookup:
+            self.lookup_started.set()
+            assert self.allow_lookup.wait(timeout=1)
+        return super().get(sandbox_id)
+
+
+def test_reuse_lookup_and_retain_block_last_owner_release_as_one_transition() -> None:
+    provider = _BlockingLookupProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "previous",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+    provider.arm_lookup()
+
+    reused_ids: list[str] = []
+    reuse = manager.reuse_or_acquire
+    reuse_thread = threading.Thread(
+        target=lambda: reused_ids.append(
+            reuse(
+                "next",
+                "shared",
+                thread_id="thread-1",
+                user_id="user-1",
+            )
+        )
+    )
+    release_thread = threading.Thread(target=manager.release, args=("previous",))
+
+    reuse_thread.start()
+    assert provider.lookup_started.wait(timeout=1)
+    release_thread.start()
+    release_thread.join(timeout=0.05)
+    assert release_thread.is_alive()
+
+    provider.allow_lookup.set()
+    reuse_thread.join(timeout=1)
+    release_thread.join(timeout=1)
+
+    assert not reuse_thread.is_alive()
+    assert not release_thread.is_alive()
+    assert reused_ids == ["shared"]
+    assert manager.binding_for("next") == "shared"
+    assert provider.release_calls == []
+
+
+def test_async_reuse_lookup_and_retain_block_last_owner_release_as_one_transition() -> None:
+    provider = _BlockingLookupProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "previous",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+    provider.arm_lookup()
+
+    reused_ids: list[str] = []
+    reuse_async = manager.reuse_or_acquire_async
+
+    def run_async_reuse() -> None:
+        reused_ids.append(
+            asyncio.run(
+                reuse_async(
+                    "next",
+                    "shared",
+                    thread_id="thread-1",
+                    user_id="user-1",
+                )
+            )
+        )
+
+    reuse_thread = threading.Thread(target=run_async_reuse)
+    release_thread = threading.Thread(target=manager.release, args=("previous",))
+
+    reuse_thread.start()
+    assert provider.lookup_started.wait(timeout=1)
+    release_thread.start()
+    release_thread.join(timeout=0.05)
+    assert release_thread.is_alive()
+
+    provider.allow_lookup.set()
+    reuse_thread.join(timeout=1)
+    release_thread.join(timeout=1)
+
+    assert not reuse_thread.is_alive()
+    assert not release_thread.is_alive()
+    assert reused_ids == ["shared"]
+    assert manager.binding_for("next") == "shared"
+    assert provider.release_calls == []
+
+
+def test_reuse_acquires_fresh_sandbox_for_stale_owner_binding() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "next",
+        "stale",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    sandbox_id = manager.reuse_or_acquire(
+        "next",
+        "stale",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    assert sandbox_id == "shared"
+    assert manager.binding_for("next") == "shared"
+    assert provider.acquire_calls == [("thread-1", "user-1")]
+
+
+@pytest.mark.anyio
+async def test_async_reuse_acquires_fresh_sandbox_for_stale_owner_binding() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "next",
+        "stale",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    sandbox_id = await manager.reuse_or_acquire_async(
+        "next",
+        "stale",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+
+    assert sandbox_id == "shared"
+    assert manager.binding_for("next") == "shared"
+    assert provider.acquire_calls == [("thread-1", "user-1")]
+
+
 @pytest.mark.anyio
 async def test_async_lazy_acquires_share_one_release_boundary() -> None:
     provider = _LeaseProvider()

@@ -104,6 +104,75 @@ class SandboxLeaseManager:
         if not has_owners:
             self._provider.release(sandbox_id)
 
+    def _active_owner_binding(self, owner_id: str, key: tuple[str, str]) -> str | None:
+        """Return one live owner binding while the caller holds ``key``.
+
+        Middleware may retain a checkpointed id before the provider discovers
+        that its local client is gone. Treat that owner binding as stale so a
+        later acquire rebuilds it instead of preserving an unusable id.
+        """
+        with self._metadata_lock:
+            existing = self._bindings_by_owner.get(owner_id)
+        if existing is None:
+            return None
+        if existing.thread_key != key:
+            raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
+        if self._provider.get(existing.sandbox_id) is not None:
+            return existing.sandbox_id
+
+        with self._metadata_lock:
+            if self._bindings_by_owner.get(owner_id) == existing:
+                self._remove_binding_locked(owner_id)
+        return None
+
+    def _acquire_and_bind(self, owner_id: str, thread_id: str, user_id: str, key: tuple[str, str]) -> str:
+        sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
+        with self._metadata_lock:
+            previous, release_previous = self._bind_locked(
+                owner_id,
+                sandbox_id,
+                key,
+            )
+        if release_previous and previous is not None:
+            self._provider.release(previous.sandbox_id)
+        return sandbox_id
+
+    async def _acquire_and_bind_async(
+        self,
+        owner_id: str,
+        thread_id: str,
+        user_id: str,
+        key: tuple[str, str],
+    ) -> str:
+        acquire_task = asyncio.create_task(self._provider.acquire_async(thread_id, user_id=user_id))
+        try:
+            sandbox_id = await asyncio.shield(acquire_task)
+        except asyncio.CancelledError as cancellation:
+            # Provider implementations commonly offload container startup to a
+            # worker thread, which cannot be stopped by cancelling the awaiter.
+            # Reconcile the result before relinquishing the serializer.
+            try:
+                sandbox_id = await acquire_task
+            except Exception:
+                raise cancellation
+            await asyncio.to_thread(
+                self._release_unbound_acquire,
+                sandbox_id,
+            )
+            raise cancellation
+        with self._metadata_lock:
+            previous, release_previous = self._bind_locked(
+                owner_id,
+                sandbox_id,
+                key,
+            )
+        if release_previous and previous is not None:
+            await asyncio.to_thread(
+                self._provider.release,
+                previous.sandbox_id,
+            )
+        return sandbox_id
+
     def retain(
         self,
         owner_id: str,
@@ -151,62 +220,78 @@ class SandboxLeaseManager:
         """Acquire and bind a sandbox, idempotently for one execution owner."""
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
-            with self._metadata_lock:
-                existing = self._bindings_by_owner.get(owner_id)
-                if existing is not None:
-                    if existing.thread_key != key:
-                        raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
-                    return existing.sandbox_id
-            sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
-            with self._metadata_lock:
-                previous, release_previous = self._bind_locked(
-                    owner_id,
-                    sandbox_id,
-                    key,
-                )
-            if release_previous and previous is not None:
-                self._provider.release(previous.sandbox_id)
-            return sandbox_id
+            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            if existing_sandbox_id is not None:
+                return existing_sandbox_id
+            return self._acquire_and_bind(owner_id, thread_id, user_id, key)
+
+    def reuse_or_acquire(
+        self,
+        owner_id: str,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> str:
+        """Atomically retain a live persisted sandbox or acquire a replacement."""
+        key = self._thread_key(thread_id, user_id)
+        with self._serializer.hold(key):
+            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            if existing_sandbox_id is not None:
+                return existing_sandbox_id
+
+            if self._provider.get(sandbox_id) is not None:
+                with self._metadata_lock:
+                    previous, release_previous = self._bind_locked(
+                        owner_id,
+                        sandbox_id,
+                        key,
+                    )
+                if release_previous and previous is not None:
+                    self._provider.release(previous.sandbox_id)
+                return sandbox_id
+
+            return self._acquire_and_bind(owner_id, thread_id, user_id, key)
 
     async def acquire_async(self, owner_id: str, thread_id: str, *, user_id: str) -> str:
         """Async acquire while preserving the provider's own async hook."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
-            with self._metadata_lock:
-                existing = self._bindings_by_owner.get(owner_id)
-                if existing is not None:
-                    if existing.thread_key != key:
-                        raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
-                    return existing.sandbox_id
-            acquire_task = asyncio.create_task(self._provider.acquire_async(thread_id, user_id=user_id))
-            try:
-                sandbox_id = await asyncio.shield(acquire_task)
-            except asyncio.CancelledError as cancellation:
-                # Provider implementations commonly offload container startup
-                # to a worker thread, which cannot be stopped by cancelling the
-                # awaiter. Reconcile the eventual result before returning so an
-                # unbound active sandbox is never left behind.
-                try:
-                    sandbox_id = await acquire_task
-                except Exception:
-                    raise cancellation
-                await asyncio.to_thread(
-                    self._release_unbound_acquire,
-                    sandbox_id,
-                )
-                raise cancellation
-            with self._metadata_lock:
-                previous, release_previous = self._bind_locked(
-                    owner_id,
-                    sandbox_id,
-                    key,
-                )
-            if release_previous and previous is not None:
-                await asyncio.to_thread(
-                    self._provider.release,
-                    previous.sandbox_id,
-                )
-            return sandbox_id
+            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            if existing_sandbox_id is not None:
+                return existing_sandbox_id
+            return await self._acquire_and_bind_async(owner_id, thread_id, user_id, key)
+
+    async def reuse_or_acquire_async(
+        self,
+        owner_id: str,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> str:
+        """Async atomic retain-or-replace transition for a persisted sandbox."""
+        key = self._thread_key(thread_id, user_id)
+        async with self._serializer.hold_async(key):
+            existing_sandbox_id = self._active_owner_binding(owner_id, key)
+            if existing_sandbox_id is not None:
+                return existing_sandbox_id
+
+            if self._provider.get(sandbox_id) is not None:
+                with self._metadata_lock:
+                    previous, release_previous = self._bind_locked(
+                        owner_id,
+                        sandbox_id,
+                        key,
+                    )
+                if release_previous and previous is not None:
+                    await asyncio.to_thread(
+                        self._provider.release,
+                        previous.sandbox_id,
+                    )
+                return sandbox_id
+
+            return await self._acquire_and_bind_async(owner_id, thread_id, user_id, key)
 
     def release(self, owner_id: str) -> None:
         """Release one execution and park the sandbox only after the last user."""

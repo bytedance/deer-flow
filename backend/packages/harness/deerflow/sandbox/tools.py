@@ -1495,17 +1495,18 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            if owner_id is not None and thread_id is not None and not fork_restored:
+                sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                    owner_id,
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=resolve_runtime_user_id(runtime),
+                )
+                runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
             sandbox = provider.get(sandbox_id)
             if sandbox is not None:
-                owner_id = sandbox_lease_owner(runtime.context)
-                thread_id = _resolve_runtime_thread_id(runtime)
-                if owner_id is not None and thread_id is not None and not fork_restored:
-                    get_sandbox_lease_manager(provider).retain(
-                        owner_id,
-                        sandbox_id,
-                        thread_id=thread_id,
-                        user_id=resolve_runtime_user_id(runtime),
-                    )
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
                 return sandbox
@@ -1569,17 +1570,18 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
             provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            if owner_id is not None and thread_id is not None and not fork_restored:
+                sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                    owner_id,
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=resolve_runtime_user_id(runtime),
+                )
+                runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
             sandbox = provider.get(sandbox_id)
             if sandbox is not None:
-                owner_id = sandbox_lease_owner(runtime.context)
-                thread_id = _resolve_runtime_thread_id(runtime)
-                if owner_id is not None and thread_id is not None and not fork_restored:
-                    await get_sandbox_lease_manager(provider).retain_async(
-                        owner_id,
-                        sandbox_id,
-                        thread_id=thread_id,
-                        user_id=resolve_runtime_user_id(runtime),
-                    )
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id
                 return sandbox

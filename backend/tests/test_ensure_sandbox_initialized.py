@@ -214,6 +214,61 @@ async def test_async_reuse_with_config_only_thread_id_binds_execution_owner() ->
         reset_sandbox_provider()
 
 
+def test_reuse_replaces_stale_checkpoint_and_owner_binding() -> None:
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = "stale-owner"
+        runtime.context["thread_id"] = "thread-1"
+        runtime.context["user_id"] = "user-1"
+        manager = get_sandbox_lease_manager(provider)
+        manager.retain(
+            "stale-owner",
+            "parent-sandbox",
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+
+        sandbox = ensure_sandbox_initialized(runtime)
+
+        assert sandbox is provider.sandbox
+        assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
+        assert runtime.context["sandbox_id"] == "fresh-sandbox"
+        assert manager.binding_for("stale-owner") == "fresh-sandbox"
+        assert provider.acquired == ["thread-1"]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_async_reuse_replaces_stale_checkpoint_and_owner_binding() -> None:
+    provider = _FallthroughProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = "stale-owner"
+        runtime.context["thread_id"] = "thread-1"
+        runtime.context["user_id"] = "user-1"
+        manager = get_sandbox_lease_manager(provider)
+        manager.retain(
+            "stale-owner",
+            "parent-sandbox",
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+
+        assert sandbox is provider.sandbox
+        assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
+        assert runtime.context["sandbox_id"] == "fresh-sandbox"
+        assert manager.binding_for("stale-owner") == "fresh-sandbox"
+        assert provider.acquired == ["thread-1"]
+    finally:
+        reset_sandbox_provider()
+
+
 @pytest.mark.anyio
 async def test_ensure_sandbox_initialized_async_acquires_fresh_when_parent_missing() -> None:
     """Same fall-through as the sync path: the fork-restored id is gone from
