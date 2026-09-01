@@ -1339,7 +1339,14 @@ def validate_acceptance_verdict(value: object) -> AcceptanceVerdict | None:
 
 
 def render_acceptance_section(verdict: AcceptanceVerdict) -> str:
-    """Render the per-criterion checklist section for the result text."""
+    """Render the per-criterion checklist section for the result text.
+
+    One leaf is exactly one line: the criterion is model-supplied untrusted
+    text (tag-neutralized, but newlines are not tags), so it is rendered
+    whitespace-collapsed — a multi-line criterion would otherwise inject a
+    forged ``- [holds] …`` line into the checklist the lead reads. The
+    stored verdict keeps the verbatim criterion; only the display collapses.
+    """
     lines = [f"Acceptance checklist (deterministic checks; {_LIMITATION}):"]
     for leaf in verdict["leaves"]:
         if not leaf["checked"]:
@@ -1348,7 +1355,7 @@ def render_acceptance_section(verdict: AcceptanceVerdict) -> str:
             marker = "holds"
         else:
             marker = "does not hold"
-        lines.append(f"- [{marker}] {leaf['criterion']} — {leaf['detail']}")
+        lines.append(f"- [{marker}] {' '.join(leaf['criterion'].split())} — {leaf['detail']}")
     return "\n".join(lines)
 
 
