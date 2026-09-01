@@ -41,6 +41,16 @@ network.
 | `user_id` | `user_id` |
 | `agent_name` | `agent_id` |
 | `thread_id` | `run_id` |
+| omitted `agent_name` (default bucket) | records without an `agent_id` |
+
+Default-bucket semantics: reading without an `agent_name` (the Settings "Main
+memory" view, export, status, main-agent context injection, and main-agent
+`memory_search`) returns only the user's unscoped records -- never another
+custom agent's facts -- mirroring DeerMem's reserved `__default__` bucket.
+mem0's filter syntax cannot express agent-id absence, so the default scope is
+applied client-side after a user-wide listing. `clear_memory` with no
+`agent_name` still clears the user's whole memory (all buckets), per the
+`MemoryManager` contract.
 
 ## Limitations
 

@@ -4,6 +4,15 @@ All state lives server-side in mem0 (dedup, extraction, storage): this backend
 keeps no queue, watermark, or cache, so it is safe for multi-worker Gateway
 deployments. Identity maps 1:1: (user_id, agent_name) -> mem0 (user_id,
 agent_id); thread_id -> mem0 run_id.
+
+Default-bucket semantics: an omitted ``agent_name`` selects the *default*
+fact bucket, not the user's whole memory -- mirroring DeerMem's reserved
+``__default__`` bucket. In mem0 the default bucket is represented by the
+absence of ``agent_id`` (main-agent writes have never carried one), so reads
+with no ``agent_name`` post-filter unscoped records out of the user-wide
+listing; mem0's filter syntax cannot express agent-id absence server-side.
+``clear_memory`` is the exception: ``agent_name=None`` clears the user's whole
+memory, per the MemoryManager contract.
 """
 
 from __future__ import annotations
@@ -24,6 +33,21 @@ from .message_filtering import extract_message_text, filter_messages_for_memory
 logger = logging.getLogger(__name__)
 
 _ROLE_MAP = {"human": "user", "ai": "assistant"}
+
+# Default-scope reads post-filter the user-wide listing down to unscoped
+# records, so over-fetch: a top_k-sized window would otherwise fill up with
+# other agents' facts and starve the default bucket's injection/view.
+_DEFAULT_SCOPE_OVERFETCH = 10
+
+
+def _default_scope_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep only default-bucket records (no ``agent_id``).
+
+    The default bucket is represented by agent-id absence, which mem0's
+    filter syntax cannot express, so the scope is applied client-side. This
+    keeps existing unscoped records in the default view by construction.
+    """
+    return [record for record in records if not record.get("agent_id")]
 
 
 def _build_filters(
@@ -188,14 +212,19 @@ class Mem0Manager(MemoryManager):
         if filters is None:
             return ""
         top_k = self._config.top_k
+        # Default scope (no agent_name) post-filters other agents' records out
+        # of the user-wide listing, so fetch a wider window first.
+        max_items = top_k if agent_name else top_k * _DEFAULT_SCOPE_OVERFETCH
         records = self._read_or_fallback(
             [],
             lambda: self._client.list_memories(
                 filters=filters,
-                page_size=min(top_k, 200),
-                max_items=top_k,
+                page_size=min(max_items, 200),
+                max_items=max_items,
             ),
         )
+        if not agent_name:
+            records = _default_scope_records(records)
         budget = self._config.max_injection_chars
         seen: set[str] = set()
         lines: list[str] = []
@@ -272,6 +301,12 @@ class Mem0Manager(MemoryManager):
                 threshold=self._config.score_threshold,
             ),
         )
+        # Default scope (no agent_name): keep only unscoped records so the main
+        # agent's search never recalls a custom agent's facts. The post-filter
+        # can shrink the result below top_k -- over-fetching a ranked search
+        # would change server-side semantics, so the shortfall is accepted.
+        if not agent_name:
+            results = _default_scope_records(results)
         return [_to_fact(r) for r in results]
 
     async def asearch(
@@ -299,10 +334,20 @@ class Mem0Manager(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
+        """Return the bucket's memory document.
+
+        An explicit ``agent_name`` filters server-side. The default bucket
+        (``agent_name=None``) is the user's unscoped records only -- mem0
+        cannot filter on agent-id absence, so the user-wide listing is
+        post-filtered and other agents' facts never leak into the Main
+        memory view / export / status.
+        """
         filters = _build_filters(user_id=user_id, agent_name=agent_name)
         if filters is None:
             return {"facts": []}
         records = self._read_or_fallback([], lambda: self._client.list_memories(filters=filters))
+        if not agent_name:
+            records = _default_scope_records(records)
         return {"facts": [_to_fact(r) for r in records]}
 
     def export_memory(

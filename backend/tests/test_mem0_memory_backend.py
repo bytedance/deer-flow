@@ -635,6 +635,68 @@ class TestMem0ManagerManage:
             mgr.import_memory({"facts": []}, user_id="u1")
 
 
+class TestMem0DefaultBucketIsolation:
+    """``agent_name=None`` selects the default bucket (unscoped records only),
+    never the user's whole memory -- the mem0 counterpart of DeerMem's reserved
+    ``__default__`` bucket, so the Main memory view / export / status can never
+    leak another custom agent's facts."""
+
+    def test_get_memory_returns_only_unscoped_records(self) -> None:
+        mgr, fake = _manager()
+        fake.list_results = [
+            {"id": "m1", "memory": "default fact"},
+            {"id": "m2", "memory": "agent fact", "agent_id": "lead_agent"},
+            {"id": "m3", "memory": "another default fact", "agent_id": None},
+        ]
+        doc = mgr.get_memory(user_id="u1")
+        assert [f["id"] for f in doc["facts"]] == ["m1", "m3"]
+
+    def test_get_memory_explicit_agent_uses_server_side_filter(self) -> None:
+        mgr, fake = _manager()
+        fake.list_results = [{"id": "m2", "memory": "agent fact", "agent_id": "lead_agent"}]
+        doc = mgr.get_memory(user_id="u1", agent_name="lead_agent")
+        assert [f["id"] for f in doc["facts"]] == ["m2"]
+        assert fake.list_calls[0]["filters"] == {"AND": [{"user_id": "u1"}, {"agent_id": "lead_agent"}]}
+
+    def test_export_memory_default_scope_excludes_agent_records(self) -> None:
+        mgr, fake = _manager()
+        fake.list_results = [
+            {"id": "m1", "memory": "default fact"},
+            {"id": "m2", "memory": "agent fact", "agent_id": "lead_agent"},
+        ]
+        assert [f["id"] for f in mgr.export_memory(user_id="u1")["facts"]] == ["m1"]
+
+    def test_get_context_default_scope_excludes_agent_records_and_overfetches(self) -> None:
+        mgr, fake = _manager()
+        fake.list_results = [
+            {"id": "m2", "memory": "agent fact", "agent_id": "lead_agent"},
+            {"id": "m1", "memory": "default fact"},
+        ]
+        assert mgr.get_context("u1") == "- default fact"
+        call = fake.list_calls[0]
+        assert call["filters"] == {"user_id": "u1"}
+        # top_k(8) * overfetch(10): the post-filter needs a wider window or
+        # other agents' facts would crowd the default bucket out of top_k.
+        assert call["max_items"] == 80
+
+    def test_get_context_explicit_agent_keeps_server_side_scope(self) -> None:
+        mgr, fake = _manager()
+        fake.list_results = [{"id": "m1", "memory": "x", "agent_id": "lead_agent"}]
+        mgr.get_context("u1", agent_name="lead_agent")
+        call = fake.list_calls[0]
+        assert call["filters"] == {"AND": [{"user_id": "u1"}, {"agent_id": "lead_agent"}]}
+        assert call["max_items"] == 8  # no post-filter -> no overfetch
+
+    def test_search_default_scope_excludes_agent_records(self) -> None:
+        mgr, fake = _manager()
+        fake.search_results = [
+            {"id": "m1", "memory": "default fact"},
+            {"id": "m2", "memory": "agent fact", "agent_id": "lead_agent"},
+        ]
+        results = mgr.search("q", user_id="u1")
+        assert [f["id"] for f in results] == ["m1"]
+
+
 class TestMem0Discovery:
     def test_scan_backends_registers_mem0(self) -> None:
         import deerflow.agents.memory.manager as manager_module
