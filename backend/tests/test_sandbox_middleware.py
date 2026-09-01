@@ -12,6 +12,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
@@ -34,6 +35,24 @@ class _SyncProvider(SandboxProvider):
 
     def release(self, sandbox_id: str) -> None:
         return None
+
+
+class _AgentSkillSyncProvider(_SyncProvider):
+    supports_agent_skill_isolation = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.skill_syncs: list[tuple[str, str, str, object]] = []
+
+    def sync_agent_skills(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection,
+    ) -> None:
+        self.skill_syncs.append((sandbox_id, thread_id, user_id, projection))
 
 
 class _SandboxStub(Sandbox):
@@ -149,6 +168,129 @@ async def test_abefore_agent_uses_async_provider_acquire() -> None:
     assert result == {"sandbox": {"sandbox_id": "async-sandbox"}}
     assert provider.thread_ids == ["thread-2"]
     assert provider.user_ids == ["owner-2"]
+
+
+def test_explicit_skill_policy_eagerly_acquires_and_syncs_existing_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _AgentSkillSyncProvider()
+    projection = object()
+    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
+    monkeypatch.setattr(
+        middleware,
+        "_prepare_agent_skill_projection",
+        lambda *_args, **_kwargs: projection,
+    )
+    set_sandbox_provider(provider)
+    try:
+        result = middleware.before_agent(
+            {"sandbox": {"sandbox_id": "shared-view-sandbox"}},
+            Runtime(context={"thread_id": "thread-policy", "user_id": "owner-policy"}),
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert result is not None
+    assert isinstance(result["sandbox"], Overwrite)
+    assert result["sandbox"].value == {"sandbox_id": "sync-sandbox"}
+    assert provider.thread_ids == ["thread-policy"]
+    assert provider.user_ids == ["owner-policy"]
+    assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
+
+
+def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SyncProvider()
+    middleware = SandboxMiddleware(lazy_init=True, available_skills={"allowed"})
+    monkeypatch.setattr(
+        middleware,
+        "_prepare_agent_skill_projection",
+        lambda *_args, **_kwargs: object(),
+    )
+    set_sandbox_provider(provider)
+    try:
+        with pytest.raises(
+            SandboxRuntimeError,
+            match="cannot enforce per-Agent skill filesystem isolation",
+        ):
+            middleware.before_agent(
+                {},
+                Runtime(context={"thread_id": "thread-policy", "user_id": "owner-policy"}),
+            )
+    finally:
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == []
+
+
+def test_non_owner_skill_policy_preserves_lazy_init_without_projection_or_acquire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _SyncProvider()
+    middleware = SandboxMiddleware(
+        lazy_init=True,
+        available_skills={"bootstrap"},
+        owns_agent_skill_projection=False,
+    )
+    prepare_calls: list[tuple[str, str]] = []
+    original_prepare = middleware._prepare_agent_skill_projection
+
+    def _prepare(thread_id: str, *, user_id: str):
+        prepare_calls.append((thread_id, user_id))
+        return original_prepare(thread_id, user_id=user_id)
+
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", _prepare)
+    set_sandbox_provider(provider)
+    try:
+        result = middleware.before_agent(
+            {},
+            Runtime(
+                context={
+                    "thread_id": "thread-bootstrap",
+                    "user_id": "owner-bootstrap",
+                }
+            ),
+        )
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert prepare_calls == [("thread-bootstrap", "owner-bootstrap")]
+    assert provider.thread_ids == []
+
+
+def test_explicit_skill_policy_does_not_reuse_checkpointed_sandbox_after_auth_denial(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _AgentSkillSyncProvider()
+    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
+    monkeypatch.setattr(
+        middleware,
+        "_prepare_agent_skill_projection",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.middleware.authorize_sandbox_execution",
+        lambda **_kwargs: (_ for _ in ()).throw(SandboxAuthorizationError("denied")),
+    )
+    set_sandbox_provider(provider)
+    try:
+        with pytest.raises(SandboxAuthorizationError, match="denied"):
+            middleware.before_agent(
+                {"sandbox": {"sandbox_id": "shared-view-sandbox"}},
+                Runtime(
+                    context={
+                        "thread_id": "thread-policy",
+                        "user_id": "owner-policy",
+                    }
+                ),
+            )
+    finally:
+        reset_sandbox_provider()
+
+    assert provider.thread_ids == []
+    assert provider.skill_syncs == []
 
 
 @pytest.mark.anyio

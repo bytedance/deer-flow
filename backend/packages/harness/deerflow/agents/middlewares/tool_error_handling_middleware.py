@@ -167,6 +167,8 @@ def _build_runtime_middlewares(
     receipts_render_mode: str = "delegation_only",
     authorization_provider=None,
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
+    available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
@@ -199,7 +201,13 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
         thread_hooks.append(UploadsMiddleware())
-    thread_hooks.append(SandboxMiddleware(lazy_init=lazy_init))
+    thread_hooks.append(
+        SandboxMiddleware(
+            lazy_init=lazy_init,
+            available_skills=available_skills,
+            owns_agent_skill_projection=owns_agent_skill_projection,
+        )
+    )
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
@@ -313,6 +321,8 @@ def build_lead_runtime_middlewares(
     lazy_init: bool = True,
     authorization_provider=None,
     deferred_setup: "DeferredToolSetup | None" = None,
+    available_skills: set[str] | None = None,
+    owns_agent_skill_projection: bool = True,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -324,6 +334,8 @@ def build_lead_runtime_middlewares(
         # results (default "delegation_only"); stamping stays always-on.
         receipts_render_mode=app_config.verification.receipts_render_mode,
         authorization_provider=authorization_provider,
+        available_skills=available_skills,
+        owns_agent_skill_projection=owns_agent_skill_projection,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
@@ -361,6 +373,7 @@ def build_subagent_runtime_middlewares(
         receipts_render_mode="always",
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
+        owns_agent_skill_projection=False,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically

@@ -1,5 +1,7 @@
 """Core behavior tests for MCP client server config building."""
 
+import logging
+
 import pytest
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
@@ -81,6 +83,63 @@ def test_build_server_params_rejects_unsupported_transport():
 
     with pytest.raises(ValueError, match="unsupported transport type"):
         build_server_params("bad-transport", config)
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("Bearer static-secret-123\n", "line break"),
+        ("Bearer static-secret-caf\u00e9", "outside ASCII"),
+        ("Bearer static-secret-456 ", "whitespace"),
+    ],
+    ids=["trailing-newline", "non-ascii", "trailing-space"],
+)
+def test_build_server_params_rejects_illegal_header_value(value: str, reason: str):
+    """A statically configured value the transport would refuse is denied here.
+
+    h11 renders the full value into its exception message on a line break or
+    surrounding whitespace, which ToolErrorHandlingMiddleware turns into a
+    model-visible ToolMessage. These values are API keys often enough that the
+    denial names the header and the reason instead.
+    """
+    config = McpServerConfig(type="http", url="https://example.com/mcp", headers={"Authorization": value})
+
+    with pytest.raises(ValueError) as excinfo:
+        build_server_params("remote-server", config)
+
+    message = str(excinfo.value)
+    assert reason in message
+    assert "static-secret" not in message
+    assert "Authorization" in message
+
+
+def test_build_servers_config_drops_only_the_server_with_an_illegal_header(caplog):
+    config = ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "broken": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer static-secret-123\n"},
+                },
+                "healthy": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer fine"},
+                },
+            }
+        }
+    )
+
+    with caplog.at_level(logging.ERROR, logger="deerflow.mcp.client"):
+        servers_config = build_servers_config(config)
+
+    # One bad server does not take the others down with it, and the log that
+    # explains the drop does not carry the value either.
+    assert set(servers_config) == {"healthy"}
+    assert "static-secret" not in caplog.text
 
 
 @pytest.mark.parametrize("transport", ["sse", "http"])

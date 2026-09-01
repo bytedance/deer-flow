@@ -100,6 +100,14 @@ Skill quality review note:
   tag-neutralized; full raw payloads stay in tool artifacts. See
   [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
   `skill-creator` ownership boundaries.
+- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
+  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
+  edits from their head revision, but only the manifest from the trusted base
+  revision can suppress that run. Entries match one error finding exactly,
+  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
+  output, and can never waive blocker findings. Adding a waiver and relying on
+  it therefore requires two steps: merge the reviewed waiver first, then update
+  the affected public skill in a later pull request.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
