@@ -9,8 +9,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langchain.agents import create_agent
 from langchain.agents.middleware.types import ModelResponse
-from langchain_core.messages import AIMessage
+from langchain_core.language_models import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
@@ -353,6 +356,167 @@ def test_empty_response_error_uses_one_retry_budget() -> None:
     middleware = _build_middleware(retry_max_attempts=3)
 
     assert middleware._max_attempts_for(EmptyModelResponseError()) == 2
+    assert middleware.release_policy_parameters() == {
+        "empty_response_retry_limit": 1,
+        "empty_response_retry_scope": "run",
+    }
+
+
+def test_empty_response_retry_budget_is_shared_across_model_calls_in_one_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    request = SimpleNamespace(runtime=SimpleNamespace(context={"thread_id": "thread-1", "run_id": "run-1"}))
+    first_attempts = 0
+    second_attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def first_handler(_request) -> AIMessage:
+        nonlocal first_attempts
+        first_attempts += 1
+        if first_attempts == 1:
+            return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+        return AIMessage(
+            content="",
+            tool_calls=[{"id": "call-1", "name": "bash", "args": {}}],
+            response_metadata={"finish_reason": "tool_calls"},
+        )
+
+    def second_handler(_request) -> AIMessage:
+        nonlocal second_attempts
+        second_attempts += 1
+        return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+
+    first_result = middleware.wrap_model_call(request, first_handler)
+    second_result = middleware.wrap_model_call(request, second_handler)
+
+    assert first_result.tool_calls
+    assert first_attempts == 2
+    assert second_attempts == 1
+    assert second_result.additional_kwargs["error_reason"] == "empty_response"
+
+
+@pytest.mark.anyio
+async def test_async_empty_response_retry_budget_is_shared_across_model_calls_in_one_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    request = SimpleNamespace(runtime=SimpleNamespace(context={"thread_id": "thread-async", "run_id": "run-async"}))
+    attempts = 0
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    async def handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    first_result = await middleware.awrap_model_call(request, handler)
+    second_result = await middleware.awrap_model_call(request, handler)
+
+    assert attempts == 3
+    assert first_result.additional_kwargs["error_reason"] == "empty_response"
+    assert second_result.additional_kwargs["error_reason"] == "empty_response"
+
+
+def test_empty_response_exhaustion_does_not_trip_circuit_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(
+        circuit_failure_threshold=2,
+        retry_max_attempts=2,
+        retry_base_delay_ms=1,
+        retry_cap_delay_ms=1,
+    )
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def empty_handler(_request) -> AIMessage:
+        return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+
+    for index in range(3):
+        request = SimpleNamespace(runtime=SimpleNamespace(context={"run_id": f"run-{index}"}))
+        result = middleware.wrap_model_call(request, empty_handler)
+        assert result.additional_kwargs["error_reason"] == "empty_response"
+
+    healthy_calls = 0
+
+    def healthy_handler(_request) -> AIMessage:
+        nonlocal healthy_calls
+        healthy_calls += 1
+        return AIMessage(content="healthy")
+
+    result = middleware.wrap_model_call(
+        SimpleNamespace(runtime=SimpleNamespace(context={"run_id": "run-healthy"})),
+        healthy_handler,
+    )
+
+    assert middleware._circuit_failure_count == 0
+    assert middleware._circuit_state == "closed"
+    assert healthy_calls == 1
+    assert result.content == "healthy"
+
+
+def test_empty_response_exhaustion_releases_half_open_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    middleware._circuit_state = "half_open"
+    assert middleware._check_circuit() is False
+    assert middleware._circuit_probe_in_flight is True
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+    monkeypatch.setattr(middleware, "_check_circuit", lambda: False)
+
+    def empty_handler(_request) -> AIMessage:
+        return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+
+    result = middleware.wrap_model_call(
+        SimpleNamespace(runtime=SimpleNamespace(context={"run_id": "half-open-run"})),
+        empty_handler,
+    )
+
+    assert result.additional_kwargs["error_reason"] == "empty_response"
+    assert middleware._circuit_state == "half_open"
+    assert middleware._circuit_probe_in_flight is False
+
+
+class _EmptyThenRecoveredGraphModel(BaseChatModel):
+    call_count: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "empty-then-recovered"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.call_count += 1
+        content = "" if self.call_count == 1 else "recovered through graph stream"
+        message = AIMessage(content=content, response_metadata={"finish_reason": "stop"})
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_empty_response_recovery_runs_through_create_agent_astream(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise the same create_agent().astream() path used by Gateway."""
+    model = _EmptyThenRecoveredGraphModel()
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    agent = create_agent(model=model, tools=[], middleware=[middleware], context_schema=dict)
+    states = [
+        state
+        async for state in agent.astream(
+            {"messages": [HumanMessage(content="hello")]},
+            stream_mode="values",
+            context={"thread_id": "stream-thread", "run_id": "stream-run"},
+        )
+    ]
+
+    assert model.call_count == 2
+    assert states[-1]["messages"][-1].content == "recovered through graph stream"
 
 
 def test_sync_retry_event_preserves_langgraph_control_flow(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -119,20 +119,13 @@ def test_empty_response_without_tool_result_is_not_handled_by_terminal_guard():
     assert middleware.after_model(state, _runtime()) is None
 
 
-@pytest.mark.parametrize(
-    "message",
-    [
-        AIMessage(
-            content="",
-            tool_calls=[{"id": "call-2", "name": "lookup_status", "args": {}}],
-            response_metadata={"finish_reason": "tool_calls"},
-        ),
-        AIMessage(content="", additional_kwargs={"reasoning_content": "thinking"}, response_metadata={"finish_reason": "stop"}),
-        AIMessage(content="", response_metadata={"finish_reason": "length"}),
-    ],
-)
-def test_nonempty_semantics_and_length_are_not_treated_as_empty_terminal(message: AIMessage):
+def test_tool_call_is_not_treated_as_empty_terminal():
     middleware = TerminalResponseMiddleware()
+    message = AIMessage(
+        content="",
+        tool_calls=[{"id": "call-2", "name": "lookup_status", "args": {}}],
+        response_metadata={"finish_reason": "tool_calls"},
+    )
     state: dict[str, list[Any]] = {
         "messages": [
             HumanMessage(content="Check the status"),
@@ -142,3 +135,56 @@ def test_nonempty_semantics_and_length_are_not_treated_as_empty_terminal(message
     }
 
     assert middleware.after_model(state, _runtime()) is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        AIMessage(content="   ", response_metadata={"finish_reason": "stop"}),
+        AIMessage(
+            content="",
+            additional_kwargs={"reasoning_content": "thinking"},
+            response_metadata={"finish_reason": "stop"},
+        ),
+        AIMessage(content="", response_metadata={"finish_reason": "length"}),
+    ],
+)
+def test_nonvisible_post_tool_response_becomes_terminal_fallback(message: AIMessage):
+    middleware = TerminalResponseMiddleware()
+    state: dict[str, list[Any]] = {
+        "messages": [
+            HumanMessage(content="Check the status"),
+            ToolMessage(content="tool completed", tool_call_id="call-2"),
+            message,
+        ]
+    }
+
+    result = middleware.after_model(state, _runtime())
+
+    assert result is not None
+    replacement = result["messages"][0]
+    assert "returned no final response" in str(replacement.content)
+    assert replacement.additional_kwargs["deerflow_error_fallback"] is True
+    if "reasoning_content" in message.additional_kwargs:
+        assert replacement.additional_kwargs["reasoning_content"] == "thinking"
+
+
+def test_thinking_blocks_are_preserved_when_terminal_fallback_is_appended():
+    middleware = TerminalResponseMiddleware()
+    thinking_block = {"type": "thinking", "thinking": "internal reasoning"}
+    message = AIMessage(content=[thinking_block], response_metadata={"finish_reason": "stop"})
+    state = {
+        "messages": [
+            HumanMessage(content="Check the status"),
+            ToolMessage(content="tool completed", tool_call_id="call-2"),
+            message,
+        ]
+    }
+
+    result = middleware.after_model(state, _runtime())
+
+    assert result is not None
+    content = result["messages"][0].content
+    assert content[0] == thinking_block
+    assert content[-1]["type"] == "text"
+    assert "returned no final response" in content[-1]["text"]

@@ -9,10 +9,9 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.model_response import finish_reason, has_model_content
+from deerflow.agents.middlewares.model_response import append_visible_text, has_tool_call_intent, has_visible_content
 
 _FALLBACK_CONTENT = "The model completed the tool run but returned no final response. Please try again or use a different model."
-_LENGTH_FINISH_REASONS = {"length", "max_tokens", "max_output_tokens"}
 
 
 def _tool_result_in_current_turn(messages: list[Any]) -> bool:
@@ -46,10 +45,7 @@ class TerminalResponseMiddleware(AgentMiddleware[AgentState]):
             return None
 
         last = messages[-1]
-        if has_model_content(last):
-            return None
-        if finish_reason(last) in _LENGTH_FINISH_REASONS:
-            # Length termination is handled independently and is not an empty response.
+        if has_visible_content(last) or has_tool_call_intent(last):
             return None
         if not _tool_result_in_current_turn(messages):
             return None
@@ -63,7 +59,7 @@ class TerminalResponseMiddleware(AgentMiddleware[AgentState]):
         )
         fallback = last.model_copy(
             update={
-                "content": _FALLBACK_CONTENT,
+                "content": append_visible_text(last, _FALLBACK_CONTENT),
                 "additional_kwargs": additional_kwargs,
             }
         )

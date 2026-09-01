@@ -28,6 +28,9 @@ from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 
 logger = logging.getLogger(__name__)
 
+_EMPTY_RESPONSE_RETRY_CONTEXT_KEY = "__empty_response_retry_consumed"
+_NON_CIRCUIT_FAILURE_REASONS = {"burst_rate", "empty_response"}
+
 
 class EmptyModelResponseError(RuntimeError):
     """The model completed normally without producing persistent content."""
@@ -46,6 +49,19 @@ def _raise_for_empty_response(response: ModelCallResult) -> None:
     reason = finish_reason(message)
     if reason in (None, "", "stop", "end_turn"):
         raise EmptyModelResponseError()
+
+
+def _consume_empty_response_retry(request: ModelRequest) -> bool:
+    """Consume the one empty-response retry budget stored in run context."""
+    runtime = getattr(request, "runtime", None)
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict):
+        # Direct middleware calls without runtime context retain one retry per call.
+        return True
+    if context.get(_EMPTY_RESPONSE_RETRY_CONTEXT_KEY) is True:
+        return False
+    context[_EMPTY_RESPONSE_RETRY_CONTEXT_KEY] = True
+    return True
 
 
 _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
@@ -434,7 +450,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         self._circuit_probe_in_flight = False
 
     def release_policy_parameters(self) -> dict[str, object]:
-        return {"empty_response_retry_limit": 1}
+        return {
+            "empty_response_retry_limit": 1,
+            "empty_response_retry_scope": "run",
+        }
 
     def _max_attempts_for(self, exc: BaseException, reason: str = "transient") -> int:
         """Return the effective max attempt count for this exception.
@@ -831,7 +850,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc, reason)
-                if retriable and attempt < max_attempts:
+                should_retry = retriable and attempt < max_attempts
+                if should_retry and reason == "empty_response":
+                    should_retry = _consume_empty_response_retry(request)
+                if should_retry:
                     wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc, reason)
                     prev_delay_ms = wait_ms
                     logger.warning(
@@ -851,14 +873,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
-                if retriable and reason != "burst_rate":
+                if retriable and reason not in _NON_CIRCUIT_FAILURE_REASONS:
                     self._record_failure()
                 else:
-                    # Non-retriable, OR burst_rate (a transient provider
-                    # slope-throttle, not "provider down"): release the half-open
-                    # probe without recording a failure so the circuit doesn't
-                    # trip and fast-fail ALL calls for the recovery window - the
-                    # exact self-inflicted outage #4290 is trying to prevent.
+                    # These outcomes do not show that the provider is broadly unavailable.
                     self._release_half_open_probe()
                 return self._build_user_fallback_message(exc, reason)
 
@@ -891,7 +909,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             except Exception as exc:
                 retriable, reason = self._classify_error(exc)
                 max_attempts = self._max_attempts_for(exc, reason)
-                if retriable and attempt < max_attempts:
+                should_retry = retriable and attempt < max_attempts
+                if should_retry and reason == "empty_response":
+                    should_retry = _consume_empty_response_retry(request)
+                if should_retry:
                     wait_ms = self._build_retry_delay_ms(prev_delay_ms, exc, reason)
                     prev_delay_ms = wait_ms
                     logger.warning(
@@ -911,14 +932,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     _extract_error_detail(exc),
                     exc_info=exc,
                 )
-                if retriable and reason != "burst_rate":
+                if retriable and reason not in _NON_CIRCUIT_FAILURE_REASONS:
                     self._record_failure()
                 else:
-                    # Non-retriable, OR burst_rate (a transient provider
-                    # slope-throttle, not "provider down"): release the half-open
-                    # probe without recording a failure so the circuit doesn't
-                    # trip and fast-fail ALL calls for the recovery window - the
-                    # exact self-inflicted outage #4290 is trying to prevent.
+                    # These outcomes do not show that the provider is broadly unavailable.
                     self._release_half_open_probe()
                 return self._build_user_fallback_message(exc, reason)
 

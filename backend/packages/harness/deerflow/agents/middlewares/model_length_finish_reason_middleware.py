@@ -24,32 +24,11 @@ from deerflow.agents.middlewares.model_length_termination_detectors import (
     ModelLengthTerminationDetector,
     default_detectors,
 )
+from deerflow.agents.middlewares.model_response import append_visible_text, has_tool_call_intent, has_visible_content
 
 MODEL_LENGTH_CAPPED_STOP_REASON = "model_length_capped"
 _MODEL_LENGTH_CAPPED_CONTENT = "The model reached its output limit before producing a complete final response. Please continue the conversation to resume."
 logger = logging.getLogger(__name__)
-
-
-def _has_tool_call_intent_or_error(message: AIMessage) -> bool:
-    if message.tool_calls or getattr(message, "invalid_tool_calls", None):
-        return True
-    additional_kwargs = message.additional_kwargs or {}
-    return bool(additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call"))
-
-
-def _has_visible_content(message: AIMessage) -> bool:
-    content = message.content
-    if isinstance(content, str):
-        return bool(content.strip())
-    if isinstance(content, list):
-        for block in content:
-            if isinstance(block, str) and block.strip():
-                return True
-            if isinstance(block, dict) and block.get("type") in {"text", "output_text"}:
-                text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    return True
-    return False
 
 
 def _tool_call_summary(message: AIMessage) -> tuple[int, list[str]]:
@@ -136,14 +115,14 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
             },
         )
 
-        has_tool_call_intent = _has_tool_call_intent_or_error(last)
-        has_visible_content = _has_visible_content(last)
-        if not has_tool_call_intent and has_visible_content:
+        contains_tool_call = has_tool_call_intent(last)
+        contains_visible_content = has_visible_content(last)
+        if not contains_tool_call and contains_visible_content:
             return None
 
         additional_kwargs = dict(last.additional_kwargs or {})
-        suppressed_count, suppressed_names = _tool_call_summary(last) if has_tool_call_intent else (0, [])
-        if has_tool_call_intent:
+        suppressed_count, suppressed_names = _tool_call_summary(last) if contains_tool_call else (0, [])
+        if contains_tool_call:
             # Tool arguments may be incomplete at a max-token boundary.
             additional_kwargs.pop("tool_calls", None)
             additional_kwargs.pop("function_call", None)
@@ -156,7 +135,7 @@ class ModelLengthFinishReasonMiddleware(AgentMiddleware[AgentState]):
         }
         replacement = last.model_copy(
             update={
-                "content": last.content if has_visible_content else _MODEL_LENGTH_CAPPED_CONTENT,
+                "content": (last.content if contains_visible_content else append_visible_text(last, _MODEL_LENGTH_CAPPED_CONTENT)),
                 "tool_calls": [],
                 "invalid_tool_calls": [],
                 "additional_kwargs": additional_kwargs,

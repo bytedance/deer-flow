@@ -17,14 +17,45 @@ def last_ai_message(response: Any) -> AIMessage | None:
     return None
 
 
-def has_model_content(message: AIMessage) -> bool:
-    """Return whether a message contains any provider-produced content block."""
+def has_tool_call_intent(message: AIMessage) -> bool:
+    """Return whether parsed or provider-raw tool-call intent is present."""
     if message.tool_calls or getattr(message, "invalid_tool_calls", None):
         return True
-
     additional_kwargs = message.additional_kwargs or {}
-    if additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call"):
+    return bool(additional_kwargs.get("tool_calls") or additional_kwargs.get("function_call"))
+
+
+def has_visible_content(message: AIMessage) -> bool:
+    """Return whether a message contains non-whitespace user-visible text."""
+    content = message.content
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return False
+
+    for block in content:
+        if isinstance(block, str) and block.strip():
+            return True
+        if not isinstance(block, dict) or block.get("type") not in {"text", "output_text"}:
+            continue
+        text = block.get("text")
+        if isinstance(text, str) and text.strip():
+            return True
+    return False
+
+
+def append_visible_text(message: AIMessage, text: str) -> Any:
+    """Append a visible text block without dropping existing content blocks."""
+    if isinstance(message.content, list):
+        return [*message.content, {"type": "text", "text": text}]
+    return text
+
+
+def has_model_content(message: AIMessage) -> bool:
+    """Return whether a message contains any provider-produced content block."""
+    if has_tool_call_intent(message):
         return True
+    additional_kwargs = message.additional_kwargs or {}
     for field in ("reasoning_content", "reasoning", "thinking"):
         value = additional_kwargs.get(field)
         if isinstance(value, str) and len(value) > 0:
