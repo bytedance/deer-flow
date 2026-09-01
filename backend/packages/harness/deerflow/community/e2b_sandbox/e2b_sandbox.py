@@ -47,6 +47,10 @@ class E2BSandbox(Sandbox):
             :data:`DEFAULT_E2B_HOME_DIR`.
     """
 
+    #: Every call is a fresh ``sandbox.commands.run`` execution — no shell
+    #: state survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,

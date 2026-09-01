@@ -311,13 +311,67 @@ class TestFileLeafSizeProbe:
         for criterion, expected in (
             ("file:../outputs/big.csv exists", "exists, 10000000 bytes (size probe; content not loaded)"),
             ("file:../outputs/big.csv non-empty", "10000000 bytes (size probe; content not loaded)"),
-            ("file_written:../outputs/big.csv", "size probe ok, 10000000 bytes (read-back skipped for a large file)"),
         ):
             verdict = check_acceptance_criteria([criterion], thread_data=THREAD_DATA, content_reader=forbidden_reader, size_prober=lambda _rt, _p, _td: 10_000_000)
             leaf = verdict["leaves"][0]
             assert leaf["checked"] is True, criterion
             assert leaf["holds"] is True, criterion
             assert leaf["detail"] == expected, criterion
+
+    def test_large_file_written_requires_a_bounded_open_probe(self):
+        """PR review: metadata is not read-back — a mode-000 large file stats
+        fine while any open raises EACCES, so ``file_written`` above the cap
+        holds only when a bounded open probe proves readability."""
+
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read above the probe cap")
+
+        verdict = check_acceptance_criteria(
+            ["file_written:../outputs/big.csv"],
+            thread_data=THREAD_DATA,
+            content_reader=forbidden_reader,
+            size_prober=lambda _rt, _p, _td: 10_000_000,
+            readable_prober=lambda _rt, _p, _td: True,
+        )
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is True
+        assert leaf["holds"] is True
+        assert leaf["detail"] == "read probe ok, 10000000 bytes (content above the read cap not loaded)"
+
+    def test_large_file_written_with_failed_open_probe_does_not_hold(self):
+        """The reviewer's reproduction: stat ok, one-byte open EACCES → the
+        leaf must not hold."""
+
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read above the probe cap")
+
+        verdict = check_acceptance_criteria(
+            ["file_written:../outputs/big.csv"],
+            thread_data=THREAD_DATA,
+            content_reader=forbidden_reader,
+            size_prober=lambda _rt, _p, _td: 10_000_000,
+            readable_prober=lambda _rt, _p, _td: False,
+        )
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+        assert "cannot be opened for reading" in leaf["detail"]
+
+    def test_large_file_written_with_inconclusive_probe_is_unverified(self):
+        def forbidden_reader(_runtime, _path):
+            raise AssertionError("content must not be read above the probe cap")
+
+        verdict = check_acceptance_criteria(
+            ["file_written:../outputs/big.csv"],
+            thread_data=THREAD_DATA,
+            content_reader=forbidden_reader,
+            size_prober=lambda _rt, _p, _td: 10_000_000,
+            readable_prober=lambda _rt, _p, _td: None,
+        )
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+        assert "could not be established" in leaf["detail"]
 
     def test_probe_at_or_below_cap_still_reads_content(self):
         files = {"/mnt/user-data/outputs/report.md": "hello"}
@@ -518,6 +572,38 @@ class TestProbeFileSize:
         os.mkfifo(workspace / "pipe")
         assert _probe_file_size(self._local_runtime(), "/mnt/user-data/workspace/pipe", {"workspace_path": str(workspace)}) is None
 
+    def test_local_readable_probe_opens_one_byte_without_a_shell(self, monkeypatch, tmp_path):
+        """The local readability proof is a direct one-byte ``open`` of the
+        validated host path — no shell, no sandbox acquisition."""
+        from deerflow.subagents.acceptance_checks import _probe_file_readable
+
+        workspace = tmp_path / "user-data" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "report.md").write_text("hello", encoding="utf-8")
+
+        def forbidden_ensure(runtime=None):
+            raise AssertionError("the local probe must not acquire a sandbox")
+
+        monkeypatch.setattr("deerflow.sandbox.tools.ensure_sandbox_initialized", forbidden_ensure)
+        thread_data = {"workspace_path": str(workspace)}
+        assert _probe_file_readable(self._local_runtime(), "/mnt/user-data/workspace/report.md", thread_data) is True
+
+    @pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="mode-000 readability needs POSIX permissions and a non-root euid")
+    def test_local_unreadable_file_fails_the_probe(self, tmp_path):
+        """The reviewer's reproduction: a mode-000 deliverable stats fine but
+        cannot be opened — the probe answers False, not a stat-based hold."""
+        from deerflow.subagents.acceptance_checks import _probe_file_readable
+
+        workspace = tmp_path / "user-data" / "workspace"
+        workspace.mkdir(parents=True)
+        locked = workspace / "report.md"
+        locked.write_text("x" * 60_001, encoding="utf-8")
+        locked.chmod(0)
+        try:
+            assert _probe_file_readable(self._local_runtime(), "/mnt/user-data/workspace/report.md", {"workspace_path": str(workspace)}) is False
+        finally:
+            locked.chmod(0o600)
+
 
 @pytest.mark.skipif(sys.platform != "linux", reason="the probe script targets GNU coreutils (Linux sandboxes)")
 class TestProbeInnerScriptRealLayouts:
@@ -557,6 +643,39 @@ class TestProbeInnerScriptRealLayouts:
         outside.write_text("x", encoding="utf-8")
         (outputs / "stolen.md").symlink_to(outside)
         assert self._run_probe(str(outputs / "stolen.md"), str(outputs)) == "NONREGULAR"
+
+    def _run_read_probe(self, path: str, root: str) -> str:
+        from deerflow.subagents.acceptance_checks import _READ_PROBE_INNER_SCRIPT
+
+        command = f"/usr/bin/env -i /bin/sh -c {shlex.quote(_READ_PROBE_INNER_SCRIPT)} probe {shlex.quote(path)} {shlex.quote(root)}"
+        return subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_read_probe_regular_file_is_readable(self, tmp_path):
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        (outputs / "report.md").write_text("hello", encoding="utf-8")
+        assert self._run_read_probe(str(outputs / "report.md"), str(outputs)) == "READABLE"
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads through mode-000")
+    def test_read_probe_mode_000_is_unreadable(self, tmp_path):
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        locked = outputs / "report.md"
+        locked.write_text("x", encoding="utf-8")
+        locked.chmod(0)
+        try:
+            assert self._run_read_probe(str(locked), str(outputs)) == "UNREADABLE"
+        finally:
+            locked.chmod(0o600)
+
+    @pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-only")
+    def test_read_probe_fifo_is_rejected_before_any_open(self, tmp_path):
+        """The regular-file gate runs first: a FIFO renders NONREGULAR and
+        the probe never opens it (nothing to block on)."""
+        outputs = tmp_path / "outputs"
+        outputs.mkdir()
+        os.mkfifo(outputs / "pipe")
+        assert self._run_read_probe(str(outputs / "pipe"), str(outputs)) == "NONREGULAR"
 
     def test_fifo_is_nonregular_without_blocking(self, tmp_path):
         outputs = tmp_path / "outputs"
@@ -644,6 +763,14 @@ class TestTestsPassedLeaf:
         verdict = check_acceptance_criteria(["tests_passed:pytest tests/security"], bash_executions=executions)
 
         assert verdict["leaves"][0]["checked"] is False
+
+    def test_shell_persistence_capability_defaults_to_unknown(self):
+        """PR review (P2): the Sandbox contract fails closed — an
+        implementation that never declares its session semantics is UNKNOWN,
+        not fresh-shell; only an explicit ``False`` is trusted."""
+        from deerflow.sandbox.sandbox import Sandbox
+
+        assert Sandbox.persistent_shell_sessions is None
 
     def test_one_shot_session_evidence_still_matches(self):
         executions = [_bash_execution("pytest tests/security", output_tail="7 passed")]
@@ -876,6 +1003,38 @@ class TestTestsPassedLeaf:
 
         leaf = verdict["leaves"][0]
         assert leaf["checked"] is True
+        assert leaf["holds"] is False
+
+    def test_expected_and_connector_must_not_match_semicolon(self):
+        """PR review: criterion ``cd missing && pytest tests/test_auth.py``
+        must not accept execution ``cd missing; pytest tests/test_auth.py`` —
+        the failed cd is bypassed and pytest succeeds from the wrong working
+        directory."""
+        executions = [_bash_execution("cd missing; pytest tests/test_auth.py", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:cd missing && pytest tests/test_auth.py"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
+    def test_unconditional_criterion_accepts_stricter_and_execution(self):
+        """The reverse substitution is sound: criterion ``cd backend; make
+        test`` executed as ``cd backend && make test`` is the stricter run —
+        with a recorded success the final segment provably ran."""
+        executions = [_bash_execution("cd backend && make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:cd backend; make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_trailing_criterion_background_operator_is_unprovable(self):
+        """Criterion ``make test &`` asks for backgrounding; the span must end
+        at the last executed segment, so a trailing criterion operator other
+        than ``;`` can never be preserved."""
+        executions = [_bash_execution("make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test &"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
         assert leaf["holds"] is False
 
     def test_multiline_execution_tail_commands_are_not_attributed(self):

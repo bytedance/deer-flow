@@ -89,6 +89,10 @@ class TenkiSandbox(Sandbox):
             can evict the dead sandbox.
     """
 
+    #: Every call is a fresh ``sh -lc`` exec in the sandbox — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,

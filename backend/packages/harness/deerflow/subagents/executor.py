@@ -435,8 +435,9 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
     mis-adjudicate the common path where the parent never touched a sandbox:
     its state has no ``sandbox`` key, the lookup would report "no persistent
     session", and persistent-session evidence would pass as trusted. ``None``
-    when the producing sandbox cannot be identified; consumers must fail
-    closed (UNVERIFIED).
+    when the producing sandbox cannot be identified — and also when it never
+    declared its session semantics: a custom provider's silence is not
+    fresh-shell proof. Consumers must fail closed (UNVERIFIED) on ``None``.
     """
     try:
         from deerflow.sandbox.overwrite import unwrap_sandbox
@@ -447,7 +448,13 @@ def _harvest_shell_persistence(final_state: Any) -> bool | None:
         if not isinstance(sandbox_id, str):
             return None
         sandbox = get_sandbox_provider().get(sandbox_id)
-        return None if sandbox is None else bool(getattr(sandbox, "persistent_shell_sessions", False))
+        if sandbox is None:
+            return None
+        # Tri-state: an implementation that never declared its session
+        # semantics (custom provider loaded by class path) stays ``None`` —
+        # unknown — and the matcher fails closed on it exactly as on True.
+        declared = getattr(sandbox, "persistent_shell_sessions", None)
+        return None if declared is None else bool(declared)
     except Exception:
         return None
 

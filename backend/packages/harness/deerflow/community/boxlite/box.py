@@ -57,6 +57,10 @@ class BoxliteBox(Sandbox):
             per-call ``env`` (request-scoped secrets).
     """
 
+    #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     TERMINAL_ERROR_MARKERS = (
         "vsock",
         "disconnected",

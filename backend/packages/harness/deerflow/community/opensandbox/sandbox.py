@@ -91,6 +91,10 @@ def format_execution(execution: Any) -> str:
 class OpenSandboxSandbox(Sandbox):
     """Wrap one live ``opensandbox.sync.SandboxSync`` instance."""
 
+    #: Every call is a fresh ``run_command`` execution — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,

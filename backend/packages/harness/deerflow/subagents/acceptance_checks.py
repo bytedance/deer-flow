@@ -289,6 +289,76 @@ def _probe_file_size(runtime: Any, resolved: str, thread_data: Mapping[str, Any]
     return int(text) if text.isdigit() else None
 
 
+#: Remote read-probe script (POSIX sh, positional params: ``$1`` path,
+#: ``$2`` mount root). Answers ``READABLE`` / ``UNREADABLE`` (or one of the
+#: shared ``NOFILE`` / ``NONREGULAR`` / ``ESCAPED`` rejections). The same
+#: fresh-shell, absolute-path, non-dereferencing, canonicalized-containment
+#: discipline as ``_SIZE_PROBE_INNER_SCRIPT``; only then one bounded open
+#: (``head -c 1``) proves the file can be opened for reading — ``stat``
+#: alone cannot: a mode-000 deliverable stats fine while any open raises
+#: EACCES, and metadata must not stand in for ``file_written``'s read-back
+#: claim. The regular-file gate runs first, so no FIFO or device is ever
+#: opened.
+_READ_PROBE_INNER_SCRIPT = (
+    '[ -e "$1" ] || { echo NOFILE; exit 0; }; '
+    't=$(/usr/bin/stat -c %F -- "$1") || { echo UNREADABLE; exit 0; }; '
+    '[ "$t" = "regular file" ] || { echo NONREGULAR; exit 0; }; '
+    'r=$(/usr/bin/realpath -- "$2") || { echo UNREADABLE; exit 0; }; '
+    'p=$(/usr/bin/realpath -- "$1") || { echo UNREADABLE; exit 0; }; '
+    'case $p in "$r"/*) ;; *) echo ESCAPED; exit 0 ;; esac; '
+    '/usr/bin/head -c 1 -- "$p" >/dev/null 2>&1 && echo READABLE || echo UNREADABLE'
+)
+
+
+def _probe_file_readable(runtime: Any, resolved: str, thread_data: Mapping[str, Any] | None) -> bool | None:
+    """Whether the resolved file can be opened for reading — one bounded byte —
+    else ``None`` when the probe itself cannot answer.
+
+    Backs the ``file_written`` read-back claim above the content read cap:
+    metadata (``stat``) proves existence and size, not readability. Local
+    sandbox: a direct one-byte ``open`` of the validated host path — the
+    same filesystem access the read itself would perform, no shell.
+    Remote providers: one bounded open in a fresh ``env -i`` shell with
+    absolute-path utilities (same discipline as the size probe; the marker
+    env also routes AIO off its persistent shell), after the
+    non-dereferencing regular-file gate — a FIFO is rejected before any
+    open, so nothing can block — and canonicalized containment.
+    ``False`` means the open provably failed (e.g. EACCES); any
+    probe-level failure is ``None`` and the caller degrades to UNVERIFIED.
+    """
+    try:
+        from deerflow.sandbox.tools import _resolve_local_read_path, ensure_sandbox_initialized, is_local_sandbox
+
+        if is_local_sandbox(runtime):
+            host_path = _resolve_local_read_path(resolved, thread_data)
+            if host_path == resolved:
+                # A mount-mapped virtual path: only the provider's mount
+                # table resolves it, and the parent cannot open that.
+                return None
+            try:
+                with open(host_path, "rb") as handle:
+                    handle.read(1)
+                return True
+            except OSError:
+                return False
+        sandbox = ensure_sandbox_initialized(runtime)
+        root = "/".join(resolved.split("/")[:4])  # the /mnt/user-data/{workspace|outputs} mount root
+        output = sandbox.execute_command(
+            f"/usr/bin/env -i /bin/sh -c {shlex.quote(_READ_PROBE_INNER_SCRIPT)} probe {shlex.quote(resolved)} {shlex.quote(root)}",
+            env={"_DEERFLOW_SIZE_PROBE": "1"},
+        )
+    except Exception:
+        # Same failure-isolation precedent as _probe_file_size: best-effort
+        # over provider-specific failure modes; the caller degrades.
+        return None
+    text = str(output or "").strip()
+    if text == "READABLE":
+        return True
+    if text == "UNREADABLE":
+        return False
+    return None
+
+
 def _check_file_leaf(
     family: str,
     path: str,
@@ -297,6 +367,7 @@ def _check_file_leaf(
     thread_data: Mapping[str, Any] | None,
     content_reader: Callable[[Any, str], str],
     size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None],
+    readable_prober: Callable[[Any, str, Mapping[str, Any] | None], bool | None],
 ) -> AcceptanceLeaf:
     criterion_path = path.strip()
     # Lazy imports: the sandbox helpers pull the provider stack, and this
@@ -327,17 +398,25 @@ def _check_file_leaf(
         base["detail"] = "file size could not be established by a bounded probe; content not read"
         return base
     if probed_size > _FILE_CONTENT_READ_CAP_BYTES:
-        # Large deliverable: the probe already proved the file exists, is
-        # openable, and is non-empty (size > cap > 0) — answering every file
-        # leaf without loading content (and its utf-8 re-encode) onto the
-        # worker. The read-back claim of ``file_written`` degrades to the
-        # probe's open-for-reading proof, which the detail states.
+        # Large deliverable: the size probe proved the file exists, is
+        # regular, and is non-empty (size > cap > 0) — answering the
+        # existence/non-empty leaves without loading content (and its utf-8
+        # re-encode) onto the worker. Metadata is NOT read-back, though: a
+        # mode-000 file stats fine while any open raises EACCES, so
+        # ``file_written`` additionally requires a bounded one-byte open
+        # probe; without its proof the leaf stays UNVERIFIED.
         base["checked"] = True
         base["holds"] = True
         if family == "file_non_empty":
             base["detail"] = f"{probed_size} bytes (size probe; content not loaded)"
         elif family == "file_written":
-            base["detail"] = f"size probe ok, {probed_size} bytes (read-back skipped for a large file)"
+            readable = readable_prober(runtime, resolved, thread_data)
+            if readable is not True:
+                base["checked"] = False
+                base["holds"] = False
+                base["detail"] = "file cannot be opened for reading (bounded open probe failed)" if readable is False else "readability could not be established by a bounded probe; content not read"
+                return base
+            base["detail"] = f"read probe ok, {probed_size} bytes (content above the read cap not loaded)"
         else:  # file_exists
             base["detail"] = f"exists, {probed_size} bytes (size probe; content not loaded)"
         return base
@@ -925,6 +1004,33 @@ def _span_attributable(ops_before: list[str], ops_within: list[str], ops_after: 
     return True
 
 
+def _criterion_connectors_preserved(expected_ops: list[str], executed_within_ops: list[str], executed_success: bool) -> bool:
+    """Whether the executed span keeps the criterion's control-flow connectors.
+
+    Criterion operators carry semantics the match must preserve: an expected
+    ``&&`` makes the next segment conditional on the previous segment's
+    success, so executing it as ``;`` (``cd missing; pytest
+    tests/test_auth.py`` against criterion ``cd missing && pytest
+    tests/test_auth.py``) lets a failed preceding step be bypassed while the
+    run still succeeds from the wrong state. The reverse substitution is
+    sound: an unconditional criterion connector (``;``) executed as ``&&``
+    is the stricter run — with a recorded success the final segment provably
+    ran (a recorded failure already fails span attribution on its own). A
+    trailing criterion operator other than ``;`` (``make test &``) has no
+    executed counterpart — the span must end at the last executed segment —
+    so it is never preserved.
+    """
+    if any(op != ";" for op in expected_ops[len(executed_within_ops) :]):
+        return False
+    for expected_op, executed_op in zip(expected_ops, executed_within_ops, strict=True):
+        if expected_op == executed_op:
+            continue
+        if expected_op == ";" and executed_op == "&&" and executed_success:
+            continue
+        return False
+    return True
+
+
 def _commands_match(criterion_command: str, executed_command: str, *, executed_success: bool) -> str:
     """Shell-structure match with control-flow attribution.
 
@@ -943,7 +1049,7 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
         # Malformed shell: only exact normalized equality survives.
         expected_norm = _normalize_command(criterion_command)
         return "match" if expected_norm and expected_norm == _normalize_command(executed_command) else "no_match"
-    expected, _ = expected_parsed
+    expected, expected_ops = expected_parsed
     actual, ops = actual_parsed
     if not expected or not actual or len(expected) > len(actual):
         return "no_match"
@@ -963,6 +1069,12 @@ def _commands_match(criterion_command: str, executed_command: str, *, executed_s
             continue
         # The exit status is attributable only to the command's last segment.
         if start + span != len(actual):
+            saw_unprovable = True
+            continue
+        if not _criterion_connectors_preserved(expected_ops, ops[start : start + span - 1], executed_success):
+            # Textually equal segments wired with weaker control flow than the
+            # criterion's (an expected ``&&`` executed as ``;``) — a failed
+            # preceding step may have been bypassed.
             saw_unprovable = True
             continue
         if _span_attributable(ops[:start], ops[start : start + span - 1], ops[start + span - 1 :], executed_success):
@@ -1038,13 +1150,15 @@ def _check_tests_passed_leaf(command: str, bash_executions: list[dict[str, Any]]
         # ``sandbox`` key when the parent delegated before touching one).
         # True: the matched run shared one persistent shell with every earlier
         # call — any of them (including one since capped away or compacted
-        # out) could have exported PATH or redefined the runner. Absent/None:
-        # the producing sandbox could not be identified — fail closed either
-        # way. Re-execution belongs to the read-only verifier (RFC §6).
+        # out) could have exported PATH or redefined the runner. None: the
+        # producing sandbox could not be identified OR never declared its
+        # session semantics (a custom provider's silence is not fresh-shell
+        # proof) — fail closed either way. Re-execution belongs to the
+        # read-only verifier (RFC §6).
         if shell_persistent is True:
             base["detail"] = "recorded bash evidence comes from a persistent shell session; earlier calls' state cannot be proven clean"
         else:
-            base["detail"] = "the sandbox that produced the recorded bash evidence could not be identified; shell state cannot be proven clean"
+            base["detail"] = "the producing sandbox does not declare one-shot shell sessions (or could not be identified); shell state cannot be proven clean"
         return base
     status = str(latest.get("status") or "")
     if status != "success":
@@ -1085,6 +1199,7 @@ def check_acceptance_criteria(
     bash_executions: list[dict[str, Any]] | None = None,
     content_reader: Callable[[Any, str], str] | None = None,
     size_prober: Callable[[Any, str, Mapping[str, Any] | None], int | None] | None = None,
+    readable_prober: Callable[[Any, str, Mapping[str, Any] | None], bool | None] | None = None,
 ) -> AcceptanceVerdict | None:
     """Check each decidable criterion against recorded execution evidence.
 
@@ -1124,6 +1239,8 @@ def check_acceptance_criteria(
         content_reader = read_current_file_content
     if size_prober is None:
         size_prober = _probe_file_size
+    if readable_prober is None:
+        readable_prober = _probe_file_readable
     leaves: list[AcceptanceLeaf] = []
     for criterion in criteria:
         file_match = _FILE_LEAF_RE.match(criterion)
@@ -1132,9 +1249,9 @@ def check_acceptance_criteria(
         if file_match is not None:
             mode = file_match.group("mode").lower()
             family = "file_exists" if mode == "exists" else "file_non_empty"
-            leaf = _check_file_leaf(family, file_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
+            leaf = _check_file_leaf(family, file_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
         elif written_match is not None:
-            leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober)
+            leaf = _check_file_leaf("file_written", written_match.group("path"), runtime=runtime, thread_data=thread_data, content_reader=content_reader, size_prober=size_prober, readable_prober=readable_prober)
         elif tests_match is not None:
             leaf = _check_tests_passed_leaf(tests_match.group("command"), bash_executions, thread_data)
         else:

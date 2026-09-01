@@ -93,6 +93,10 @@ class ResolvedPath(NamedTuple):
 
 
 class LocalSandbox(Sandbox):
+    #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
+    #: no shell state survives into the next command.
+    persistent_shell_sessions = False
+
     @staticmethod
     def _shell_name(shell: str) -> str:
         """Return the executable name for a shell path or command."""

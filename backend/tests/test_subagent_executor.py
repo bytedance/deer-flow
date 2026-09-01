@@ -4496,6 +4496,24 @@ class TestBashExecutionHarvest:
 
         assert executions[0]["shell_persistent"] is False
 
+    def test_undeclared_sandbox_capability_stamps_none(self, classes, monkeypatch):
+        """PR review (P2): a custom provider that never declared
+        ``persistent_shell_sessions`` is UNKNOWN, not fresh-shell — silence
+        cannot be read as a clean-environment proof."""
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        monkeypatch.setitem(sys.modules, "deerflow.agents.middlewares.tool_result_meta", _module("deerflow.agents.middlewares.tool_result_meta", TOOL_META_KEY="deerflow_tool_meta"))
+
+        class _UndeclaredSandbox:
+            pass
+
+        monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: SimpleNamespace(get=lambda _id: _UndeclaredSandbox()))
+        state = self._final_state(classes)
+        state["sandbox"] = {"sandbox_id": "sb-1"}
+
+        executions = executor_module._harvest_bash_executions(state)
+
+        assert executions[0]["shell_persistent"] is None
+
     def test_unidentifiable_sandbox_stamps_none(self, classes, monkeypatch):
         """No sandbox channel in the evidence-carrying state → unknown
         provenance; the acceptance matcher fails closed on it."""
