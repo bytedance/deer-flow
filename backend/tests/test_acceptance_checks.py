@@ -963,6 +963,27 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
+    @pytest.mark.parametrize(
+        "executed",
+        (
+            # Same class as the executable identity: the negation overlap
+            # check is a lexical prefix compare, so a ``..`` value can name
+            # the criterion's target through a symlink without overlapping
+            # textually — fail closed like expansions and globs.
+            "pytest tests/security --ignore link/../tests/security",
+            "pytest tests --deselect x/../tests/unit/test_auth.py",
+            "pytest tests/ --ignore=../tests",
+        ),
+    )
+    def test_parent_traversal_negated_value_is_unprovable(self, executed):
+        criterion = "tests_passed:pytest tests/security" if "security" in executed else "tests_passed:pytest tests/"
+        executions = [_bash_execution(executed, output_tail="7 passed")]
+        verdict = check_acceptance_criteria([criterion], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
     def test_continuation_line_or_operator_cannot_launder_a_skipped_run(self):
         """Self-audit: ``cd backend\\n|| pytest tests/`` — a continuation
         ``||`` after a successful command skips the runner entirely while

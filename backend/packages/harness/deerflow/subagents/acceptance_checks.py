@@ -979,10 +979,13 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     # --ignore tests``) excludes the target itself. Unrelated exclusions
     # (``--ignore tests/slow`` against ``pytest tests/unit``) keep matching.
     negated_values = [_negated_value(actual[position]) for position in negated]
-    if any(_EXPANSION_CHAR_RE.search(value) or _GLOB_CHAR_RE.search(value) for value in negated_values):
-        # An unknown or glob exclusion (``--ignore $X``, ``--ignore
-        # tests/slow*``): the overlap check cannot reason about what did
-        # not run.
+    if any(_EXPANSION_CHAR_RE.search(value) or _GLOB_CHAR_RE.search(value) or ".." in value.replace("\\", "/").split("/") for value in negated_values):
+        # An unknown, glob, or parent-traversal exclusion (``--ignore $X``,
+        # ``--ignore tests/slow*``, ``--ignore link/../tests/security``):
+        # the overlap check cannot reason about what did not run — the
+        # ``..`` form because lexical prefixes lie (the OS follows ``link``
+        # before resolving ``..``, so a textually unrelated value can name
+        # the criterion's target).
         return "unprovable"
     if any(_negation_overlaps(actual[position], value) for position in consumed if position != 0 for value in negated_values):
         return "unprovable"
