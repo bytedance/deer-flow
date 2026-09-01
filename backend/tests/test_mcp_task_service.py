@@ -2555,7 +2555,7 @@ async def test_cancelled_hung_claim_returns_then_releases_delayed_result(monkeyp
         return [_claimed_row()]
 
     async def release(record, *, settle=False):
-        assert settle is True
+        assert settle is False
         release_calls.append(record["id"])
 
     service = McpTaskService(
@@ -2672,7 +2672,7 @@ async def test_single_flight_claim_releases_late_uncancelled_claim(phase, monkey
 
         repo.claim_gate.set()
         async with asyncio.timeout(0.2):
-            while service._claim_owners:
+            while not repo.released:
                 await asyncio.sleep(0)
 
         assert [(released_phase, task_id) for released_phase, task_id, _ in repo.released] == [(phase, "task-1")]
@@ -2721,7 +2721,7 @@ async def test_single_flight_claim_skip_logs_unresolved_owner(caplog):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["poll", "cancel", "notification"])
-async def test_single_flight_claim_keeps_owner_until_late_release_settles(phase, monkeypatch):
+async def test_single_flight_claim_releases_owner_before_stuck_release(phase, monkeypatch):
     monkeypatch.setattr(service_module, "_CANCELLATION_DRAIN_TIMEOUT_SECONDS", 0.01)
 
     class BlockingClaimAndReleaseRepository:
@@ -2796,18 +2796,20 @@ async def test_single_flight_claim_keeps_owner_until_late_release_settles(phase,
         await repo.release_started.wait()
         await asyncio.sleep(0.02)
 
-        assert list(service._claim_owners) == [phase]
-        assert await claim_once() == []
-        assert repo.claim_calls[phase] == 1
+        # The claim's durable outcome is now known, so the phase owner is released
+        # even though the release is still blocked. A new claim can proceed; the
+        # stuck release continues in the background (per-claim token fencing
+        # rejects it if it settles late).
+        assert list(service._claim_owners) == []
+        assert service._compensation_tasks, "a stuck release must not be abandoned once the phase owner is released"
+        claimed = await claim_once()
+        assert [record["id"] for record in claimed] == ["task-1"]
+        assert repo.claim_calls[phase] == 2
 
         repo.release_gate.set()
         async with asyncio.timeout(0.2):
             while service._claim_owners:
                 await asyncio.sleep(0)
-
-        claimed = await claim_once()
-        assert [record["id"] for record in claimed] == ["task-1"]
-        assert repo.claim_calls[phase] == 2
     finally:
         repo.claim_gate.set()
         repo.release_gate.set()
