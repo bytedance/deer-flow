@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 from pathlib import Path
 
 from langchain_core.tools import BaseTool
@@ -13,29 +14,48 @@ logger = logging.getLogger(__name__)
 
 _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
-_initialization_lock = asyncio.Lock()
-# The loop ``_initialization_lock`` is currently bound to. asyncio.Lock binds
-# to the first loop that contends it and raises RuntimeError on any other
-# loop; the lazy-init path runs each initialization through ``asyncio.run``
-# on a fresh loop, so a permanently-bound module lock would make every later
-# re-initialization fail closed into an empty tool list (#5060).
-_initialization_lock_loop: asyncio.AbstractEventLoop | None = None
 
 
-def _get_initialization_lock() -> asyncio.Lock:
-    """Return the initialization lock, rebinding it to the running loop.
+class _InitCoordinator:
+    """Single-flight coordinator that works across event loops and threads.
 
-    Rebinding trades cross-loop mutual exclusion for liveness: two loops
-    could initialize concurrently in the worst case, which the
-    ``_cache_initialized`` flag keeps idempotent. The alternative (a lock
-    stuck on a closed loop) freezes every later config change until restart.
+    asyncio.Lock cannot serve here: it binds to the first loop that contends
+    it and raises RuntimeError on any other, while a per-loop rebound lock
+    excludes nothing across loops (#5060). A threading gate admits exactly
+    one initializer process-wide; everyone else waits on an event and either
+    reads the published cache or re-raises the owner's failure.
     """
-    global _initialization_lock, _initialization_lock_loop
-    running = asyncio.get_running_loop()
-    if running is not _initialization_lock_loop:
-        _initialization_lock = asyncio.Lock()
-        _initialization_lock_loop = running
-    return _initialization_lock
+
+    def __init__(self) -> None:
+        self._gate = threading.Lock()
+        self._done = threading.Event()
+        self._in_flight = False
+        self._error: BaseException | None = None
+
+    def try_acquire(self) -> bool:
+        """True for the one caller that must run initialization."""
+        with self._gate:
+            if self._in_flight:
+                return False
+            self._in_flight = True
+            self._done.clear()
+            self._error = None
+            return True
+
+    def finish(self, error: BaseException | None = None) -> None:
+        with self._gate:
+            self._in_flight = False
+            self._error = error
+            self._done.set()
+
+    async def wait(self) -> None:
+        """Wait out another loop's initialization; re-raise its failure."""
+        await asyncio.to_thread(self._done.wait)
+        if self._error is not None:
+            raise self._error
+
+
+_init_coordinator = _InitCoordinator()
 
 
 # Cache-invalidation key for the resolved extensions config file. We track the
@@ -146,7 +166,16 @@ async def initialize_mcp_tools() -> list[BaseTool]:
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
 
-    async with _get_initialization_lock():
+    if _cache_initialized:
+        return _mcp_tools_cache or []
+    if not _init_coordinator.try_acquire():
+        # Another loop or thread is initializing right now; wait for its
+        # result instead of racing a second discovery beside it.
+        await _init_coordinator.wait()
+        return _mcp_tools_cache or []
+
+    error: BaseException | None = None
+    try:
         if _cache_initialized:
             logger.info("MCP tools already initialized")
             return _mcp_tools_cache or []
@@ -160,6 +189,11 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
 
         return _mcp_tools_cache
+    except BaseException as exc:
+        error = exc
+        raise
+    finally:
+        _init_coordinator.finish(error)
 
 
 def get_cached_mcp_tools() -> list[BaseTool]:

@@ -44,6 +44,7 @@ _TRACKED_GLOBALS = (
     "_config_mtime",
     "_initialization_lock",
     "_initialization_lock_loop",
+    "_init_coordinator",
 )
 
 
@@ -65,11 +66,10 @@ def cache_globals():
     for name in ("_config_path", "_config_signature", "_config_mtime"):
         if hasattr(cache_module, name):
             setattr(cache_module, name, None)
-    # asyncio.Lock binds to the first event loop it is awaited on, so each test
-    # (which drives initialize_mcp_tools via a fresh asyncio.run) needs its own.
-    cache_module._initialization_lock = asyncio.Lock()
-    if hasattr(cache_module, "_initialization_lock_loop"):
-        cache_module._initialization_lock_loop = None
+    # A fresh single-flight coordinator per test, so an in-flight init from a
+    # previous test cannot leak its state into this one.
+    if hasattr(cache_module, "_InitCoordinator"):
+        cache_module._init_coordinator = cache_module._InitCoordinator()
 
     try:
         yield
@@ -291,42 +291,41 @@ def test_config_deleted_after_init_via_real_env_resolution_does_not_raise(cache_
     assert cache_module._is_cache_stale() is False
 
 
-def test_reinitialization_survives_a_lock_bound_to_a_closed_loop(cache_globals, monkeypatch):
-    """#5060: a module-level ``asyncio.Lock`` binds to the first loop that
-    contends it, and lazy re-initialization runs through ``asyncio.run`` on
-    fresh loops. Once bound, the next *concurrent* initialization on a later
-    loop raises ``RuntimeError`` out of ``async with _initialization_lock``
-    (the uncontended acquire path does not check the binding, so the failure
-    needs two in-flight inits), the caller swallows it, and the cache never
-    comes back until restart. The rebind in ``_get_initialization_lock`` must
-    let a later loop initialize again.
-    """
+def test_initialization_works_repeatedly_across_loops(cache_globals, monkeypatch):
+    """#5060: the coordinator binds to no loop, so initialization on a fresh
+    loop right after another loop initialized (and closed) succeeds."""
 
     async def _fake_get_mcp_tools():
-        await asyncio.sleep(0.01)  # widen the contention window
+        await asyncio.sleep(0.01)
         return ["tool"]
 
     monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
 
-    async def _bind_lock_to_this_loop():
-        # Contend the module lock so asyncio binds it to this (soon closed)
-        # loop, the same state a contended lazy init leaves behind.
-        lock = cache_module._initialization_lock
-        async with lock:
-            waiter = asyncio.ensure_future(lock.acquire())
-            await asyncio.sleep(0.01)
-            waiter.cancel()
+    assert asyncio.run(cache_module.initialize_mcp_tools()) == ["tool"]
+    cache_module.reset_mcp_tools_cache()
+    assert asyncio.run(cache_module.initialize_mcp_tools()) == ["tool"]
 
-    asyncio.run(_bind_lock_to_this_loop())
 
-    async def _two_in_flight_inits():
-        first = asyncio.ensure_future(cache_module.initialize_mcp_tools())
-        await asyncio.sleep(0)  # let the first acquire before the second asks
-        second = asyncio.ensure_future(cache_module.initialize_mcp_tools())
-        return await asyncio.gather(first, second)
+def test_concurrent_initialization_on_two_threads_runs_the_loader_once(cache_globals, monkeypatch):
+    """willem-bd's P1: two threads initializing on separate event loops must
+    not each run the underlying loader. The rebound per-loop locks admitted
+    one initializer per loop; the coordinator admits one process-wide."""
 
-    # The lock is now bound to a closed loop. Concurrent initialization from a
-    # fresh loop must succeed rather than raising out of the async-with.
-    first, second = asyncio.run(_two_in_flight_inits())
-    assert first == ["tool"]
-    assert second == ["tool"]
+    calls = 0
+
+    async def _fake_get_mcp_tools():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)  # hold the flight open so the second thread overlaps
+        return ["tool"]
+
+    monkeypatch.setattr("deerflow.mcp.tools.get_mcp_tools", _fake_get_mcp_tools)
+
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(asyncio.run, cache_module.initialize_mcp_tools()) for _ in range(2)]
+        results = [future.result() for future in futures]
+
+    assert results == [["tool"], ["tool"]]
+    assert calls == 1
