@@ -505,7 +505,17 @@ function InteractivePatSettingsPage() {
               <DialogFooter>
                 <Button
                   variant="outline"
-                  onClick={closeCreateDialog}
+                  onClick={() => {
+                    // The footer Cancel is the one dismissal affordance that
+                    // does not route through onOpenChange above, so it needs
+                    // the same in-flight guard: the latch covers the
+                    // pre-re-render window the disabled prop's isPending
+                    // cannot see, and closing there would detach the
+                    // observer while the response carrying the only copy of
+                    // the token is still in flight.
+                    if (createLatchedRef.current || create.isPending) return;
+                    closeCreateDialog();
+                  }}
                   disabled={create.isPending}
                 >
                   {t.common.cancel}
@@ -558,9 +568,11 @@ function InteractivePatSettingsPage() {
       <Dialog
         open={revoking !== null}
         onOpenChange={(open) => {
-          // Same pending-guard discipline as the create dialog, so Escape
-          // cannot silently swallow an in-flight revocation.
-          if (!open && revoke.isPending) return;
+          // Same pending-guard discipline as the create dialog, including
+          // the synchronous latch: isPending lands one re-render too late,
+          // so Escape cannot silently swallow an in-flight revocation in
+          // that window either.
+          if (!open && (revoke.isPending || revokeLatchedRef.current)) return;
           if (!open) setRevoking(null);
         }}
       >
@@ -579,7 +591,15 @@ function InteractivePatSettingsPage() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setRevoking(null)}
+              onClick={() => {
+                // Same reason as the create dialog's Cancel: this button does
+                // not route through onOpenChange, and the disabled prop's
+                // isPending cannot see the pre-re-render latch window. A
+                // dismissal here would close the confirmation while the
+                // DELETE is still in flight.
+                if (revokeLatchedRef.current || revoke.isPending) return;
+                setRevoking(null);
+              }}
               disabled={revoke.isPending}
             >
               {t.common.cancel}

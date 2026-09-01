@@ -288,6 +288,38 @@ describe("PatSettingsPage", () => {
     }
   });
 
+  it("keeps the create dialog open when Cancel is clicked in the latch window", () => {
+    // Cancel is the one dismissal affordance that does not route through
+    // onOpenChange: pre-fix it called closeCreateDialog() directly, and its
+    // disabled prop only knows the rendered isPending — so in the window
+    // where the latch is held but the pending re-render has not landed,
+    // Cancel could close the dialog and detach the observer while the POST
+    // is in flight. The arriving response carries the only copy of the
+    // token, so it would never be seen.
+    const mutate = rs.fn(() => new Promise<never>(() => undefined));
+    patsMockState.createMutate = mutate;
+
+    renderWithQueryClient(<PatSettingsPage />);
+    fireEvent.click(screen.getByText("Create token"));
+    fireEvent.change(screen.getByPlaceholderText("e.g. ci-runner"), {
+      target: { value: "ci" },
+    });
+    fireEvent.click(screen.getByRole("switch", { name: "Read threads" }));
+    const submit = screen
+      .getAllByText("Create token")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(submit);
+
+    // Latch held, isPending still false on this render: the exact window.
+    const cancel = screen
+      .getAllByText("Cancel")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(cancel);
+
+    expect(screen.getByRole("dialog")).toBeDefined();
+    expect(mutate).toHaveBeenCalledTimes(1);
+  });
+
   it("latches revoke the same way", () => {
     const mutate = rs.fn(() => new Promise<never>(() => undefined));
     patsMockState.revokeMutate = mutate;
@@ -300,6 +332,19 @@ describe("PatSettingsPage", () => {
     fireEvent.click(confirm);
 
     expect(mutate).toHaveBeenCalledTimes(1);
+
+    // Same latch window via the dismissal affordances: neither Escape nor
+    // the footer Cancel may close the confirmation while the DELETE is in
+    // flight, or the revocation would finish invisibly behind a closed
+    // dialog.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeDefined();
+
+    const cancel = screen
+      .getAllByText("Cancel")
+      .find((element) => element.closest("[role=dialog]") !== null)!;
+    fireEvent.click(cancel);
+    expect(screen.getByRole("dialog")).toBeDefined();
   });
 
   it("shows the empty state when no tokens exist", () => {
