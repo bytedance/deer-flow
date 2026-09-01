@@ -145,6 +145,12 @@ class SandboxLeaseManager:
         """Acquire and bind a sandbox, idempotently for one execution owner."""
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
+            with self._metadata_lock:
+                existing = self._bindings_by_owner.get(owner_id)
+                if existing is not None:
+                    if existing.thread_key != key:
+                        raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
+                    return existing.sandbox_id
             sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
             with self._metadata_lock:
                 previous, release_previous = self._bind_locked(
@@ -160,6 +166,12 @@ class SandboxLeaseManager:
         """Async acquire while preserving the provider's own async hook."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
+            with self._metadata_lock:
+                existing = self._bindings_by_owner.get(owner_id)
+                if existing is not None:
+                    if existing.thread_key != key:
+                        raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
+                    return existing.sandbox_id
             acquire_task = asyncio.create_task(self._provider.acquire_async(thread_id, user_id=user_id))
             try:
                 sandbox_id = await asyncio.shield(acquire_task)

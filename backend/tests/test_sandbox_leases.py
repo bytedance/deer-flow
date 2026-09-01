@@ -108,6 +108,17 @@ def test_release_is_idempotent_for_executor_finally_safety_net() -> None:
     assert provider.sandbox.released_scopes == ["child"]
 
 
+def test_repeated_acquire_for_same_owner_does_not_reacquire_provider() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+
+    first = manager.acquire("child", "thread-1", user_id="user-1")
+    second = manager.acquire("child", "thread-1", user_id="user-1")
+
+    assert first == second == "shared"
+    assert provider.acquire_calls == [("thread-1", "user-1")]
+
+
 @pytest.mark.anyio
 async def test_async_lazy_acquires_share_one_release_boundary() -> None:
     provider = _LeaseProvider()
@@ -120,6 +131,18 @@ async def test_async_lazy_acquires_share_one_release_boundary() -> None:
     assert provider.release_calls == []
     await manager.release_async("child-b")
     assert provider.release_calls == ["shared"]
+
+
+@pytest.mark.anyio
+async def test_repeated_async_acquire_for_same_owner_does_not_reacquire_provider() -> None:
+    provider = _LeaseProvider()
+    manager = SandboxLeaseManager(provider)
+
+    first = await manager.acquire_async("child", "thread-1", user_id="user-1")
+    second = await manager.acquire_async("child", "thread-1", user_id="user-1")
+
+    assert first == second == "shared"
+    assert provider.acquire_calls == [("thread-1", "user-1")]
 
 
 @pytest.mark.anyio
