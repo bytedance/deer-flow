@@ -163,9 +163,12 @@ def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: f
         try:
             p.stdin.write("GO\n")
             p.stdin.flush()
-            p.stdin.close()
         except (BrokenPipeError, ValueError):
             pass  # worker already exited -- nothing to release
+        # Do NOT close p.stdin here: p.communicate() below flushes and closes
+        # it, and a second close turns that flush into an uncaught ValueError
+        # ("I/O operation on closed file"). The worker reads exactly one line
+        # (the GO above), so the flush is all the release it needs.
 
     worker_outputs = []
     for wid, p in procs:
@@ -266,6 +269,9 @@ def main():
     ap.add_argument("--baseline-users", type=int, default=100)
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
+
+    if args.backend == "postgres" and not args.pg_url:
+        ap.error("--pg-url is required for --backend postgres")
 
     worker_counts = [int(x) for x in args.workers.split(",")]
     all_summaries = []
