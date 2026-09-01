@@ -1,8 +1,8 @@
 ### Gateway API (`app/gateway/`)
 
-FastAPI application on port 8001 with health check at `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable `/docs`, `/redoc`, and `/openapi.json` in production (default: enabled).
+FastAPI listens on port 8001; health: `GET /health`. Set `GATEWAY_ENABLE_DOCS=false` to disable the default `/docs`, `/redoc`, and `/openapi.json` endpoints.
 
-Durable MCP task notifications are internal Agent runs: keep the trusted delivery instruction outside the user-input boundary and frame the serialized remote event payload as untrusted text before model invocation. These runs use strict thread existence/ownership admission so an event from a task that outlives its deleted chat is dead-lettered rather than recreating the thread.
+Durable MCP notifications use internal Agent runs. Keep their trusted delivery instruction outside the user-input boundary, and frame serialized remote events as untrusted before model invocation. Strict thread existence/ownership admission dead-letters events whose task outlives its deleted chat instead of recreating the thread.
 
 CORS is same-origin by default when requests enter through nginx on port 2026. Split-origin or port-forwarded browser clients must opt in with `GATEWAY_CORS_ORIGINS` (exact origins); Gateway `CORSMiddleware` and `CSRFMiddleware` both read that variable so browser CORS and auth-origin checks stay aligned. Those clients also need `CORS_EXPOSED_HEADERS` (`csrf_middleware.py`): run-creating routes return the run's id in `Content-Location`, which is not CORS-safelisted, so JS cannot read it unless it is exposed — and the LangGraph SDK resolves run metadata from that header alone, so withholding it breaks `useStream`'s `onCreated` and thread-gated actions.
 
