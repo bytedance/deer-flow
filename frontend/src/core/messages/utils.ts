@@ -145,11 +145,19 @@ export function getMessageGroups(
       // same message later. Keep that unresolved message in the processing
       // group so its visible text does not jump from an assistant bubble into
       // the steps panel when the tool call arrives (#4304).
+      // A reasoning-bearing answer is treated as terminal until tool calls
+      // actually arrive. If they do arrive on that same message, it is
+      // deliberately reclassified as processing so its tool activity remains
+      // visible with the text that introduced it.
       const isUnresolvedAssistantText =
         currentTurnStartIndex >= 0 &&
         messageIndex > currentTurnStartIndex &&
         hasContent(message) &&
-        !hasToolCalls(message);
+        !hasToolCalls(message) &&
+        // A provider that has already supplied reasoning with answer text is
+        // completing an answer, not merely streaming a pre-tool narration.
+        // Keep it out of the processing disclosure while the turn is active.
+        !hasReasoning(message);
       const becomesAssistantBubble =
         hasContent(message) &&
         !hasToolCalls(message) &&
@@ -738,7 +746,7 @@ export function hasReasoning(message: Message) {
     return false;
   }
   if (typeof message.additional_kwargs?.reasoning_content === "string") {
-    return true;
+    return message.additional_kwargs.reasoning_content.trim().length > 0;
   }
   if (Array.isArray(message.content)) {
     const part = message.content[0];

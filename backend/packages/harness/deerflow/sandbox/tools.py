@@ -1836,12 +1836,16 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
-    """Execute a bash command in a Linux environment.
+    """Execute a bash command in the active sandbox or trusted local host.
 
 
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - For local-environment questions (OS, current directory, files, processes, or ports), use this tool before answering from assumptions.
+      Start OS detection with `uname -s`; on `Darwin`, use `sw_vers` for version details. Do not assume Linux.
+    - In local-host mode, system paths outside `/mnt/user-data` can be blocked. If a path probe is rejected, keep the guard in place.
+      Retry with a command-only probe such as `uname -s`, `sw_vers`, `pwd`, or `ps`; do not repeat the blocked path.
     - To start a long-lived process such as a web server, ALWAYS run it in the background with its
       output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
       the log file or poll the port. A long-lived process run in the foreground blocks the turn until

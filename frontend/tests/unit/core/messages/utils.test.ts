@@ -287,6 +287,98 @@ test("keeps unresolved streaming text in the processing group when tool calls ar
   );
 });
 
+test("keeps streaming reasoning and answer text out of the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "The final answer is ready.",
+      additional_kwargs: {
+        reasoning_content: "I checked the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual(["human", "assistant"]);
+});
+
+test("moves a reasoning-bearing message into processing when it gains tool calls", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will verify that with a source.",
+      additional_kwargs: {
+        reasoning_content: "I should verify the answer before replying.",
+      },
+    },
+  ] as Message[];
+
+  expect(
+    getMessageGroups(messages, { isCurrentTurnLoading: true }).map(
+      (group) => group.type,
+    ),
+  ).toEqual(["human", "assistant"]);
+
+  messages[1] = {
+    ...messages[1],
+    tool_calls: [{ id: "call-1", name: "web_search", args: {} }],
+  } as Message;
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
+test("keeps content with empty reasoning metadata in the processing group while streaming", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "I will check the result first.",
+      additional_kwargs: { reasoning_content: "" },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+});
+
+test("keeps streaming reasoning-only messages in the processing group", () => {
+  const messages = [
+    { id: "human-1", type: "human", content: "Explain the result" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: {
+        reasoning_content: "I am still checking the available evidence.",
+      },
+    },
+  ] as Message[];
+
+  const groups = getMessageGroups(messages, { isCurrentTurnLoading: true });
+
+  expect(groups.map((group) => group.type)).toEqual([
+    "human",
+    "assistant:processing",
+  ]);
+  expect(groups[1]?.messages.map((message) => message.id)).toEqual(["ai-1"]);
+});
+
 test("keeps post-tool streaming text in the processing group until the turn settles", () => {
   const messages = [
     { id: "human-1", type: "human", content: "Inspect and summarize" },
