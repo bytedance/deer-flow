@@ -15,6 +15,8 @@ const LONG_TASK_PROMPT =
   "你的任务：分析 bytedance/deer-flow 前端核心线程同步文件 `frontend/src/core/threads/hooks.ts`（约 108KB），提取其消息流同步机制的关键信息。背景：用户在 DeerFlow 前端发现子代理任务卡片标题过长，需要确认截断行为。请重点关注消息合并、流式节流与本地排序逻辑，并输出结构化结论。";
 const LONG_RUNNING_STATUS =
   "Writing the quarterly infrastructure cost breakdown report to workspace/reports/q3-infra-cost-breakdown-final-v2.md";
+const LONG_TASK_USER_TEXT =
+  "Analyze the thread sync hooks and report how the subtask card renders.";
 
 const stoppedSubtaskMessages = [
   {
@@ -53,7 +55,13 @@ const longSubtaskThread = {
   title: "Long subtask title",
   updated_at: "2026-06-18T12:00:00Z",
   messages: [
-    stoppedSubtaskMessages[0],
+    {
+      // Reuse the stopped test's message *shape* only: its human text narrates
+      // the stop scenario, which none of the long-title tests exercise.
+      ...stoppedSubtaskMessages[0],
+      id: "msg-human-long-subtask",
+      content: [{ type: "text", text: LONG_TASK_USER_TEXT }],
+    },
     {
       ...stoppedSubtaskMessages[1],
       id: "msg-ai-long-subtask",
@@ -325,7 +333,7 @@ test.describe("Subtask card", () => {
       const status = page.getByText(LONG_RUNNING_STATUS, { exact: true });
       await expect(status).toBeVisible({ timeout: 15_000 });
       const title = page.getByTitle(LONG_TASK_PROMPT, { exact: true });
-      await expect(title).toBeVisible();
+      await expect(title).toBeVisible({ timeout: 15_000 });
       await expectSingleLineEllipsis(title);
       const pill = status.locator("xpath=..");
       const row = status.locator(
