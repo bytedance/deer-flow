@@ -38,6 +38,7 @@ class SubagentConfig:
     disallowed_tools: list[str] | None = field(default_factory=lambda: ["task"])
     skills: list[str] | None = None
     model: str = "inherit"
+    model_settings: dict[str, object] | None = None
     thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
     max_turns: int = 50

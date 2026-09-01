@@ -605,11 +605,13 @@ class SubagentExecutor:
                 app_config=app_config,
             )
 
-        # P1/P2 fix: pass thinking_enabled and reasoning_effort from subagent config
-        # so subagents inherit the same model-behavior settings as their lead persona
+        # P1/P2 fix: pass model-behavior settings from subagent config so
+        # store-backed custom agents keep the same LLM behavior as direct chats.
+        # ``thinking_enabled`` stays as the explicit create_chat_model argument;
+        # adding it to **model_kwargs would bind the parameter twice.
         model_kwargs: dict[str, Any] = {}
-        if self.config.thinking_enabled is not None:
-            model_kwargs["thinking_enabled"] = self.config.thinking_enabled
+        if self.config.model_settings:
+            model_kwargs["model_overrides"] = dict(self.config.model_settings)
         if self.config.reasoning_effort is not None:
             model_kwargs["reasoning_effort"] = self.config.reasoning_effort
 
@@ -723,8 +725,9 @@ class SubagentExecutor:
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                model_overrides=self.config.model_settings,
+                thinking_enabled=bool(self.config.thinking_enabled),
+                reasoning_effort=self.config.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,

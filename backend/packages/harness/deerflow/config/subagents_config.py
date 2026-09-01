@@ -124,6 +124,10 @@ class CustomSubagentConfig(BaseModel):
         default="inherit",
         description="Model to use - 'inherit' uses parent's model",
     )
+    model_settings: dict[str, object] | None = Field(
+        default=None,
+        description="Per-subagent LLM sampling overrides layered on top of the model profile",
+    )
     max_turns: int = Field(
         default=50,
         ge=1,

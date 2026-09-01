@@ -49,6 +49,7 @@ def _build_custom_subagent_config(name: str, *, app_config: Any | None = None) -
         disallowed_tools=custom.disallowed_tools,
         skills=custom.skills,
         model=custom.model,
+        model_settings=custom.model_settings,
         max_turns=custom.max_turns,
         timeout_seconds=custom.timeout_seconds,
     )
@@ -138,6 +139,7 @@ def _build_agent_store_subagent_config(
         disallowed_tools=_non_interactive_tool_denylist,
         skills=agent.skills,
         model=agent.model or "inherit",
+        model_settings=(agent.model_settings.model_dump(exclude_none=True) if agent.model_settings is not None else None),
         thinking_enabled=agent.thinking_enabled,
         reasoning_effort=agent.reasoning_effort,
     )

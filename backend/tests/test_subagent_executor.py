@@ -786,6 +786,92 @@ class TestAgentConstruction:
         # tool_search is infra: present despite being named in disallowed_tools.
         assert "tool_search" in names
 
+    def test_create_agent_preserves_subagent_model_behavior_settings(
+        self,
+        classes,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Subagent model settings must reach both model construction and descriptors."""
+        from deerflow.subagents import executor as executor_module
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        model = object()
+        agent = object()
+        descriptor = object()
+        captured: dict[str, object] = {}
+        app_config = SimpleNamespace(
+            models=[SimpleNamespace(name="default-model")],
+            tool_search=SimpleNamespace(enabled=False, auto_promote_top_k=3),
+            authorization=SimpleNamespace(enabled=False),
+            get_model_config=lambda name: SimpleNamespace(name=name, model=name, use="fake:model"),
+        )
+        extensions = SimpleNamespace(has_agent_assembly_observers=True)
+
+        def fake_create_chat_model(**kwargs):
+            captured["model"] = kwargs
+            return model
+
+        def fake_create_agent(**kwargs):
+            return agent
+
+        def fake_build_subagent_runtime_middlewares(**kwargs):
+            return []
+
+        def fake_build_assembly_descriptor(**kwargs):
+            captured["descriptor"] = kwargs
+            return descriptor
+
+        monkeypatch.setattr(executor_module, "create_chat_model", fake_create_chat_model)
+        monkeypatch.setattr(executor_module, "create_agent", fake_create_agent)
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=fake_build_subagent_runtime_middlewares,
+            ),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.assembly_descriptor",
+            _module("deerflow.agents.assembly_descriptor", build_assembly_descriptor=fake_build_assembly_descriptor),
+        )
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.extensions.notify",
+            _module("deerflow.extensions.notify", notify_agent_assembled=lambda descriptor, extensions: None),
+        )
+
+        executor = SubagentExecutor(
+            config=SubagentConfig(
+                name="custom-agent",
+                description="custom",
+                system_prompt="prompt",
+                model="custom-model",
+                model_settings={"temperature": 0.2, "max_tokens": 12000},
+                thinking_enabled=True,
+                reasoning_effort="high",
+            ),
+            tools=[],
+            app_config=app_config,
+            extensions=extensions,
+        )
+
+        assert executor._create_agent() is agent
+        assert captured["model"] == {
+            "name": "custom-model",
+            "thinking_enabled": True,
+            "reasoning_effort": "high",
+            "model_overrides": {"temperature": 0.2, "max_tokens": 12000},
+            "app_config": app_config,
+            "attach_tracing": False,
+        }
+        assert captured["descriptor"]["model_overrides"] == {"temperature": 0.2, "max_tokens": 12000}
+        assert captured["descriptor"]["thinking_enabled"] is True
+        assert captured["descriptor"]["reasoning_effort"] == "high"
+
     def test_create_agent_threads_deferred_setup_to_middlewares(
         self,
         classes,
