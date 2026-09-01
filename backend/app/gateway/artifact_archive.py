@@ -10,6 +10,7 @@ import unicodedata
 import zipfile
 from collections.abc import Iterable
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import BinaryIO
 
@@ -69,6 +70,7 @@ def _member(
     virtual_path: str,
     reserved: frozenset[str],
     deadline: float,
+    root_components: tuple[tuple[Path, int, int], ...],
 ) -> _ArchiveMember:
     _check_deadline(deadline)
     if not virtual_path or virtual_path.startswith("//") or "\\" in virtual_path or "\x00" in virtual_path:
@@ -95,7 +97,7 @@ def _member(
 
     candidate = root.joinpath(*parts)
     current = root
-    components: list[tuple[Path, int, int]] = []
+    components = list(root_components)
     try:
         for part in parts:
             _check_deadline(deadline)
@@ -115,6 +117,25 @@ def _member(
         raise _reject() from exc
     _check_deadline(deadline)
     return _ArchiveMember(resolved, entry, initial, tuple(components))
+
+
+def _hash_descriptor(descriptor: int, size: int, deadline: float) -> bytes:
+    digest = sha256()
+    remaining = size
+    try:
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        while remaining:
+            _check_deadline(deadline)
+            chunk = os.read(descriptor, min(_CHUNK_BYTES, remaining))
+            if not chunk:
+                raise _reject()
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise _reject()
+    except OSError as exc:
+        raise _reject() from exc
+    return digest.digest()
 
 
 def _copy_member(
@@ -145,6 +166,7 @@ def _copy_member(
         info.create_system = 0
         info.compress_type = zipfile.ZIP_STORED
         remaining = before.st_size
+        copied_digest = sha256()
         with archive.open(info, "w", force_zip64=False) as destination:
             while remaining:
                 _check_deadline(deadline)
@@ -152,6 +174,7 @@ def _copy_member(
                 if not chunk:
                     raise _reject()
                 destination.write(chunk)
+                copied_digest.update(chunk)
                 remaining -= len(chunk)
             if os.read(descriptor, 1):
                 raise _reject()
@@ -159,6 +182,14 @@ def _copy_member(
         _check_deadline(deadline)
         after = os.fstat(descriptor)
         if (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+            raise _reject()
+        if _hash_descriptor(descriptor, before.st_size, deadline) != copied_digest.digest():
+            raise _reject()
+        after_verification = os.fstat(descriptor)
+        if (after_verification.st_dev, after_verification.st_ino) != identity or (after_verification.st_size, after_verification.st_mtime_ns) != (
+            before.st_size,
+            before.st_mtime_ns,
+        ):
             raise _reject()
         try:
             for component, device, inode in member.components:
@@ -176,16 +207,31 @@ def build_artifact_archive(
     outputs_dir: Path,
     virtual_paths: Iterable[str],
     *,
+    user_data_dir: Path,
     extra_reserved_dir_names: Iterable[str] = (),
 ) -> ArtifactArchiveResult:
     deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS
     try:
+        if outputs_dir.parent != user_data_dir:
+            raise _reject()
+        user_data_metadata = os.lstat(user_data_dir)
+        outputs_metadata = os.lstat(outputs_dir)
+        if stat.S_ISLNK(user_data_metadata.st_mode) or not stat.S_ISDIR(user_data_metadata.st_mode) or stat.S_ISLNK(outputs_metadata.st_mode) or not stat.S_ISDIR(outputs_metadata.st_mode):
+            raise _reject()
+        user_data_root = user_data_dir.resolve(strict=True)
         root = outputs_dir.resolve(strict=True)
+        if root.parent != user_data_root:
+            raise _reject()
+    except ArtifactArchiveError:
+        raise
     except OSError as exc:
         raise _reject() from exc
-    if not root.is_dir():
-        raise _reject()
     _check_deadline(deadline)
+
+    root_components = (
+        (user_data_dir, user_data_metadata.st_dev, user_data_metadata.st_ino),
+        (outputs_dir, outputs_metadata.st_dev, outputs_metadata.st_ino),
+    )
 
     paths = list(dict.fromkeys(virtual_paths))
     if not paths:
@@ -194,7 +240,7 @@ def build_artifact_archive(
         raise _too_large(f"An artifact archive can contain at most {MAX_FILES} files")
 
     reserved = frozenset(name.casefold() for name in {BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME, *extra_reserved_dir_names})
-    members = [_member(root, path, reserved, deadline) for path in paths]
+    members = [_member(root, path, reserved, deadline, root_components) for path in paths]
     collision_keys = [unicodedata.normalize("NFC", member.entry).casefold() for member in members]
     if len(collision_keys) != len(set(collision_keys)):
         raise _reject()

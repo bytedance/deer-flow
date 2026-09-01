@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import threading
 import zipfile
 from pathlib import Path
@@ -30,6 +31,9 @@ class _FakePaths:
 
     def sandbox_outputs_dir(self, _thread_id: str, *, user_id: str | None = None) -> Path:
         return self._outputs_dir
+
+    def sandbox_user_data_dir(self, _thread_id: str, *, user_id: str | None = None) -> Path:
+        return self._outputs_dir.parent
 
 
 def _user() -> User:
@@ -208,6 +212,29 @@ def test_archive_rejects_a_symlink(tmp_path, monkeypatch) -> None:
     assert response.status_code == 409
 
 
+def test_archive_rejects_a_symlinked_outputs_root(tmp_path, monkeypatch) -> None:
+    user_data = tmp_path / "user-data"
+    user_data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("outside", encoding="utf-8")
+    outputs = user_data / "outputs"
+    try:
+        outputs.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=["/mnt/user-data/outputs/secret.txt"],
+    )
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 409
+
+
 def test_archive_rejects_missing_or_nonterminal_delivery(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -224,7 +251,8 @@ def test_archive_rejects_missing_or_nonterminal_delivery(tmp_path, monkeypatch) 
     assert response.status_code == 409
 
 
-def test_archive_hides_a_run_from_another_thread(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("method", ["get", "post"])
+def test_archive_hides_a_run_from_another_thread(tmp_path, monkeypatch, method: str) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     client, _, _ = _archive_app(
@@ -235,7 +263,7 @@ def test_archive_hides_a_run_from_another_thread(tmp_path, monkeypatch) -> None:
     )
 
     with client:
-        response = client.post(ARCHIVE_URL)
+        response = getattr(client, method)(ARCHIVE_URL)
 
     assert response.status_code == 404
 
@@ -327,6 +355,7 @@ def test_archive_rechecks_size_after_open(tmp_path, monkeypatch) -> None:
         artifact_archive.build_artifact_archive(
             outputs,
             ["/mnt/user-data/outputs/report.txt"],
+            user_data_dir=outputs.parent,
         )
 
     assert exc_info.value.status_code == 413
@@ -342,13 +371,13 @@ def test_archive_enforces_file_count_and_total_size_limits(tmp_path, monkeypatch
 
     monkeypatch.setattr(artifact_archive, "MAX_FILES", 1)
     with pytest.raises(artifact_archive.ArtifactArchiveError) as count_error:
-        artifact_archive.build_artifact_archive(outputs, paths)
+        artifact_archive.build_artifact_archive(outputs, paths, user_data_dir=outputs.parent)
     assert count_error.value.status_code == 413
 
     monkeypatch.setattr(artifact_archive, "MAX_FILES", 2)
     monkeypatch.setattr(artifact_archive, "MAX_TOTAL_BYTES", 1)
     with pytest.raises(artifact_archive.ArtifactArchiveError) as size_error:
-        artifact_archive.build_artifact_archive(outputs, paths)
+        artifact_archive.build_artifact_archive(outputs, paths, user_data_dir=outputs.parent)
     assert size_error.value.status_code == 413
 
 
@@ -373,6 +402,7 @@ def test_archive_rejects_internal_output_names(
         artifact_archive.build_artifact_archive(
             outputs,
             [f"/mnt/user-data/outputs/{relative_path}"],
+            user_data_dir=outputs.parent,
             extra_reserved_dir_names=reserved,
         )
 
@@ -401,6 +431,43 @@ def test_archive_rejects_a_path_replaced_during_read(tmp_path, monkeypatch) -> N
         artifact_archive.build_artifact_archive(
             outputs,
             ["/mnt/user-data/outputs/report.txt"],
+            user_data_dir=outputs.parent,
+        )
+
+
+def test_archive_rejects_same_size_content_change_with_restored_mtime(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    artifact = outputs / "report.bin"
+    chunk_size = artifact_archive._CHUNK_BYTES
+    artifact.write_bytes(b"A" * (chunk_size * 2))
+    original_mtime_ns = artifact.stat().st_mtime_ns
+    original_read = artifact_archive.os.read
+    reads = 0
+
+    def change_middle_chunk_then_restore(descriptor: int, count: int) -> bytes:
+        nonlocal reads
+        data = original_read(descriptor, count)
+        reads += 1
+        if reads == 1:
+            with artifact.open("r+b") as stream:
+                stream.seek(chunk_size)
+                stream.write(b"B" * chunk_size)
+            os.utime(artifact, ns=(artifact.stat().st_atime_ns, original_mtime_ns))
+        elif reads == 2:
+            with artifact.open("r+b") as stream:
+                stream.seek(chunk_size)
+                stream.write(b"A" * chunk_size)
+            os.utime(artifact, ns=(artifact.stat().st_atime_ns, original_mtime_ns))
+        return data
+
+    monkeypatch.setattr(artifact_archive.os, "read", change_middle_chunk_then_restore)
+
+    with pytest.raises(artifact_archive.ArtifactArchiveError):
+        artifact_archive.build_artifact_archive(
+            outputs,
+            ["/mnt/user-data/outputs/report.bin"],
+            user_data_dir=outputs.parent,
         )
 
 
@@ -414,6 +481,7 @@ def test_archive_deadline_applies_to_empty_files(tmp_path, monkeypatch) -> None:
         artifact_archive.build_artifact_archive(
             outputs,
             ["/mnt/user-data/outputs/empty.txt"],
+            user_data_dir=outputs.parent,
         )
 
     assert exc_info.value.status_code == 503
@@ -445,6 +513,7 @@ def test_archive_rejects_nonportable_zip_names(tmp_path, filename: str) -> None:
         artifact_archive.build_artifact_archive(
             outputs,
             [f"/mnt/user-data/outputs/{filename}"],
+            user_data_dir=outputs.parent,
         )
 
 
@@ -457,6 +526,7 @@ def test_archive_allows_emoji_joiner_sequences(tmp_path) -> None:
     result = artifact_archive.build_artifact_archive(
         outputs,
         [f"/mnt/user-data/outputs/{filename}"],
+        user_data_dir=outputs.parent,
     )
 
     with result.file, zipfile.ZipFile(result.file) as archive:
@@ -479,6 +549,7 @@ async def test_repeated_cancellation_keeps_the_archive_slot_until_worker_exit(mo
     task = asyncio.create_task(
         thread_runs._build_archive_without_abandoning_worker(
             Path("unused"),
+            Path("unused-parent"),
             [],
             extra_reserved_dir_names=set(),
         )

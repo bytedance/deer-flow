@@ -21,6 +21,7 @@ async def test_artifact_archive_build_does_not_block_event_loop(tmp_path: Path) 
 
     result = await _build_archive_without_abandoning_worker(
         outputs,
+        outputs.parent,
         ["/mnt/user-data/outputs/report.txt"],
         extra_reserved_dir_names=set(),
     )

@@ -1448,6 +1448,7 @@ def _archive_response_chunks(result: ArtifactArchiveResult):
 
 async def _build_archive_without_abandoning_worker(
     outputs_dir,
+    user_data_dir,
     presented_paths: list[str],
     *,
     extra_reserved_dir_names: set[str],
@@ -1460,6 +1461,7 @@ async def _build_archive_without_abandoning_worker(
             build_artifact_archive,
             outputs_dir,
             presented_paths,
+            user_data_dir=user_data_dir,
             extra_reserved_dir_names=extra_reserved_dir_names,
         )
     )
@@ -1540,7 +1542,9 @@ async def create_run_artifact_archive(
     app_config = await safe_app_config_async()
     custom_tool_output_dir = getattr(getattr(app_config, "tool_output", None), "storage_subdir", None)
     extra_reserved_dir_names = {custom_tool_output_dir} if isinstance(custom_tool_output_dir, str) else set()
-    outputs_dir = get_paths().sandbox_outputs_dir(thread_id, user_id=effective_user_id)
+    paths = get_paths()
+    user_data_dir = paths.sandbox_user_data_dir(thread_id, user_id=effective_user_id)
+    outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)
 
     try:
         async with get_run_manager(request).reserve_thread_operation(
@@ -1550,6 +1554,7 @@ async def create_run_artifact_archive(
         ):
             result = await _build_archive_without_abandoning_worker(
                 outputs_dir,
+                user_data_dir,
                 presented_paths,
                 extra_reserved_dir_names=extra_reserved_dir_names,
             )

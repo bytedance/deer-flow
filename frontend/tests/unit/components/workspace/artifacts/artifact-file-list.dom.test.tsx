@@ -63,15 +63,24 @@ function renderList(
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  const component = (
+    nextProps: React.ComponentProps<typeof ArtifactFileList>,
+  ) => (
     <QueryClientProvider client={queryClient}>
       <I18nContext.Provider
         value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
       >
-        <ArtifactFileList {...componentProps} />
+        <ArtifactFileList {...nextProps} />
       </I18nContext.Provider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+  const result = render(component(componentProps));
+  return {
+    ...result,
+    rerenderList: (
+      nextProps: Partial<React.ComponentProps<typeof ArtifactFileList>>,
+    ) => result.rerender(component({ ...componentProps, ...nextProps })),
+  };
 }
 
 afterEach(cleanup);
@@ -80,15 +89,19 @@ afterEach(() => {
 });
 
 describe("ArtifactFileList archive download", () => {
-  it("offers the current versions of a verified multi-file delivery", async () => {
+  it("offers a branch-local run accepted by the manifest ownership check", async () => {
     archiveState.manifest.mockResolvedValue({ fileCount: 2 });
-    renderList({ runId: "run-1" });
+    renderList({ runId: "branch-run", threadId: "branch-thread" });
 
     expect(
       await screen.findByRole("button", {
         name: "Download current versions (2 files)",
       }),
     ).toBeTruthy();
+    expect(archiveState.manifest).toHaveBeenCalledWith({
+      runId: "branch-run",
+      threadId: "branch-thread",
+    });
     expect(
       screen.getByText(
         "The file list comes from this response. Contents are the current versions and may have changed.",
@@ -165,6 +178,41 @@ describe("ArtifactFileList archive download", () => {
   it("does not offer an archive when the current thread cannot download it", () => {
     renderList({ archiveDownloadsEnabled: false, runId: "run-1" });
 
+    expect(
+      screen.queryByRole("button", {
+        name: /Download current versions/,
+      }),
+    ).toBeNull();
+  });
+
+  it("hides a cached archive while downloads are disabled", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 2 });
+    const { rerenderList } = renderList({ runId: "run-1" });
+    await screen.findByRole("button", {
+      name: "Download current versions (2 files)",
+    });
+
+    rerenderList({ archiveDownloadsEnabled: false });
+
+    expect(
+      screen.queryByRole("button", {
+        name: /Download current versions/,
+      }),
+    ).toBeNull();
+  });
+
+  it("hides an inherited run when the thread ownership check rejects it", async () => {
+    archiveState.manifest.mockRejectedValue(
+      new ArtifactRequestError(404, "Run parent-run not found"),
+    );
+    renderList({ runId: "parent-run" });
+
+    await waitFor(() => {
+      expect(archiveState.manifest).toHaveBeenCalledWith({
+        runId: "parent-run",
+        threadId: "thread-1",
+      });
+    });
     expect(
       screen.queryByRole("button", {
         name: /Download current versions/,

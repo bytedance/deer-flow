@@ -132,6 +132,7 @@ export function ArtifactFileList({
   }, [downloadingArchive, runId, t, threadId]);
 
   const canDownloadArchive =
+    archiveDownloadsEnabled &&
     archiveCount !== undefined &&
     archiveCount > 1 &&
     archiveCount <= MAX_ARTIFACT_ARCHIVE_FILES &&

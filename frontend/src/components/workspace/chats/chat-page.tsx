@@ -50,7 +50,6 @@ import {
   useThreadStream,
   useThreadTokenUsage,
 } from "@/core/threads/hooks";
-import { isBranchThread } from "@/core/threads/thread-branch-tree";
 import {
   selectContextUsage,
   threadTokenUsageToTokenUsage,
@@ -331,8 +330,7 @@ export default function ChatPage() {
               <div className="flex min-h-0 flex-1 justify-center">
                 <MessageList
                   archiveDownloadsEnabled={
-                    (isNewThread || isMock || threadMetadata.data != null) &&
-                    !isBranchThread(threadMetadata.data)
+                    isNewThread || isMock || threadMetadata.data != null
                   }
                   className={cn("size-full", !isWelcomeMode && "pt-10")}
                   testId="main-message-list"
