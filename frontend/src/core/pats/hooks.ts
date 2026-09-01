@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef } from "react";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 
@@ -21,9 +22,30 @@ export function patQueryKey(userId: string | null) {
 
 export function usePats() {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const userId = user?.id ?? null;
+
+  // A cross-tab account switch replaces the session cookie immediately,
+  // while this tab's React auth state only catches up after AuthProvider's
+  // throttled visibility refresh. Any fetch TanStack fires in that window
+  // would return the new account's list and cache/render it under the old
+  // identity's key — so the query opts out of focus refetches (like the
+  // other identity-scoped hooks), and the previous identity's cached list
+  // is dropped on change so it can never resurface if the cookie flips
+  // back within the gc window.
+  const previousUserId = useRef<string | null>(userId);
+  useEffect(() => {
+    if (previousUserId.current === userId) return;
+    void queryClient.removeQueries({
+      queryKey: patQueryKey(previousUserId.current),
+    });
+    previousUserId.current = userId;
+  }, [userId, queryClient]);
+
   const query = useQuery({
-    queryKey: patQueryKey(user?.id ?? null),
+    queryKey: patQueryKey(userId),
     queryFn: listPats,
+    refetchOnWindowFocus: false,
     // A 503 (memory backend, no PAT store) is a legitimate deployment state,
     // not a transient failure worth retrying — everything else (network
     // blips, 5xx) retries like the skills hook (count < 3). A bare predicate
