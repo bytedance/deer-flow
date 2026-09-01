@@ -1390,6 +1390,8 @@ def test_complete_lark_config_saves_app_credentials_and_returns_status(monkeypat
     (config_dir / "config.json").write_text("old-config", encoding="utf-8")
     token_file = data_dir / "token.json"
     token_file.write_text("old-token", encoding="utf-8")
+    master_key = data_dir / "master.key"
+    app_secret_file = data_dir / "appsecret_cli_mock.enc"
     generation = _advance_lark_flow()
 
     monkeypatch.setattr(
@@ -1401,11 +1403,13 @@ def test_complete_lark_config_saves_app_credentials_and_returns_status(monkeypat
             "user_info": {"tenant_brand": "feishu"},
         },
     )
-    monkeypatch.setattr(
-        lark_cli,
-        "_save_lark_app_config_with_cli",
-        lambda user_id, **kwargs: captured.update({"user_id": user_id, **kwargs}),
-    )
+
+    def _save(user_id, **kwargs):
+        captured.update({"user_id": user_id, **kwargs})
+        master_key.write_text("new-master-key", encoding="utf-8")
+        app_secret_file.write_text("encrypted-app-secret", encoding="utf-8")
+
+    monkeypatch.setattr(lark_cli, "_save_lark_app_config_with_cli", _save)
     monkeypatch.setattr(
         lark_cli,
         "_revoke_lark_auth_from_snapshot",
@@ -1445,6 +1449,8 @@ def test_complete_lark_config_saves_app_credentials_and_returns_status(monkeypat
     assert result.generation == generation
     assert revoked == ["old-token"]
     assert not token_file.exists()
+    assert master_key.read_text(encoding="utf-8") == "new-master-key"
+    assert app_secret_file.read_text(encoding="utf-8") == "encrypted-app-secret"
     assert captured == {
         "user_id": "alice",
         "app_id": "cli_mock",
