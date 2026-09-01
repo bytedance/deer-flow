@@ -1037,6 +1037,16 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False
         assert leaf["holds"] is False
 
+    def test_trailing_criterion_semicolon_still_matches(self):
+        """PR review: ``tests_passed:make test;`` is a valid shell spelling —
+        the trailing ``;`` leaves the criterion one more operator than the
+        span has connectors, which must not raise (the task tool discards
+        the whole verdict on an exception, bypassing every criterion)."""
+        executions = [_bash_execution("make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:make test;"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_multiline_execution_tail_commands_are_not_attributed(self):
         """Self-audit: physical newlines are command separators (``;``
         semantics) that shlex would otherwise merge into one segment — the

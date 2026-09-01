@@ -1020,9 +1020,15 @@ def _criterion_connectors_preserved(expected_ops: list[str], executed_within_ops
     executed counterpart — the span must end at the last executed segment —
     so it is never preserved.
     """
-    if any(op != ";" for op in expected_ops[len(executed_within_ops) :]):
+    trailing = expected_ops[len(executed_within_ops) :]
+    if any(op != ";" for op in trailing):
         return False
-    for expected_op, executed_op in zip(expected_ops, executed_within_ops, strict=True):
+    # Trailing criterion ``;`` operators are validated above; the pairwise
+    # comparison covers only the connector prefix between the span's
+    # segments, or a criterion spelled ``make test;`` (one more operator
+    # than connectors) would raise on the strict zip — and the task tool
+    # discards the whole verdict on an exception.
+    for expected_op, executed_op in zip(expected_ops[: len(executed_within_ops)], executed_within_ops, strict=True):
         if expected_op == executed_op:
             continue
         if expected_op == ";" and executed_op == "&&" and executed_success:
