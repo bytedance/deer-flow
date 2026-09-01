@@ -7,13 +7,15 @@ from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
     McpRoutingConfig,
     McpTaskToolsetConfig,
+    McpTimeoutSeconds,
+    McpToolCallTimeoutSeconds,
     McpToolOverride,
     atomic_write_extensions_config,
     extensions_config_file_lock,
@@ -443,14 +445,14 @@ class McpServerConfigResponse(BaseModel):
     routing: McpRoutingConfig = Field(default_factory=McpRoutingConfig, description="Soft routing hints for tools from this MCP server")
     tools: dict[str, McpToolOverride] = Field(default_factory=dict, description="Per-original-tool MCP configuration overrides")
     tool_name_prefix: bool = Field(default=True, description="Whether to prefix discovered tool names with the MCP server name")
-    tool_call_timeout: float | None = Field(
+    tool_call_timeout: McpToolCallTimeoutSeconds | None = Field(
         default=None,
         description="Timeout in seconds for individual stdio MCP calls and durable-task calls on every transport",
     )
     # Default matches McpServerConfig: this model's defaults feed model_dump()
     # into the persisted extensions config on PUT, so an API-created server that
     # omits the field must get the same bring-up timeout as a file-created one.
-    session_init_timeout: float | None = Field(
+    session_init_timeout: McpTimeoutSeconds | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
         description="Timeout in seconds for MCP server bring-up and durable HTTP/SSE task-session initialization; null means no timeout",
     )
@@ -998,9 +1000,26 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         for name, incoming in body.mcp_servers.items():
             raw_server = raw_servers.get(name)
             if raw_server is not None:
+                # Older Gateway versions could persist invalid timeout values.
+                # PUT is the repair boundary: validate the incoming replacement
+                # first, then let those values win before parsing the raw server
+                # solely for secret/advanced-field preservation.
+                existing_for_merge = {
+                    **raw_server,
+                    "tool_call_timeout": incoming.tool_call_timeout,
+                    "session_init_timeout": incoming.session_init_timeout,
+                }
+                try:
+                    existing_server = McpServerConfigResponse(**existing_for_merge)
+                except ValidationError as exc:
+                    invalid_fields = ", ".join(sorted({".".join(str(part) for part in error["loc"]) for error in exc.errors() if error.get("loc")}))
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        detail=(f"Stored MCP server '{name}' has invalid non-timeout field(s): {invalid_fields or 'unknown'}. Back up extensions_config.json, directly edit those fields, and retry the full configuration update."),
+                    ) from exc
                 merged_servers[name] = _merge_preserving_secrets(
                     incoming,
-                    McpServerConfigResponse(**raw_server),
+                    existing_server,
                 )
             else:
                 merged_servers[name] = incoming
@@ -1052,7 +1071,13 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
             )
 
         if body.enabled:
-            target_server = McpServerConfigResponse(**raw_server)
+            try:
+                target_server = McpServerConfigResponse(**raw_server)
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=f"MCP server '{body.server_name}' has invalid stored configuration; repair it with PUT /api/mcp/config before enabling it.",
+                ) from exc
             _validate_mcp_update_request(
                 McpConfigUpdateRequest(
                     mcp_servers={body.server_name: target_server},

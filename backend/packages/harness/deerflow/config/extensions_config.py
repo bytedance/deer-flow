@@ -9,10 +9,12 @@ import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from copy import deepcopy
+from datetime import timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PrivateAttr, ValidationError, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
 from deerflow.constants import (
@@ -25,6 +27,25 @@ logger = logging.getLogger(__name__)
 
 _non_atomic_fallback_targets: set[Path] = set()
 _non_atomic_fallback_targets_lock = threading.Lock()
+
+
+def _reject_boolean_timeout(value: Any) -> Any:
+    """Keep JSON booleans out of numeric MCP timeout fields."""
+    if isinstance(value, bool):
+        raise ValueError("MCP timeout must be a number, not a boolean")
+    return value
+
+
+McpTimeoutSeconds = Annotated[
+    float,
+    BeforeValidator(_reject_boolean_timeout),
+    Field(gt=0, allow_inf_nan=False),
+]
+MAX_MCP_TOOL_CALL_TIMEOUT_SECONDS = timedelta.max.days * 24 * 60 * 60 + timedelta.max.seconds
+McpToolCallTimeoutSeconds = Annotated[
+    McpTimeoutSeconds,
+    Field(le=MAX_MCP_TOOL_CALL_TIMEOUT_SECONDS),
+]
 
 
 def normalize_mcp_transport_alias(data: Any) -> Any:
@@ -226,11 +247,11 @@ class McpServerConfig(BaseModel):
         default=True,
         description="Whether to prefix discovered tool names with the MCP server name to avoid cross-server collisions",
     )
-    tool_call_timeout: float | None = Field(
+    tool_call_timeout: McpToolCallTimeoutSeconds | None = Field(
         default=None,
         description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
-    session_init_timeout: float | None = Field(
+    session_init_timeout: McpTimeoutSeconds | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
@@ -310,6 +331,8 @@ class SkillStateConfig(BaseModel):
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
+    _isolated_mcp_servers_raw: dict[str, Any] = PrivateAttr(default_factory=dict)
+
     middlewares: list[str] = Field(
         default_factory=list,
         description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
@@ -336,7 +359,52 @@ class ExtensionsConfig(BaseModel):
 
     def to_file_dict(self) -> dict[str, Any]:
         """Serialize in the public extensions_config.json shape."""
-        return self.model_dump(by_alias=True)
+        config_data = self.model_dump(by_alias=True)
+        if self._isolated_mcp_servers_raw:
+            valid_servers = config_data.get("mcpServers", {})
+            config_data["mcpServers"] = {
+                **deepcopy(self._isolated_mcp_servers_raw),
+                **valid_servers,
+            }
+        return config_data
+
+    @classmethod
+    def _isolate_servers_with_invalid_timeouts(cls, config_data: Any) -> Any:
+        """Skip servers whose only validation errors are timeout fields.
+
+        Older Gateway versions could persist these values. Keeping model-level
+        validation strict prevents new invalid configs while isolating a legacy
+        server at the file boundary so healthy MCP servers and skills still load.
+        """
+        if not isinstance(config_data, dict):
+            return config_data
+
+        servers_key = "mcpServers" if "mcpServers" in config_data else "mcp_servers"
+        raw_servers = config_data.get(servers_key)
+        if not isinstance(raw_servers, dict):
+            return config_data
+
+        valid_servers: dict[str, Any] = {}
+        for server_name, raw_server in raw_servers.items():
+            try:
+                McpServerConfig.model_validate(raw_server)
+            except ValidationError as exc:
+                errors = exc.errors()
+                timeout_errors = [error for error in errors if error.get("loc") and error["loc"][0] in {"session_init_timeout", "tool_call_timeout"}]
+                if not errors or len(timeout_errors) != len(errors):
+                    raise
+                timeout_fields = {str(error["loc"][0]) for error in timeout_errors}
+                logger.warning(
+                    "Skipping MCP server '%s' because stored timeout field(s) %s are invalid; repair it with a valid full configuration update.",
+                    server_name,
+                    ", ".join(sorted(timeout_fields)),
+                )
+                continue
+            valid_servers[server_name] = raw_server
+
+        if len(valid_servers) == len(raw_servers):
+            return config_data
+        return {**config_data, servers_key: valid_servers}
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
@@ -434,9 +502,18 @@ class ExtensionsConfig(BaseModel):
 
         try:
             with open(resolved_path, encoding="utf-8") as f:
-                config_data = json.load(f)
-            config_data = cls.resolve_env_variables(config_data)
-            return cls.model_validate(config_data)
+                raw_config_data = json.load(f)
+            config_data = cls.resolve_env_variables(raw_config_data)
+            config_data = cls._isolate_servers_with_invalid_timeouts(config_data)
+            config = cls.model_validate(config_data)
+
+            raw_servers_key = "mcpServers" if isinstance(raw_config_data, dict) and "mcpServers" in raw_config_data else "mcp_servers"
+            filtered_servers_key = "mcpServers" if isinstance(config_data, dict) and "mcpServers" in config_data else "mcp_servers"
+            raw_servers = raw_config_data.get(raw_servers_key, {}) if isinstance(raw_config_data, dict) else {}
+            filtered_servers = config_data.get(filtered_servers_key, {}) if isinstance(config_data, dict) else {}
+            if isinstance(raw_servers, dict) and isinstance(filtered_servers, dict):
+                config._isolated_mcp_servers_raw = {name: deepcopy(raw_server) for name, raw_server in raw_servers.items() if name not in filtered_servers}
+            return config
         except json.JSONDecodeError as e:
             raise ValueError(f"Extensions config file at {resolved_path} is not valid JSON: {e}") from e
         except Exception as e:
