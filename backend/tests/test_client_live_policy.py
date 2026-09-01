@@ -180,7 +180,11 @@ def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
     assert 'pytest -m "not live"' in command
     assert "--ignore=tests/blocking_io" in command
     assert "--splitting-algorithm least_duration" in command
-    assert "--durations-path=" in command
+    assert "--durations-path=.test_durations" in command
+
+    # The repo must ship a duration baseline. Without it pytest-split silently
+    # degrades to an even (count-based) split, so this is a fail-closed contract.
+    assert (BACKEND_ROOT / ".test_durations").exists()
 
     # The full-suite entry point stays offline-only.
     full_command = _dry_run_make_target("test")

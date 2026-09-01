@@ -40,6 +40,8 @@ SPLITS ?= 1
 GROUP ?= 1
 DURATIONS_FILE ?= .test_durations
 test-shard:
+	@test -f $(DURATIONS_FILE) || \
+		(echo "error: $(DURATIONS_FILE) is missing; run 'make test-shard-durations' to regenerate the duration baseline" >&2; exit 1)
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
 
 # Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
