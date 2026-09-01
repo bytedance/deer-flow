@@ -90,6 +90,10 @@ def _assert_path_suffix(value: str, suffix: str) -> None:
 
 
 def _assert_posix_mode(path: Path, expected: int) -> None:
+    # POSIX 0700/0600 is not a Windows credential contract: chmod() is a no-op
+    # on NTFS, and existing trees are not ACL-repaired. Mode asserts are skipped
+    # on Windows for that reason; Windows ACL hardening is tracked in
+    # https://github.com/bytedance/deer-flow/issues/5135
     if os.name == "nt":
         return
     assert stat.S_IMODE(path.stat().st_mode) == expected

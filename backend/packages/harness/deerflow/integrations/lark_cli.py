@@ -303,6 +303,11 @@ def ensure_lark_cli_credential_tree(user_id: str, *, paths: Paths | None = None)
     The CLI writes plaintext app secrets and OAuth tokens beneath this tree.
     Reject links before changing modes so a compromised tree cannot redirect a
     chmod or subsequent CLI write outside the user's integration directory.
+
+    POSIX ``0700``/``0600`` is the credential contract on POSIX only. On Windows,
+    ``chmod()`` does not apply POSIX bits on NTFS, and existing trees are not
+    ACL-repaired. Windows ACL hardening is tracked separately in
+    https://github.com/bytedance/deer-flow/issues/5135
     """
     paths = paths or get_paths()
     root = paths.user_dir(user_id) / "integrations" / INTEGRATION_ID
@@ -436,11 +441,12 @@ def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
         candidate = root / relative
         if not candidate.is_file():
             raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative.as_posix()}")
-        # NTFS cannot represent POSIX executable bits. The Windows→Linux bind mount
-        # is expected to present these files as executable (Docker Desktop
-        # gRPC-FUSE/virtiofs typically synthesizes 0755); this check is skipped on
-        # Windows because the host mode is unrepresentable, not because anything
-        # later chmods the read-only sandbox mount.
+        # There is no in-sandbox chmod: the runtime is bind-mounted read-only and
+        # the launcher just execs linux-$arch/lark-cli. NTFS cannot represent
+        # POSIX exec bits. Docker Desktop (gRPC-FUSE/virtiofs) typically
+        # synthesizes ~0755 for Windows-shared files, which is why this check is
+        # skipped on Windows. A mount that faithfully preserved host modes would
+        # fail at exec.
         if os.name != "nt" and candidate.stat().st_mode & 0o111 == 0:
             raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative.as_posix()}")
 
