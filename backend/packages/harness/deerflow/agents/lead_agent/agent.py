@@ -927,7 +927,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # Neither a request nor a config-file default may widen an explicit
     # custom-agent deny policy.
     subagent_enabled = bool(subagent_enabled and allowed_subagents != [])
-    requested_max_concurrent = _resolve_runtime_option(cfg, "max_concurrent_subagents", agent_max_concurrent_subagents, 3)
+    requested_max_concurrent = _resolve_runtime_option(cfg, "max_concurrent_subagents", agent_max_concurrent_subagents, None)
     max_concurrent_subagents = effective_subagent_concurrency(
         requested_max_concurrent,
         resolved_app_config,
