@@ -13,6 +13,10 @@ export interface ArtifactArchiveDownload {
   filename: string;
 }
 
+export interface ArtifactArchiveManifest {
+  fileCount: number;
+}
+
 export const MAX_ARTIFACT_ARCHIVE_FILES = 50;
 
 export class ArtifactRequestError extends Error {
@@ -82,4 +86,22 @@ export async function downloadArtifactArchive({
     blob: await response.blob(),
     filename: filename ?? `artifacts-${runId}.zip`,
   };
+}
+
+export async function getArtifactArchiveManifest({
+  threadId,
+  runId,
+}: {
+  threadId: string;
+  runId: string;
+}): Promise<ArtifactArchiveManifest> {
+  const response = await fetch(urlOfArtifactArchive({ threadId, runId }));
+  if (!response.ok) {
+    throw new ArtifactRequestError(
+      response.status,
+      await readErrorDetail(response),
+    );
+  }
+  const data = (await response.json()) as { file_count: number };
+  return { fileCount: data.file_count };
 }

@@ -1,3 +1,4 @@
+import { useQuery } from "@tanstack/react-query";
 import { DownloadIcon, LoaderIcon, PackageIcon } from "lucide-react";
 import { useCallback, useState } from "react";
 import { toast } from "sonner";
@@ -13,6 +14,7 @@ import {
 import {
   ArtifactRequestError,
   downloadArtifactArchive,
+  getArtifactArchiveManifest,
   MAX_ARTIFACT_ARCHIVE_FILES,
 } from "@/core/artifacts/api";
 import { urlOfArtifact } from "@/core/artifacts/utils";
@@ -30,14 +32,12 @@ import { cn } from "@/lib/utils";
 import { useArtifacts } from "./context";
 
 export function ArtifactFileList({
-  archiveFileCount,
   archiveDownloadsEnabled = true,
   className,
   files,
   runId,
   threadId,
 }: {
-  archiveFileCount?: number;
   archiveDownloadsEnabled?: boolean;
   className?: string;
   files: string[];
@@ -50,7 +50,16 @@ export function ArtifactFileList({
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [downloadingArchive, setDownloadingArchive] = useState(false);
   const [installingFile, setInstallingFile] = useState<string | null>(null);
-  const archiveCount = archiveFileCount ?? files.length;
+  const staticWebsiteOnly = isStaticWebsiteOnly();
+  const { data: archiveManifest } = useQuery({
+    queryKey: ["artifact-archive-manifest", threadId, runId],
+    queryFn: () => getArtifactArchiveManifest({ threadId, runId: runId! }),
+    enabled:
+      archiveDownloadsEnabled && runId !== undefined && !staticWebsiteOnly,
+    retry: false,
+    staleTime: Infinity,
+  });
+  const archiveCount = archiveManifest?.fileCount;
 
   const handleClick = useCallback(
     (filepath: string) => {
@@ -123,11 +132,10 @@ export function ArtifactFileList({
   }, [downloadingArchive, runId, t, threadId]);
 
   const canDownloadArchive =
-    archiveDownloadsEnabled &&
-    runId !== undefined &&
+    archiveCount !== undefined &&
     archiveCount > 1 &&
     archiveCount <= MAX_ARTIFACT_ARCHIVE_FILES &&
-    !isStaticWebsiteOnly();
+    !staticWebsiteOnly;
 
   return (
     <div className={cn("flex w-full flex-col gap-4", className)}>

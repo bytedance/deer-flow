@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, rs } from "@rstest/core";
 
 import {
   downloadArtifactArchive,
+  getArtifactArchiveManifest,
   updateArtifactContent,
 } from "@/core/artifacts/api";
 
@@ -84,5 +85,26 @@ describe("downloadArtifactArchive", () => {
     );
     expect(result.filename).toBe("artifacts-run-1.zip");
     expect(await result.blob.text()).toBe("zip");
+  });
+});
+
+describe("getArtifactArchiveManifest", () => {
+  it("reads the verified delivery count from the encoded run endpoint", async () => {
+    const fetchMock = rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ file_count: 3 }), {
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+
+    const result = await getArtifactArchiveManifest({
+      threadId: "thread #1",
+      runId: "run/1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/threads/thread%20%231/runs/run%2F1/artifacts/archive",
+      expect.objectContaining({ credentials: "include" }),
+    );
+    expect(result).toEqual({ fileCount: 3 });
   });
 });

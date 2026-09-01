@@ -27,7 +27,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
-import { getArtifactArchiveDisplaysByGroupIndex } from "@/core/messages/artifact-archive";
+import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
 import {
   buildConversationChapters,
   CONVERSATION_OUTLINE_MIN_TURNS,
@@ -516,8 +516,8 @@ export function MessageList({
     () => getRunDurationDisplaysByGroupIndex(groupedMessages),
     [groupedMessages],
   );
-  const artifactArchiveDisplaysByGroupIndex = useMemo(
-    () => getArtifactArchiveDisplaysByGroupIndex(groupedMessages),
+  const artifactArchiveCandidatesByGroupIndex = useMemo(
+    () => getArtifactArchiveCandidatesByGroupIndex(groupedMessages),
     [groupedMessages],
   );
   const workspaceChangeAnchorGroupIndices = useMemo(
@@ -1284,8 +1284,8 @@ export function MessageList({
                   }
                 }
                 const presentedFiles = [...files];
-                const archiveDisplay =
-                  artifactArchiveDisplaysByGroupIndex[groupIndex];
+                const archiveCandidate =
+                  artifactArchiveCandidatesByGroupIndex[groupIndex];
                 return withRunDuration(
                   group,
                   groupIndex,
@@ -1298,12 +1298,11 @@ export function MessageList({
                       />
                     )}
                     <ArtifactFileList
-                      archiveFileCount={archiveDisplay?.fileCount}
                       archiveDownloadsEnabled={
                         archiveDownloadsEnabled && !thread.isLoading
                       }
                       files={presentedFiles}
-                      runId={archiveDisplay?.runId}
+                      runId={archiveCandidate?.runId}
                       threadId={threadId}
                     />
                     {renderTokenUsage({

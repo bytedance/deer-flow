@@ -1,7 +1,7 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
-import { getArtifactArchiveDisplaysByGroupIndex } from "@/core/messages/artifact-archive";
+import { getArtifactArchiveCandidatesByGroupIndex } from "@/core/messages/artifact-archive";
 import { getMessageGroups } from "@/core/messages/utils";
 
 function presentFiles(id: string, runId: string, filepaths: string[]): Message {
@@ -30,9 +30,19 @@ describe("artifact archive display placement", () => {
       ]),
     ]);
 
-    expect(getArtifactArchiveDisplaysByGroupIndex(groups)).toEqual([
+    expect(getArtifactArchiveCandidatesByGroupIndex(groups)).toEqual([
       undefined,
-      { runId: "run-1", fileCount: 2 },
+      { runId: "run-1" },
+    ]);
+  });
+
+  test("verifies even a single attempted path against the terminal receipt", () => {
+    const groups = getMessageGroups([
+      presentFiles("only", "run-1", ["/mnt/user-data/outputs/a.txt"]),
+    ]);
+
+    expect(getArtifactArchiveCandidatesByGroupIndex(groups)).toEqual([
+      { runId: "run-1" },
     ]);
   });
 
@@ -46,10 +56,10 @@ describe("artifact archive display placement", () => {
       presentFiles("run-1-last", "run-1", ["/mnt/user-data/outputs/b.txt"]),
     ]);
 
-    expect(getArtifactArchiveDisplaysByGroupIndex(groups)).toEqual([
+    expect(getArtifactArchiveCandidatesByGroupIndex(groups)).toEqual([
       undefined,
-      { runId: "run-2", fileCount: 2 },
-      { runId: "run-1", fileCount: 2 },
+      { runId: "run-2" },
+      { runId: "run-1" },
     ]);
   });
 });

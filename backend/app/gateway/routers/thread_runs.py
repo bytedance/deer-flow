@@ -176,6 +176,10 @@ class RunResponse(BaseModel):
     stop_reason: str | None = None
 
 
+class ArtifactArchiveManifestResponse(BaseModel):
+    file_count: int
+
+
 class ThreadTokenUsageModelBreakdown(BaseModel):
     tokens: int = 0
     runs: int = Field(
@@ -1490,14 +1494,7 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
     return presented
 
 
-@router.post("/{thread_id}/runs/{run_id}/artifacts/archive")
-@require_permission("runs", "read", owner_check=True, require_existing=True)
-async def create_run_artifact_archive(
-    thread_id: ThreadId,
-    run_id: str,
-    request: Request,
-) -> StreamingResponse:
-    """Download the current contents of the files presented by one terminal run."""
+async def _archive_presented_paths(thread_id: ThreadId, run_id: str, request: Request) -> list[str]:
     run = await get_run_store(request).get(run_id)
     if run is None or run.get("thread_id") != thread_id or run.get("operation_kind", "run") != "run":
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
@@ -1510,7 +1507,33 @@ async def create_run_artifact_archive(
         event_types=["run.delivery"],
         limit=2,
     )
-    presented_paths = _presented_files_from_delivery(events)
+    return _presented_files_from_delivery(events)
+
+
+@router.get(
+    "/{thread_id}/runs/{run_id}/artifacts/archive",
+    response_model=ArtifactArchiveManifestResponse,
+)
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def get_run_artifact_archive_manifest(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> ArtifactArchiveManifestResponse:
+    """Return the verified terminal delivery count used by the archive."""
+    presented_paths = await _archive_presented_paths(thread_id, run_id, request)
+    return ArtifactArchiveManifestResponse(file_count=len(dict.fromkeys(presented_paths)))
+
+
+@router.post("/{thread_id}/runs/{run_id}/artifacts/archive")
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def create_run_artifact_archive(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> StreamingResponse:
+    """Download the current contents of the files presented by one terminal run."""
+    presented_paths = await _archive_presented_paths(thread_id, run_id, request)
 
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     effective_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else get_effective_user_id()

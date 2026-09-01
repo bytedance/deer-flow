@@ -124,6 +124,26 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
         assert "not-presented.txt" not in archive.namelist()
 
 
+def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=[
+            "/mnt/user-data/outputs/report.txt",
+            "/mnt/user-data/outputs/data.csv",
+            "/mnt/user-data/outputs/data.csv",
+        ],
+    )
+
+    with client:
+        response = client.get(ARCHIVE_URL)
+
+    assert response.status_code == 200
+    assert response.json() == {"file_count": 2}
+
+
 @pytest.mark.parametrize(
     "presented_path",
     [

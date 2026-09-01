@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
   fireEvent,
@@ -23,6 +24,7 @@ const archiveState = rs.hoisted(() => {
 
   return {
     download: rs.fn(),
+    manifest: rs.fn(),
     RequestError,
     toastError: rs.fn(),
   };
@@ -37,6 +39,7 @@ rs.mock("@/components/workspace/artifacts/context", () => ({
 rs.mock("@/core/artifacts/api", () => ({
   ArtifactRequestError: archiveState.RequestError,
   downloadArtifactArchive: archiveState.download,
+  getArtifactArchiveManifest: archiveState.manifest,
   MAX_ARTIFACT_ARCHIVE_FILES: 50,
 }));
 rs.mock("sonner", () => ({
@@ -57,12 +60,17 @@ function renderList(
   props: Partial<React.ComponentProps<typeof ArtifactFileList>> = {},
 ) {
   const componentProps = { files, threadId: "thread-1", ...props };
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   return render(
-    <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-    >
-      <ArtifactFileList {...componentProps} />
-    </I18nContext.Provider>,
+    <QueryClientProvider client={queryClient}>
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <ArtifactFileList {...componentProps} />
+      </I18nContext.Provider>
+    </QueryClientProvider>,
   );
 }
 
@@ -72,11 +80,12 @@ afterEach(() => {
 });
 
 describe("ArtifactFileList archive download", () => {
-  it("offers the current versions of a run's multi-file delivery", () => {
+  it("offers the current versions of a verified multi-file delivery", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 2 });
     renderList({ runId: "run-1" });
 
     expect(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Download current versions (2 files)",
       }),
     ).toBeTruthy();
@@ -87,14 +96,32 @@ describe("ArtifactFileList archive download", () => {
     ).toBeTruthy();
   });
 
-  it("uses the run-wide file count when the action is anchored to one group", () => {
-    renderList({ archiveFileCount: 3, runId: "run-1" });
+  it("uses the verified receipt count instead of attempted tool arguments", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 3 });
+    renderList({ runId: "run-1" });
 
     expect(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Download current versions (3 files)",
       }),
     ).toBeTruthy();
+  });
+
+  it("does not offer an archive when only one attempted file was delivered", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 1 });
+    renderList({ runId: "run-1" });
+
+    await waitFor(() => {
+      expect(archiveState.manifest).toHaveBeenCalledWith({
+        runId: "run-1",
+        threadId: "thread-1",
+      });
+    });
+    expect(
+      screen.queryByRole("button", {
+        name: /Download current versions/,
+      }),
+    ).toBeNull();
   });
 
   it("does not offer an archive outside a run-scoped delivery", () => {
@@ -107,9 +134,13 @@ describe("ArtifactFileList archive download", () => {
     ).toBeNull();
   });
 
-  it("does not offer an archive for a single file", () => {
+  it("does not offer an archive for a single verified file", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 1 });
     renderList({ files: files.slice(0, 1), runId: "run-1" });
 
+    await waitFor(() => {
+      expect(archiveState.manifest).toHaveBeenCalled();
+    });
     expect(
       screen.queryByRole("button", {
         name: /Download current versions/,
@@ -117,9 +148,13 @@ describe("ArtifactFileList archive download", () => {
     ).toBeNull();
   });
 
-  it("does not offer an archive above the server file-count limit", () => {
-    renderList({ archiveFileCount: 51, runId: "run-1" });
+  it("does not offer an archive above the server file-count limit", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 51 });
+    renderList({ runId: "run-1" });
 
+    await waitFor(() => {
+      expect(archiveState.manifest).toHaveBeenCalled();
+    });
     expect(
       screen.queryByRole("button", {
         name: /Download current versions/,
@@ -138,6 +173,7 @@ describe("ArtifactFileList archive download", () => {
   });
 
   it("downloads the archive and releases its object URL", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 2 });
     const blob = new Blob(["zip"]);
     archiveState.download.mockResolvedValue({
       blob,
@@ -156,7 +192,7 @@ describe("ArtifactFileList archive download", () => {
     renderList({ runId: "run-1" });
 
     fireEvent.click(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Download current versions (2 files)",
       }),
     );
@@ -173,11 +209,12 @@ describe("ArtifactFileList archive download", () => {
   });
 
   it("reports archive download failures", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 2 });
     archiveState.download.mockRejectedValue(new Error("network down"));
     renderList({ runId: "run-1" });
 
     fireEvent.click(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Download current versions (2 files)",
       }),
     );
@@ -190,6 +227,7 @@ describe("ArtifactFileList archive download", () => {
   });
 
   it("shows actionable archive errors returned by the server", async () => {
+    archiveState.manifest.mockResolvedValue({ fileCount: 2 });
     archiveState.download.mockRejectedValue(
       new ArtifactRequestError(
         413,
@@ -199,7 +237,7 @@ describe("ArtifactFileList archive download", () => {
     renderList({ runId: "run-1" });
 
     fireEvent.click(
-      screen.getByRole("button", {
+      await screen.findByRole("button", {
         name: "Download current versions (2 files)",
       }),
     );

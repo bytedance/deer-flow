@@ -1,25 +1,17 @@
 import { getMessageRunId } from "./run-duration";
-import {
-  extractPresentFilesFromMessage,
-  hasPresentFiles,
-  type MessageGroup,
-} from "./utils";
+import { hasPresentFiles, type MessageGroup } from "./utils";
 
-export interface ArtifactArchiveDisplay {
+export interface ArtifactArchiveCandidate {
   runId: string;
-  fileCount: number;
 }
 
-export function getArtifactArchiveDisplaysByGroupIndex(
+export function getArtifactArchiveCandidatesByGroupIndex(
   groups: MessageGroup[],
-): Array<ArtifactArchiveDisplay | undefined> {
-  const displays = Array<ArtifactArchiveDisplay | undefined>(
+): Array<ArtifactArchiveCandidate | undefined> {
+  const candidates = Array<ArtifactArchiveCandidate | undefined>(
     groups.length,
   ).fill(undefined);
-  const deliveries = new Map<
-    string,
-    { files: Set<string>; lastGroupIndex: number }
-  >();
+  const lastGroupIndexByRunId = new Map<string, number>();
 
   groups.forEach((group, groupIndex) => {
     if (group.type !== "assistant:present-files") return;
@@ -28,27 +20,13 @@ export function getArtifactArchiveDisplaysByGroupIndex(
       if (!hasPresentFiles(message)) continue;
       const runId = getMessageRunId(message);
       if (!runId) continue;
-
-      const delivery = deliveries.get(runId) ?? {
-        files: new Set<string>(),
-        lastGroupIndex: groupIndex,
-      };
-      extractPresentFilesFromMessage(message).forEach((file) =>
-        delivery.files.add(file),
-      );
-      delivery.lastGroupIndex = groupIndex;
-      deliveries.set(runId, delivery);
+      lastGroupIndexByRunId.set(runId, groupIndex);
     }
   });
 
-  for (const [runId, delivery] of deliveries) {
-    if (delivery.files.size > 1) {
-      displays[delivery.lastGroupIndex] = {
-        runId,
-        fileCount: delivery.files.size,
-      };
-    }
+  for (const [runId, groupIndex] of lastGroupIndexByRunId) {
+    candidates[groupIndex] = { runId };
   }
 
-  return displays;
+  return candidates;
 }
