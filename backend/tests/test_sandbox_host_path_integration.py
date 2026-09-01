@@ -95,9 +95,9 @@ def test_bash_tool_normalizes_configured_host_path_before_validation() -> None:
         patch("deerflow.sandbox.tools._lark_cli_env_from_runtime", return_value=None),
     ):
         result = bash_tool.func(
-            runtime,
-            "统计挂载目录",
-            r"find C:\Users\lichen -mindepth 1 -maxdepth 1 -type d",
+            runtime=runtime,
+            description="统计挂载目录",
+            command=r"find C:\Users\lichen -mindepth 1 -maxdepth 1 -type d",
         )
 
     assert result == "ok"
@@ -125,9 +125,9 @@ def test_read_file_tool_passes_virtual_path_for_configured_windows_host_path() -
         patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
     ):
         result = read_file_tool.func(
-            runtime,
-            "读取配置",
-            r"C:\Users\lichen\config.tfx-dms",
+            runtime=runtime,
+            description="读取配置",
+            path=r"C:\Users\lichen\config.tfx-dms",
         )
 
     assert result == "config"
@@ -152,7 +152,12 @@ def test_grep_tool_normalizes_configured_windows_host_path() -> None:
         patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
         patch("deerflow.sandbox.tools._get_custom_mounts", return_value=_MOUNTS),
     ):
-        result = grep_tool.func(runtime, "搜索配置", "needle", r"C:\Users\lichen\config.tfx-dms")
+        result = grep_tool.func(
+            runtime=runtime,
+            description="搜索配置",
+            pattern="needle",
+            path=r"C:\Users\lichen\config.tfx-dms",
+        )
 
     assert result == "No matches found under C:\\Users\\lichen\\config.tfx-dms"
     assert calls == ["/root/config.tfx-dms"]
