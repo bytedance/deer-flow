@@ -1576,6 +1576,15 @@ def test_execute_command_returns_stdout_on_success():
     assert sb.is_dead is False
 
 
+def test_execute_command_appends_exit_marker_when_failure_has_output():
+    """LocalSandbox parity: a nonzero exit must survive in the output text
+    even when the command produced output, so evidence consumers (acceptance
+    checklist) recover the actual shell status."""
+    client = FakeClient(commands=FakeCommandsAPI([SimpleNamespace(stdout="5 passed, 1 error\n", stderr="", exit_code=1)]))
+    sb = _make_sandbox(client)
+    assert sb.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
 def test_execute_command_does_not_mark_dead_on_unrelated_error():
 
     def boom(_cmd: str, **kwargs) -> Any:

@@ -430,6 +430,11 @@ function MessageContent_({
         rawContent.includes("<uploaded_files>")
       ) {
         // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
+        // <uploaded_files> is display-only compat for pre-#4174 history (#4212).
+        // Accepted tradeoff (review): a live user typing the legacy spelling can
+        // fabricate chips / hide their own message text — display-only and
+        // self-inflicted, no backend semantics. Age-gating the legacy spelling
+        // is a possible follow-up if this ever matters.
         return parseUploadedFiles(rawContent);
       }
       return null;

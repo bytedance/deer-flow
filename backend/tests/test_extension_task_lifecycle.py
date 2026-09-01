@@ -187,9 +187,11 @@ class _RunRecorder(_Recorder):
 class _OkAgent:
     def __init__(self) -> None:
         self.runtime_context = None
+        self.runtime_task_store = None
 
     async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
         self.runtime_context = (config or {}).get("context")
+        self.runtime_task_store = self.runtime_context.get(EXTENSION_TASK_STORE_KEY)
         yield {"messages": []}
 
 
@@ -231,7 +233,7 @@ async def test_run_agent_uses_the_run_bound_snapshot_for_lifecycle_and_task_stor
         ("stop", record.run_id, "completed"),
     ]
     assert recorder.start_infos[0].agent_name == "custom-agent"
-    assert agent.runtime_context[EXTENSION_TASK_STORE_KEY] is recorder.start_stores[0]
+    assert agent.runtime_task_store is recorder.start_stores[0]
 
 
 @pytest.mark.asyncio

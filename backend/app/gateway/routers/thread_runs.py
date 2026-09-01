@@ -18,7 +18,7 @@ from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
@@ -1019,26 +1019,34 @@ async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> Stream
     )
 
 
-# Register GET and POST as separate routes so each method gets a unique OpenAPI
-# operationId. ``api_route(methods=["GET", "POST"])`` shares one route registration
-# across both methods, which makes FastAPI emit the same ``operationId`` twice and
-# warn about a duplicate operation id during OpenAPI generation.
-@router.get("/{thread_id}/runs/{run_id}/stream", response_model=None)
-@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
-@require_permission("runs", "read", owner_check=True)
-async def stream_existing_run(
+def _reject_get_stream_action(
+    action: Literal["interrupt", "rollback"] | None = Query(default=None, include_in_schema=False),
+) -> None:
+    """Keep the GET join read-only before thread ownership or run lookup."""
+    if action is not None:
+        # SameSite=Lax still sends the session cookie on a cross-site top-level
+        # safe navigation. Reject the state-changing action before the endpoint
+        # wrapper performs its thread ownership lookup.
+        raise HTTPException(
+            status_code=405,
+            detail="`action` is only supported on POST requests",
+            headers={"Allow": "POST"},
+        )
+
+
+async def _stream_existing_run(
     thread_id: ThreadId,
     run_id: str,
     request: Request,
-    action: Literal["interrupt", "rollback"] | None = Query(default=None, description="Cancel action"),
-    wait: int = Query(default=0, description="Block until cancelled (1) or return immediately (0)"),
-):
-    """Join an existing run's SSE stream (GET), or cancel-then-stream (POST).
+    *,
+    action: Literal["interrupt", "rollback"] | None,
+    wait: int,
+) -> Response:
+    """Join an existing run's SSE stream, optionally cancelling it first.
 
-    The LangGraph SDK's ``joinStream`` and ``useStream`` stop button both use
-    ``POST`` to this endpoint.  When ``action=interrupt`` or ``action=rollback``
-    is present the run is cancelled first; the response then streams any
-    remaining buffered events so the client observes a clean shutdown.
+    When ``action=interrupt`` or ``action=rollback`` is present the run is
+    cancelled first; the response then streams any remaining buffered events
+    so the client observes a clean shutdown.
     """
     require_cancel_permission_when_action(request, action)
 
@@ -1097,6 +1105,34 @@ async def stream_existing_run(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# Register POST before GET to preserve the historical route precedence and
+# Allow header, while separate signatures keep cancel-only parameters off the
+# GET schema. The shared route name keeps generated operationIds stable.
+@router.post("/{thread_id}/runs/{run_id}/stream", response_model=None, name="stream_existing_run")
+@require_permission("runs", "read", owner_check=True)
+async def stream_existing_run(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+    action: Literal["interrupt", "rollback"] | None = Query(default=None, description="Cancel action"),
+    wait: int = Query(default=0, description="Block until cancelled (1) or return immediately (0)"),
+) -> Response:
+    """Join an existing run's SSE stream, optionally cancelling it first."""
+    return await _stream_existing_run(thread_id, run_id, request, action=action, wait=wait)
+
+
+@router.get(
+    "/{thread_id}/runs/{run_id}/stream",
+    response_model=None,
+    dependencies=[Depends(_reject_get_stream_action)],
+    name="stream_existing_run",
+)
+@require_permission("runs", "read", owner_check=True)
+async def join_existing_run_stream(thread_id: ThreadId, run_id: str, request: Request) -> Response:
+    """Join an existing run's observation-only SSE stream."""
+    return await _stream_existing_run(thread_id, run_id, request, action=None, wait=0)
 
 
 # ---------------------------------------------------------------------------
