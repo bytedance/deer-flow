@@ -758,37 +758,43 @@ def _arbitrary_exec_arg(args: list[str], *, command: str) -> str | None:
     return None
 
 
-def _validate_mcp_update_request(request: McpConfigUpdateRequest) -> None:
+def _validate_mcp_update_request(
+    request: McpConfigUpdateRequest,
+    *,
+    enforce_execution_policy: bool = True,
+) -> None:
     """Validate API-submitted MCP config before it is persisted.
 
     Local config files can still express arbitrary advanced setups, but the
     HTTP API is an untrusted boundary. Restricting stdio commands here reduces
     the blast radius of a compromised authenticated browser session.
 
-    The command name alone is not a meaningful restriction, so the launcher's
-    ``args`` and ``env`` are screened for the flags and variables that turn an
-    allowlisted binary into an arbitrary code evaluator.
+    Command shape and code-injecting environment variables are invalid at the
+    API boundary even while a server remains disabled. The allowlist and its
+    companion argument screen are execution policy, so targeted offline edits
+    may defer only those checks until the server is enabled.
     """
-    allowed_commands = _allowed_stdio_commands()
+    allowed_commands = _allowed_stdio_commands() if enforce_execution_policy else set()
     for name, server in request.mcp_servers.items():
         transport_type = (server.type or "stdio").lower()
         if transport_type != "stdio":
             continue
 
         command_name = _stdio_command_name(server.command, server_name=name)
-        if command_name not in allowed_commands:
-            allowed = ", ".join(sorted(allowed_commands)) or "<none>"
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(f"MCP server '{name}' uses disallowed stdio command '{command_name}'. Allowed commands: {allowed}. Configure {_MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."),
-            )
+        if enforce_execution_policy:
+            if command_name not in allowed_commands:
+                allowed = ", ".join(sorted(allowed_commands)) or "<none>"
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(f"MCP server '{name}' uses disallowed stdio command '{command_name}'. Allowed commands: {allowed}. Configure {_MCP_STDIO_COMMAND_ALLOWLIST_ENV} to extend this list."),
+                )
 
-        exec_flag = _arbitrary_exec_arg(server.args, command=command_name)
-        if exec_flag is not None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(f"MCP server '{name}' passes '{exec_flag}' to '{command_name}', which would run arbitrary code. Point the server at a package or module instead."),
-            )
+            exec_flag = _arbitrary_exec_arg(server.args, command=command_name)
+            if exec_flag is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(f"MCP server '{name}' passes '{exec_flag}' to '{command_name}', which would run arbitrary code. Point the server at a package or module instead."),
+                )
 
         for env_name in server.env:
             if env_name.strip().upper() in _CODE_INJECTING_ENV_VARS:
@@ -1529,8 +1535,10 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
     """Update one existing server and reload the MCP tool cache."""
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        if body.server.enabled:
-            _validate_mcp_update_request(McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}))
+        _validate_mcp_update_request(
+            McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}),
+            enforce_execution_policy=body.server.enabled,
+        )
         reloaded_servers = await asyncio.to_thread(_apply_mcp_server_config_update, body)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}

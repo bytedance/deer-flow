@@ -447,6 +447,11 @@ Completely replace one existing server while preserving sibling entries.
 Omitted ordinary fields are deleted or reset; explicit `***` placeholders
 restore the corresponding stored secret.
 
+A disabled `stdio` replacement may keep a syntactically valid command outside
+the allowlist for offline editing. Command-shape and code-injecting environment
+variable checks still run when saving; the allowlist and executable-argument
+policy run when the server is enabled.
+
 ```http
 PUT /api/mcp/config/server
 Content-Type: application/json

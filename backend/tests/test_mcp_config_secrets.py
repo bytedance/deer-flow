@@ -2056,6 +2056,61 @@ async def test_update_mcp_server_allows_editing_disabled_disallowed_stdio_server
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("server_fields", "expected_detail"),
+    [
+        ({"command": " "}, "requires a command"),
+        ({"command": "/usr/local/bin/npx"}, "single executable name"),
+        ({"command": "npx --yes"}, "single executable name"),
+        ({"command": "npx;echo"}, "single executable name"),
+        ({"command": "npx", "env": {"BASH_ENV": "/tmp/payload.sh"}}, "environment variable"),
+    ],
+    ids=["blank-command", "command-path", "command-whitespace", "command-metachar", "injecting-env"],
+)
+async def test_update_mcp_server_rejects_invalid_disabled_stdio_without_writing(
+    monkeypatch,
+    tmp_path,
+    server_fields,
+    expected_detail,
+):
+    config_path = tmp_path / "extensions_config.json"
+    original = {
+        "mcpServers": {
+            "target": {
+                "enabled": False,
+                "type": "stdio",
+                "command": "npx",
+                "args": ["mcp-server-fetch"],
+            }
+        },
+        "skills": {},
+    }
+    config_path.write_text(json.dumps(original), encoding="utf-8")
+
+    monkeypatch.setattr(mcp_router.ExtensionsConfig, "resolve_config_path", lambda: config_path)
+    monkeypatch.setattr(mcp_router, "reload_extensions_config", lambda: None)
+    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
+    monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await update_mcp_server(
+            _request_with_role("admin"),
+            McpServerConfigUpdateRequest(
+                server_name="target",
+                server=McpServerConfigResponse(
+                    enabled=False,
+                    type="stdio",
+                    **server_fields,
+                ),
+            ),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert expected_detail in exc_info.value.detail
+    assert json.loads(config_path.read_text(encoding="utf-8")) == original
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_disallowed_command(
     monkeypatch,
