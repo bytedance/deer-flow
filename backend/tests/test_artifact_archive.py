@@ -235,6 +235,50 @@ def test_archive_rejects_a_symlinked_outputs_root(tmp_path, monkeypatch) -> None
     assert response.status_code == 409
 
 
+def test_archive_rejects_a_hard_linked_member(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    internal = outputs / ".tool-results"
+    internal.mkdir(parents=True)
+    secret = internal / "raw-secret.txt"
+    secret.write_text("internal", encoding="utf-8")
+    public_alias = outputs / "report.txt"
+    try:
+        public_alias.hardlink_to(secret)
+    except OSError:
+        pytest.skip("hard links are unavailable on this platform")
+    client, _, _ = _archive_app(
+        monkeypatch,
+        outputs,
+        paths=["/mnt/user-data/outputs/report.txt"],
+    )
+
+    with client:
+        response = client.post(ARCHIVE_URL)
+
+    assert response.status_code == 409
+
+
+@pytest.mark.parametrize("junction_relative", [Path(), Path("site")])
+def test_archive_rejects_junction_like_roots_and_components(
+    tmp_path,
+    monkeypatch,
+    junction_relative: Path,
+) -> None:
+    outputs = tmp_path / "outputs"
+    target = outputs / "site" / "report.txt"
+    target.parent.mkdir(parents=True)
+    target.write_text("report", encoding="utf-8")
+    junction = outputs / junction_relative
+    monkeypatch.setattr(Path, "is_junction", lambda self: self == junction)
+
+    with pytest.raises(artifact_archive.ArtifactArchiveError):
+        artifact_archive.build_artifact_archive(
+            outputs,
+            ["/mnt/user-data/outputs/site/report.txt"],
+            user_data_dir=outputs.parent,
+        )
+
+
 def test_archive_rejects_missing_or_nonterminal_delivery(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

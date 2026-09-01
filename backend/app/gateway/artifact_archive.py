@@ -65,6 +65,10 @@ def _check_deadline(deadline: float) -> None:
         raise ArtifactArchiveError("Artifact archive creation timed out", 503)
 
 
+def _is_link_like(path: Path, metadata: os.stat_result) -> bool:
+    return stat.S_ISLNK(metadata.st_mode) or path.is_junction()
+
+
 def _member(
     root: Path,
     virtual_path: str,
@@ -103,11 +107,11 @@ def _member(
             _check_deadline(deadline)
             current /= part
             metadata = os.lstat(current)
-            if stat.S_ISLNK(metadata.st_mode):
+            if _is_link_like(current, metadata):
                 raise _reject()
             components.append((current, metadata.st_dev, metadata.st_ino))
         initial = os.lstat(candidate)
-        if not stat.S_ISREG(initial.st_mode):
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
             raise _reject()
         resolved = candidate.resolve(strict=True)
         resolved.relative_to(root)
@@ -155,7 +159,7 @@ def _copy_member(
         _check_deadline(deadline)
         before = os.fstat(descriptor)
         identity = (before.st_dev, before.st_ino)
-        if not stat.S_ISREG(before.st_mode) or identity != (member.initial.st_dev, member.initial.st_ino):
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or identity != (member.initial.st_dev, member.initial.st_ino):
             raise _reject()
         if before.st_size > MAX_FILE_BYTES:
             raise _too_large(f"Each archived artifact must be at most {MAX_FILE_BYTES} bytes")
@@ -181,20 +185,17 @@ def _copy_member(
 
         _check_deadline(deadline)
         after = os.fstat(descriptor)
-        if (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
+        if after.st_nlink != 1 or (after.st_dev, after.st_ino) != identity or (after.st_size, after.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             raise _reject()
         if _hash_descriptor(descriptor, before.st_size, deadline) != copied_digest.digest():
             raise _reject()
         after_verification = os.fstat(descriptor)
-        if (after_verification.st_dev, after_verification.st_ino) != identity or (after_verification.st_size, after_verification.st_mtime_ns) != (
-            before.st_size,
-            before.st_mtime_ns,
-        ):
+        if after_verification.st_nlink != 1 or (after_verification.st_dev, after_verification.st_ino) != identity or (after_verification.st_size, after_verification.st_mtime_ns) != (before.st_size, before.st_mtime_ns):
             raise _reject()
         try:
             for component, device, inode in member.components:
                 current = os.lstat(component)
-                if stat.S_ISLNK(current.st_mode) or (current.st_dev, current.st_ino) != (device, inode):
+                if _is_link_like(component, current) or (current.st_dev, current.st_ino) != (device, inode):
                     raise _reject()
         except OSError as exc:
             raise _reject() from exc
@@ -216,7 +217,7 @@ def build_artifact_archive(
             raise _reject()
         user_data_metadata = os.lstat(user_data_dir)
         outputs_metadata = os.lstat(outputs_dir)
-        if stat.S_ISLNK(user_data_metadata.st_mode) or not stat.S_ISDIR(user_data_metadata.st_mode) or stat.S_ISLNK(outputs_metadata.st_mode) or not stat.S_ISDIR(outputs_metadata.st_mode):
+        if _is_link_like(user_data_dir, user_data_metadata) or not stat.S_ISDIR(user_data_metadata.st_mode) or _is_link_like(outputs_dir, outputs_metadata) or not stat.S_ISDIR(outputs_metadata.st_mode):
             raise _reject()
         user_data_root = user_data_dir.resolve(strict=True)
         root = outputs_dir.resolve(strict=True)
