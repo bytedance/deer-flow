@@ -3681,6 +3681,7 @@ class TestSubagentGuardrailAttribution:
         assert context is not None
         assert context.get("__run_loop_detection_recorder") is recorder
         assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(

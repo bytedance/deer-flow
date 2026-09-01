@@ -90,9 +90,10 @@ and its event store must not cross the isolated-loop boundary. Durable batch
 subagents have no parent run journal and do not emit these events. The event's
 `action` is `warn` or
 `hard_stop`. The `changes` object identifies the detection layer, affected tool
-names, observed count, and effective threshold. Tool arguments, prompts,
-message content, tool results, and argument-derived hashes are not persisted in
-this event.
+names, observed count, effective threshold, whether the producer was a
+subagent, and its agent id when applicable. Tool arguments, prompts, message
+content, tool results, and argument-derived hashes are not persisted in this
+event.
 
 ### Opaque Run Outputs
 

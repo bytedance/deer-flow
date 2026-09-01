@@ -112,14 +112,21 @@ class _ParentLoopMiddlewareRecorderProxy:
                 # The loop may close between is_closed() and scheduling.
                 logger.debug("Dropping subagent middleware event after parent loop shutdown")
 
+    @property
+    def is_closed(self) -> bool:
+        """Whether the task-tool boundary has fenced new child events."""
+        with self._state_lock:
+            return self._closed
+
     async def aclose(self) -> None:
         """Fence late child events and drain every append accepted before it."""
+        if asyncio.get_running_loop() is not self._loop:
+            logger.warning("Cannot drain subagent middleware recorder from a non-owner loop")
+            return
         with self._state_lock:
             self._closed = True
         if self._loop.is_closed():
             return
-        if asyncio.get_running_loop() is not self._loop:
-            raise RuntimeError("middleware recorder proxy must close on its owner loop")
         # record_middleware holds _state_lock through call_soon_threadsafe, so
         # all accepted callbacks are already ahead of this continuation.
         await asyncio.sleep(0)

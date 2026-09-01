@@ -647,6 +647,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     ) -> None:
         """Persist a loop-detection transition without sensitive tool data."""
         context = getattr(runtime, "context", None)
+        is_subagent = isinstance(context, dict) and context.get("is_subagent") is True
         recorder = context.get(LOOP_DETECTION_RECORDER_CONTEXT_KEY) if isinstance(context, dict) else None
         if recorder is None and isinstance(context, dict):
             # Lead-agent runs expose the ordinary RunJournal. Native task-tool
@@ -662,6 +663,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
                 hook="after_model",
                 action=decision.action,
                 changes={
+                    "is_subagent": is_subagent,
+                    "agent_id": context.get("agent_id") if is_subagent else None,
                     "detection_layer": decision.detection_layer,
                     "tool_names": list(decision.tool_names),
                     "count": decision.count,

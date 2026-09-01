@@ -685,6 +685,8 @@ class TestLoopDetectionRunEvents:
         assert recorded.kwargs["hook"] == "after_model"
         assert recorded.kwargs["action"] == "warn"
         assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
             "detection_layer": "identical_call_set",
             "tool_names": ["bash"],
             "count": 2,
@@ -699,6 +701,8 @@ class TestLoopDetectionRunEvents:
         recorder = MagicMock()
         runtime = _make_runtime()
         runtime.context["__run_loop_detection_recorder"] = recorder
+        runtime.context["is_subagent"] = True
+        runtime.context["agent_id"] = "general-purpose"
         assert "__run_journal" not in runtime.context
         mw = LoopDetectionMiddleware(
             warn_threshold=2,
@@ -713,6 +717,8 @@ class TestLoopDetectionRunEvents:
 
         recorder.record_middleware.assert_called_once()
         assert recorder.record_middleware.call_args.kwargs["action"] == "warn"
+        assert recorder.record_middleware.call_args.kwargs["changes"]["is_subagent"] is True
+        assert recorder.record_middleware.call_args.kwargs["changes"]["agent_id"] == "general-purpose"
 
     def test_identical_call_hard_stop_records_event(self):
         journal = MagicMock()
@@ -740,6 +746,8 @@ class TestLoopDetectionRunEvents:
         assert recorded.kwargs["tag"] == "loop_detection"
         assert recorded.kwargs["action"] == "hard_stop"
         assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
             "detection_layer": "identical_call_set",
             "tool_names": ["bash"],
             "count": 3,
@@ -769,6 +777,8 @@ class TestLoopDetectionRunEvents:
 
         assert recorded.kwargs["action"] == "warn"
         assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
             "detection_layer": "tool_frequency",
             "tool_names": ["bash"],
             "count": 2,
@@ -805,6 +815,8 @@ class TestLoopDetectionRunEvents:
         recorded = journal.record_middleware.call_args_list[-1]
         assert recorded.kwargs["action"] == "hard_stop"
         assert recorded.kwargs["changes"] == {
+            "is_subagent": False,
+            "agent_id": None,
             "detection_layer": "tool_frequency",
             "tool_names": ["bash"],
             "count": 3,

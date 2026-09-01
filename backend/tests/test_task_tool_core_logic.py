@@ -98,6 +98,20 @@ def test_parent_loop_middleware_recorder_proxy_drops_after_loop_closed():
     )
 
 
+def test_parent_loop_middleware_recorder_close_is_fail_open_off_owner_loop(caplog):
+    """A bad close caller must not replace the task tool's original outcome."""
+    owner_loop = asyncio.new_event_loop()
+    proxy = task_tool_module._ParentLoopMiddlewareRecorderProxy(MagicMock(), owner_loop)
+    try:
+        with caplog.at_level("WARNING"):
+            asyncio.run(proxy.aclose())
+
+        assert proxy.is_closed is False
+        assert "Cannot drain subagent middleware recorder from a non-owner loop" in caplog.text
+    finally:
+        owner_loop.close()
+
+
 class FakeSubagentStatus(Enum):
     # Match production enum values so branch comparisons behave identically.
     PENDING = "pending"
@@ -442,7 +456,7 @@ def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatc
 
     kwargs = captured["executor_kwargs"]
     proxy = kwargs["loop_detection_recorder"]
-    assert "run_journal_recorder" not in kwargs
+    assert proxy.is_closed is True
     proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
     journal.record_middleware.assert_not_called()
 
