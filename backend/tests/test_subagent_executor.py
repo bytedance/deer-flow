@@ -3699,6 +3699,10 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+        lease_owner = context.get("sandbox_lease_owner_id")
+        assert isinstance(lease_owner, str)
+        assert lease_owner.startswith("subagent:")
+        assert context.get("sandbox_command_scope_id") == lease_owner
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(

@@ -178,8 +178,13 @@ class TestErrorObservationRetry:
         # ...and the retry targets exactly that created session, never an
         # uncreated/fabricated id (which would 404).
         assert exec_calls[1].get("id") == created_ids[0]
-        # ...and that one-shot recovery session is released afterwards so a
-        # sandbox that keeps hitting corruption doesn't accumulate sessions.
+        # The recovered session is promoted: future commands must not return
+        # to the corrupted implicit default session.
+        assert cleaned_ids == []
+        assert sandbox.execute_command("again") == "ok"
+        assert exec_calls[-1].get("id") == created_ids[0]
+
+        sandbox.close()
         assert cleaned_ids == [created_ids[0]]
 
     def test_cleanup_failure_does_not_mask_successful_retry(self, sandbox):
@@ -201,6 +206,33 @@ class TestErrorObservationRetry:
         # into an "Error: ..." result.
         assert sandbox.execute_command("test") == "recovered"
 
+    def test_failed_replacement_never_falls_back_to_corrupt_default(self, sandbox):
+        created_ids: list[str] = []
+        exec_ids: list[str | None] = []
+
+        def mock_create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def mock_exec(command, **kwargs):
+            session_id = kwargs.get("id")
+            exec_ids.append(session_id)
+            if len(exec_ids) <= 2:
+                return SimpleNamespace(data=SimpleNamespace(output="'ErrorObservation' object has no attribute 'exit_code'"))
+            return SimpleNamespace(data=SimpleNamespace(output="healthy"))
+
+        sandbox._client.shell.create_session = mock_create_session
+        sandbox._client.shell.exec_command = mock_exec
+
+        assert "ErrorObservation" in sandbox.execute_command("first")
+        assert sandbox.execute_command("second") == "healthy"
+        assert exec_ids[0] is None
+        assert exec_ids[1] == created_ids[0]
+        # The next call creates another explicit session instead of touching
+        # the already-proven-corrupt implicit default again.
+        assert exec_ids[2] == created_ids[1]
+        assert all(session_id is not None for session_id in exec_ids[1:])
+
     def test_no_retry_on_clean_output(self, sandbox):
         """Normal output should not trigger a retry."""
         call_count = 0
@@ -215,6 +247,146 @@ class TestErrorObservationRetry:
         result = sandbox.execute_command("echo hello")
         assert result == "all good"
         assert call_count == 1
+
+
+class TestScopedShellSessions:
+    """Concurrent subagents use independent persistent shell sessions (#5128)."""
+
+    def test_different_scopes_execute_concurrently(self, sandbox):
+        active = 0
+        max_active = 0
+        active_lock = threading.Lock()
+        start_barrier = threading.Barrier(2)
+        session_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            session_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def overlapping_exec(command, **kwargs):
+            nonlocal active, max_active
+            with active_lock:
+                active += 1
+                max_active = max(max_active, active)
+            start_barrier.wait(timeout=1)
+            with active_lock:
+                active -= 1
+            return SimpleNamespace(data=SimpleNamespace(output=command, exit_code=0))
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = overlapping_exec
+
+        outputs: list[str] = []
+
+        def worker(scope_id: str):
+            outputs.append(
+                sandbox.execute_command_in_scope(
+                    scope_id,
+                    scope_id=scope_id,
+                )
+            )
+
+        threads = [
+            threading.Thread(target=worker, args=("subagent-a",)),
+            threading.Thread(target=worker, args=("subagent-b",)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert sorted(outputs) == ["subagent-a", "subagent-b"]
+        assert max_active == 2
+        assert len(set(session_ids)) == 2
+
+    def test_same_scope_remains_serialized(self, sandbox):
+        call_log: list[tuple[str, str]] = []
+        start_barrier = threading.Barrier(3)
+
+        sandbox._client.shell.create_session = lambda id, **kwargs: SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def slow_exec(command, **kwargs):
+            call_log.append(("enter", command))
+            import time
+
+            time.sleep(0.03)
+            call_log.append(("exit", command))
+            return SimpleNamespace(data=SimpleNamespace(output=command, exit_code=0))
+
+        sandbox._client.shell.exec_command = slow_exec
+
+        def worker(command: str):
+            start_barrier.wait()
+            sandbox.execute_command_in_scope(command, scope_id="one-subagent")
+
+        threads = [threading.Thread(target=worker, args=(f"cmd-{index}",)) for index in range(3)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        for index in range(0, len(call_log), 2):
+            assert call_log[index][0] == "enter"
+            assert call_log[index + 1] == ("exit", call_log[index][1])
+
+    def test_corrupt_scoped_session_is_replaced_and_reused(self, sandbox):
+        created_ids: list[str] = []
+        cleaned_ids: list[str] = []
+        exec_ids: list[str] = []
+
+        def create_session(id, **kwargs):
+            created_ids.append(id)
+            return SimpleNamespace(data=SimpleNamespace(session_id=id))
+
+        def exec_command(command, **kwargs):
+            exec_ids.append(kwargs["id"])
+            if len(exec_ids) == 1:
+                return SimpleNamespace(
+                    data=SimpleNamespace(
+                        output="'ErrorObservation' object has no attribute 'exit_code'",
+                        exit_code=None,
+                    )
+                )
+            return SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+
+        sandbox._client.shell.create_session = create_session
+        sandbox._client.shell.exec_command = exec_command
+        sandbox._client.shell.cleanup_session = lambda session_id, **kwargs: cleaned_ids.append(session_id)
+
+        assert sandbox.execute_command_in_scope("first", scope_id="subagent-a") == "ok"
+        assert len(created_ids) == 2
+        assert cleaned_ids == [created_ids[0]]
+        assert exec_ids == [created_ids[0], created_ids[1]]
+
+        assert sandbox.execute_command_in_scope("second", scope_id="subagent-a") == "ok"
+        assert exec_ids[-1] == created_ids[1]
+
+        sandbox.release_command_scope("subagent-a")
+        assert cleaned_ids == created_ids
+
+    def test_env_command_keeps_fresh_bash_exec_semantics(self, sandbox):
+        sandbox._client.bash.exec = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr="", exit_code=0)))
+
+        assert (
+            sandbox.execute_command_in_scope(
+                "echo $TOKEN",
+                env={"TOKEN": "secret"},
+                scope_id="subagent-a",
+            )
+            == "ok"
+        )
+        sandbox._client.bash.exec.assert_called_once()
+        sandbox._client.shell.create_session.assert_not_called()
+        assert sandbox._scoped_shell_sessions == {}
+
+    def test_closed_sandbox_rejects_new_scope_without_leaking_session(self, sandbox):
+        client = sandbox._client
+
+        sandbox.close()
+
+        assert sandbox.execute_command_in_scope("echo late", scope_id="subagent-late") == "Error: sandbox client is closed"
+        assert sandbox._scoped_shell_sessions == {}
+        client.shell.create_session.assert_not_called()
 
 
 class TestBashExecUnsupportedFailFast:
