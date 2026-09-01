@@ -229,6 +229,37 @@ async def test_neutralize_backslash_separators():
     assert neutralize("mnt\\user-data\\report.pdf") == "[private artifact omitted]"
 
 
+async def test_neutralize_separator_runs():
+    """Runs of raw forward slashes classify like their escaped forms.
+
+    ``\\/`` at any depth collapses (round 5), but raw ``//`` and
+    percent-encoded ``%2F%2F`` runs did not — and the shipped nginx keeps
+    ``merge_slashes`` on, so ``/api//threads//…`` resolves to the real
+    owner-scoped route in a browser. Public doubled paths keep their
+    original bytes; only classification sees the collapse.
+    """
+    neutralize = _neutralize_private_references
+    assert neutralize("/api//threads//thread-secret//artifacts//x.png") == "[private artifact omitted]"
+    assert neutralize("//mnt//user-data//x.png") == "[private artifact omitted]"
+    assert neutralize("mnt%2F%2Fuser-data/x.png") == "[private artifact omitted]"
+    # public separator runs are not rewritten in the output
+    assert neutralize("see //example.com//docs next") == "see //example.com//docs next"
+
+
+async def test_neutralize_terminator_joined_private_paths():
+    """Whitespace-free tokens may carry several private paths joined by
+    prose/markdown terminators (tool-style comma lists). The first cut must
+    not publish the tail items; a public tail after the terminator still
+    survives."""
+    neutralize = _neutralize_private_references
+    assert neutralize("/mnt/user-data/a.txt,/mnt/user-data/b.txt") == "[private artifact omitted]"
+    assert neutralize("/api/threads/thread-secret/artifacts/a.png;/mnt/user-data/b.png") == "[private artifact omitted]"
+    assert neutralize("(/mnt/user-data/a.txt),(/mnt/user-data/b.txt)") == "([private artifact omitted])"
+    # terminator followed by public content keeps both sides
+    assert neutralize("/mnt/user-data/a.txt, see the docs") == "[private artifact omitted], see the docs"
+    assert neutralize("/mnt/user-data/a.txt,/etc/hosts") == "[private artifact omitted],/etc/hosts"
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted

@@ -294,6 +294,21 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
                 spans.append((backslash, backslash))
             i = run_end
             continue
+        if char == "/":
+            run_end = i
+            while run_end < n and text[run_end] == "/":
+                run_end += 1
+            if run_end - i > 1:
+                # A run of separators is one separator: raw ``//`` (and,
+                # composed across passes, entity- or percent-decoded doubles)
+                # must classify like the single ``/`` whose escaped forms
+                # already collapse — the shipped nginx leaves ``merge_slashes``
+                # on, so ``/api//threads//…`` reaches the real owner-scoped
+                # route when followed.
+                normalized.append("/")
+                spans.append((i, run_end - 1))
+                i = run_end
+                continue
         normalized.append(char)
         spans.append((i, i))
         i += 1
@@ -357,7 +372,10 @@ _REFERENCE_TRAILING_PUNCTUATION = ".,;:!?)]}\"'`*_~(|[<"
 # URL structure (``/``, ``?``, ``#``, consumed by the scan before this set
 # is consulted) continues it so a query string or nested path can never
 # survive the cut. Dots continue (filenames) and are handled by the
-# trailing-punctuation trim instead.
+# trailing-punctuation trim instead. A terminator run only ends the cut
+# when what follows it is not itself private: tool-style output joins
+# several paths with commas/semicolons/parens inside one whitespace-free
+# token, and the first cut must not publish the tail items.
 _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 
 # Owner-scoped API surface (round 8): every ``/api/threads/{id}/<segment>``
@@ -382,7 +400,9 @@ def _is_private_reference(value: str) -> bool:
 def _private_reference_cut_end(value: str) -> int | None:
     """Index just past the private path inside *value* (a normalized-shadow
     slice): the path continues through URL structure and in-segment bytes,
-    and stops at the first prose/markdown terminator or whitespace."""
+    and stops at the first prose/markdown terminator or whitespace — unless
+    the terminator only joins this private path to another one, in which
+    case the cut continues through the joined items."""
     prefix = _API_THREAD_REFERENCE_RE.search(value) or _MNT_USER_DATA_RE.search(value)
     if prefix is None:
         return None
@@ -394,6 +414,12 @@ def _private_reference_cut_end(value: str) -> int | None:
             end += 1
             continue
         if char in _REFERENCE_CUT_TERMINATORS or char.isspace():
+            probe = end
+            while probe < n and value[probe] in _REFERENCE_CUT_TERMINATORS:
+                probe += 1
+            if probe < n and not value[probe].isspace() and _is_private_reference(value[probe:]):
+                end = probe
+                continue
             break
         end += 1
     return end
