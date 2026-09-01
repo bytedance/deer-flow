@@ -23,20 +23,23 @@ def manager() -> RunManager:
     return RunManager()
 
 
-class FlakyStatusRunStore(MemoryRunStore):
-    """Memory run store that simulates transient SQLite status-write failures."""
+class FlakyTerminalFinalizationRunStore(MemoryRunStore):
+    """Memory store that transiently fails owner-fenced terminal writes."""
 
-    def __init__(self, *, status_failures: int) -> None:
+    def __init__(self, *, terminal_failures: int) -> None:
         super().__init__()
-        self.status_failures = status_failures
-        self.status_update_attempts = 0
+        self.terminal_failures = terminal_failures
+        self.terminal_finalize_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
-        self.status_update_attempts += 1
-        if self.status_failures > 0:
-            self.status_failures -= 1
+    async def finalize_completion_if_owned_and_not_cancelled(self, run_id, **kwargs):
+        self.terminal_finalize_attempts += 1
+        if self.terminal_failures > 0:
+            self.terminal_failures -= 1
             raise sqlite3.OperationalError("database is locked")
-        return await super().update_status(run_id, status, error=error, stop_reason=stop_reason)
+        return await super().finalize_completion_if_owned_and_not_cancelled(
+            run_id,
+            **kwargs,
+        )
 
 
 class MissingRowStatusRunStore(MemoryRunStore):
@@ -47,18 +50,18 @@ class MissingRowStatusRunStore(MemoryRunStore):
         return False
 
 
-class PermanentStatusRunStore(MemoryRunStore):
-    """Memory run store that simulates a permanent SQLAlchemy write failure."""
+class PermanentTerminalFinalizationRunStore(MemoryRunStore):
+    """Memory store that permanently fails owner-fenced terminal writes."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.status_update_attempts = 0
+        self.terminal_finalize_attempts = 0
 
-    async def update_status(self, run_id, status, *, error=None, stop_reason=None):
-        self.status_update_attempts += 1
+    async def finalize_completion_if_owned_and_not_cancelled(self, run_id, **kwargs):
+        self.terminal_finalize_attempts += 1
         raise SQLAlchemyDatabaseError(
             "UPDATE runs SET status = :status WHERE run_id = :run_id",
-            {"status": status, "run_id": run_id},
+            {"status": kwargs["status"], "run_id": run_id},
             sqlite3.DatabaseError("no such table: runs"),
         )
 
@@ -76,11 +79,12 @@ class FailingTakeoverRunStore(MemoryRunStore):
 
 
 class MissingCompletionRunStore(MemoryRunStore):
-    """Memory run store that reports one missing row for completion updates."""
+    """Memory run store that observes atomic missing-row recovery."""
 
     def __init__(self) -> None:
         super().__init__()
         self.completion_update_attempts = 0
+        self.terminal_insert_attempts = 0
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         self.completion_update_attempts += 1
@@ -88,17 +92,26 @@ class MissingCompletionRunStore(MemoryRunStore):
             return False
         return await super().update_run_completion(run_id, status=status, **kwargs)
 
+    async def insert_terminal_completion_if_absent(self, run_id, **kwargs):
+        self.terminal_insert_attempts += 1
+        return await super().insert_terminal_completion_if_absent(run_id, **kwargs)
+
 
 class AlwaysMissingCompletionRunStore(MemoryRunStore):
-    """Memory run store that keeps reporting missing rows for completion updates."""
+    """Memory run store whose atomic insert claims success but loses the row."""
 
     def __init__(self) -> None:
         super().__init__()
         self.completion_update_attempts = 0
+        self.terminal_insert_attempts = 0
 
     async def update_run_completion(self, run_id, *, status, **kwargs):
         self.completion_update_attempts += 1
         return False
+
+    async def insert_terminal_completion_if_absent(self, run_id, **kwargs):
+        self.terminal_insert_attempts += 1
+        return True
 
 
 class FailingDeleteRunStore(MemoryRunStore):
@@ -339,10 +352,16 @@ async def test_cancel_persists_interrupted_status_to_store():
 
 
 @pytest.mark.anyio
-async def test_status_persistence_retries_transient_sqlite_lock():
-    """Transient SQLite lock errors should not leave a final status stale."""
-    store = FlakyStatusRunStore(status_failures=2)
-    manager = RunManager(store=store)
+async def test_terminal_persistence_retries_transient_sqlite_lock():
+    """Transient SQLite lock errors should retry the fenced terminal CAS."""
+    store = FlakyTerminalFinalizationRunStore(terminal_failures=2)
+    manager = RunManager(
+        store=store,
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=3,
+            initial_delay=0,
+        ),
+    )
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.running)
 
@@ -351,7 +370,7 @@ async def test_status_persistence_retries_transient_sqlite_lock():
     stored = await store.get(record.run_id)
     assert stored is not None
     assert stored["status"] == "success"
-    assert store.status_update_attempts >= 4
+    assert store.terminal_finalize_attempts == 3
 
 
 @pytest.mark.anyio
@@ -373,7 +392,7 @@ async def test_status_persistence_recreates_missing_store_row():
 @pytest.mark.anyio
 async def test_status_persistence_does_not_retry_permanent_sqlalchemy_errors():
     """Permanent SQLAlchemy failures should not be retried as SQLite pressure."""
-    store = PermanentStatusRunStore()
+    store = PermanentTerminalFinalizationRunStore()
     manager = RunManager(
         store=store,
         persistence_retry_policy=PersistenceRetryPolicy(max_attempts=5, initial_delay=0),
@@ -382,7 +401,7 @@ async def test_status_persistence_does_not_retry_permanent_sqlalchemy_errors():
 
     await manager.set_status(record.run_id, RunStatus.error, error="boom")
 
-    assert store.status_update_attempts == 1
+    assert store.terminal_finalize_attempts == 1
 
 
 @pytest.mark.anyio
@@ -413,10 +432,25 @@ async def test_try_start_respects_durable_and_racing_cancels():
 
 
 @pytest.mark.anyio
-async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
+async def test_fail_start_if_pending_marks_pending_run_error_and_persists(
+    monkeypatch: pytest.MonkeyPatch,
+):
     """Worker attach failures should finalize only runs still pending startup."""
     store = MemoryRunStore()
     manager = RunManager(store=store)
+    schedule_terminal_eviction = manager.schedule_terminal_eviction
+    scheduled_evictions = []
+
+    def schedule_immediately(run_id: str):
+        task = schedule_terminal_eviction(run_id, delay=0)
+        scheduled_evictions.append(task)
+        return task
+
+    monkeypatch.setattr(
+        manager,
+        "schedule_terminal_eviction",
+        schedule_immediately,
+    )
     record = await manager.create_or_reject("thread-1")
     error = "Failed to attach run worker: boom"
 
@@ -429,6 +463,11 @@ async def test_fail_start_if_pending_marks_pending_run_error_and_persists():
     assert stored is not None
     assert stored["status"] == RunStatus.error.value
     assert stored["error"] == error
+    eviction = scheduled_evictions[0]
+    assert eviction is not None
+    await eviction
+    assert record.run_id not in manager._runs
+    assert record.thread_id not in manager._runs_by_thread
 
     running = await manager.create_or_reject("thread-2")
     assert await manager.try_start(running.run_id) == RunStartOutcome.started
@@ -467,22 +506,25 @@ async def test_completion_persistence_recreates_missing_store_row():
     assert stored["total_tokens"] == 42
     assert stored["llm_call_count"] == 2
     assert stored["last_ai_message"] == "done"
-    assert store.completion_update_attempts == 2
+    assert store.completion_update_attempts == 0
+    assert store.terminal_insert_attempts == 1
 
 
 @pytest.mark.anyio
 async def test_completion_persistence_warns_when_recreated_row_still_missing(caplog):
-    """A second zero-row completion update after recreation should not be silent."""
+    """A missing row after claimed atomic insertion should not be silent."""
     store = AlwaysMissingCompletionRunStore()
     manager = RunManager(store=store)
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.success)
+    await store.delete(record.run_id)
     caplog.set_level(logging.WARNING, logger="deerflow.runtime.runs.manager")
 
     await manager.update_run_completion(record.run_id, status="success", total_tokens=42)
 
-    assert store.completion_update_attempts == 2
-    assert "affected no rows after row recreation" in caplog.text
+    assert store.completion_update_attempts == 0
+    assert store.terminal_insert_attempts == 1
+    assert "durable status is missing" in caplog.text
 
 
 @pytest.mark.anyio
@@ -1141,12 +1183,19 @@ async def test_create_or_reject_cleanup_failure_preserves_caller_cancellation(
     class FailingReplacementCleanupStore(MemoryRunStore):
         replacement_update_failed = False
 
-        async def update_status(self, run_id: str, status: str, **kwargs: Any) -> bool:
+        async def finalize_completion_if_owned_and_not_cancelled(
+            self,
+            run_id: str,
+            **kwargs: Any,
+        ) -> Any:
             row = await super().get(run_id)
-            if status == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
+            if kwargs.get("status") == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
                 self.replacement_update_failed = True
                 raise RuntimeError("replacement status unavailable")
-            return await super().update_status(run_id, status, **kwargs)
+            return await super().finalize_completion_if_owned_and_not_cancelled(
+                run_id,
+                **kwargs,
+            )
 
         async def get(self, run_id: str, *, user_id: str | None = None) -> dict[str, Any] | None:
             row = await super().get(run_id, user_id=user_id)
@@ -1188,12 +1237,24 @@ async def test_create_or_reject_preserves_peer_terminal_status_during_cancel_ret
     class PeerWinsReplacementInterruptStore(MemoryRunStore):
         replacement_attempts = 0
 
-        async def update_status(self, run_id: str, status: str, **kwargs: Any) -> bool:
+        async def finalize_completion_if_owned_and_not_cancelled(
+            self,
+            run_id: str,
+            **kwargs: Any,
+        ) -> Any:
             row = await self.get(run_id)
-            if status == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
+            if kwargs.get("status") == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
                 self.replacement_attempts += 1
                 if self.replacement_attempts == 1:
                     raise RuntimeError("replacement status write failed")
+            return await super().finalize_completion_if_owned_and_not_cancelled(
+                run_id,
+                **kwargs,
+            )
+
+        async def update_status(self, run_id: str, status: str, **kwargs: Any) -> bool:
+            row = await self.get(run_id)
+            if status == RunStatus.interrupted.value and row is not None and row.get("status") == RunStatus.pending.value:
                 await super().update_status(run_id, RunStatus.error.value, error="peer takeover")
                 return False
             return await super().update_status(run_id, status, **kwargs)

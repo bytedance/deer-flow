@@ -6,12 +6,24 @@ Uses a temp SQLite DB to test ORM-backed CRUD operations.
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
+from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.persistence.run import RunRepository
+from deerflow.persistence.run.sql import _database_wall_clock
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import RunStore
+
+
+def test_postgres_lease_fence_uses_wall_clock_not_transaction_time():
+    """A row-lock wait must not reuse PostgreSQL's transaction-start time."""
+    statement = select(_database_wall_clock("postgresql"))
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+
+    assert "clock_timestamp()" in compiled
+    assert "CURRENT_TIMESTAMP" not in compiled
 
 
 async def _make_repo(tmp_path):
@@ -87,6 +99,45 @@ async def test_update_run_progress_defaults_to_noop_for_custom_store():
 
 
 @pytest.mark.anyio
+async def test_owned_completion_finalize_defaults_to_unsupported_for_custom_store():
+    store = _CustomRunStoreWithoutProgress()
+
+    result = await store.finalize_completion_if_owned_and_not_cancelled(
+        "r1",
+        expected_owner_worker_id="worker-1",
+        status="success",
+        total_tokens=1,
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_terminal_insert_defaults_to_unsupported_for_custom_store():
+    store = _CustomRunStoreWithoutProgress()
+
+    result = await store.insert_terminal_completion_if_absent(
+        "r1",
+        run_payload={"thread_id": "t1"},
+        completion_payload={"status": "success"},
+    )
+
+    assert result is None
+
+
+@pytest.mark.anyio
+async def test_checkpoint_mutation_fence_defaults_to_unsupported_for_custom_store():
+    store = _CustomRunStoreWithoutProgress()
+
+    async with store.checkpoint_mutation_fence(
+        "r1",
+        expected_owner_worker_id="worker-1",
+        lease_seconds=30,
+    ) as fence:
+        assert fence.acquired is False
+
+
+@pytest.mark.anyio
 async def test_legacy_create_run_atomic_store_remains_compatible():
     store = _CustomRunStoreWithoutProgress()
 
@@ -118,6 +169,39 @@ class TestRunRepository:
         assert row["run_id"] == "r1"
         assert row["thread_id"] == "t1"
         assert row["status"] == "pending"
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_checkpoint_mutation_fence_requires_live_owner_and_renews_lease(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        original_expiry = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        await repo.put(
+            "r-fence",
+            thread_id="t-fence",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=original_expiry,
+        )
+
+        async with repo.checkpoint_mutation_fence(
+            "r-fence",
+            expected_owner_worker_id="worker-a",
+            lease_seconds=120,
+        ) as fence:
+            assert fence.acquired is True
+
+        stored = await repo.get("r-fence")
+        assert stored is not None
+        assert fence.lease_expires_at is not None
+        assert stored["lease_expires_at"] == fence.lease_expires_at
+        assert datetime.fromisoformat(stored["lease_expires_at"]) > datetime.now(UTC) + timedelta(seconds=110)
+
+        async with repo.checkpoint_mutation_fence(
+            "r-fence",
+            expected_owner_worker_id="worker-b",
+            lease_seconds=120,
+        ) as fence:
+            assert fence.acquired is False
         await _cleanup()
 
     @pytest.mark.anyio
@@ -181,6 +265,34 @@ class TestRunRepository:
         assert row["status"] == "error"
         assert row["error"] == "boom"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_generic_writes_do_not_replace_interrupted_terminal_row(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        try:
+            await repo.put("r1", thread_id="t1", status="interrupted")
+
+            assert await repo.update_status("r1", "success") is False
+            assert await repo.update_status("r1", "error", error="late error") is False
+            assert (
+                await repo.update_run_completion(
+                    "r1",
+                    status="error",
+                    total_tokens=99,
+                )
+                is False
+            )
+
+            row = await repo.get("r1")
+            assert row is not None
+            assert row["status"] == "interrupted"
+            assert row["error"] is None
+            assert row["total_tokens"] == 0
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_list_by_thread(self, tmp_path):
@@ -277,6 +389,7 @@ class TestRunRepository:
             message_count=3,
             last_ai_message="The answer is 42",
             first_human_message="What is the meaning?",
+            stop_reason="token_capped",
         )
         row = await repo.get("r1")
         assert updated is True
@@ -287,6 +400,7 @@ class TestRunRepository:
         assert row["message_count"] == 3
         assert row["last_ai_message"] == "The answer is 42"
         assert row["first_human_message"] == "What is the meaning?"
+        assert row["stop_reason"] == "token_capped"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -310,6 +424,418 @@ class TestRunRepository:
         assert row["status"] == "error"
         assert row["error"] == "peer takeover"
         await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_finalize_completion_if_owned_and_not_cancelled(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        await repo.put(
+            "owned",
+            thread_id="owned-thread",
+            status="running",
+            owner_worker_id="worker-local",
+        )
+        await repo.put(
+            "peer-owned",
+            thread_id="peer-thread",
+            status="running",
+            owner_worker_id="worker-peer",
+        )
+        await repo.put(
+            "cancelled",
+            thread_id="cancelled-thread",
+            status="running",
+            owner_worker_id="worker-local",
+        )
+        assert await repo.request_cancel("cancelled", action="rollback") == "rollback"
+
+        finalized = await repo.finalize_completion_if_owned_and_not_cancelled(
+            "owned",
+            expected_owner_worker_id="worker-local",
+            status="success",
+            total_input_tokens=10,
+            total_output_tokens=5,
+            total_tokens=15,
+            token_usage_by_model={"model-a": {"input_tokens": 10, "output_tokens": 5}},
+            message_count=2,
+            stop_reason="completed",
+        )
+        peer_miss = await repo.finalize_completion_if_owned_and_not_cancelled(
+            "peer-owned",
+            expected_owner_worker_id="worker-local",
+            status="success",
+            total_tokens=99,
+        )
+        cancel_miss = await repo.finalize_completion_if_owned_and_not_cancelled(
+            "cancelled",
+            expected_owner_worker_id="worker-local",
+            status="success",
+            total_tokens=99,
+        )
+
+        owned = await repo.get("owned")
+        peer_owned = await repo.get("peer-owned")
+        cancelled = await repo.get("cancelled")
+        assert finalized is not None
+        assert finalized.finalized is True
+        assert finalized.durable_write_confirmed is True
+        assert owned["status"] == "success"
+        assert owned["total_input_tokens"] == 10
+        assert owned["total_output_tokens"] == 5
+        assert owned["total_tokens"] == 15
+        assert owned["token_usage_by_model"] == {"model-a": {"input_tokens": 10, "output_tokens": 5}}
+        assert owned["message_count"] == 2
+        assert owned["stop_reason"] == "completed"
+        assert peer_miss is not None
+        assert peer_miss.finalized is False
+        assert peer_owned["status"] == "running"
+        assert peer_owned["total_tokens"] == 0
+        assert cancel_miss is not None
+        assert cancel_miss.finalized is False
+        assert cancel_miss.cancel_action == "rollback"
+        assert cancelled["status"] == "running"
+        assert cancelled["total_tokens"] == 0
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_owner_terminal_cas_requires_live_lease_only_for_active_row(
+        self,
+        tmp_path,
+    ):
+        repo = await _make_repo(tmp_path)
+        expired = "2000-01-01T00:00:00+00:00"
+        try:
+            await repo.put(
+                "expired-active",
+                thread_id="active-thread",
+                status="running",
+                owner_worker_id="worker-local",
+                lease_expires_at=expired,
+            )
+            await repo.put(
+                "expired-terminal",
+                thread_id="terminal-thread",
+                status="success",
+                owner_worker_id="worker-local",
+                lease_expires_at=expired,
+            )
+
+            stale_active = await repo.finalize_completion_if_owned_and_not_cancelled(
+                "expired-active",
+                expected_owner_worker_id="worker-local",
+                status="success",
+                total_tokens=99,
+                require_unexpired_lease=True,
+            )
+            terminal_repair = await repo.finalize_completion_if_owned_and_not_cancelled(
+                "expired-terminal",
+                expected_owner_worker_id="worker-local",
+                status="success",
+                total_tokens=17,
+                require_unexpired_lease=True,
+            )
+
+            active = await repo.get("expired-active")
+            terminal = await repo.get("expired-terminal")
+            assert stale_active.finalized is False
+            assert active is not None
+            assert active["status"] == "running"
+            assert active["total_tokens"] == 0
+            assert terminal_repair.finalized is True
+            assert terminal_repair.durable_write_confirmed is True
+            assert terminal is not None
+            assert terminal["status"] == "success"
+            assert terminal["total_tokens"] == 17
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_cancelled_and_same_terminal_owner_cas_persist_full_snapshot(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            await repo.put(
+                "cancelled-owned",
+                thread_id="cancelled-owned-thread",
+                status="running",
+                owner_worker_id="worker-local",
+            )
+            assert await repo.request_cancel("cancelled-owned", action="interrupt") == "interrupt"
+
+            cancelled = await repo.finalize_cancelled_completion_if_owned(
+                "cancelled-owned",
+                expected_owner_worker_id="worker-local",
+                expected_cancel_action="interrupt",
+                status="interrupted",
+                total_input_tokens=20,
+                total_output_tokens=10,
+                total_tokens=30,
+                llm_call_count=2,
+                lead_agent_tokens=21,
+                subagent_tokens=7,
+                middleware_tokens=2,
+                token_usage_by_model={
+                    "model-a": {
+                        "input_tokens": 20,
+                        "output_tokens": 10,
+                        "total_tokens": 30,
+                    }
+                },
+                message_count=3,
+                last_ai_message="partial",
+                first_human_message="start",
+                stop_reason="cancelled",
+            )
+            same_terminal = await repo.finalize_completion_if_owned_and_not_cancelled(
+                "cancelled-owned",
+                expected_owner_worker_id="worker-local",
+                status="interrupted",
+                total_input_tokens=25,
+                total_output_tokens=10,
+                total_tokens=35,
+                llm_call_count=3,
+                lead_agent_tokens=26,
+                subagent_tokens=7,
+                middleware_tokens=2,
+                token_usage_by_model={
+                    "model-a": {
+                        "input_tokens": 25,
+                        "output_tokens": 10,
+                        "total_tokens": 35,
+                    }
+                },
+                message_count=4,
+                last_ai_message="final partial",
+                first_human_message="start",
+                stop_reason="cancelled",
+            )
+
+            row = await repo.get("cancelled-owned")
+            assert cancelled is not None
+            assert cancelled.finalized is True
+            assert same_terminal is not None
+            assert same_terminal.finalized is True
+            assert row is not None
+            assert row["status"] == "interrupted"
+            assert row["cancel_action"] == "interrupt"
+            assert row["owner_worker_id"] == "worker-local"
+            assert row["total_input_tokens"] == 25
+            assert row["total_output_tokens"] == 10
+            assert row["total_tokens"] == 35
+            assert row["llm_call_count"] == 3
+            assert row["lead_agent_tokens"] == 26
+            assert row["subagent_tokens"] == 7
+            assert row["middleware_tokens"] == 2
+            assert row["token_usage_by_model"] == {
+                "model-a": {
+                    "input_tokens": 25,
+                    "output_tokens": 10,
+                    "total_tokens": 35,
+                }
+            }
+            assert row["message_count"] == 4
+            assert row["last_ai_message"] == "final partial"
+            assert row["first_human_message"] == "start"
+            assert row["stop_reason"] == "cancelled"
+
+            await repo.put(
+                "rollback-owned",
+                thread_id="rollback-owned-thread",
+                status="running",
+                owner_worker_id="worker-local",
+            )
+            assert await repo.request_cancel("rollback-owned", action="rollback") == "rollback"
+            assert await repo.update_status(
+                "rollback-owned",
+                "interrupted",
+            )
+            rollback = await repo.finalize_cancelled_completion_if_owned(
+                "rollback-owned",
+                expected_owner_worker_id="worker-local",
+                expected_cancel_action="rollback",
+                status="error",
+                total_tokens=19,
+                message_count=2,
+                error="Rolled back by user",
+            )
+            rollback_row = await repo.get("rollback-owned")
+            assert rollback is not None
+            assert rollback.finalized is True
+            assert rollback_row is not None
+            assert rollback_row["status"] == "error"
+            assert rollback_row["cancel_action"] == "rollback"
+            assert rollback_row["owner_worker_id"] == "worker-local"
+            assert rollback_row["error"] == "Rolled back by user"
+            assert rollback_row["total_tokens"] == 19
+            assert rollback_row["message_count"] == 2
+
+            await repo.put(
+                "local-rollback-owned",
+                thread_id="local-rollback-owned-thread",
+                status="running",
+                owner_worker_id="worker-local",
+            )
+            assert await repo.update_status(
+                "local-rollback-owned",
+                "interrupted",
+            )
+            local_rollback = await repo.finalize_completion_if_owned_and_not_cancelled(
+                "local-rollback-owned",
+                expected_owner_worker_id="worker-local",
+                status="error",
+                total_tokens=11,
+                error="Rolled back by user",
+            )
+            local_rollback_row = await repo.get("local-rollback-owned")
+            assert local_rollback is not None
+            assert local_rollback.finalized is True
+            assert local_rollback_row is not None
+            assert local_rollback_row["status"] == "error"
+            assert local_rollback_row.get("cancel_action") is None
+            assert local_rollback_row["owner_worker_id"] == "worker-local"
+            assert local_rollback_row["error"] == "Rolled back by user"
+            assert local_rollback_row["total_tokens"] == 11
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_insert_terminal_completion_if_absent_never_overwrites(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            run_payload = {
+                "thread_id": "terminal-thread",
+                "status": "success",
+                "operation_kind": "run",
+                "multitask_strategy": "reject",
+                "metadata": {"source": "local"},
+                "kwargs": {},
+                "owner_worker_id": "worker-local",
+            }
+            completion_payload = {
+                "status": "success",
+                "total_tokens": 17,
+                "message_count": 2,
+                "last_ai_message": "done",
+                "stop_reason": "completed",
+            }
+
+            inserted = await repo.insert_terminal_completion_if_absent(
+                "terminal-new",
+                run_payload=run_payload,
+                completion_payload=completion_payload,
+            )
+            await repo.put(
+                "terminal-conflict",
+                thread_id="peer-thread",
+                status="running",
+                owner_worker_id="worker-peer",
+            )
+            conflict = await repo.insert_terminal_completion_if_absent(
+                "terminal-conflict",
+                run_payload=run_payload,
+                completion_payload=completion_payload,
+            )
+
+            created = await repo.get("terminal-new")
+            peer = await repo.get("terminal-conflict")
+            assert inserted is True
+            assert created is not None
+            assert created["status"] == "success"
+            assert created["total_tokens"] == 17
+            assert created["message_count"] == 2
+            assert created["last_ai_message"] == "done"
+            assert created["stop_reason"] == "completed"
+            assert conflict is False
+            assert peer is not None
+            assert peer["status"] == "running"
+            assert peer["owner_worker_id"] == "worker-peer"
+            assert peer["total_tokens"] == 0
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_terminal_eviction_repairs_full_sql_snapshot_without_zeroing_or_chasing_truncation(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            manager = RunManager(store=repo, worker_id="worker-local")
+            record = await manager.create("thread-sql-completion-repair")
+            long_last = "a" * 2200
+            long_first = "h" * 2300
+            await manager.set_status(
+                record.run_id,
+                RunStatus.success,
+                stop_reason="completed",
+                persist=False,
+            )
+            record.total_input_tokens = 100
+            record.total_output_tokens = 50
+            record.total_tokens = 151
+            record.llm_call_count = 2
+            record.lead_agent_tokens = 120
+            record.subagent_tokens = 20
+            record.middleware_tokens = 10
+            record.token_usage_by_model = {"model-a": {"input_tokens": 100, "output_tokens": 50}}
+            record.message_count = 3
+            record.last_ai_message = long_last
+            record.first_human_message = long_first
+
+            assert await manager._evict_if_durable_terminal(record.run_id) is True
+
+            stored = await repo.get(record.run_id)
+            assert stored is not None
+            assert stored["status"] == RunStatus.success.value
+            assert stored["total_input_tokens"] == 100
+            assert stored["total_output_tokens"] == 50
+            assert stored["total_tokens"] == 151
+            assert stored["llm_call_count"] == 2
+            assert stored["lead_agent_tokens"] == 120
+            assert stored["subagent_tokens"] == 20
+            assert stored["middleware_tokens"] == 10
+            assert stored["token_usage_by_model"] == {"model-a": {"input_tokens": 100, "output_tokens": 50}}
+            assert stored["message_count"] == 3
+            assert stored["last_ai_message"] == long_last[:2000]
+            assert stored["first_human_message"] == long_first[:2000]
+            assert stored["stop_reason"] == "completed"
+            assert record.run_id not in manager._runs
+        finally:
+            await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_manager_completion_does_not_overwrite_sql_peer_takeover(self, tmp_path):
+        repo = await _make_repo(tmp_path)
+        try:
+            manager = RunManager(store=repo, worker_id="worker-local")
+            record = await manager.create("thread-sql-peer-takeover")
+            await manager.set_status(
+                record.run_id,
+                RunStatus.error,
+                error="local worker failed",
+                stop_reason="tool_capped",
+                persist=False,
+            )
+            assert await repo.claim_for_takeover(
+                record.run_id,
+                grace_seconds=0,
+                error="peer lease takeover",
+                stop_reason="orphan_recovered",
+            )
+
+            await manager.update_run_completion(
+                record.run_id,
+                status=RunStatus.error.value,
+                total_tokens=99,
+                message_count=7,
+            )
+
+            stored = await repo.get(record.run_id)
+            assert stored is not None
+            assert stored["status"] == RunStatus.error.value
+            assert stored["error"] == "peer lease takeover"
+            assert stored["stop_reason"] == "orphan_recovered"
+            assert stored["owner_worker_id"] is None
+            assert stored["lease_expires_at"] is None
+            assert stored["total_tokens"] == 0
+            assert stored["message_count"] == 0
+        finally:
+            await _cleanup()
 
     @pytest.mark.anyio
     async def test_metadata_preserved(self, tmp_path):
@@ -776,23 +1302,51 @@ class TestRunRepository:
     @pytest.mark.anyio
     async def test_run_admission_reuses_process_wide_idempotency_key(self, tmp_path):
         repo = await _make_repo(tmp_path)
-        first_manager = RunManager(store=repo, worker_id="worker-a")
-        second_manager = RunManager(store=repo, worker_id="worker-b")
+        ownership = RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        )
+        first_manager = RunManager(
+            store=repo,
+            worker_id="worker-a",
+            run_ownership_config=ownership,
+        )
+        second_manager = RunManager(
+            store=repo,
+            worker_id="worker-b",
+            run_ownership_config=ownership,
+        )
 
         first = await first_manager.create_or_reject(
             "thread-T",
-            user_id="user-1",
+            user_id="test-user-autouse",
             idempotency_key="mcp-task:task-1:1:0",
         )
+        await first_manager.try_start(first.run_id)
         reused = await second_manager.create_or_reject(
             "thread-T",
-            user_id="user-1",
+            user_id="test-user-autouse",
             idempotency_key="mcp-task:task-1:1:0",
         )
 
         assert reused.run_id == first.run_id
         assert reused.idempotency_reused is True
-        assert len(await repo.list_by_thread("thread-T", user_id="user-1")) == 1
+        assert reused.store_only is True
+        assert reused.run_id not in second_manager._runs
+        assert len(await repo.list_by_thread("thread-T", user_id="test-user-autouse")) == 1
+
+        outcome = await second_manager.cancel(reused.run_id, action="rollback")
+        stored = await repo.get(first.run_id, user_id="test-user-autouse")
+        assert outcome == CancelOutcome.requested
+        assert stored is not None
+        assert stored["status"] == RunStatus.running.value
+        assert stored["owner_worker_id"] == "worker-a"
+        assert stored["cancel_action"] == "rollback"
+
+        await first_manager._renew_leases()
+        assert first.abort_event.is_set() is True
+        assert first.abort_action == "rollback"
         await _cleanup()
 
     @pytest.mark.anyio
@@ -991,6 +1545,7 @@ class TestRunRepository:
         grace = 10
         expired = (datetime.now(UTC) - timedelta(seconds=grace + 5)).isoformat()
         await repo.put("run-1", thread_id="t1", status="running", owner_worker_id="w-a", lease_expires_at=expired, created_at=datetime.now(UTC).isoformat())
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
 
         ok = await repo.claim_for_takeover("run-1", grace_seconds=grace, error="claimed")
         assert ok is True
@@ -998,6 +1553,22 @@ class TestRunRepository:
         row = await repo.get("run-1")
         assert row["status"] == "error"
         assert row["error"] == "claimed"
+        assert row["owner_worker_id"] is None
+        assert row["lease_expires_at"] is None
+        assert row["cancel_action"] == "rollback"
+
+        stale_owner = await repo.finalize_completion_if_owned_and_not_cancelled(
+            "run-1",
+            expected_owner_worker_id="w-a",
+            status="error",
+            total_tokens=99,
+        )
+        assert stale_owner is not None
+        assert stale_owner.finalized is False
+        assert stale_owner.cancel_action is None
+        row = await repo.get("run-1")
+        assert row["error"] == "claimed"
+        assert row["total_tokens"] == 0
         await _cleanup()
 
     @pytest.mark.anyio
@@ -1041,6 +1612,41 @@ class TestRunRepository:
         row = await repo.get("run-1")
         assert row["cancel_action"] == "rollback"
         assert row["cancel_requested_at"] is not None
+        await _cleanup()
+
+    @pytest.mark.anyio
+    async def test_lease_renewal_does_not_shorten_existing_deadline(self, tmp_path):
+        """Queued SQL lease writes preserve a newer release-time deadline."""
+        repo = await _make_repo(tmp_path)
+        newer_lease = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
+        await repo.put(
+            "run-1",
+            thread_id="t1",
+            status="running",
+            owner_worker_id="worker-a",
+            lease_expires_at=newer_lease,
+        )
+
+        stale_lease = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+        assert (
+            await repo.update_lease(
+                "run-1",
+                owner_worker_id="worker-a",
+                lease_expires_at=stale_lease,
+            )
+            is True
+        )
+        assert await repo.request_cancel("run-1", action="rollback") == "rollback"
+        renewal = await repo.renew_lease(
+            "run-1",
+            owner_worker_id="worker-a",
+            lease_expires_at=stale_lease,
+        )
+
+        assert renewal.renewed is True
+        assert renewal.cancel_action == "rollback"
+        row = await repo.get("run-1")
+        assert row["lease_expires_at"] == newer_lease
         await _cleanup()
 
     @pytest.mark.anyio
@@ -1088,6 +1694,7 @@ class TestRunRepository:
         )
 
         assert result.finalized is True
+        assert result.durable_write_confirmed is True
         assert await repo.request_cancel("run-1", action="rollback") is None
         assert (await repo.get("run-1"))["status"] == "success"
         await _cleanup()

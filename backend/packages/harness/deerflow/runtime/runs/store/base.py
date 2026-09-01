@@ -11,6 +11,8 @@ When user_id is None, no user filtering is applied (single-user mode).
 from __future__ import annotations
 
 import abc
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -33,12 +35,21 @@ class LeaseRenewal:
     cancel_action: str | None = None
 
 
+@dataclass
+class CheckpointMutationFence:
+    """Result and release-time lease proof for a checkpoint mutation fence."""
+
+    acquired: bool
+    lease_expires_at: str | None = None
+
+
 @dataclass(frozen=True)
 class StatusFinalization:
     """Result of completing a run only if cancellation has not won."""
 
     finalized: bool
     cancel_action: str | None = None
+    durable_write_confirmed: bool = False
 
 
 class RunIdempotencyConflict(RuntimeError):
@@ -50,6 +61,30 @@ class RunIdempotencyConflict(RuntimeError):
 
 
 class RunStore(abc.ABC):
+    @asynccontextmanager
+    async def checkpoint_mutation_fence(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        lease_seconds: int,
+    ) -> AsyncIterator[CheckpointMutationFence]:
+        """Hold durable run ownership across one checkpoint mutation.
+
+        Implementations must serialize this scope with lease takeover and any
+        admission path that can terminalize the active row.  The row must stay
+        active while the scope is held, and a successful scope must extend its
+        lease by *lease_seconds* at release time before dropping the
+        serialization fence. The yielded result receives that exact durable
+        deadline after the scope exits.
+
+        ``acquired=False`` means this optional capability is unsupported or the
+        active, unexpired owner fence no longer matched. The compatibility
+        default is deliberately fail-closed for heartbeat-enabled callers.
+        """
+        del run_id, expected_owner_worker_id, lease_seconds
+        yield CheckpointMutationFence(acquired=False)
+
     @abc.abstractmethod
     async def put(
         self,
@@ -188,14 +223,112 @@ class RunStore(abc.ABC):
         last_ai_message: str | None = None,
         first_human_message: str | None = None,
         error: str | None = None,
+        stop_reason: str | None = None,
     ) -> bool | None:
-        """Persist final completion fields.
+        """Persist final completion fields, including the terminal reason.
 
         Implementations must not replace a different terminal status. Returns
         ``False`` when the row is missing or already has a conflicting terminal
         outcome.
         """
         pass
+
+    async def finalize_completion_if_owned_and_not_cancelled(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        status: str,
+        total_input_tokens: int = 0,
+        total_output_tokens: int = 0,
+        total_tokens: int = 0,
+        llm_call_count: int = 0,
+        lead_agent_tokens: int = 0,
+        subagent_tokens: int = 0,
+        middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
+        message_count: int = 0,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> StatusFinalization | None:
+        """Atomically persist a complete terminal snapshot for its owner.
+
+        Implementations may update either an active row whose
+        ``owner_worker_id`` matches *expected_owner_worker_id* and whose
+        cancellation fence is still empty, or a row already at the requested
+        terminal status whose owner still matches. An owner-matched
+        ``interrupted`` row with an empty cancellation fence may also advance
+        to ``error`` for the local rollback fallback where the durable cancel
+        request itself failed. These paths let the owner finish
+        counters/messages after a status-only write without reopening terminal
+        outcome races. When *require_unexpired_lease* is true, an active-row
+        transition also requires a lease later than the store's current time; an
+        already-terminal row remains repairable after lease expiry. A returned
+        ``cancel_action`` is authoritative only while the expected owner still
+        owns either a live active row or an action-consistent terminal row;
+        implementations must not surface a cancellation retained on a peer
+        takeover row. ``None`` means this optional capability is unsupported.
+        The concrete default keeps existing third-party stores
+        source-compatible.
+        """
+        return None
+
+    async def finalize_cancelled_completion_if_owned(
+        self,
+        run_id: str,
+        *,
+        expected_owner_worker_id: str,
+        expected_cancel_action: str,
+        status: str,
+        total_input_tokens: int = 0,
+        total_output_tokens: int = 0,
+        total_tokens: int = 0,
+        llm_call_count: int = 0,
+        lead_agent_tokens: int = 0,
+        subagent_tokens: int = 0,
+        middleware_tokens: int = 0,
+        token_usage_by_model: dict[str, dict[str, int]] | None = None,
+        message_count: int = 0,
+        last_ai_message: str | None = None,
+        first_human_message: str | None = None,
+        error: str | None = None,
+        stop_reason: str | None = None,
+        require_unexpired_lease: bool = False,
+    ) -> StatusFinalization | None:
+        """Atomically complete a cancellation that already won durability.
+
+        Implementations may update only an active row whose owner and durable
+        cancellation action match the expected values. A ``rollback`` may also
+        advance its durable intermediate ``interrupted`` row to ``error``.
+        They must reject an outcome inconsistent with the action
+        (``interrupt`` becomes ``interrupted``; ``rollback`` first becomes
+        ``interrupted`` and then ``error``). This closes the windows where cancellation persisted but
+        either terminal status write failed. *require_unexpired_lease* fences stale
+        owners from advancing an active row after lease expiry; an owned
+        ``interrupted`` rollback intermediate remains repairable because peers
+        cannot take over terminal rows.
+        ``None`` means this optional capability is unsupported.
+        """
+        return None
+
+    async def insert_terminal_completion_if_absent(
+        self,
+        run_id: str,
+        *,
+        run_payload: dict[str, Any],
+        completion_payload: dict[str, Any],
+    ) -> bool | None:
+        """Atomically insert a complete terminal snapshot only when absent.
+
+        Implementations must never update an existing row. ``None`` means the
+        optional capability is unsupported. Multi-worker callers must retain
+        their local record; a legacy single-worker store may use its existing
+        completion primitive because no peer can win the intervening race.
+        """
+        return None
 
     async def update_run_progress(
         self,
@@ -243,7 +376,14 @@ class RunStore(abc.ABC):
         owner_worker_id: str,
         lease_expires_at: str,
     ) -> bool:
-        """Renew the lease on an active run. Returns ``False`` when no row matched."""
+        """Renew the lease on an active run without shortening its deadline.
+
+        Returns ``False`` when no row matched. ``True`` confirms that the
+        durable deadline is at least the requested value; it need not equal it.
+        Implementations must preserve a later existing deadline when an older,
+        already-selected renewal arrives after another ownership operation has
+        extended the lease.
+        """
         pass
 
     async def renew_lease(
@@ -259,7 +399,9 @@ class RunStore(abc.ABC):
         cancellation action, so third-party stores remain source-compatible
         without adding a background read. Stores that support multi-process
         cancellation must override this method to renew and observe the
-        request atomically.
+        request atomically. Like ``update_lease``, a renewal must never shorten
+        an existing deadline; ``renewed=True`` confirms the requested deadline
+        as a durable lower bound.
         """
         renewed = await self.update_lease(
             run_id,
@@ -295,7 +437,10 @@ class RunStore(abc.ABC):
             error=error,
             stop_reason=stop_reason,
         )
-        return StatusFinalization(finalized=updated is not False)
+        return StatusFinalization(
+            finalized=updated is not False,
+            durable_write_confirmed=updated is True,
+        )
 
     @abc.abstractmethod
     async def claim_for_takeover(
@@ -312,7 +457,9 @@ class RunStore(abc.ABC):
         lease is NULL — pre-ownership data) are updated.  The conditional
         WHERE closes the race between the caller's stale read of the lease
         and a concurrent heartbeat renewal by the owning worker. When
-        provided, *stop_reason* is persisted in the same atomic update.
+        provided, *stop_reason* is persisted in the same atomic update. A
+        successful takeover clears the former owner and lease because the row
+        is terminal and no worker remains authorized to amend its snapshot.
 
         Returns ``False`` when:
           - the run is no longer ``pending`` / ``running``,

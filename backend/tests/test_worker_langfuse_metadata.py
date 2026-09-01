@@ -67,6 +67,9 @@ class _FakeRunManager:
     async def update_run_completion(self, *_args, **_kwargs) -> None:
         return None
 
+    def schedule_terminal_eviction(self, _run_id: str, **_kwargs) -> None:
+        return None
+
 
 class _FakeBridge:
     def __init__(self) -> None:
