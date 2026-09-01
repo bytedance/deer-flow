@@ -608,14 +608,19 @@ def _normalize_command(command: str) -> str:
     return " ".join(command.split())
 
 
-def _shell_parse_line(line: str) -> tuple[list[list[str]], list[str]] | None:
+def _shell_parse_line(line: str) -> tuple[str | None, list[list[str]], list[str]] | None:
     """Tokenize one physical line into segments plus the operators joining them.
 
-    ``ops[i]`` is the operator between segment ``i`` and segment ``i+1``
-    (``;``, ``&&``, ``||``, ``|``, ``&``, or a rarer punctuation run).
-    Comments are stripped (a ``# pytest ...`` remark executes nothing) and
-    quotes are honored, so an operator inside an argument cannot split a
-    segment. Returns ``None`` on malformed shell (unbalanced quotes).
+    Returns ``(leading_op, segments, ops)``: ``ops[i]`` is the operator
+    between segment ``i`` and segment ``i+1`` (``;``, ``&&``, ``||``, ``|``,
+    ``&``, or a rarer punctuation run), and ``leading_op`` is an operator
+    the line STARTS with (``cmd1\\n|| cmd2``) — real control flow the caller
+    must join with, never drop: a continuation ``||`` after a successful
+    first line SKIPS the line's commands while exiting 0, so parsing it as
+    ``;`` would overstate what provably ran. Comments are stripped (a
+    ``# pytest ...`` remark executes nothing) and quotes are honored, so an
+    operator inside an argument cannot split a segment. Returns ``None`` on
+    malformed shell (unbalanced quotes).
     """
     lexer = shlex.shlex(line, posix=True, punctuation_chars=_SHELL_OPERATORS)
     lexer.whitespace_split = True
@@ -627,14 +632,17 @@ def _shell_parse_line(line: str) -> tuple[list[list[str]], list[str]] | None:
     segments: list[list[str]] = []
     ops: list[str] = []
     current: list[str] = []
+    leading_op: str | None = None
     for token in tokens:
         if token and all(char in _SHELL_OPERATORS for char in token):
             if current:
                 segments.append(current)
                 current = []
                 ops.append(token)
-            # A leading or doubled operator (``cmd ;; esac`` style) attaches
-            # no following segment; it can never make evidence more provable,
+            elif not segments and leading_op is None:
+                leading_op = token
+            # A doubled operator (``cmd ;; esac`` style) attaches no
+            # following segment; it can never make evidence more provable,
             # so it is simply not recorded.
         else:
             current.append(token)
@@ -643,7 +651,7 @@ def _shell_parse_line(line: str) -> tuple[list[list[str]], list[str]] | None:
     # ops[i] is the operator following segment i; a trailing operator (e.g.
     # ``make test &``) leaves ops as long as segments and must stay visible —
     # backgrounding makes the execution unprovable.
-    return segments, ops
+    return leading_op, segments, ops
 
 
 def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
@@ -657,9 +665,13 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
     extra positional, its exit status for the run's, and its text for the
     test summary while bulk output (``seq``) pushes the real one out of the
     bounded tail. Each line is parsed on its own and joined with a ``;`` op —
-    or with the previous line's trailing operator when it ends on one
-    (``cmd &``). A newline inside an open quote breaks that line's parse and
-    falls back to exact-equality matching — fail closed.
+    with the previous line's trailing operator when it ends on one
+    (``cmd &``), or with the continuation operator the next line opens with
+    (``cmd1\\n&& cmd2`` parses as ``&&``, and ``cmd1\\n|| cmd2`` as ``||`` —
+    a continuation ``||`` after a successful first command skips the rest
+    while exiting 0, which ``;`` would overstate). A newline inside an open
+    quote breaks that line's parse and falls back to exact-equality matching
+    — fail closed.
     """
     segments: list[list[str]] = []
     ops: list[str] = []
@@ -667,13 +679,15 @@ def _shell_parse(command: str) -> tuple[list[list[str]], list[str]] | None:
         parsed = _shell_parse_line(line)
         if parsed is None:
             return None
-        line_segments, line_ops = parsed
+        leading_op, line_segments, line_ops = parsed
         if not line_segments:
             continue  # blank line: no command, no separator effect
         if segments and len(ops) < len(segments):
             # The previous line ended without an operator: the newline
-            # itself separates the two commands.
-            ops.append(";")
+            # itself separates the two commands — with the continuation
+            # operator this line opens with (``cmd1\\n&& cmd2``), not a
+            # hardcoded ``;``.
+            ops.append(leading_op or ";")
         segments.extend(line_segments)
         ops.extend(line_ops)
     return segments, ops
@@ -852,7 +866,9 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     Returns ``"match"`` when the executable agrees — directional: a bare
     criterion executable (``pytest``) accepts any path spelling of the same
     name, while an explicitly path-spelled criterion
-    (``/opt/project/.venv/bin/pytest``) requires the same normalized path —
+    (``/opt/project/.venv/bin/pytest``, and also ``./pytest`` — spelling is
+    judged on the raw token because normpath collapses ``./``) requires a
+    path-spelled execution of the same normalized path —
     the criterion's arguments appear in order among the executed ones
     (tokens consumed by a negating option — ``--ignore tests/security`` —
     are ineligible evidence, they name what did NOT run), and every extra
@@ -893,13 +909,20 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
         # unknown targets (``pytest $T``).
         return "unprovable"
     if expected[0] != actual[0]:
-        criterion_executable = _normalize_executable(expected[0])
-        if "/" in criterion_executable:
+        # Path-spelling is judged on the RAW token, not the normalized form:
+        # ``./pytest`` names the project-local file, but normpath collapses
+        # it to bare ``pytest`` — deciding on the normalized form would let a
+        # PATH lookup or ``/tmp/fake/pytest`` stand in for the explicit
+        # local executable the criterion asked for.
+        if "/" in expected[0] or "\\" in expected[0]:
             # An explicitly path-spelled criterion names THAT executable: a
             # same-basename binary at a different path (or a bare PATH lookup
             # resolving who-knows-where) may select a different environment —
-            # only the same normalized path is evidence for it.
-            if criterion_executable != _normalize_executable(actual[0]):
+            # only a path-spelled execution of the same normalized path is
+            # evidence for it (``venv/bin/pytest`` ≡ ``./venv/bin/pytest``).
+            if "/" not in actual[0] and "\\" not in actual[0]:
+                return "no_match"
+            if _normalize_executable(expected[0]) != _normalize_executable(actual[0]):
                 return "no_match"
         elif os.path.basename(expected[0]) != os.path.basename(actual[0]):
             # A bare criterion deliberately leaves the runner to PATH, so any

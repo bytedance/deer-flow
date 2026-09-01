@@ -917,6 +917,41 @@ class TestTestsPassedLeaf:
         assert leaf["checked"] is False
         assert leaf["detail"] == "no matching bash execution recorded"
 
+    def test_dot_slash_criterion_executable_keeps_its_identity(self):
+        """Self-audit: ``./pytest`` names the project-local file, but
+        normpath collapses it to bare ``pytest`` — a PATH-resolved or
+        relocated same-name binary is not evidence for it."""
+        for executed in ("pytest tests/security", "/tmp/fake/pytest tests/security", ".venv/bin/pytest tests/security"):
+            executions = [_bash_execution(executed, output_tail="7 passed")]
+            verdict = check_acceptance_criteria(["tests_passed:./pytest tests/security"], bash_executions=executions)
+
+            assert verdict["leaves"][0]["checked"] is False, executed
+
+        executions = [_bash_execution("./pytest tests/security", output_tail="7 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:./pytest tests/security"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
+    def test_continuation_line_or_operator_cannot_launder_a_skipped_run(self):
+        """Self-audit: ``cd backend\\n|| pytest tests/`` — a continuation
+        ``||`` after a successful command skips the runner entirely while
+        exiting 0; parsing the newline as ``;`` would record unconditional
+        execution of a run that never happened."""
+        executions = [_bash_execution("cd backend\n|| pytest tests/", output_tail="")]
+        verdict = check_acceptance_criteria(["tests_passed:pytest tests/"], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
+    def test_continuation_line_and_operator_matches_its_criterion(self):
+        """``cd backend\\n&& make test`` is the criterion's ``&&`` — the
+        continuation operator is preserved, not flattened to ``;``."""
+        executions = [_bash_execution("cd backend\n&& make test", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:cd backend && make test"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_explicit_criterion_path_does_not_match_a_bare_invocation(self):
         """A bare ``pytest`` resolves through PATH — which pytest ran cannot
         be proven, so it is not evidence for an explicit criterion path."""
