@@ -19,7 +19,6 @@ from deerflow.config.agents_config import (
     preserve_non_managed_fields,
 )
 from deerflow.config.app_config import get_app_config
-from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
@@ -568,16 +567,12 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    # Cancel *before* delete so a debounce timer cannot fire during the
-    # store.delete I/O window and recreate the agent directory (#5037).
-    # A rejected delete may drop buffered work; that update is re-fed next turn.
-    _cancel_pending_memory_for_agent(name, user_id)
-    try:
-        # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        def _delete_agent() -> AgentDeleteOutcome:
-            return get_agent_store().delete(name, user_id=user_id)
+    store = get_agent_store()
 
-        outcome = await asyncio.to_thread(_delete_agent)
+    try:
+        # Off the event loop: cancel → delete → cancel-on-success, plus any
+        # file/DB I/O from store.delete and get_memory_manager.
+        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, store, name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
@@ -595,21 +590,35 @@ async def delete_agent(name: str) -> None:
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
 
-    # Re-check after a successful delete in case work was enqueued mid-rmtree.
-    _cancel_pending_memory_for_agent(name, user_id)
-
     logger.info(f"Deleted agent '{name}'")
+
+
+def _delete_agent_with_memory_cancel(store: object, name: str, user_id: str | None) -> str:
+    """Cancel buffered memory, delete the agent, then cancel again on success.
+
+    Runs entirely in a worker thread so blocking memory/config I/O stays off the
+    event loop. Pre-delete cancel closes the debounce-timer race during rmtree;
+    post-success cancel covers work enqueued mid-delete. A rejected delete may
+    still drop buffered work; that update is re-fed on the next turn.
+    """
+    _cancel_pending_memory_for_agent(name, user_id)
+    outcome = store.delete(name, user_id=user_id)  # type: ignore[attr-defined]
+    if outcome == "deleted":
+        _cancel_pending_memory_for_agent(name, user_id)
+    return outcome
 
 
 def _cancel_pending_memory_for_agent(name: str, user_id: str | None) -> None:
     """Best-effort cancel of buffered memory extraction for one agent scope.
 
+    Always attempts cancellation even if memory is currently disabled: settings
+    are hot-reloadable and disabling does not destroy an already-live queue.
     Failure must never fail agent deletion: a dropped update is re-fed on the
     next conversation turn per the queue contract.
+
+    Callers must run this off the event loop (blocking config/manager I/O).
     """
     try:
-        if not get_memory_config().enabled:
-            return
         cancelled = get_memory_manager().cancel_by_agent(name, user_id=user_id)
         if cancelled:
             logger.info(

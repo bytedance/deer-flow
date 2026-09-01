@@ -419,11 +419,11 @@ class MemoryUpdateQueue:
             agent_name: Canonical agent bucket to cancel. Ignored when
                 ``all_agents`` is True.
             user_id: When set, only that user's pending contexts are eligible.
-                When omitted with ``all_agents=False``, only the legacy
-                ``user_id is None`` scope is cancelled (mirrors storage), not
-                every user's bucket for ``agent_name``.
-            all_agents: When True, drop every pending context in the user scope
-                (used by ``clear_memory`` with ``agent_name=None``).
+                When omitted, only the legacy ``user_id is None`` root is
+                cancelled (mirrors storage), whether ``all_agents`` is set or not.
+            all_agents: When True, ignore ``agent_name`` and cancel every agent
+                bucket in the matched user scope (used by ``clear_memory`` with
+                ``agent_name=None``).
 
         Returns:
             Number of pending contexts removed.
@@ -432,16 +432,10 @@ class MemoryUpdateQueue:
             before = len(self._items)
 
             def _keep(context: ConversationContext) -> bool:
-                if all_agents:
-                    if user_id is not None and context.user_id != user_id:
-                        return True
-                    return False
-                if context.agent_name != agent_name:
+                # Scope matches storage: user_id=None is the legacy no-user root
+                # only (None == None), never "every user".
+                if not all_agents and context.agent_name != agent_name:
                     return True
-                # Mirror storage: user_id=None is the legacy no-user root only,
-                # not "every user for this agent".
-                if user_id is None:
-                    return context.user_id is not None
                 return context.user_id != user_id
 
             self._items = [context for context in self._items if _keep(context)]

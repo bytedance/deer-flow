@@ -19,8 +19,6 @@ def test_deermem_cancel_by_agent_uses_canonical_bucket(tmp_path) -> None:
         mem._queue.add(thread_id="t1", messages=["m"], agent_name="research-agent", user_id="u1")
         mem._queue.add(thread_id="t2", messages=["m"], agent_name="other", user_id="u1")
 
-    # Gateway stores custom-agent names lowercased; cancel must match the
-    # canonical bucket even when the caller passes mixed case.
     removed = mem.cancel_by_agent("Research-Agent", user_id="u1")
 
     assert removed == 1
@@ -28,14 +26,19 @@ def test_deermem_cancel_by_agent_uses_canonical_bucket(tmp_path) -> None:
     assert mem._queue._items[0].agent_name == "other"
 
 
-def test_deermem_clear_memory_cancels_pending_before_clear(tmp_path) -> None:
+def test_deermem_clear_memory_cancels_before_and_after_clear(tmp_path) -> None:
     mem = DeerMem(backend_config={"storage_path": str(tmp_path)})
     mem._queue._items = [
         ConversationContext(thread_id="t1", messages=["m"], agent_name="research-agent", user_id="u1"),
         ConversationContext(thread_id="t2", messages=["m"], agent_name="other", user_id="u1"),
     ]
     mem._updater = MagicMock()
-    mem._updater.clear_memory_data.return_value = {"facts": []}
+
+    def _clear(**kwargs):
+        mem._queue._items.append(ConversationContext(thread_id="t-mid", messages=["m"], agent_name="research-agent", user_id="u1"))
+        return {"facts": []}
+
+    mem._updater.clear_memory_data.side_effect = _clear
 
     mem.clear_memory(agent_name="research-agent", user_id="u1")
 
@@ -99,7 +102,6 @@ def test_delete_agent_cancels_before_and_after_successful_delete(tmp_path) -> No
 
         def _delete(name, *, user_id=None):
             order.append("delete")
-            # Mid-delete enqueue: cancel-after must still clear it.
             manager._queue._items.append(ConversationContext(thread_id="t-mid", messages=["m"], agent_name="gone", user_id="user-1"))
             return "deleted"
 
@@ -117,7 +119,6 @@ def test_delete_agent_cancels_before_and_after_successful_delete(tmp_path) -> No
             patch.object(agents_router, "get_effective_user_id", return_value="user-1"),
             patch.object(agents_router, "get_agent_store", return_value=store),
             patch.object(agents_router, "_cancel_pending_memory_for_agent", side_effect=tracked_cancel),
-            patch.object(agents_router.asyncio, "to_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
         ):
             asyncio.run(agents_router.delete_agent("Gone"))
 
@@ -130,6 +131,45 @@ def test_delete_agent_cancels_before_and_after_successful_delete(tmp_path) -> No
         reset_memory_manager()
 
 
+def test_delete_agent_still_cancels_when_memory_disabled(tmp_path) -> None:
+    """Disabling memory must not skip cancel of an already-live queue."""
+    from app.gateway.routers import agents as agents_router
+
+    orig = get_memory_config()
+    reset_memory_manager()
+    set_memory_config(
+        MemoryConfig(
+            enabled=True,
+            manager_class="deermem",
+            backend_config={"storage_path": str(tmp_path / "memory")},
+        )
+    )
+    try:
+        manager = get_memory_manager()
+        with patch.object(manager._queue, "_schedule_timer"):
+            manager._queue.add(thread_id="t1", messages=["m"], agent_name="gone", user_id="user-1")
+
+        # Hot-disable after work was queued; delete must still cancel.
+        set_memory_config(MemoryConfig(enabled=False, manager_class="deermem"))
+
+        store = MagicMock()
+        store.delete.return_value = "deleted"
+
+        with (
+            patch.object(agents_router, "_require_agents_api_enabled"),
+            patch.object(agents_router, "_validate_agent_name"),
+            patch.object(agents_router, "_normalize_agent_name", side_effect=lambda n: n.lower()),
+            patch.object(agents_router, "get_effective_user_id", return_value="user-1"),
+            patch.object(agents_router, "get_agent_store", return_value=store),
+        ):
+            asyncio.run(agents_router.delete_agent("Gone"))
+
+        assert manager._queue.pending_count == 0
+    finally:
+        set_memory_config(orig)
+        reset_memory_manager()
+
+
 def test_delete_agent_still_cancels_before_rejected_delete() -> None:
     """Pre-delete cancel is intentional even when delete later 404s."""
     from app.gateway.routers import agents as agents_router
@@ -137,8 +177,6 @@ def test_delete_agent_still_cancels_before_rejected_delete() -> None:
     store = MagicMock()
     store.delete.return_value = "missing"
     manager = MagicMock()
-    cfg = MagicMock()
-    cfg.enabled = True
 
     with (
         patch.object(agents_router, "_require_agents_api_enabled"),
@@ -147,8 +185,6 @@ def test_delete_agent_still_cancels_before_rejected_delete() -> None:
         patch.object(agents_router, "get_effective_user_id", return_value="user-1"),
         patch.object(agents_router, "get_agent_store", return_value=store),
         patch.object(agents_router, "get_memory_manager", return_value=manager),
-        patch.object(agents_router, "get_memory_config", return_value=cfg),
-        patch.object(agents_router.asyncio, "to_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
     ):
         try:
             asyncio.run(agents_router.delete_agent("ghost"))

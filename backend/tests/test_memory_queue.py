@@ -462,6 +462,20 @@ def test_cancel_by_agent_without_user_id_only_drops_legacy_scope() -> None:
     assert {(c.agent_name, c.user_id) for c in queue._items} == {("bob", "u1"), ("alice", None)}
 
 
+def test_cancel_all_agents_without_user_id_only_drops_legacy_scope() -> None:
+    queue = _queue()
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="t1", messages=["legacy-a"], agent_name="a", user_id=None)
+        queue.add(thread_id="t2", messages=["legacy-b"], agent_name="b", user_id=None)
+        queue.add(thread_id="t3", messages=["named"], agent_name="a", user_id="u1")
+
+    removed = queue.cancel_by_agent(user_id=None, all_agents=True)
+
+    assert removed == 2
+    assert queue.pending_count == 1
+    assert queue._items[0].user_id == "u1"
+
+
 def test_cancel_by_agent_does_not_touch_in_flight_batch() -> None:
     """Contexts already pulled out of `_items` keep running (#5037 residual)."""
     mock_updater = MagicMock()
