@@ -32,9 +32,9 @@ describe("frontend dev launcher", () => {
     ]);
   });
 
-  test("keeps Turbopack for non-Windows development", () => {
-    expect(getDevBundler("linux")).toBe("turbo");
-    expect(getDevBundler("darwin")).toBe("turbo");
-    expect(getNextDevArgs("linux")).toEqual(["dev", "--turbo"]);
+  test("uses webpack by default on every platform", () => {
+    expect(getDevBundler("linux")).toBe("webpack");
+    expect(getDevBundler("darwin")).toBe("webpack");
+    expect(getNextDevArgs("linux")).toEqual(["dev", "--webpack"]);
   });
 });

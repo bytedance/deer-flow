@@ -5,10 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * @param {string} platform
+ * @param {string} _platform
  * @param {Record<string, string | undefined>} env
  */
-export function getDevBundler(platform = process.platform, env = process.env) {
+export function getDevBundler(_platform = process.platform, env = process.env) {
   const override = env.DEER_FLOW_DEV_BUNDLER?.trim();
   if (override) {
     if (override !== "turbo" && override !== "webpack") {
@@ -18,7 +18,7 @@ export function getDevBundler(platform = process.platform, env = process.env) {
     }
     return override;
   }
-  return platform === "win32" ? "webpack" : "turbo";
+  return "webpack";
 }
 
 /**
