@@ -98,24 +98,21 @@ async def _create_run(
     scheduled_for: datetime | None = None,
 ) -> dict:
     """Insert a scheduled_task_runs row."""
-    row_scheduled_for = scheduled_for or created_at or _NOW
+    now = created_at or _NOW
     run_row = await run_repo.create(
         run_record_id=run_id,
         task_id=task_id,
         thread_id="thread-1",
-        scheduled_for=row_scheduled_for,
+        scheduled_for=scheduled_for or now,
         trigger="scheduled",
         status=status,
     )
-    # Explicitly set created_at so the offset in multi-history regressions
-    # affects the recency ordering _fetch_latest_run uses. scheduled_for remains
-    # caller-controlled separately to cover skew/tie cases.
+    # Explicitly set created_at so multi-history regressions exercise the
+    # secondary recency key behind _fetch_latest_run. scheduled_for still
+    # defaults to the logical occurrence time unless a test overrides it.
     if created_at is not None:
         async with run_repo._sf() as session:
-            values = {"created_at": created_at}
-            if scheduled_for is not None:
-                values["scheduled_for"] = scheduled_for
-            await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == run_id).values(**values))
+            await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == run_id).values(created_at=created_at))
             await session.commit()
     return run_row
 
@@ -590,38 +587,35 @@ class TestCancelStuckMultipleRuns:
         finally:
             await close_engine()
 
-    async def test_newer_skipped_with_earlier_scheduled_for_marks_cancelled(self, tmp_path):
-        """created_at, not scheduled_for, decides the latest run under clock skew."""
+    async def test_same_scheduled_for_uses_created_at_recency_tie_break(self, tmp_path):
+        """Same scheduled_for + newer created_at skipped → task should be cancelled."""
         task_repo, run_repo = await _init_db(tmp_path)
         try:
-            await _create_once_task(task_repo, task_id="task-multi-cs-skew")
-            await _set_task_running(task_repo, "task-multi-cs-skew")
+            await _create_once_task(task_repo, task_id="task-multi-cs-tie")
+            await _set_task_running(task_repo, "task-multi-cs-tie")
 
-            # Older success has a later scheduled_for value, as can happen when
-            # dispatching gateway clocks are skewed.
+            same_scheduled_for = _NOW
             await _create_run(
                 run_repo,
-                run_id="run-old-skew",
-                task_id="task-multi-cs-skew",
+                run_id="run-old",
+                task_id="task-multi-cs-tie",
                 status="success",
                 created_at=_NOW - timedelta(minutes=5),
-                scheduled_for=_NOW,
+                scheduled_for=same_scheduled_for,
             )
-            # Newer skipped row has an earlier scheduled_for. Recency must come
-            # from created_at so this still wins over the older success.
             await _create_run(
                 run_repo,
-                run_id="run-new-skew",
-                task_id="task-multi-cs-skew",
+                run_id="run-new",
+                task_id="task-multi-cs-tie",
                 status="skipped",
                 created_at=_NOW,
-                scheduled_for=_NOW - timedelta(minutes=10),
+                scheduled_for=same_scheduled_for,
             )
 
             count = await task_repo.cancel_stuck_once_tasks(error="interrupted: gateway restarted")
             assert count == 1
 
-            task = await _get_task(task_repo, "task-multi-cs-skew")
+            task = await _get_task(task_repo, "task-multi-cs-tie")
             assert task is not None
             assert task["status"] == "cancelled"
         finally:
@@ -667,6 +661,44 @@ class TestReconcileStuckMultipleRuns:
     Ensures the latest run row is used for finalisation, not an older one.
     """
 
+
+    async def test_same_scheduled_for_uses_created_at_recency_tie_break(self, tmp_path):
+        """Same scheduled_for + newer created_at skipped → task should be cancelled."""
+        task_repo, run_repo = await _init_db(tmp_path)
+        try:
+            await _create_once_task(task_repo, task_id="task-multi-rs-tie")
+            await _set_task_running(task_repo, "task-multi-rs-tie")
+
+            same_scheduled_for = _NOW
+            await _create_run(
+                run_repo,
+                run_id="run-old",
+                task_id="task-multi-rs-tie",
+                status="success",
+                created_at=_NOW - timedelta(minutes=5),
+                scheduled_for=same_scheduled_for,
+            )
+            await _create_run(
+                run_repo,
+                run_id="run-new",
+                task_id="task-multi-rs-tie",
+                status="skipped",
+                created_at=_NOW,
+                scheduled_for=same_scheduled_for,
+            )
+
+            count = await task_repo.reconcile_stuck_once_tasks(
+                error="interrupted: lease expired",
+                now=_NOW,
+                lease_grace_seconds=10,
+            )
+            assert count == 1
+
+            task = await _get_task(task_repo, "task-multi-rs-tie")
+            assert task is not None
+            assert task["status"] == "cancelled"
+        finally:
+            await close_engine()
     async def test_older_success_newer_skipped_marks_cancelled(self, tmp_path):
         """Older success + newer skipped → task should be cancelled (not completed)."""
         task_repo, run_repo = await _init_db(tmp_path)
@@ -699,47 +731,6 @@ class TestReconcileStuckMultipleRuns:
             assert count == 1
 
             task = await _get_task(task_repo, "task-multi-rs")
-            assert task is not None
-            assert task["status"] == "cancelled"
-        finally:
-            await close_engine()
-
-    async def test_newer_skipped_with_earlier_scheduled_for_marks_cancelled(self, tmp_path):
-        """created_at, not scheduled_for, decides the latest run under clock skew."""
-        task_repo, run_repo = await _init_db(tmp_path)
-        try:
-            await _create_once_task(task_repo, task_id="task-multi-rs-skew")
-            await _set_task_running(task_repo, "task-multi-rs-skew")
-
-            # Older success has a later scheduled_for value, as can happen when
-            # dispatching gateway clocks are skewed.
-            await _create_run(
-                run_repo,
-                run_id="run-old-skew",
-                task_id="task-multi-rs-skew",
-                status="success",
-                created_at=_NOW - timedelta(minutes=5),
-                scheduled_for=_NOW,
-            )
-            # Newer skipped row has an earlier scheduled_for. Recency must come
-            # from created_at so this still wins over the older success.
-            await _create_run(
-                run_repo,
-                run_id="run-new-skew",
-                task_id="task-multi-rs-skew",
-                status="skipped",
-                created_at=_NOW,
-                scheduled_for=_NOW - timedelta(minutes=10),
-            )
-
-            count = await task_repo.reconcile_stuck_once_tasks(
-                error="interrupted: lease expired",
-                now=_NOW,
-                lease_grace_seconds=10,
-            )
-            assert count == 1
-
-            task = await _get_task(task_repo, "task-multi-rs-skew")
             assert task is not None
             assert task["status"] == "cancelled"
         finally:

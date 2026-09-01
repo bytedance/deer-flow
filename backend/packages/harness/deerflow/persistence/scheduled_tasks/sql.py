@@ -490,11 +490,8 @@ class ScheduledTaskRepository:
             select(ScheduledTaskRunRow)
             .where(ScheduledTaskRunRow.task_id == task_id)
             .order_by(
-                ScheduledTaskRunRow.created_at.desc(),
                 ScheduledTaskRunRow.scheduled_for.desc(),
-                # ``id`` is an opaque caller-supplied string. Use it only as a
-                # deterministic final tie-break when both timestamps match; it
-                # must not be treated as a recency signal.
+                ScheduledTaskRunRow.created_at.desc(),
                 ScheduledTaskRunRow.id.desc(),
             )
             .limit(1)
