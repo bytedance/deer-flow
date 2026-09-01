@@ -6,7 +6,6 @@ from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.tools.types import Runtime
 
@@ -46,12 +45,6 @@ def _detect_image_mime(image_data: bytes) -> str | None:
     if image_data.startswith((b"GIF87a", b"GIF89a")):
         return "image/gif"
     return None
-
-
-def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None) -> str:
-    from deerflow.sandbox.tools import mask_local_paths_in_output
-
-    return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
 
 
 @tool("view_image", parse_docstring=True)
@@ -146,9 +139,9 @@ def view_image_tool(
 
     try:
         image_size = path.stat().st_size
-    except OSError as e:
+    except OSError:
         return Command(
-            update={"messages": [ToolMessage(f"Error reading image metadata: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            update={"messages": [ToolMessage(f"Error reading image metadata: {image_path}", tool_call_id=tool_call_id)]},
         )
     if image_size > _MAX_IMAGE_BYTES:
         return Command(
@@ -159,9 +152,9 @@ def view_image_tool(
     try:
         with open(actual_path, "rb") as f:
             image_data = f.read()
-    except Exception as e:
+    except Exception:
         return Command(
-            update={"messages": [ToolMessage(f"Error reading image file: {_sanitize_image_error(e, thread_data)}", tool_call_id=tool_call_id)]},
+            update={"messages": [ToolMessage(f"Error reading image file: {image_path}", tool_call_id=tool_call_id)]},
         )
 
     if len(image_data) != image_size:

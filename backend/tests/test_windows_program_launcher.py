@@ -128,8 +128,21 @@ def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> Non
     helper.assert_called_once()
 
 
-@pytest.mark.parametrize("argument", [r"\\host\share\tool.exe", r"--tool=\\host\share\tool.exe"])
-def test_execute_program_rejects_unmapped_absolute_argument(argument: str, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "argument",
+    [
+        r"C:\Windows\secret.txt",
+        r"C:Windows\secret.txt",
+        r"/c/Windows/secret.txt",
+        r"\\host\share\tool.exe",
+        r"--tool=\\host\share\tool.exe",
+        "/etc/passwd",
+        r"..\..\Windows\System32\calc.exe",
+        r"/out:C:\Windows\secret.txt",
+        r"@C:\Windows\args.rsp",
+    ],
+)
+def test_execute_program_rejects_unmapped_path_shaped_argument(argument: str, monkeypatch) -> None:
     monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
     monkeypatch.setattr(LocalSandbox, "_find_first_available_shell", staticmethod(lambda candidates: r"C:\Windows\System32\cmd.exe"))
     monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(lambda *args, **kwargs: ("ok", "", 0, False)))
@@ -137,6 +150,63 @@ def test_execute_program_rejects_unmapped_absolute_argument(argument: str, monke
 
     with pytest.raises(PermissionError, match="program argument"):
         sandbox.execute_program("/root/tools/build.cmd", [argument])
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        ("--config=/root/config.tfx-dms", "--config=" + _native_path(str(_LAUNCHER_ROOT / "config.tfx-dms"))),
+        ("/out:/root/out.txt", "/out:" + _native_path(str(_LAUNCHER_ROOT / "out.txt"))),
+        ("@/root/args.rsp", "@" + _native_path(str(_LAUNCHER_ROOT / "args.rsp"))),
+    ],
+)
+def test_execute_program_resolves_mapped_path_embedded_in_option(argument: str, expected: str, monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    calls: list[list[str] | str] = []
+
+    def fake_run(args, timeout, env=None, *, cwd=None):
+        calls.append(args)
+        return "ok", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    sandbox.execute_program("/root/tools/app.exe", [argument])
+
+    assert calls[0][1] == expected
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        (r"/out:C:\Users\lichen\config.tfx-dms", "/out:/root/config.tfx-dms"),
+        (r"@C:\Users\lichen\args.rsp", "@/root/args.rsp"),
+    ],
+)
+def test_run_host_program_normalizes_shared_option_path_candidates(argument: str, expected: str, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.normalize_local_tool_path",
+        lambda value: value.replace(r"C:\Users\lichen", "/root").replace("\\", "/"),
+    )
+
+    assert run_host_program_module._normalize_program_argument(argument) == expected
+
+
+@pytest.mark.parametrize("argument", ["--mode=release", "relative/file.txt", "https://example.test/path"])
+def test_execute_program_allows_non_path_arguments(argument: str, monkeypatch) -> None:
+    monkeypatch.setattr(local_sandbox, "_is_windows_native_program_platform", lambda: True)
+    calls: list[list[str] | str] = []
+
+    def fake_run(args, timeout, env=None, *, cwd=None):
+        calls.append(args)
+        return "ok", "", 0, False
+
+    monkeypatch.setattr(LocalSandbox, "_run_windows_command", staticmethod(fake_run))
+    sandbox = LocalSandbox("t", [_MOUNT])
+
+    sandbox.execute_program("/root/tools/app.exe", [argument])
+
+    assert calls[0][1] == argument
 
 
 def test_execute_program_allows_parentheses_in_configured_cmd_program_path(monkeypatch) -> None:

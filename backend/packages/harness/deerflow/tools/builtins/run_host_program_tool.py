@@ -7,24 +7,17 @@ import os
 
 from langchain.tools import tool
 
+from deerflow.sandbox.host_path_compat import is_program_argument_path, split_program_argument
 from deerflow.sandbox.security import is_host_bash_allowed, uses_local_sandbox_provider
 from deerflow.tools.types import Runtime
 
 
-def _looks_like_path(value: str) -> bool:
-    candidate = value.partition("=")[2] if "=" in value else value
-    return bool(candidate) and (candidate.startswith(("/", "\\")) or (len(candidate) >= 3 and candidate[1] == ":" and candidate[2] in {"/", "\\"}))
-
-
 def _normalize_program_argument(value: str) -> str:
-    if "=" in value:
-        prefix, separator, candidate = value.partition("=")
-        if _looks_like_path(candidate):
-            return f"{prefix}{separator}{_normalize_program_argument(candidate)}"
-    if _looks_like_path(value):
+    prefix, candidate = split_program_argument(value)
+    if is_program_argument_path(value):
         from deerflow.sandbox.tools import normalize_local_tool_path
 
-        return normalize_local_tool_path(value)
+        return f"{prefix}{normalize_local_tool_path(candidate)}"
     return value
 
 
@@ -46,6 +39,24 @@ def _resolve_program_timeout(requested: float | None, configured: object) -> flo
     if not math.isfinite(requested) or requested <= 0:
         raise ValueError("timeout must be positive and finite")
     return min(float(requested), configured_timeout)
+
+
+def _sanitize_program_exception(error: Exception, *, sandbox: object | None, thread_data: object | None, injected_env: dict[str, str] | None) -> str | None:
+    """Return a launch error with host paths and injected secrets removed."""
+    try:
+        from deerflow.sandbox.tools import mask_local_paths_in_output, mask_secret_values
+
+        detail = f"{type(error).__name__}: {error}"
+        reverse_paths = getattr(sandbox, "_reverse_resolve_paths_in_output", None)
+        if not callable(reverse_paths):
+            # No acquired sandbox means custom-mount mappings are unavailable;
+            # do not expose an exception string that may contain a host path.
+            return None
+        detail = reverse_paths(detail)
+        detail = mask_local_paths_in_output(detail, thread_data)
+        return mask_secret_values(detail, injected_env)
+    except Exception:
+        return None
 
 
 @tool("run_host_program", parse_docstring=True)
@@ -72,6 +83,9 @@ def run_host_program_tool(
         cwd: Optional working directory, as a configured virtual or Windows host path.
         timeout: Optional wall-clock timeout in seconds.
     """
+    sandbox = None
+    thread_data = None
+    injected_env = None
     try:
         from deerflow.config import get_app_config
         from deerflow.runtime.secret_context import read_active_secrets
@@ -129,13 +143,26 @@ def run_host_program_tool(
         max_chars = sandbox_config.bash_output_max_chars if sandbox_config else 20000
         return _truncate_bash_output(mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env), max_chars)
     except PermissionError as exc:
-        return f"Error: Permission denied: {exc}"
+        if sandbox is None:
+            return "Error: Permission denied: Host path is not allowed"
+        detail = _sanitize_program_exception(error=exc, sandbox=sandbox, thread_data=thread_data, injected_env=injected_env)
+        if detail is None:
+            return "Error: Permission denied while running program"
+        return f"Error: Permission denied: {detail}"
     except FileNotFoundError:
-        return f"Error: Program not found: {program_path}"
+        return "Error: Program not found"
     except ValueError as exc:
+        if sandbox is not None:
+            detail = _sanitize_program_exception(error=exc, sandbox=sandbox, thread_data=thread_data, injected_env=injected_env)
+            if detail is None:
+                return "Error: Invalid program request"
+            return f"Error: {detail}"
         return f"Error: {exc}"
     except Exception as exc:
-        return f"Error: Unexpected error running program: {type(exc).__name__}: {exc}"
+        detail = _sanitize_program_exception(error=exc, sandbox=sandbox, thread_data=thread_data, injected_env=injected_env)
+        if detail is None:
+            return "Error: Unexpected error running program"
+        return f"Error: Unexpected error running program: {detail}"
 
 
 __all__ = ["run_host_program_tool"]

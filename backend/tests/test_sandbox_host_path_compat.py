@@ -4,7 +4,12 @@ import pytest
 from pydantic import ValidationError
 
 from deerflow.config.sandbox_config import VolumeMountConfig
-from deerflow.sandbox.host_path_compat import normalize_host_path, replace_host_paths_in_command
+from deerflow.sandbox.host_path_compat import (
+    is_program_argument_path,
+    normalize_host_path,
+    replace_host_paths_in_command,
+    split_program_argument,
+)
 
 
 @pytest.fixture
@@ -151,3 +156,41 @@ def test_normalize_host_path_preserves_single_letter_posix_container_root() -> N
         monkeypatch.setattr("deerflow.sandbox.host_path_compat.os.name", "posix")
         mount = VolumeMountConfig(host_path="/tmp", container_path="/d/data", read_only=False)
         assert normalize_host_path("/tmp/report.txt", mount) == "/d/data/report.txt"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("--config=/root/config.tfx-dms", ("--config=", "/root/config.tfx-dms")),
+        (r"/out:C:\Windows\secret.txt", ("/out:", r"C:\Windows\secret.txt")),
+        (r"/LIBPATH:C:\outside", ("/LIBPATH:", r"C:\outside")),
+        (r"@C:\outside\args.rsp", ("@", r"C:\outside\args.rsp")),
+        ("--mode=release", ("--mode=", "release")),
+        ("https://example.test/path", ("", "https://example.test/path")),
+        ("url:http://example.test/path", ("", "url:http://example.test/path")),
+    ],
+)
+def test_split_program_argument_preserves_option_prefix(value: str, expected: tuple[str, str]) -> None:
+    assert split_program_argument(value) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        r"C:\Windows\secret.txt",
+        r"C:Windows\secret.txt",
+        r"/c/Windows/secret.txt",
+        r"\\host\share\secret.txt",
+        "/etc/passwd",
+        r"..\..\Windows\System32\calc.exe",
+        r"/out:C:\Windows\secret.txt",
+        r"@C:\Windows\args.rsp",
+    ],
+)
+def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms(value: str) -> None:
+    assert is_program_argument_path(value)
+
+
+@pytest.mark.parametrize("value", ["--mode=release", "relative/file.txt", "https://example.test/path", "url:http://example.test/path"])
+def test_program_argument_path_predicate_keeps_non_path_arguments_opaque(value: str) -> None:
+    assert not is_program_argument_path(value)

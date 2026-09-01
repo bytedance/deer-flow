@@ -32,7 +32,7 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
-from deerflow.sandbox.host_path_compat import normalize_host_path, replace_host_paths_in_command
+from deerflow.sandbox.host_path_compat import is_windows_host_path_spelling, normalize_host_path, replace_host_paths_in_command
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
@@ -124,8 +124,6 @@ _SHELL_REDIRECTION_OPERATORS = {
     "&>>",
     ">|",
 }
-
-_WINDOWS_HOST_PATH_PREFIX = re.compile(r"^(?:[A-Za-z]:[\\/]|/[A-Za-z][\\/])")
 
 
 def _get_skills_container_path() -> str:
@@ -443,9 +441,7 @@ def _looks_like_configured_host_path(path: str) -> bool:
     local deployments keep host spellings opaque and continue to use the
     configured virtual path contract.
     """
-    if os.name == "nt" and _WINDOWS_HOST_PATH_PREFIX.match(path):
-        return True
-    return False
+    return is_windows_host_path_spelling(path, platform_name=os.name)
 
 
 def normalize_local_tool_path(path: str) -> str:

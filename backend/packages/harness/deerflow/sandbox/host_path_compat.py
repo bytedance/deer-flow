@@ -17,6 +17,9 @@ from deerflow.config.sandbox_config import VolumeMountConfig
 
 _WINDOWS_DRIVE_PATH = re.compile(r"^(?P<drive>[A-Za-z]):(?:/|$)")
 _GIT_BASH_DRIVE_PATH = re.compile(r"^/(?P<drive>[A-Za-z])(?:/|$)")
+_PROGRAM_ARGUMENT_DRIVE = re.compile(r"^[A-Za-z]:")
+_PROGRAM_ARGUMENT_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
+_URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
 # remain opaque command arguments unless the caller explicitly normalizes one.
@@ -34,6 +37,65 @@ class _Mount:
 
 def _permission_error(path: str, reason: str) -> PermissionError:
     return PermissionError(f"Host path is not allowed: {path!r} ({reason})")
+
+
+def is_windows_host_path_spelling(path: str, *, platform_name: str | None = None) -> bool:
+    """Return whether *path* uses a Windows drive or Git Bash spelling.
+
+    ``platform_name`` lets callers retain their own platform-test seam while
+    keeping the spelling rules in this boundary module.
+    """
+    if (os.name if platform_name is None else platform_name) != "nt":
+        return False
+    normalized = path.replace("\\", "/")
+    return bool(_WINDOWS_DRIVE_PATH.match(normalized) or _GIT_BASH_DRIVE_PATH.match(normalized))
+
+
+def _has_program_path_syntax(value: str) -> bool:
+    normalized = value.replace("\\", "/")
+    return bool(value) and (normalized.startswith("/") or value.startswith("\\") or _PROGRAM_ARGUMENT_DRIVE.match(normalized) is not None or _PROGRAM_ARGUMENT_TRAVERSAL.search(normalized) is not None)
+
+
+def split_program_argument(value: str) -> tuple[str, str]:
+    """Split an option-bearing program argument into prefix and path candidate.
+
+    The candidate may be a complete argument (``C:\\tool.exe``), an option
+    value (``--tool=C:\\tool.exe``), a colon option (``/out:C:\\tool.exe``),
+    or a response-file argument (``@C:\\args.rsp``). URL values remain opaque.
+    """
+    if not isinstance(value, str) or not value or _URL_SCHEME_ANYWHERE.search(value):
+        return "", value
+
+    if "=" in value:
+        prefix, candidate = value.split("=", 1)
+        nested_prefix, nested_candidate = split_program_argument(candidate)
+        return f"{prefix}={nested_prefix}", nested_candidate
+
+    if value.startswith("@") and _has_program_path_syntax(value[1:]):
+        return "@", value[1:]
+
+    if _PROGRAM_ARGUMENT_DRIVE.match(value):
+        return "", value
+
+    for index, character in enumerate(value):
+        if character != ":" or index == 0 or (index == 1 and value[0].isalpha()):
+            continue
+        candidate = value[index + 1 :]
+        if _has_program_path_syntax(candidate):
+            nested_prefix, nested_candidate = split_program_argument(candidate)
+            return f"{value[: index + 1]}{nested_prefix}", nested_candidate
+
+    return "", value
+
+
+def program_argument_candidate(value: str) -> str:
+    """Return the path-bearing portion of a program argument."""
+    return split_program_argument(value)[1]
+
+
+def is_program_argument_path(value: str) -> bool:
+    """Return whether a program argument contains a rooted, drive, or escape path."""
+    return _has_program_path_syntax(program_argument_candidate(value))
 
 
 def _canonical_host_path(path: str) -> tuple[str, bool]:
@@ -169,4 +231,11 @@ def replace_host_paths_in_command(command: str, mounts: MountInput) -> str:
     return _COMMAND_HOST_PATH.sub(replace, command)
 
 
-__all__ = ["normalize_host_path", "replace_host_paths_in_command"]
+__all__ = [
+    "is_program_argument_path",
+    "is_windows_host_path_spelling",
+    "normalize_host_path",
+    "program_argument_candidate",
+    "replace_host_paths_in_command",
+    "split_program_argument",
+]

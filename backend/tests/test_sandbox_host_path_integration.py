@@ -235,6 +235,40 @@ def test_view_image_custom_mount_converts_acquisition_error_to_tool_message() ->
     assert _message_content(result) == "Error: Sandbox not found"
 
 
+def test_view_image_custom_mount_read_error_does_not_leak_host_path(tmp_path, monkeypatch) -> None:
+    from base64 import b64decode
+
+    image_path = tmp_path / "chart.png"
+    image_path.write_bytes(b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="))
+    mount = VolumeMountConfig(host_path=str(tmp_path), container_path="/root", read_only=True)
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _POSIX_THREAD_DATA},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+    real_open = open
+
+    def fail_custom_mount_open(file, *args, **kwargs):
+        if str(file) == str(image_path):
+            raise PermissionError(f"permission denied: {image_path}")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", fail_custom_mount_open)
+    with (
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=[mount]),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized") as acquire,
+    ):
+        from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
+
+        acquire.return_value = LocalSandbox("local", [PathMapping("/root", str(tmp_path), True)])
+        result = view_image_tool.func(runtime, "/root/chart.png", "call-custom-read-error")
+
+    message = _message_content(result)
+    assert "Error reading image file" in message
+    assert str(image_path) not in message
+    assert "/root/chart.png" in message
+
+
 def test_run_host_program_clamps_model_timeout_to_sandbox_limit() -> None:
     calls: list[float | None] = []
 
@@ -277,6 +311,51 @@ def test_run_host_program_clamps_model_timeout_to_sandbox_limit() -> None:
 
     assert result == "ok"
     assert calls == [12]
+
+
+def test_run_host_program_launch_error_does_not_leak_host_path(tmp_path) -> None:
+    host_program = tmp_path / "tools" / "build.exe"
+    mount = VolumeMountConfig(host_path=str(tmp_path), container_path="/root", read_only=False)
+
+    class FailingSandbox:
+        id = "local"
+
+        def _reverse_resolve_paths_in_output(self, output: str) -> str:
+            return output.replace(str(host_program), "/root/tools/build.exe")
+
+        def execute_program(self, *args, **kwargs):
+            raise PermissionError(f"permission denied: {host_program}")
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "local"}, "thread_data": _POSIX_THREAD_DATA},
+        context={"thread_id": "thread-1"},
+        config={},
+    )
+    config = SimpleNamespace(
+        sandbox=SandboxConfig(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=True,
+            mounts=[mount],
+            bash_command_timeout=12,
+        )
+    )
+    with (
+        patch.object(run_host_program_module, "_is_windows_host_program_platform", return_value=True),
+        patch("deerflow.sandbox.tools.ensure_sandbox_initialized", return_value=FailingSandbox()),
+        patch("deerflow.sandbox.tools.is_local_sandbox", return_value=True),
+        patch("deerflow.tools.builtins.run_host_program_tool.is_host_bash_allowed", return_value=True),
+        patch("deerflow.sandbox.tools._get_custom_mounts", return_value=[mount]),
+        patch("deerflow.config.get_app_config", return_value=config),
+    ):
+        result = run_host_program_tool.func(
+            runtime=runtime,
+            description="run program",
+            program_path="/root/tools/build.exe",
+            args=[],
+        )
+
+    assert str(host_program) not in result
+    assert result == "Error: Permission denied: PermissionError: permission denied: /root/tools/build.exe"
 
 
 def test_run_host_program_rejects_non_custom_mount_cwd() -> None:
