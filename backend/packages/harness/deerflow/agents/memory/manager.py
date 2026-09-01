@@ -326,9 +326,18 @@ class MemoryManager(BaseModel):
         the default ``0``. DeerMem drops matching pending contexts so a deleted
         or cleared agent cannot be resurrected by a late timer fire.
 
-        ``agent_name=None`` cancels all buffered work for ``user_id`` (or the
-        whole process-local queue when ``user_id`` is also ``None``). An
-        explicit agent name cancels only that agent's pending contexts.
+        Scope (must stay symmetric with ``clear_memory`` / storage buckets):
+
+        - ``user_id`` selects the user bucket. ``user_id=None`` means the
+          **legacy no-user root only**, never "every user in the process".
+        - ``agent_name=None`` cancels every agent bucket inside that user
+          scope (including the default/global bucket).
+        - An explicit ``agent_name`` cancels only that agent's pending
+          contexts inside the same user scope.
+
+        There is no "cancel the whole process-local queue" form of this
+        method; callers that need a broader sweep must iterate known user
+        scopes explicitly.
 
         Returns:
             Number of pending contexts cancelled. Default: ``0``.

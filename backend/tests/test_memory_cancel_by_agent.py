@@ -78,6 +78,14 @@ def test_base_memory_manager_cancel_by_agent_defaults_to_zero() -> None:
     assert _Bare().cancel_by_agent("x", user_id="u") == 0
 
 
+def test_cancel_by_agent_contract_documents_legacy_user_none_scope() -> None:
+    """Contract must not promise whole-queue cancel for user_id=None."""
+    doc = MemoryManager.cancel_by_agent.__doc__ or ""
+    assert "legacy no-user root" in doc
+    assert "never" in doc and "every user" in doc
+    assert "whole process-local queue" not in doc
+
+
 def test_delete_agent_cancels_before_and_after_successful_delete(tmp_path) -> None:
     """Cancel must run before store.delete so a timer cannot resurrect mid-rmtree."""
     from app.gateway.routers import agents as agents_router

@@ -460,7 +460,11 @@ class DeerMem(MemoryManager):
         *,
         user_id: str | None = None,
     ) -> int:
-        """Drop pending debounce-queue contexts for a deleted or cleared scope."""
+        """Drop pending debounce-queue contexts for a deleted or cleared scope.
+
+        ``user_id=None`` matches the legacy no-user storage root only (same as
+        ``clear_memory`` / ``clear_*_memory_data``), not every queued user.
+        """
         if agent_name is None:
             return self._queue.cancel_by_agent(user_id=user_id, all_agents=True)
         return self._queue.cancel_by_agent(
