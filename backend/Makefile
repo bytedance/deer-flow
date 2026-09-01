@@ -28,6 +28,15 @@ test-live:
 test-blocking-io:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest tests/blocking_io -q --tb=short
 
+# Run the backend unit-test suite as one shard of a parallel CI split.
+#   SPLITS = total number of shards; GROUP = 1-based shard index.
+# `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
+# runs the whole (non-live) suite as a single split, matching `make test`.
+SPLITS ?= 1
+GROUP ?= 1
+test-shard:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits=$(SPLITS) --group=$(GROUP) tests/ -q
+
 lint:
 	uv run ruff check .
 	uv run ruff format --check .
