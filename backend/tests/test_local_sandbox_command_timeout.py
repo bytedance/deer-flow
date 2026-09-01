@@ -83,6 +83,19 @@ def test_timeout_notice_formats_fractional_and_singular_timeouts(monkeypatch):
     assert "after 1 second" in LocalSandbox("t").execute_command("wait", timeout=1)
 
 
+def test_timeout_output_carries_authoritative_failure_marker(monkeypatch):
+    """A timed-out command is a failed execution: the output must carry an
+    exit marker so exit-status evidence (acceptance checklist) cannot read a
+    partial passing summary as success."""
+    monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: ("12 passed\n", "", 0, True)))
+
+    output = LocalSandbox("t").execute_command("make test", timeout=1)
+
+    assert "timed out" in output.lower()
+    assert output.endswith("Exit Code: 124")
+
+
 def test_windows_timeout_returns_notice(monkeypatch):
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "cmd.exe")

@@ -15,7 +15,7 @@
         "id": "69411c14-efea-4c7f-a322-2dd541b98fda"
       },
       {
-        "content": "<uploaded_files>\nNo files have been uploaded yet.\n</uploaded_files>",
+        "content": "<current_uploads>\nNo files have been uploaded yet.\n</current_uploads>",
         "additional_kwargs": {},
         "response_metadata": {},
         "type": "system",
@@ -565,7 +565,7 @@
         "id": "5b5a187a-5b2d-4c9e-b6f7-817fe9c12330"
       },
       {
-        "content": "<uploaded_files>\nNo files have been uploaded yet.\n</uploaded_files>",
+        "content": "<current_uploads>\nNo files have been uploaded yet.\n</current_uploads>",
         "additional_kwargs": {},
         "response_metadata": {},
         "type": "system",

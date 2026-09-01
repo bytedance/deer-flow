@@ -47,6 +47,10 @@ class E2BSandbox(Sandbox):
             :data:`DEFAULT_E2B_HOME_DIR`.
     """
 
+    #: Every call is a fresh ``sandbox.commands.run`` execution — no shell
+    #: state survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,
@@ -161,8 +165,12 @@ class E2BSandbox(Sandbox):
                     output = f"{stdout}\n{stderr}"
                 else:
                     output = stdout or stderr
-                if exit_code not in (0, None) and not output:
-                    output = f"Command exited with code {exit_code}"
+                if exit_code not in (0, None):
+                    # Mirror LocalSandbox: a nonzero exit must survive in the
+                    # output text even when the command produced output, so
+                    # evidence consumers (acceptance checklist) can recover the
+                    # actual shell status.
+                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
             except Exception as e:
                 if _is_sandbox_gone_error(e):
