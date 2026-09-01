@@ -258,7 +258,9 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
         assert installed_mode & 0o222
     else:
         assert installed_mode == 0o755
-    launcher = (runtime / "bin" / "lark-cli").read_text(encoding="utf-8")
+    launcher_bytes = (runtime / "bin" / "lark-cli").read_bytes()
+    assert b"\r" not in launcher_bytes
+    launcher = launcher_bytes.decode("utf-8")
     assert "uname -m" in launcher
     assert "x86_64" in launcher and "aarch64" in launcher
 
