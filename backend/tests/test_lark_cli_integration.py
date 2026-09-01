@@ -138,7 +138,9 @@ def test_managed_sandbox_runtime_verifies_and_installs_linux_archives(monkeypatc
     assert (runtime / "linux-amd64" / "lark-cli").read_bytes() == b"amd64-binary"
     assert (runtime / "linux-arm64" / "lark-cli").read_bytes() == b"arm64-binary"
     _assert_posix_mode(runtime / "linux-amd64" / "lark-cli", 0o755)
-    launcher = (runtime / "bin" / "lark-cli").read_text(encoding="utf-8")
+    launcher_bytes = (runtime / "bin" / "lark-cli").read_bytes()
+    assert b"\r" not in launcher_bytes
+    launcher = launcher_bytes.decode("utf-8")
     assert "uname -m" in launcher
     assert "x86_64" in launcher and "aarch64" in launcher
 
@@ -268,6 +270,8 @@ def test_validate_lark_cli_sandbox_runtime_accepts_non_executable_files_on_windo
     _stage_non_executable_sandbox_runtime(root)
 
     lark_cli._validate_lark_cli_sandbox_runtime(root)
+    lark_cli._write_lark_cli_sandbox_launcher(root)
+    assert b"\r" not in (root / "bin" / "lark-cli").read_bytes()
 
 
 def test_validate_lark_cli_sandbox_runtime_rejects_non_executable_files_on_posix_hosts(tmp_path, monkeypatch) -> None:

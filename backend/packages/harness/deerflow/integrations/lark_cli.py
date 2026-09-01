@@ -425,7 +425,9 @@ def _extract_lark_cli_runtime_binary(archive: bytes, destination: Path) -> None:
 def _write_lark_cli_sandbox_launcher(staging: Path) -> None:
     launcher = staging / "bin" / "lark-cli"
     launcher.parent.mkdir(parents=True, exist_ok=True)
-    launcher.write_text(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT, encoding="utf-8")
+    # LF-only, matching docker/lark-cli-init. Path.write_text() uses os.linesep
+    # and would emit \r\n on Windows, which Linux then parses as #!/bin/sh\r.
+    launcher.write_bytes(LARK_CLI_SANDBOX_LAUNCHER_SCRIPT.encode("utf-8"))
     launcher.chmod(0o755)
 
 
