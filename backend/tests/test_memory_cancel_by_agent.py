@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock, patch
+
+from fastapi import HTTPException
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.core.queue import ConversationContext
-from deerflow.agents.memory.manager import MemoryManager, reset_memory_manager
+from deerflow.agents.memory.manager import MemoryManager, get_memory_manager, reset_memory_manager
 from deerflow.config.memory_config import MemoryConfig, get_memory_config, set_memory_config
 
 
@@ -72,10 +75,8 @@ def test_base_memory_manager_cancel_by_agent_defaults_to_zero() -> None:
     assert _Bare().cancel_by_agent("x", user_id="u") == 0
 
 
-def test_delete_agent_cancels_pending_memory_after_success(tmp_path) -> None:
-    """DELETE /api/agents/{name} must cancel buffered work for the deleted agent."""
-    import asyncio
-
+def test_delete_agent_cancels_before_and_after_successful_delete(tmp_path) -> None:
+    """Cancel must run before store.delete so a timer cannot resurrect mid-rmtree."""
     from app.gateway.routers import agents as agents_router
 
     orig = get_memory_config()
@@ -88,13 +89,26 @@ def test_delete_agent_cancels_pending_memory_after_success(tmp_path) -> None:
         )
     )
     try:
-        manager = __import__("deerflow.agents.memory.manager", fromlist=["get_memory_manager"]).get_memory_manager()
+        manager = get_memory_manager()
         with patch.object(manager._queue, "_schedule_timer"):
             manager._queue.add(thread_id="t1", messages=["m"], agent_name="gone", user_id="user-1")
             manager._queue.add(thread_id="t2", messages=["m"], agent_name="keep", user_id="user-1")
 
         store = MagicMock()
-        store.delete.return_value = "deleted"
+        order: list[str] = []
+
+        def _delete(name, *, user_id=None):
+            order.append("delete")
+            # Mid-delete enqueue: cancel-after must still clear it.
+            manager._queue._items.append(ConversationContext(thread_id="t-mid", messages=["m"], agent_name="gone", user_id="user-1"))
+            return "deleted"
+
+        store.delete.side_effect = _delete
+        real_cancel = agents_router._cancel_pending_memory_for_agent
+
+        def tracked_cancel(name, user_id):
+            order.append("cancel")
+            return real_cancel(name, user_id)
 
         with (
             patch.object(agents_router, "_require_agents_api_enabled"),
@@ -102,10 +116,12 @@ def test_delete_agent_cancels_pending_memory_after_success(tmp_path) -> None:
             patch.object(agents_router, "_normalize_agent_name", side_effect=lambda n: n.lower()),
             patch.object(agents_router, "get_effective_user_id", return_value="user-1"),
             patch.object(agents_router, "get_agent_store", return_value=store),
+            patch.object(agents_router, "_cancel_pending_memory_for_agent", side_effect=tracked_cancel),
             patch.object(agents_router.asyncio, "to_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
         ):
             asyncio.run(agents_router.delete_agent("Gone"))
 
+        assert order == ["cancel", "delete", "cancel"]
         assert manager._queue.pending_count == 1
         assert manager._queue._items[0].agent_name == "keep"
         store.delete.assert_called_once_with("gone", user_id="user-1")
@@ -114,16 +130,15 @@ def test_delete_agent_cancels_pending_memory_after_success(tmp_path) -> None:
         reset_memory_manager()
 
 
-def test_delete_agent_skips_cancel_when_delete_rejected() -> None:
-    import asyncio
-
-    from fastapi import HTTPException
-
+def test_delete_agent_still_cancels_before_rejected_delete() -> None:
+    """Pre-delete cancel is intentional even when delete later 404s."""
     from app.gateway.routers import agents as agents_router
 
     store = MagicMock()
     store.delete.return_value = "missing"
     manager = MagicMock()
+    cfg = MagicMock()
+    cfg.enabled = True
 
     with (
         patch.object(agents_router, "_require_agents_api_enabled"),
@@ -131,15 +146,14 @@ def test_delete_agent_skips_cancel_when_delete_rejected() -> None:
         patch.object(agents_router, "_normalize_agent_name", side_effect=lambda n: n.lower()),
         patch.object(agents_router, "get_effective_user_id", return_value="user-1"),
         patch.object(agents_router, "get_agent_store", return_value=store),
+        patch.object(agents_router, "get_memory_manager", return_value=manager),
+        patch.object(agents_router, "get_memory_config", return_value=cfg),
         patch.object(agents_router.asyncio, "to_thread", side_effect=lambda fn, *a, **k: fn(*a, **k)),
-        patch("deerflow.agents.memory.manager.get_memory_manager", return_value=manager),
-        patch("deerflow.config.memory_config.get_memory_config") as cfg,
     ):
-        cfg.return_value.enabled = True
         try:
             asyncio.run(agents_router.delete_agent("ghost"))
             raise AssertionError("expected 404")
         except HTTPException as exc:
             assert exc.status_code == 404
 
-    manager.cancel_by_agent.assert_not_called()
+    manager.cancel_by_agent.assert_called_once_with("ghost", user_id="user-1")

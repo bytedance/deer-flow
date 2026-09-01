@@ -8,6 +8,7 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from deerflow.agents.memory.manager import get_memory_manager
 from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.agents_config import (
     AgentConfig,
@@ -18,6 +19,7 @@ from deerflow.config.agents_config import (
     preserve_non_managed_fields,
 )
 from deerflow.config.app_config import get_app_config
+from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
@@ -566,6 +568,10 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+    # Cancel *before* delete so a debounce timer cannot fire during the
+    # store.delete I/O window and recreate the agent directory (#5037).
+    # A rejected delete may drop buffered work; that update is re-fed next turn.
+    _cancel_pending_memory_for_agent(name, user_id)
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
         def _delete_agent() -> AgentDeleteOutcome:
@@ -589,26 +595,31 @@ async def delete_agent(name: str) -> None:
             detail=(f"Directory for '{name}' contains memory data but is not a custom agent because config.yaml is missing; it was preserved."),
         )
 
-    # Best-effort: drop buffered memory extraction for this agent so a debounce
-    # timer cannot resurrect per-agent memory after the files are gone (#5037).
-    # Failure here must not fail the already-successful delete.
-    try:
-        from deerflow.agents.memory.manager import get_memory_manager
-        from deerflow.config.memory_config import get_memory_config
+    # Re-check after a successful delete in case work was enqueued mid-rmtree.
+    _cancel_pending_memory_for_agent(name, user_id)
 
-        if get_memory_config().enabled:
-            cancelled = get_memory_manager().cancel_by_agent(name, user_id=user_id)
-            if cancelled:
-                logger.info(
-                    "Cancelled %d pending memory update(s) for deleted agent '%s'",
-                    cancelled,
-                    name,
-                )
+    logger.info(f"Deleted agent '{name}'")
+
+
+def _cancel_pending_memory_for_agent(name: str, user_id: str | None) -> None:
+    """Best-effort cancel of buffered memory extraction for one agent scope.
+
+    Failure must never fail agent deletion: a dropped update is re-fed on the
+    next conversation turn per the queue contract.
+    """
+    try:
+        if not get_memory_config().enabled:
+            return
+        cancelled = get_memory_manager().cancel_by_agent(name, user_id=user_id)
+        if cancelled:
+            logger.info(
+                "Cancelled %d pending memory update(s) for agent '%s'",
+                cancelled,
+                name,
+            )
     except Exception:
         logger.warning(
-            "Failed to cancel pending memory updates for deleted agent '%s' (non-fatal)",
+            "Failed to cancel pending memory updates for agent '%s' (non-fatal)",
             name,
             exc_info=True,
         )
-
-    logger.info(f"Deleted agent '{name}'")
