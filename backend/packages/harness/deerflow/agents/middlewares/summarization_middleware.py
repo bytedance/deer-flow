@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Protocol, override, runtime_checkable
 
+from deerflow_extension_api import CompactionEvent, canonical_hash
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, get_buffer_string, trim_messages
@@ -17,10 +18,14 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
+from deerflow.extensions.notify import notify_context_compacted
 from deerflow.models import create_chat_model
+from deerflow.utils.messages import is_real_user_message
 
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
+_COMPACTION_TRANSFORM_KIND = "summarization"
+_COMPACTION_TRANSFORM_VERSION = "1"
 _UNSET = object()
 # Valid non-generated summaries for the empty / too-long-to-summarize edges; these
 # short-circuit model invocation (and must not be treated as generation failures).
@@ -105,6 +110,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         configured_model_name: str | None = None,
         run_model_name: str | None = None,
         anchor_model_name: str | None = _UNSET,  # type: ignore[assignment]
+        extensions=None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -139,10 +145,37 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             self._anchor_model_name = configured_model_name or self._default_model_name()
         else:
             self._anchor_model_name = anchor_model_name
+        if extensions is None:
+            from deerflow.extensions import get_agent_build_extensions
+
+            extensions = get_agent_build_extensions()
+        self._extensions = extensions
         # Nostream generation models built lazily by name and cached (None = a build
         # that failed, so a broken candidate config is not retried every turn and does
         # not escape the fail-open boundary).
         self._model_cache: dict[str | None, Any] = {}
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Return the effective compaction policy used for release identity."""
+
+        def plain_size(value: object) -> object:
+            if isinstance(value, tuple):
+                return [plain_size(child) for child in value]
+            if isinstance(value, list):
+                return [plain_size(child) for child in value]
+            return value
+
+        return {
+            "trigger": plain_size(self.trigger),
+            "keep": plain_size(self.keep),
+            "trim_tokens_to_summarize": self.trim_tokens_to_summarize,
+            "summary_prompt_hash": canonical_hash(self.summary_prompt),
+            # self.model is a chat-model object and is not JSON-serialisable; the
+            # anchor model name is the identity that actually drives compaction
+            # behaviour (token counting/profile inspection and, absent an
+            # explicit configured summary model, generation itself).
+            "summary_model": self._anchor_model_name,
+        }
 
     def _tag_nostream(self, model: Any) -> Any:
         """Return a copy of ``model`` carrying TAG_NOSTREAM without clobbering tags.
@@ -270,14 +303,26 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 return text
         return None
 
-    async def _asummarize_with(self, messages_to_summarize: list[AnyMessage], previous_summary: str | None = None) -> str | None:
+    async def _asummarize_with(
+        self,
+        messages_to_summarize: list[AnyMessage],
+        previous_summary: str | None = None,
+        *,
+        task_store=None,
+    ) -> str | None:
         """Async counterpart of :meth:`_summarize_with` using the nostream model."""
         prompt = self._prepare_summary_prompt(messages_to_summarize, previous_summary)
         if prompt is None or prompt in _CANNED_SUMMARIES:
             return prompt
         names = self._generation_candidate_names()
         for index, name in enumerate(names):
-            text = await self._ainvoke_summary(self._model_for(name), prompt, last=index == len(names) - 1)
+            text = await self._ainvoke_summary(
+                self._model_for(name),
+                prompt,
+                last=index == len(names) - 1,
+                model_name=name,
+                task_store=task_store,
+            )
             if text is not None:
                 return text
         return None
@@ -289,6 +334,13 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         response's ``.text`` is part of consuming the provider result, so a failing
         accessor must convert to a candidate failure (fall through) rather than escape
         the fail-open boundary.
+
+        Deliberately unobserved by system-model-call extensions, unlike
+        :meth:`_ainvoke_summary`. Both this method and its only host caller
+        (``compact_state``) are the sync half of an async-only runtime: the agent runs
+        through ``abefore_model``, and ``runtime/context_compaction.py`` calls
+        ``acompact_state``. Notifying from here would have to block the calling thread
+        on the extension loop for a call site the host never reaches.
         """
         if model is None:
             return None
@@ -299,12 +351,37 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             self._log_summary_error(last)
             return None
 
-    async def _ainvoke_summary(self, model: Any | None, prompt: str, *, last: bool = False) -> str | None:
+    async def _ainvoke_summary(
+        self,
+        model: Any | None,
+        prompt: str,
+        *,
+        last: bool = False,
+        model_name: str | None = None,
+        task_store=None,
+    ) -> str | None:
         """Async counterpart of :meth:`_invoke_summary`."""
         if model is None:
             return None
         try:
-            response = await model.ainvoke(prompt, config={"metadata": {"lc_source": "summarization"}})
+            invoke_config = {"metadata": {"lc_source": "summarization"}}
+            extensions = getattr(self, "_extensions", None)
+            if extensions is None:
+                response = await model.ainvoke(prompt, config=invoke_config)
+            else:
+                from deerflow_extension_api import SystemOperationKind
+
+                from deerflow.extensions.notify import observe_system_model_call
+
+                response = await observe_system_model_call(
+                    extensions,
+                    SystemOperationKind.SUMMARIZATION,
+                    messages=prompt,
+                    model_name=model_name,
+                    invoke_config=invoke_config,
+                    invoke=lambda: model.ainvoke(prompt, config=invoke_config),
+                    task_store=task_store,
+                )
             return self._checked_summary(response, last)
         except Exception:
             self._log_summary_error(last)
@@ -474,11 +551,68 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if cutoff_index <= 0:
             return None
 
+        # The latest real user message (the current request) must survive: peer
+        # rescue no longer covers it (see _preserve_dynamic_context_reminders), so
+        # lock its id here and rescue by exact id. This keeps the current request
+        # without "moving cutoff" — which would also retain early AI/Tool turns and
+        # never compress a first-turn long analysis.
+        latest_user_id: str | None = None
+        for msg in reversed(messages):
+            if is_real_user_message(msg):
+                latest_user_id = msg.id
+                break
+
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
+        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages, latest_user_id=latest_user_id)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
+
+    def _freeze_compaction_sources(self, messages_to_summarize: list[AnyMessage]) -> tuple[str, ...]:
+        """Hash each about-to-be-removed message's content before the summary call.
+
+        Returns empty when no ``ContextCompactionObserver`` is registered. The
+        hashing is an O(context-size) canonical-JSON pass, and
+        ``notify_context_compacted`` would discard the event anyway; an install
+        with no observer must not pay for one, the same rule ``_complete_assembly``
+        follows for descriptor construction. The check cannot live only in the
+        notify call — by then the work is already done.
+
+        Once the summary call returns, ``messages_to_summarize`` is gone from state —
+        only the produced summary remains. The mapping from "these messages" to "this
+        summary" exists only in this stack frame, so it must be captured now rather
+        than reconstructed later.
+
+        Hashes ``message.content`` directly, never ``str(message.content)``:
+        DeerFlow messages are routinely multimodal (``list[dict]`` content, e.g.
+        ``view_image_middleware``'s injected image payloads), and ``str()`` on a
+        dict renders insertion order, so pre-stringifying would make two
+        logically identical messages hash differently. ``canonical_hash`` exists
+        precisely to normalize that away (sorted keys via ``canonical_json``);
+        stringifying first throws the normalization away before it runs.
+        """
+        extensions = getattr(self, "_extensions", None)
+        if extensions is None or not extensions.context_compaction_observers:
+            return ()
+        return tuple(canonical_hash(message.content) for message in messages_to_summarize)
+
+    def _record_compaction(
+        self,
+        source_content_hashes: tuple[str, ...],
+        *,
+        summary: str,
+        compacted_message_count: int,
+        kept_message_count: int,
+    ) -> None:
+        event = CompactionEvent(
+            transform_kind=_COMPACTION_TRANSFORM_KIND,
+            transform_version=_COMPACTION_TRANSFORM_VERSION,
+            source_content_hashes=source_content_hashes,
+            output_content_hash=canonical_hash(summary),
+            compacted_message_count=compacted_message_count,
+            kept_message_count=kept_message_count,
+        )
+        notify_context_compacted(event, extensions=self._extensions)
 
     def compact_state(
         self,
@@ -500,6 +634,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
+        source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
         summary = self._summarize_with(messages_to_summarize, previous_summary=previous_summary)
         if summary is None:
             if raise_on_failure:
@@ -510,6 +645,12 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # duplicate that work on the next attempt. Messages are still removed after
         # this returns (in _maybe_summarize), so hooks run before they are gone.
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._record_compaction(
+            source_content_hashes,
+            summary=summary,
+            compacted_message_count=len(messages_to_summarize),
+            kept_message_count=len(preserved_messages),
+        )
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -530,13 +671,26 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
-        summary = await self._asummarize_with(messages_to_summarize, previous_summary=previous_summary)
+        from deerflow_extension_api import task_store_from_runtime
+
+        source_content_hashes = self._freeze_compaction_sources(messages_to_summarize)
+        summary = await self._asummarize_with(
+            messages_to_summarize,
+            previous_summary=previous_summary,
+            task_store=task_store_from_runtime(runtime),
+        )
         if summary is None:
             if raise_on_failure:
                 raise SummaryGenerationError("summary generation failed")
             return None
         # Fire hooks only once a replacement summary exists (see compact_state).
         self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        self._record_compaction(
+            source_content_hashes,
+            summary=summary,
+            compacted_message_count=len(messages_to_summarize),
+            kept_message_count=len(preserved_messages),
+        )
         return ContextCompactionResult(
             summary_text=summary,
             messages_to_summarize=tuple(messages_to_summarize),
@@ -572,51 +726,24 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
+        *,
+        latest_user_id: str | None = None,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
+        """Keep tagged dynamic-context reminders and the current user request out of compression.
 
-        These reminders carry the current date and optional memory. If summarization
-        removes them, DynamicContextMiddleware can lose the already-injected reminder
-        and inject a replacement into the wrong point of the conversation.
-
-        The ID-swap triplet produced by ``_make_reminder_and_user_messages`` contains
-        three messages: ``SystemMessage(id=X)`` and ``HumanMessage(id=X__memory)`` are
-        both tagged with ``dynamic_context_reminder=True``, but ``HumanMessage(id=X__user)``
-        carries the original user content and is **not** tagged. Without peer rescue,
-        ``__user`` would stay in ``to_summarize`` and be compressed into prose — orphaning
-        the tagged messages and losing the user question from the model's direct context.
-
-        This method rescues tagged reminders and also rescues any untagged messages whose
-        ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
+        Only tagged reminders (date ``SystemMessage`` + optional ``__memory`` peer,
+        both carrying ``dynamic_context_reminder=True``) and the latest real user
+        message are rescued. The untagged ``__user`` peer is deliberately NOT
+        rescued by ID-swap prefix: it is a stale historical request that must be
+        allowed to compress — the source of cross-turn prompt contamination. The
+        *current* request is instead identified by ``latest_user_id``, so a
+        first-turn long analysis keeps its ``__user`` request while its early
+        AI/Tool turns still compress.
         """
-        reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
-        if not reminders:
-            return messages_to_summarize, preserved_messages
-
-        # Collect the base IDs (the stable_id prefix) from tagged reminders.
-        # For a reminder with id="ctx-001__memory", the base is "ctx-001".
-        # For a reminder with id="ctx-001" (SystemMessage), the base is "ctx-001".
-        # removesuffix is suffix-only — it won't strip a "__" that sits in the
-        # middle of a stable_id (e.g. "ctx__001" stays intact, unlike rsplit
-        # which would mis-derive "ctx").  Only known ID-swap suffixes (__memory,
-        # __user) are stripped; __user is not tagged so won't appear in reminders,
-        # but is included defensively.
-        reminder_base_ids: set[str] = set()
-        for msg in reminders:
-            if msg.id:
-                base = msg.id.removesuffix("__memory").removesuffix("__user")
-                reminder_base_ids.add(base)
-
-        # Single-pass partition: walk messages_to_summarize in chronological order
-        # and rescue both tagged reminders and untagged ID-swap peers (whose id
-        # starts with a known base + "__").  This preserves the original message
-        # order within rescued — critical when multiple triplets land in one
-        # summarization window — and eliminates the need for id(m)-based dedup
-        # that the previous reminders+peers concatenation required.
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
+            if is_dynamic_context_reminder(msg) or (latest_user_id is not None and msg.id == latest_user_id):
                 rescued.append(msg)
             else:
                 remaining.append(msg)
@@ -678,6 +805,7 @@ def create_summarization_middleware(
     keep: tuple[str, int | float] | None = None,
     skip_memory_flush: bool = False,
     run_model_name: str | None = None,
+    extensions=None,
 ) -> DeerFlowSummarizationMiddleware | None:
     """Create the configured summarization middleware.
 
@@ -753,4 +881,5 @@ def create_summarization_middleware(
         configured_model_name=config.model_name,
         run_model_name=run_model_name,
         anchor_model_name=anchor_name,
+        extensions=extensions,
     )

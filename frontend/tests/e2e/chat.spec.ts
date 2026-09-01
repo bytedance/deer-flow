@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Route } from "@playwright/test";
 
 import { handleRunStream, mockLangGraphAPI } from "./utils/mock-api";
 
@@ -20,6 +20,79 @@ function textFromMessageContent(content: unknown) {
     )
     .join("");
 }
+
+test.describe("Streaming message actions", () => {
+  test("keeps a completed answer copyable while the next turn starts", async ({
+    page,
+  }) => {
+    let streamCalls = 0;
+    let releaseSecondStream!: () => void;
+    const secondStreamHeld = new Promise<void>((resolve) => {
+      releaseSecondStream = resolve;
+    });
+
+    const handleCopyRegressionStream = async (route: Route) => {
+      streamCalls += 1;
+      if (streamCalls === 2) {
+        await secondStreamHeld;
+      }
+      return handleRunStream(route, {}, undefined, {
+        responseMessage: {
+          type: "ai",
+          id: `copy-regression-ai-${streamCalls}`,
+          content:
+            streamCalls === 1 ? "First completed answer" : "Second answer",
+        },
+        messageMetadata: {
+          langgraph_node: "agent",
+          langgraph_step: streamCalls,
+        },
+      });
+    };
+    mockLangGraphAPI(page, {
+      createdThreadMessages: [
+        {
+          type: "human",
+          id: "copy-regression-human-1",
+          content: "First question",
+        },
+        {
+          type: "ai",
+          id: "copy-regression-ai-1",
+          content: "First completed answer",
+        },
+      ],
+      runStreamHandler: handleCopyRegressionStream,
+    });
+
+    try {
+      await page.goto("/workspace/chats/new");
+      const textarea = page.getByPlaceholder(/how can i assist you/i);
+      await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+      await textarea.fill("First question");
+      await textarea.press("Enter");
+      await expect.poll(() => streamCalls).toBe(1);
+      await expect(page.getByText("First completed answer")).toBeVisible({
+        timeout: 10_000,
+      });
+
+      await textarea.fill("Second question");
+      await textarea.press("Enter");
+      await expect.poll(() => streamCalls).toBe(2);
+
+      const completedTurn = page
+        .locator('[data-assistant-turn=""]')
+        .filter({ hasText: "First completed answer" });
+      await completedTurn.hover();
+      await expect(
+        completedTurn.getByRole("button", { name: "Copy to clipboard" }),
+      ).toBeVisible();
+    } finally {
+      releaseSecondStream();
+    }
+  });
+});
 
 test.describe("Chat workspace", () => {
   test.beforeEach(async ({ page }) => {
@@ -460,6 +533,136 @@ test.describe("Chat workspace", () => {
       .toBe("/data-analysis summarize this dataset");
   });
 
+  test("reopens the skill list with a slash after a skill is selected", async ({
+    page,
+  }) => {
+    let submittedText: string | undefined;
+    await page.route("**/runs/stream", (route) => {
+      const body = route.request().postDataJSON() as {
+        input?: { messages?: Array<{ content?: unknown }> };
+      };
+      submittedText = textFromMessageContent(
+        body.input?.messages?.at(-1)?.content,
+      );
+      return handleRunStream(route);
+    });
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/dat");
+    await expect(
+      page.getByRole("option", { name: /data-analysis/i }),
+    ).toBeVisible();
+    await textarea.press("Enter");
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await expect(skillInput).toBeVisible();
+
+    await skillInput.pressSequentially("/");
+
+    const dataAnalysis = page.getByRole("option", { name: /data-analysis/i });
+    const frontendDesign = page.getByRole("option", {
+      name: /frontend-design/i,
+    });
+    await expect(dataAnalysis).toBeVisible();
+    await expect(frontendDesign).toBeVisible();
+    // Builtin commands own the whole composer line, so they stay out of the
+    // list while a skill is selected even though an empty query matches them.
+    await expect(page.getByRole("option", { name: /goal/i })).toBeHidden();
+
+    await skillInput.pressSequentially("fro");
+    await expect(frontendDesign).toHaveAttribute("aria-selected", "true");
+
+    await skillInput.press("Enter");
+
+    await expect(page.getByText("/frontend-design")).toBeVisible();
+    await expect(page.getByText("/data-analysis")).toBeHidden();
+
+    await skillInput.pressSequentially("polish the composer");
+    await skillInput.press("Enter");
+
+    await expect
+      .poll(() => submittedText)
+      .toBe("/frontend-design polish the composer");
+  });
+
+  test("does not offer a skill whose name a slash command owns", async ({
+    page,
+  }) => {
+    // Registered after the shared mock, so it wins: nothing rejects these
+    // names when the skill is created.
+    await page.route("**/api/skills", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          skills: [
+            {
+              name: "data-analysis",
+              description: "Analyze structured data and produce charts.",
+              category: "public",
+              enabled: true,
+            },
+            {
+              name: "compact",
+              description: "A custom skill named after a builtin command.",
+              category: "custom",
+              enabled: true,
+            },
+            {
+              name: "status",
+              description: "A custom skill named after a reserved command.",
+              category: "custom",
+              enabled: true,
+            },
+          ],
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await textarea.fill("/comp");
+    // Reserved outside chip mode: the builtin is offered, the skill is not.
+    await expect(
+      page.getByRole("option", { name: /compact/i }),
+    ).toHaveAccessibleName(/Compact earlier context/i);
+
+    // A contract-reserved name has no builtin standing in for it, so the list
+    // is empty rather than showing a skill both slash parsers would refuse.
+    await textarea.fill("/stat");
+    await expect(page.getByRole("option", { name: /status/i })).toBeHidden();
+
+    await textarea.fill("/dat");
+    await expect(
+      page.getByRole("option", { name: /data-analysis/i }),
+    ).toBeVisible();
+    await textarea.press("Enter");
+    await expect(page.getByText("/data-analysis")).toBeVisible();
+
+    const skillInput = page.getByRole("textbox", {
+      name: /how can i assist you/i,
+    });
+    await skillInput.pressSequentially("/comp");
+
+    // Reserved in chip mode too. Selecting it would set a `/compact` chip that
+    // `parseCompactCommand` intercepts on submit, so context compaction would
+    // run instead of the skill.
+    await expect(page.getByRole("option", { name: /compact/i })).toBeHidden();
+
+    await skillInput.fill("/stat");
+    await expect(page.getByRole("option", { name: /status/i })).toBeHidden();
+  });
+
   test("goal command sets a goal and starts an agent run", async ({ page }) => {
     let streamCalls = 0;
     await page.goto("/workspace/chats/new");
@@ -855,6 +1058,45 @@ test.describe("Chat workspace", () => {
 
     await expect(page.getByRole("tooltip")).toContainText("50 MiB");
     await expect(page.getByRole("tooltip")).toContainText("100 MiB");
+  });
+
+  test("shows structured upload errors as readable messages", async ({
+    page,
+  }) => {
+    await page.route("**/api/threads/*/uploads", (route) =>
+      route.fulfill({
+        status: 422,
+        contentType: "application/json",
+        body: JSON.stringify({
+          detail: [
+            {
+              type: "missing",
+              loc: ["body", "files"],
+              msg: "Field required",
+              input: null,
+            },
+          ],
+        }),
+      }),
+    );
+
+    await page.goto("/workspace/chats/new");
+    const textarea = page.getByPlaceholder(/how can i assist you/i);
+    await expect(textarea).toBeVisible({ timeout: 15_000 });
+
+    await page.getByLabel("Upload files").setInputFiles({
+      name: "report.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("report"),
+    });
+    await textarea.fill("Summarize this report");
+    await textarea.press("Enter");
+
+    const errorToast = page
+      .locator("[data-sonner-toast]")
+      .filter({ hasText: "body.files: Field required" });
+    await expect(errorToast).toBeVisible();
+    await expect(errorToast).not.toContainText("[object Object]");
   });
 
   test("rejects an oversized attachment before upload", async ({ page }) => {

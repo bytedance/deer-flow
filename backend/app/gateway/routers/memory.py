@@ -131,6 +131,8 @@ def _map_memory_fact_value_error(exc: ValueError) -> HTTPException:
         detail = "Invalid confidence value; must be between 0 and 1."
     elif exc.args and exc.args[0] == "agent_name":
         detail = "An agent name is required for fact operations; user-global memory stores summaries only."
+    elif exc.args and exc.args[0] == "Duplicate fact":
+        return HTTPException(status_code=409, detail="A fact with the same content already exists.")
     else:
         detail = "Memory fact content cannot be empty."
     return HTTPException(status_code=400, detail=detail)
@@ -368,8 +370,8 @@ async def create_memory_fact_endpoint(
         raise HTTPException(status_code=500, detail="Failed to create memory fact.") from exc
 
     if fact_id is None:
-        # max_facts cap evicted the new (lower-confidence) fact; it was not stored.
-        raise HTTPException(status_code=409, detail="Fact was not stored because memory.max_facts kept higher-confidence facts")
+        # The configured max_facts policy evicted the new fact; it was not stored.
+        raise HTTPException(status_code=409, detail="Fact was not stored because the configured memory.max_facts capacity policy evicted it")
     return MemoryResponse(**memory_data)
 
 

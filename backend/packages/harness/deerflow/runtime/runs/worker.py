@@ -17,14 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gc
 import inspect
 import logging
 import os
 import sys
 import threading
+import time
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from contextlib import asynccontextmanager
+from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
@@ -34,8 +37,10 @@ from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.constants import TOOL_RESULTS_DIRNAME
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -90,6 +95,141 @@ logger = logging.getLogger(__name__)
 _checkpoint_locks_guard = threading.Lock()
 _checkpoint_locks_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
 
+# Completed LangGraph runs can leave callback Contexts and AsyncPregelLoop
+# instances in unreachable reference cycles. They are collectable, but a busy
+# Gateway may promote those cycles into older GC generations faster than the
+# automatic collector revisits them, producing a rising post-GC heap floor.
+# Coalesce terminal full collections so the cycles have a bounded lifetime
+# without paying for a stop-the-world collection on every run.
+_TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS = 10.0
+_TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS = 0.1
+_terminal_cycle_collection_guard = threading.Lock()
+_terminal_cycle_collection_last_at = time.monotonic()
+_terminal_cycle_collection_scheduled_loops: weakref.WeakSet[asyncio.AbstractEventLoop] = weakref.WeakSet()
+
+
+def _create_contextless_task(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Schedule terminal housekeeping without retaining the run's ContextVars."""
+    return asyncio.create_task(coro, context=Context())
+
+
+def _schedule_terminal_cycle_collection() -> None:
+    """Coalesce full cyclic-GC passes after completed LangGraph runs."""
+    loop = asyncio.get_running_loop()
+    with _terminal_cycle_collection_guard:
+        if loop in _terminal_cycle_collection_scheduled_loops:
+            return
+        elapsed = time.monotonic() - _terminal_cycle_collection_last_at
+        delay = max(0.0, _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS - elapsed)
+        _terminal_cycle_collection_scheduled_loops.add(loop)
+
+    async def _collect() -> None:
+        global _terminal_cycle_collection_last_at
+
+        try:
+            with _terminal_cycle_collection_guard:
+                now = time.monotonic()
+                if now - _terminal_cycle_collection_last_at < _TERMINAL_CYCLE_COLLECTION_INTERVAL_SECONDS:
+                    return
+                _terminal_cycle_collection_last_at = now
+
+            started_at = time.perf_counter()
+            # Do not run a heap walk synchronously from the event-loop timer.
+            # CPython's collector can still contend for the GIL, so surface slow
+            # passes below rather than claiming this removes every pause.
+            collected = await loop.run_in_executor(None, gc.collect)
+            duration = time.perf_counter() - started_at
+            if duration >= _TERMINAL_CYCLE_COLLECTION_INFO_THRESHOLD_SECONDS:
+                logger.info(
+                    "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+                    collected,
+                    duration,
+                )
+            else:
+                logger.debug(
+                    "Terminal cyclic GC collected %d object(s) in %.3f seconds",
+                    collected,
+                    duration,
+                )
+        finally:
+            with _terminal_cycle_collection_guard:
+                _terminal_cycle_collection_scheduled_loops.discard(loop)
+
+    def _start_collection() -> None:
+        _create_contextless_task(_collect())
+
+    # A blank Context prevents the timer itself from retaining the completed
+    # run. The loop owns the TimerHandle; the WeakSet never keeps a test or
+    # short-lived embedded-client event loop alive.
+    loop.call_later(delay, _start_collection, context=Context())
+
+
+async def _close_agent_stream(stream: Any) -> None:
+    """Close a LangGraph stream deterministically after completion or early exit."""
+    close = getattr(stream, "aclose", None)
+    if close is None:
+        return
+    result = close()
+    if inspect.isawaitable(result):
+        await result
+
+
+def _remove_callback(config: dict[str, Any], handler: Any) -> None:
+    callbacks = config.get("callbacks")
+    if isinstance(callbacks, list):
+        callbacks[:] = [callback for callback in callbacks if callback is not handler]
+        return
+    remove_handler = getattr(callbacks, "remove_handler", None)
+    if callable(remove_handler):
+        try:
+            remove_handler(handler)
+        except Exception:
+            logger.debug("could not detach terminal callback", exc_info=True)
+
+
+def _release_run_scoped_references(
+    configs: list[dict[str, Any]],
+    runtime_context: dict[str, Any] | None,
+    journal: Any | None,
+) -> None:
+    """Remove worker-owned graph references once durable finalization is done."""
+    internal_context_keys = {
+        "__run_journal",
+        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    }
+    try:
+        from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+        internal_context_keys.add(EXTENSION_SNAPSHOT_CONTEXT_KEY)
+    except Exception:
+        pass
+    try:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        internal_context_keys.add(EXTENSION_TASK_STORE_KEY)
+    except Exception:
+        pass
+
+    seen_configs: set[int] = set()
+    handlers = [journal] if journal is not None else []
+    for runnable_config in configs:
+        if not isinstance(runnable_config, dict) or id(runnable_config) in seen_configs:
+            continue
+        seen_configs.add(id(runnable_config))
+        configurable = runnable_config.get("configurable")
+        if isinstance(configurable, dict):
+            configurable.pop("__pregel_runtime", None)
+        context = runnable_config.get("context")
+        if isinstance(context, dict):
+            for key in internal_context_keys:
+                context.pop(key, None)
+        for handler in handlers:
+            _remove_callback(runnable_config, handler)
+
+    if isinstance(runtime_context, dict):
+        for key in internal_context_keys:
+            runtime_context.pop(key, None)
+
 
 @asynccontextmanager
 async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
@@ -110,6 +250,20 @@ async def _checkpoint_thread_lock(thread_id: str) -> AsyncIterator[None]:
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
+_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+
+
+def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Build the bounded model-state projection without trusting display names."""
+    return [
+        {
+            "task_id": row["id"],
+            "task_name": neutralize_untrusted_tags(str(row["task_name"])),
+            "status": row["status"],
+            "updated_at": row["updated_at"],
+        }
+        for row in task_rows
+    ]
 
 
 async def _persist_delivery_receipt(
@@ -205,17 +359,36 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
+    """Directory names workspace snapshots must skip for this deployment.
+
+    The tool-output budget middleware externalizes oversized tool outputs into
+    a storage subdir under outputs (default ``.tool-results``). Those files are
+    process feedback referenced from the budget preview via ``read_file``, not
+    deliverables: counting them as produced artifacts would fail run delivery
+    verification for any run that externalized a tool output without also
+    presenting a real artifact. The default name is excluded by the scanner
+    itself; a custom ``tool_output.storage_subdir`` (a single-segment name,
+    enforced by ``ToolOutputConfig`` so the scanner's dir-name pruning always
+    matches) is threaded through the snapshot capture here so before/after
+    diffs stay consistent.
+    """
+    storage_subdir = app_config.tool_output.storage_subdir if app_config is not None else TOOL_RESULTS_DIRNAME
+    return frozenset({storage_subdir})
+
+
 async def _produced_output_paths(
     before: WorkspaceSnapshot | None,
     *,
     thread_id: str,
     user_id: str | None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> list[str]:
     """Detect regular output files created or modified by this run."""
     if before is None:
         return []
     try:
-        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False)
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
         return get_changed_output_paths(before, after)
     except Exception:
         logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
@@ -349,6 +522,8 @@ def _build_runtime_context(
     run_id: str,
     caller_context: Any | None,
     app_config: AppConfig | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -370,6 +545,21 @@ def _build_runtime_context(
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if task_store is not None:
+        from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
+
+        runtime_ctx[EXTENSION_TASK_STORE_KEY] = task_store
+    # Publish the run's extension snapshot so work dispatched during graph
+    # execution (task delegation) binds the same generation the lead agent was
+    # built with, instead of re-reading a singleton that may have been replaced
+    # mid-run. Written after the caller merge and popped when absent, because a
+    # caller-supplied value for this host-internal key is never authoritative.
+    from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
+
+    if extensions is not None:
+        runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
+    else:
+        runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
     return runtime_ctx
 
 
@@ -387,7 +577,9 @@ class RunContext:
     event_store: Any | None = field(default=None)
     run_events_config: Any | None = field(default=None)
     thread_store: Any | None = field(default=None)
+    mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
+    extensions: Any | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
@@ -429,6 +621,17 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
     except TypeError:
         # Some callable instances are unhashable; fall back to a direct check.
         return _compute_agent_factory_supports_app_config(agent_factory)
+
+
+def _agent_graph(agent_result: Any) -> Any:
+    """Unwrap the lead assembly, leaving any other factory result untouched."""
+    try:
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
+    except Exception:
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        return agent_result
+    return unwrap_agent_graph(agent_result)
 
 
 class _SubagentEventBuffer:
@@ -519,9 +722,25 @@ async def run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+
+    from deerflow_extension_api import ExtensionData, TaskInfo
+
+    from deerflow.extensions import get_loaded_extensions
+    from deerflow.extensions.notify import (
+        lead_task_id,
+        lead_task_outcome,
+        notify_task_start,
+        notify_task_stop,
+    )
+
+    extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
+    task_store: ExtensionData | None = None
+    task_info: TaskInfo | None = None
+    deferred_stop_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
+    workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
     checkpoint_rollback_completed = False
@@ -537,6 +756,11 @@ async def run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
+    runtime_ctx: dict[str, Any] | None = None
+    runtime: Any | None = None
+    agent: Any | None = None
+    runnable_configs: list[dict[str, Any]] = [config]
+    goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
@@ -545,6 +769,7 @@ async def run_agent(
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
@@ -615,6 +840,22 @@ async def run_agent(
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
 
+        # Keep cancellable preflight work under the worker's terminal guard so
+        # cancellation cannot strand a pending RunRecord or stream subscriber.
+        if ctx.mcp_task_repo is not None and record.user_id is not None:
+            try:
+                task_rows = await ctx.mcp_task_repo.list_by_thread(
+                    thread_id,
+                    user_id=record.user_id,
+                    limit=20,
+                )
+                graph_input = {
+                    **graph_input,
+                    "background_tasks": _project_background_tasks(task_rows),
+                }
+            except Exception:
+                logger.warning("Run %s: failed to project MCP task state", run_id, exc_info=True)
+
         await run_manager.wait_for_prior_finalizing(
             thread_id,
             run_id,
@@ -630,6 +871,26 @@ async def run_agent(
                 )
             return
         started = True
+
+        task_id = lead_task_id(run_id)
+        if extensions.needs_task_store:
+            task_store = ExtensionData(task_id)
+
+        if extensions.has_task_lifecycle:
+            task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+            )
+            assert task_store is not None
+            await notify_task_start(
+                extensions,
+                task_store,
+                task_info,
+                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+            )
 
         if not record.ownership_lost and thread_store is not None:
             try:
@@ -672,10 +933,15 @@ async def run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
+            # Resolved once per run so the pre-run snapshot, the post-run
+            # delivery scan, and the workspace-changes scan all agree on the
+            # same exclusion set.
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
                     user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
                 logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
@@ -698,7 +964,14 @@ async def run_agent(
         # access thread-level data. langgraph-cli does this automatically; we must do it
         # manually here because we drive the graph through ``agent.astream(config=...)``
         # without passing the official ``context=`` parameter.
-        runtime_ctx = _build_runtime_context(thread_id, run_id, config.get("context"), ctx.app_config)
+        runtime_ctx = _build_runtime_context(
+            thread_id,
+            run_id,
+            config.get("context"),
+            ctx.app_config,
+            task_store,
+            extensions,
+        )
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
         deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
         if deerflow_trace_id:
@@ -740,6 +1013,7 @@ async def run_agent(
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
         initial_runnable_config = RunnableConfig(**config)
+        runnable_configs.append(initial_runnable_config)
 
         def _continuation_runnable_config() -> RunnableConfig:
             continuation_config = dict(config)
@@ -748,12 +1022,17 @@ async def run_agent(
             configurable.pop("checkpoint_id", None)
             configurable.pop("checkpoint_map", None)
             continuation_config["configurable"] = configurable
-            return RunnableConfig(**continuation_config)
+            continuation = RunnableConfig(**continuation_config)
+            runnable_configs.append(continuation)
+            return continuation
 
+        agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
-            agent = agent_factory(config=initial_runnable_config, app_config=ctx.app_config)
-        else:
-            agent = agent_factory(config=initial_runnable_config)
+            agent_factory_kwargs["app_config"] = ctx.app_config
+        from deerflow.extensions import bind_agent_build_extensions
+
+        with bind_agent_build_extensions(extensions):
+            agent = _agent_graph(agent_factory(**agent_factory_kwargs))
 
         accessor = CheckpointStateAccessor.bind(
             agent,
@@ -802,6 +1081,7 @@ async def run_agent(
                 # captured for rollback.
                 pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(resumed_messages)})
                 initial_runnable_config = RunnableConfig(**config)
+                runnable_configs.append(initial_runnable_config)
 
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
@@ -836,8 +1116,6 @@ async def run_agent(
         # the finally block so buffered steps survive abort/exception paths too.
         subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
 
-        goal_evaluator_model: Any | None = None
-
         def _get_goal_evaluator_model() -> Any:
             nonlocal goal_evaluator_model
             if goal_evaluator_model is None:
@@ -855,45 +1133,77 @@ async def run_agent(
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
-                        async for chunk in agent.astream(input_payload, config=stream_config, stream_mode=single_mode):
-                            if record.abort_event.is_set():
-                                logger.info("Run %s abort requested — stopping", run_id)
-                                break
-                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                            sse_event = _lg_mode_to_sse_event(single_mode)
-                            await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
-                            if single_mode == "custom":
-                                await subagent_events.add(chunk)
+                        stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
+                        broke_on_abort = False
+                        try:
+                            async for chunk in stream:
+                                if record.abort_event.is_set():
+                                    broke_on_abort = True
+                                    logger.info("Run %s abort requested — stopping", run_id)
+                                    break
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                                sse_event = _lg_mode_to_sse_event(single_mode)
+                                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                                if single_mode == "custom":
+                                    await subagent_events.add(chunk)
+                        finally:
+                            close_error = sys.exception()
+                            try:
+                                await _close_agent_stream(stream)
+                            except Exception:
+                                abort_requested = broke_on_abort or record.abort_event.is_set()
+                                if close_error is None and not abort_requested:
+                                    raise
+                                if abort_requested:
+                                    logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                                else:
+                                    logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
                         return
                     # Multiple modes or subgraphs: astream yields tuples
-                    async for item in agent.astream(
+                    stream = agent.astream(
                         input_payload,
                         config=stream_config,
                         stream_mode=lg_modes,
                         subgraphs=stream_subgraphs,
-                    ):
-                        if record.abort_event.is_set():
-                            logger.info("Run %s abort requested — stopping", run_id)
-                            break
+                    )
+                    broke_on_abort = False
+                    try:
+                        async for item in stream:
+                            if record.abort_event.is_set():
+                                broke_on_abort = True
+                                logger.info("Run %s abort requested — stopping", run_id)
+                                break
 
-                        mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                        if mode is None:
-                            continue
+                            mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                            if mode is None:
+                                continue
 
-                        if not namespace:
-                            # Only root-graph frames may decide the parent run's error
-                            # fallback: a delegated subagent's marked fallback is the
-                            # executor's to map (task_failed), not this run's.
-                            llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                        await _publish_stream_item(
-                            bridge=bridge,
-                            run_id=run_id,
-                            mode=mode,
-                            chunk=chunk,
-                            namespace=namespace,
-                            file_tool_chunk_batcher=file_tool_chunk_batcher,
-                            subagent_events=subagent_events,
-                        )
+                            if not namespace:
+                                # Only root-graph frames may decide the parent run's error
+                                # fallback: a delegated subagent's marked fallback is the
+                                # executor's to map (task_failed), not this run's.
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            await _publish_stream_item(
+                                bridge=bridge,
+                                run_id=run_id,
+                                mode=mode,
+                                chunk=chunk,
+                                namespace=namespace,
+                                file_tool_chunk_batcher=file_tool_chunk_batcher,
+                                subagent_events=subagent_events,
+                            )
+                    finally:
+                        close_error = sys.exception()
+                        try:
+                            await _close_agent_stream(stream)
+                        except Exception:
+                            abort_requested = broke_on_abort or record.abort_event.is_set()
+                            if close_error is None and not abort_requested:
+                                raise
+                            if abort_requested:
+                                logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                            else:
+                                logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
@@ -926,6 +1236,8 @@ async def run_agent(
                 abort_event=record.abort_event,
                 user_id=resolve_runtime_user_id(runtime),
                 deerflow_trace_id=deerflow_trace_id,
+                task_store=task_store,
+                extensions=extensions,
             )
             if continuation_input is None or record.abort_event.is_set():
                 break
@@ -969,6 +1281,7 @@ async def run_agent(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
                 user_id=workspace_changes_user_id,
+                extra_excluded_dir_names=workspace_excluded_dir_names,
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1011,173 +1324,257 @@ async def run_agent(
             )
 
     finally:
-        if record.ownership_lost:
-            logger.warning(
-                "Skipping durable finalization for run %s because this worker no longer owns its lease",
-                run_id,
-            )
+        try:
+            if record.ownership_lost:
+                logger.warning(
+                    "Skipping durable finalization for run %s because this worker no longer owns its lease",
+                    run_id,
+                )
 
-        if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
-            if not record.finalizing:
-                await run_manager.set_finalizing(run_id, True)
-            try:
-                if not checkpoint_rollback_completed:
-                    checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
-                        accessor=accessor,
+            if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+                if not record.finalizing:
+                    await run_manager.set_finalizing(run_id, True)
+                try:
+                    if not checkpoint_rollback_completed:
+                        checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
+                            accessor=accessor,
+                            checkpointer=checkpointer,
+                            thread_id=thread_id,
+                            run_id=run_id,
+                            rollback_point=rollback_point,
+                            snapshot_capture_failed=snapshot_capture_failed,
+                        )
+                    if checkpoint_rollback_completed:
+                        await _publish_restored_checkpoint_values(
+                            bridge=bridge,
+                            run_id=run_id,
+                            accessor=accessor,
+                            thread_id=thread_id,
+                        )
+                        logger.info("Run %s edit replay restored pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+                except Exception:
+                    logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+
+            # Persist any subagent step events still buffered (#3779) — including on
+            # abort/exception paths, where the stream loop broke before its own flush.
+            if not record.ownership_lost and subagent_events is not None:
+                await subagent_events.flush()
+
+            if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
+                try:
+                    await record_workspace_changes(
+                        event_store,
+                        thread_id,
+                        run_id,
+                        pre_run_workspace_snapshot,
+                        user_id=workspace_changes_user_id,
+                        extra_excluded_dir_names=workspace_excluded_dir_names,
+                    )
+                except Exception:
+                    logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
+
+            # Flush buffered journal events before the terminal receipt. The
+            # receipt uses a run-scoped idempotent write shared with recovery, then
+            # the staged terminal status is persisted. This ordering closes the
+            # crash window where a terminal run could otherwise outlive its receipt.
+            # A fenced worker leaves receipt recovery to the peer that claimed it.
+            if not record.ownership_lost and journal is not None:
+                try:
+                    await journal.flush()
+                except Exception:
+                    logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
+
+                if delivery_content is None:
+                    if produced_output_paths is None:
+                        produced_output_paths = await _produced_output_paths(
+                            pre_run_workspace_snapshot,
+                            thread_id=thread_id,
+                            user_id=workspace_changes_user_id,
+                            extra_excluded_dir_names=workspace_excluded_dir_names,
+                        )
+                    delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+                receipt_persisted = await _persist_delivery_receipt(
+                    event_store,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    content=delivery_content,
+                )
+                if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                    await run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                        persist=False,
+                    )
+
+            if not record.ownership_lost and journal is not None and persist_completion:
+                try:
+                    # Advance the final completion fields and timestamp without
+                    # terminalizing the durable row. That active row continues to
+                    # fence peer checkpoint writers through the duration write.
+                    completion_data = journal.get_completion_data()
+                    await run_manager.update_finalizing_progress(run_id, **completion_data)
+                except Exception:
+                    logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
+
+            # Keep the durable run row active through its final duration checkpoint
+            # write. A peer Gateway admits history migration from the durable row,
+            # not this worker's staged terminal status; terminalizing first would
+            # let that migration read an unfinished lifetime and race this write.
+            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+                try:
+                    created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                    updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                    # Match legacy history semantics: turn_duration is the whole
+                    # RunRecord lifetime in integer seconds, including admission
+                    # delay. Persist zero for sub-second successful turns.
+                    duration = max(0, int((updated - created).total_seconds()))
+                    await _persist_run_duration(
                         checkpointer=checkpointer,
                         thread_id=thread_id,
                         run_id=run_id,
-                        rollback_point=rollback_point,
-                        snapshot_capture_failed=snapshot_capture_failed,
+                        duration_seconds=duration,
                     )
-                if checkpoint_rollback_completed:
-                    await _publish_restored_checkpoint_values(
-                        bridge=bridge,
-                        run_id=run_id,
-                        accessor=accessor,
-                        thread_id=thread_id,
-                    )
-                    logger.info("Run %s edit replay restored pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-            except Exception:
-                logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+                except Exception:
+                    logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
 
-        # Persist any subagent step events still buffered (#3779) — including on
-        # abort/exception paths, where the stream loop broke before its own flush.
-        if not record.ownership_lost and subagent_events is not None:
-            await subagent_events.flush()
-
-        if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
-            try:
-                await record_workspace_changes(
-                    event_store,
-                    thread_id,
-                    run_id,
-                    pre_run_workspace_snapshot,
-                    user_id=workspace_changes_user_id,
-                )
-            except Exception:
-                logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
-
-        # Flush buffered journal events before the terminal receipt. The
-        # receipt uses a run-scoped idempotent write shared with recovery, then
-        # the staged terminal status is persisted. This ordering closes the
-        # crash window where a terminal run could otherwise outlive its receipt.
-        # A fenced worker leaves receipt recovery to the peer that claimed it.
-        if not record.ownership_lost and journal is not None:
-            try:
-                await journal.flush()
-            except Exception:
-                logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
-
-            if delivery_content is None:
-                if produced_output_paths is None:
-                    produced_output_paths = await _produced_output_paths(
-                        pre_run_workspace_snapshot,
-                        thread_id=thread_id,
-                        user_id=workspace_changes_user_id,
-                    )
-                delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
-            receipt_persisted = await _persist_delivery_receipt(
-                event_store,
-                thread_id=thread_id,
-                run_id=run_id,
-                content=delivery_content,
-            )
-            if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
-                await run_manager.set_status(
-                    run_id,
-                    RunStatus.error,
-                    error=_DELIVERY_RECEIPT_FAILED_ERROR,
-                    persist=False,
-                )
-
-        if not record.ownership_lost and event_store is not None:
-            try:
-                # Even after bounded receipt retries are exhausted, persist the
-                # real worker outcome. Leaving a successful row inflight would
-                # let lease recovery rewrite it as an error with a synthetic
-                # zero receipt.
-                if record.abort_event.is_set():
-                    await run_manager.persist_current_status(run_id)
-                else:
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        record.status,
-                        error=record.error,
-                        stop_reason=record.stop_reason,
-                    )
-                    if cancel_action is not None:
-                        await _finish_cancellation(cancel_action)
+            if not record.ownership_lost and event_store is not None:
+                try:
+                    # Even after bounded receipt retries are exhausted, persist the
+                    # real worker outcome. Leaving a successful row inflight would
+                    # let lease recovery rewrite it as an error with a synthetic
+                    # zero receipt.
+                    if record.abort_event.is_set():
                         await run_manager.persist_current_status(run_id)
-            except Exception:
-                logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
+                    else:
+                        cancel_action = await run_manager.set_status_if_not_cancelled(
+                            run_id,
+                            record.status,
+                            error=record.error,
+                            stop_reason=record.stop_reason,
+                        )
+                        if cancel_action is not None:
+                            await _finish_cancellation(cancel_action)
+                            await run_manager.persist_current_status(run_id)
+                except Exception:
+                    logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
-        if not record.ownership_lost and journal is not None and persist_completion:
-            try:
-                # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await run_manager.update_run_completion(run_id, status=record.status.value, **completion)
-            except Exception:
-                logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
+            if not record.ownership_lost and journal is not None and persist_completion:
+                try:
+                    # Persist token usage + convenience fields to RunStore
+                    completion_data = completion_data or journal.get_completion_data()
+                    await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
+                except Exception:
+                    logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
-            try:
-                await run_manager.wait_for_prior_finalizing(thread_id, run_id)
-                if not await run_manager.has_later_started_run(thread_id, run_id):
-                    await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
-            except Exception:
-                logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                try:
+                    await run_manager.wait_for_prior_finalizing(thread_id, run_id)
+                    if not await run_manager.has_later_started_run(thread_id, run_id):
+                        await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                except Exception:
+                    logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
 
-        # Sync title from checkpoint to threads_meta.display_name
-        if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
-            try:
-                ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
-                if ckpt_tuple is not None:
-                    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
-                    title = ckpt.get("channel_values", {}).get("title")
-                    if title:
-                        await thread_store.update_display_name(thread_id, title)
-            except Exception:
-                logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+            # Sync title from checkpoint to threads_meta.display_name
+            if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
+                try:
+                    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                    ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+                    if ckpt_tuple is not None:
+                        ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
+                        title = ckpt.get("channel_values", {}).get("title")
+                        if title:
+                            await thread_store.update_display_name(thread_id, title)
+                except Exception:
+                    logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
-        # Persist run duration to checkpoint metadata so history reads
-        # don't need to correlate runs and events.
-        if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+            # Update threads_meta status based on run outcome
+            if started and not record.ownership_lost and thread_store is not None:
+                try:
+                    final_status = "idle" if record.status == RunStatus.success else record.status.value
+                    await thread_store.update_status(thread_id, final_status)
+                except Exception:
+                    logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
+            if not record.ownership_lost and ctx.on_run_completed is not None:
+                try:
+                    await ctx.on_run_completed(record)
+                except Exception:
+                    logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+
+            if task_info is not None and task_store is not None:
+                # Keep the finalizing barrier held until stop observers finish, so
+                # a same-thread replacement cannot overlap this task's lifecycle.
+                try:
+                    await notify_task_stop(
+                        extensions,
+                        task_store,
+                        task_info,
+                        lead_task_outcome(
+                            aborted=(record.abort_event.is_set() or record.status == RunStatus.interrupted),
+                            succeeded=record.status == RunStatus.success,
+                        ),
+                        timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    logger.warning(
+                        "Extension task-stop notification failed for run %s (non-fatal)",
+                        run_id,
+                        exc_info=True,
+                    )
+                except BaseException as exc:
+                    # Cancellation here must not strand the finalizing barrier or
+                    # leave stream consumers waiting for the end frame.
+                    deferred_stop_interrupt = exc
+                    logger.warning(
+                        "Extension task-stop notification interrupted for run %s; completing cleanup first",
+                        run_id,
+                    )
+            if record.finalizing:
+                await run_manager.set_finalizing(run_id, False)
+
+            await bridge.publish_end(run_id)
+
+            if deferred_stop_interrupt is not None:
+                raise deferred_stop_interrupt
+        finally:
             try:
-                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
-                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
-                # Match legacy history semantics: turn_duration is the whole
-                # RunRecord lifetime in integer seconds, including admission
-                # delay. Persist zero for sub-second successful turns.
-                duration = max(0, int((updated - created).total_seconds()))
-                await _persist_run_duration(
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    duration_seconds=duration,
+                if journal is not None:
+                    try:
+                        await journal.close(flush=not record.ownership_lost)
+                    except Exception:
+                        logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
+            finally:
+                _release_run_scoped_references(
+                    runnable_configs,
+                    runtime_ctx,
+                    journal,
                 )
-            except Exception:
-                logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
+                # Drop graph and per-run payload references before the terminal
+                # worker task itself becomes collectable.
+                agent = None
+                accessor = None
+                runtime = None
+                runtime_ctx = None
+                rollback_point = None
+                subagent_events = None
+                goal_evaluator_model = None
+                task_store = None
+                task_info = None
+                pre_run_workspace_snapshot = None
+                delivery_content = None
+                produced_output_paths = None
+                graph_input = {}
 
-        # Update threads_meta status based on run outcome
-        if started and not record.ownership_lost and thread_store is not None:
-            try:
-                final_status = "idle" if record.status == RunStatus.success else record.status.value
-                await thread_store.update_status(thread_id, final_status)
-            except Exception:
-                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
-
-        if not record.ownership_lost and ctx.on_run_completed is not None:
-            try:
-                await ctx.on_run_completed(record)
-            except Exception:
-                logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
-        if record.finalizing:
-            await run_manager.set_finalizing(run_id, False)
-
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
+                # Durable finalization and terminal publication may depend on
+                # external backends, but local housekeeping must always run.
+                _create_contextless_task(bridge.cleanup(run_id, delay=60))
+                # Preserve the existing five-minute grace period for local
+                # join/status paths, then release the terminal record, completed
+                # task, and request payload. Durable run history remains available
+                # through RunStore.
+                _create_contextless_task(run_manager.cleanup(run_id))
+                _schedule_terminal_cycle_collection()
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1740,8 @@ async def _prepare_goal_continuation_input(
     abort_event: asyncio.Event | None = None,
     user_id: str | None = None,
     deerflow_trace_id: str | None = None,
+    task_store: Any | None = None,
+    extensions: Any | None = None,
 ) -> dict[str, Any] | None:
     """Evaluate the active goal and return a hidden continuation input if needed.
 
@@ -1423,6 +1822,8 @@ async def _prepare_goal_continuation_input(
             thread_id=thread_id,
             user_id=user_id,
             deerflow_trace_id=deerflow_trace_id,
+            task_store=task_store,
+            extensions=extensions,
         )
         if abort_event is not None and abort_event.is_set():
             return None
@@ -1914,21 +2315,36 @@ def valid_duration_entry(run_id: Any, duration_seconds: Any) -> bool:
     return isinstance(run_id, str) and bool(run_id) and isinstance(duration_seconds, int) and not isinstance(duration_seconds, bool)
 
 
-async def persist_run_durations(
+RUN_MESSAGE_IDS_METADATA_KEY = "run_message_ids"
+
+
+def valid_run_message_id_entry(message_id: Any, run_id: Any) -> bool:
+    """Check that a persisted legacy message-to-run attribution is well formed."""
+    return isinstance(message_id, str) and bool(message_id) and isinstance(run_id, str) and bool(run_id)
+
+
+async def persist_run_history_metadata(
     *,
     checkpointer: Any,
     thread_id: str,
-    durations: dict[str, int],
+    durations: dict[str, int] | None = None,
+    message_run_ids: dict[str, str] | None = None,
 ) -> bool:
-    """Merge validated run durations into a metadata-only checkpoint.
+    """Merge validated run history indexes into a metadata-only checkpoint.
 
     Durations accumulate so the history fast path can serve every known turn
-    from the latest checkpoint.  Per-entry overhead is negligible (~50 bytes
-    per run_id) compared to the messages channel blob written on every graph
-    checkpoint, so no pruning is needed.
+    from the latest checkpoint. Legacy AI-message attributions are persisted
+    alongside them for every audited AI ID, including boundary fallbacks whose
+    event lookup was exhaustively empty. The full mapping is deliberate: it is
+    both the exact-attribution cache and the negative-result coverage proof.
+    While the materialized message set at the head remains unchanged, later
+    reads query only uncached IDs. This metadata-only merge retains existing
+    entries, so compaction timing or historical migration may leave stale IDs;
+    reads ignore them because they only consult IDs in the materialized history.
     """
-    updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in durations.items() if valid_duration_entry(run_id, duration_seconds)}
-    if not updates:
+    duration_updates = {run_id: max(0, duration_seconds) for run_id, duration_seconds in (durations or {}).items() if valid_duration_entry(run_id, duration_seconds)}
+    message_run_id_updates = {message_id: run_id for message_id, run_id in (message_run_ids or {}).items() if valid_run_message_id_entry(message_id, run_id)}
+    if not duration_updates and not message_run_id_updates:
         return False
 
     ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
@@ -1942,11 +2358,15 @@ async def persist_run_durations(
             metadata = dict(getattr(ckpt_tuple, "metadata", {}) or {})
             raw_run_durations = metadata.get("run_durations")
             run_durations = {key: value for key, value in raw_run_durations.items() if valid_duration_entry(key, value)} if isinstance(raw_run_durations, dict) else {}
-            changed_durations = {run_id: duration for run_id, duration in updates.items() if run_durations.get(run_id) != duration}
-            if not changed_durations:
+            raw_message_run_ids = metadata.get(RUN_MESSAGE_IDS_METADATA_KEY)
+            run_message_ids = {message_id: run_id for message_id, run_id in raw_message_run_ids.items() if valid_run_message_id_entry(message_id, run_id)} if isinstance(raw_message_run_ids, dict) else {}
+            changed_durations = {run_id: duration for run_id, duration in duration_updates.items() if run_durations.get(run_id) != duration}
+            changed_message_run_ids = {message_id: run_id for message_id, run_id in message_run_id_updates.items() if run_message_ids.get(message_id) != run_id}
+            if not changed_durations and not changed_message_run_ids:
                 return False
 
             run_durations.update(changed_durations)
+            run_message_ids.update(changed_message_run_ids)
             parent_checkpoint_id = _checkpoint_identity(ckpt_tuple, checkpoint)
             latest_tuple = await _call_checkpointer_method(checkpointer, "aget_tuple", "get_tuple", ckpt_config)
             latest_checkpoint = dict(getattr(latest_tuple, "checkpoint", {}) or {}) if latest_tuple is not None else {}
@@ -1958,7 +2378,16 @@ async def persist_run_durations(
             prev_step = metadata.get("step")
             metadata["step"] = (prev_step + 1) if isinstance(prev_step, int) else 1
             metadata["run_durations"] = run_durations
-            metadata["writes"] = {"runtime_run_duration": {"run_ids": sorted(changed_durations)}}
+            if run_message_ids:
+                metadata[RUN_MESSAGE_IDS_METADATA_KEY] = run_message_ids
+            else:
+                metadata.pop(RUN_MESSAGE_IDS_METADATA_KEY, None)
+            metadata["writes"] = {
+                "runtime_run_duration": {
+                    "run_ids": sorted(changed_durations),
+                    "message_ids": sorted(changed_message_run_ids),
+                }
+            }
 
             checkpoint_ns = _checkpoint_namespace(ckpt_tuple)
             write_config = {
@@ -1979,6 +2408,20 @@ async def persist_run_durations(
             )
             return True
     return False
+
+
+async def persist_run_durations(
+    *,
+    checkpointer: Any,
+    thread_id: str,
+    durations: dict[str, int],
+) -> bool:
+    """Merge validated run durations into a metadata-only checkpoint."""
+    return await persist_run_history_metadata(
+        checkpointer=checkpointer,
+        thread_id=thread_id,
+        durations=durations,
+    )
 
 
 async def _persist_run_duration(

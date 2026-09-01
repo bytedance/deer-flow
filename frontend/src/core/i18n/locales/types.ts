@@ -84,6 +84,28 @@ export interface Translations {
     linkCopied: string;
   };
 
+  artifactEditing: {
+    unsaved: string;
+    saving: string;
+    saved: string;
+    exit: string;
+    discard: string;
+    discardChanges: string;
+    conflict: string;
+    conflictShort: string;
+    runInProgress: string;
+    saveFailed: string;
+  };
+
+  artifactPreview: {
+    limited: (previewSize: string, totalSize?: string) => string;
+    loadFullFile: string;
+    loadingFullFile: string;
+    previewFailed: string;
+    viewSource: string;
+    missingTarget: string;
+  };
+
   // Citations
   citations: {
     sourcesSummary: (count: number) => string;
@@ -209,6 +231,74 @@ export interface Translations {
     channels: string;
   };
 
+  // Thread-scoped MCP background tasks
+  backgroundTasks: {
+    label: string;
+    title: string;
+    description: string;
+    active: string;
+    recent: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    retry: string;
+    cancel: string;
+    cancelling: string;
+    cancelFailed: string;
+    cancellationRetrying: (attempt: number) => string;
+    notificationRetrying: (attempt: number) => string;
+    notificationStopped: string;
+    trackingDegraded: string;
+    viewDetails: string;
+    hideDetails: string;
+    detailsFailed: string;
+    result: string;
+    resultArtifact: string;
+    inputRequired: string;
+    inputUnavailable: string;
+    lastPollError: string;
+    created: (time: string) => string;
+    updated: (time: string) => string;
+    status: {
+      submitted: string;
+      working: string;
+      inputRequired: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
+  };
+
+  subagentBatches: {
+    label: string;
+    title: string;
+    description: string;
+    workerUnavailable: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    active: string;
+    recent: string;
+    pause: string;
+    resume: string;
+    cancel: string;
+    retryItem: string;
+    exportResults: string;
+    viewItems: string;
+    hideItems: string;
+    itemsFailed: string;
+    progress: (completed: number, total: number) => string;
+    limits: (live: number, running: number) => string;
+    status: {
+      queued: string;
+      running: string;
+      paused: string;
+      completed: string;
+      failed: string;
+      cancelled: string;
+    };
+  };
+
   // Scheduled tasks
   scheduledTasks: {
     scheduleType: { cron: string; once: string };
@@ -252,6 +342,8 @@ export interface Translations {
       fresh: string;
       reuse: string;
       threadIdPlaceholder: string;
+      reuseNoticeTitle: string;
+      reuseNoticeDescription: string;
     };
     filters: {
       allStatuses: string;
@@ -285,6 +377,8 @@ export interface Translations {
       pause: string;
       resume: string;
       trigger: string;
+      duplicate: string;
+      duplicateTitleSuffix: string;
       delete: string;
     };
     deleteConfirm: string;
@@ -312,6 +406,7 @@ export interface Translations {
     runTrigger: { scheduled: string; manual: string };
     runStatus: {
       queued: string;
+      launching: string;
       running: string;
       success: string;
       failed: string;
@@ -401,6 +496,9 @@ export interface Translations {
     logout: string;
     gatewayUnavailable: string;
     gatewayUnavailableRetrying: string;
+    modelLoadFailed: string;
+    modelLoadRetry: string;
+    modelLoadRetrying: string;
   };
 
   // Conversation
@@ -410,11 +508,14 @@ export interface Translations {
     branchCreated: string;
     branchFailed: string;
     streamReplayGap: string;
+    outlineLabel: string;
+    outlineAttachmentFallback: string;
   };
 
   // Chats
   chats: {
     searchChats: string;
+    branchLabel: (title: string, parentTitle: string) => string;
     loadMoreToSearch: string;
     loadingMore: string;
     loadOlderChats: string;
@@ -582,6 +683,12 @@ export interface Translations {
     removeTodo: (content: string) => string;
   };
 
+  contextUsage: {
+    label: string;
+    title: string;
+    badgeAriaLabel: (percentage: string) => string;
+  };
+
   // Shortcuts
   shortcuts: {
     searchActions: string;
@@ -604,6 +711,7 @@ export interface Translations {
       integrations: string;
       memory: string;
       tools: string;
+      subagents: string;
       skills: string;
       notification: string;
       about: string;
@@ -707,6 +815,46 @@ export interface Translations {
       adminRequired: string;
       empty: string;
     };
+    subagents: {
+      title: string;
+      description: string;
+      executionNote: string;
+      adminNote: string;
+      create: string;
+      empty: string;
+      sourceBuiltin: string;
+      sourceConfig: string;
+      sourceManaged: string;
+      conflict: string;
+      overridden: string;
+      createTitle: string;
+      editTitle: string;
+      name: string;
+      nameHint: string;
+      displayName: string;
+      descriptionLabel: string;
+      systemPrompt: string;
+      model: string;
+      inheritModel: string;
+      tools: string;
+      skills: string;
+      listModeAll: string;
+      listModeNone: string;
+      listModeSelected: string;
+      listNamesPlaceholder: string;
+      maxTurns: string;
+      timeout: string;
+      created: string;
+      saved: string;
+      deleted: string;
+      deleteConfirm: string;
+      bindingTitle: string;
+      bindingDescription: string;
+      allAllowed: string;
+      noneAllowed: string;
+      selectedAllowed: string;
+      missing: string;
+    };
     channels: {
       title: string;
       description: string;
@@ -751,6 +899,17 @@ export interface Translations {
         connectedAction: string;
         requestPermissions: string;
         alreadyConnected: string;
+        changeAppButton: string;
+        changeAppTitle: string;
+        changeAppDescription: string;
+        changeAppIdLabel: string;
+        changeAppSecretLabel: string;
+        changeAppAuthResetNote: string;
+        changeAppSubmit: string;
+        changeAppReRegister: string;
+        changeAppSwitched: string;
+        brandFeishu: string;
+        brandLark: string;
         connectionStarted: string;
         connectionReady: string;
         authStarted: string;
@@ -821,6 +980,11 @@ export interface Translations {
       emptyButton: string;
       adminRequired: string;
       installAdminRequired: string;
+      installFromFile: string;
+      installingArchive: string;
+      invalidArchive: string;
+      archiveTooLarge: string;
+      installFailed: string;
     };
     notification: {
       title: string;

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import json
 import os
@@ -10,6 +11,7 @@ import threading
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -17,8 +19,13 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from deerflow.community.e2b_sandbox.capacity import (
+    CapacityBackendError,
+    ReserveStatus,
+)
 from deerflow.config.paths import Paths
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -100,6 +107,7 @@ class FakeFilesAPI:
         self.store = dict(store or {})
         self.read_calls: list[tuple[str, str | None]] = []
         self.write_calls: list[tuple[str, bytes]] = []
+        self.write_streamed: list[bool] = []
         self.streams: list[_FakeFileStream] = []
         self._stream_chunk_size = stream_chunk_size
 
@@ -119,9 +127,12 @@ class FakeFilesAPI:
         except UnicodeDecodeError:
             return data
 
-    def write(self, path: str, content: bytes) -> None:
-        self.write_calls.append((path, content))
-        self.store[path] = content
+    def write(self, path: str, content: Any) -> None:
+        is_stream = hasattr(content, "read")
+        data = content.read() if is_stream else content
+        self.write_streamed.append(is_stream)
+        self.write_calls.append((path, data))
+        self.store[path] = data
 
 
 class FakeClient:
@@ -234,14 +245,22 @@ class FakeOwnershipStore:
         return None
 
 
-def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_policy: str = "wait", acquire_timeout: int = 30, burst_limit: int = 0) -> Any:
+def _make_provider(
+    *,
+    replicas: int = 3,
+    idle_timeout: int = 1800,
+    overflow_policy: str = "wait",
+    acquire_timeout: int = 30,
+    burst_limit: int = 0,
+    skills_container_path: str = "/mnt/skills",
+) -> Any:
     """Build a ``E2BSandboxProvider`` instance bypassing ``__init__``."""
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
     provider._lock = threading.Lock()
     provider._sandboxes = {}
     provider._thread_sandboxes = {}
-    provider._thread_locks = {}
+    provider._acquire_serializer = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
     provider._warm_pool = OrderedDict()
     provider._eviction_tombstones = set()
     provider._evictions_in_progress = set()
@@ -253,7 +272,12 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     provider._shutdown_called = False
     provider._owner_id = "owner-a"
     provider._ownership = FakeOwnershipStore({}, owner_id=provider._owner_id)
-    provider._ownership_config = SimpleNamespace(renewal_interval_seconds=60.0)
+    provider._ownership_config = SimpleNamespace(
+        renewal_interval_seconds=60.0,
+        ttl_multiplier=4.0,
+        key_prefix="deerflow:test",
+    )
+    provider._deployment_capacity = None
     provider._owned_sandbox_ids = set()
     provider._acquire_inflight = set()
     provider._orphan_first_seen = {}
@@ -265,6 +289,7 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
         "template": "code-interpreter-v1",
         "domain": None,
         "home_dir": "/home/user",
+        "skills_container_path": skills_container_path,
         "idle_timeout": idle_timeout,
         "replicas": replicas,
         "overflow_policy": overflow_policy,
@@ -282,10 +307,1210 @@ def _make_provider(*, replicas: int = 3, idle_timeout: int = 1800, overflow_poli
     return provider
 
 
+def _install_shared_deployment_capacity(
+    *providers,
+    reserve_results: list[ReserveStatus] | None = None,
+) -> MagicMock:
+    store = MagicMock()
+    store.key = "deerflow:test:e2b-capacity"
+    store.revision.return_value = 0
+    store.reserve.return_value = ReserveStatus.GRANTED
+    store.reconcile.return_value = True
+    if reserve_results is not None:
+        store.reserve.side_effect = reserve_results
+    for provider in providers:
+        provider._deployment_capacity = store
+    return store
+
+
 def _install_fake_sdk(monkeypatch, provider) -> FakeSandboxClass:
     fake_cls = FakeSandboxClass()
     monkeypatch.setattr(provider, "_get_sandbox_cls", lambda: fake_cls)
     return fake_cls
+
+
+def _write_skill(root: Path, name: str) -> None:
+    target = root / name / "SKILL.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(f"---\nname: {name}\ndescription: test\n---\n", encoding="utf-8")
+
+
+def test_apply_mounts_uploads_only_enabled_skill_projection(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    paths = Paths(base_dir=tmp_path)
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "public", "enabled-skill")
+    _write_skill(skills_root / "public", "disabled-skill")
+    (skills_root / "custom").mkdir()
+    _write_skill(paths.integration_skills_dir() / "lark-cli", "enabled-integration")
+    _write_skill(paths.integration_skills_dir() / "lark-cli", "disabled-integration")
+    user_skills_root = paths.user_skills_dir("user-1")
+    user_skills_root.mkdir(parents=True, exist_ok=True)
+    (user_skills_root / "_skill_states.json").write_text(
+        json.dumps({"disabled-integration": {"enabled": False}}),
+        encoding="utf-8",
+    )
+    extensions = ExtensionsConfig(skills={"disabled-skill": SkillStateConfig(enabled=False)})
+    config = SimpleNamespace(
+        skills=SimpleNamespace(
+            get_skills_path=lambda: skills_root,
+            container_path="/mnt/skills",
+            use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+        )
+    )
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    monkeypatch.setattr("deerflow.config.extensions_config.ExtensionsConfig.from_file", lambda *_args, **_kwargs: extensions)
+    monkeypatch.setattr("deerflow.config.extensions_config.get_extensions_config", lambda: extensions)
+
+    provider = _make_provider()
+    client = FakeClient()
+    provider._apply_mounts(client, user_id="user-1")
+
+    uploaded_paths = {path for path, _content in client.files.write_calls}
+    assert "/mnt/skills/public/enabled-skill/SKILL.md" in uploaded_paths
+    assert "/mnt/skills/public/disabled-skill/SKILL.md" not in uploaded_paths
+    assert "/mnt/skills/integrations/lark-cli/enabled-integration/SKILL.md" in uploaded_paths
+    assert "/mnt/skills/integrations/lark-cli/disabled-integration/SKILL.md" not in uploaded_paths
+
+
+def test_policy_scoped_thread_skips_shared_projection_during_create(
+    monkeypatch,
+    tmp_path,
+):
+    paths = Paths(base_dir=tmp_path)
+    paths.thread_skills_view_dir("thread-1", user_id="user-1").mkdir(parents=True)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+
+    provider = _make_provider()
+
+    assert provider._skill_projection_mounts("user-1", "thread-1") == []
+
+
+def test_sync_agent_skills_rebuilds_managed_remote_tree_despite_matching_legacy_marker(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    _write_skill(projection.public, "allowed-skill")
+    manifest_path = root / ".projection-manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "source_signature": "source-a",
+                "view_signature": "view-a",
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    files = FakeFilesAPI(
+        {
+            "/mnt/skills/public/excluded-skill/SKILL.md": b"excluded",
+            "/mnt/skills/.deerflow-projection-signature": legacy_signature.encode(),
+            "/mnt/skills/unmanaged.txt": b"keep",
+        }
+    )
+
+    def reset_remote_tree(command: str):
+        assert "sudo rm -rf -- /mnt/skills;" not in command
+        assert "sudo chown -R" not in command
+        assert "if [ -L /mnt/skills ]" in command
+        managed_paths = (
+            "/mnt/skills/public",
+            "/mnt/skills/custom",
+            "/mnt/skills/legacy",
+            "/mnt/skills/integrations",
+            "/mnt/skills/.deerflow-projection-signature",
+        )
+        for managed_path in managed_paths:
+            assert managed_path in command
+        for path in list(files.store):
+            if any(path == managed_path or path.startswith(f"{managed_path}/") for managed_path in managed_paths):
+                files.store.pop(path)
+        return SimpleNamespace(
+            stdout="SKILLS_RESET_OK\n",
+            stderr="",
+            exit_code=0,
+        )
+
+    chmod_ok = SimpleNamespace(stdout="", stderr="", exit_code=0)
+    commands = FakeCommandsAPI([reset_remote_tree, chmod_ok, reset_remote_tree, chmod_ok])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands, files=files)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    provider.sync_agent_skills(
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        projection=projection,
+    )
+
+    assert "/mnt/skills/public/excluded-skill/SKILL.md" not in files.store
+    assert files.store["/mnt/skills/public/allowed-skill/SKILL.md"].startswith(b"---")
+    assert files.store["/mnt/skills/unmanaged.txt"] == b"keep"
+    assert "/mnt/skills/.deerflow-projection-signature" not in files.store
+    assert files.read_calls == []
+    first_command_count = len(commands.calls)
+    first_write_count = len(files.write_calls)
+
+    provider.sync_agent_skills(
+        "sandbox-1",
+        thread_id="thread-1",
+        user_id="user-1",
+        projection=projection,
+    )
+
+    assert len(commands.calls) == first_command_count * 2
+    assert len(files.write_calls) == first_write_count * 2
+
+
+def test_sync_agent_skills_serializes_reset_and_upload_for_same_thread(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    projections: list[SkillProjectionPaths] = []
+    for name in ("policy-a", "policy-b"):
+        root = tmp_path / name
+        projection = SkillProjectionPaths(
+            public=root / "public",
+            custom=root / "custom",
+            legacy=root / "legacy",
+            integrations=root / "integrations",
+        )
+        for category in (
+            projection.public,
+            projection.custom,
+            projection.legacy,
+            projection.integrations,
+        ):
+            category.mkdir(parents=True)
+        projections.append(projection)
+
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    first_upload_started = threading.Event()
+    allow_first_upload_to_finish = threading.Event()
+    second_sync_started = threading.Event()
+    second_reset_started = threading.Event()
+    reset_count = 0
+    reset_count_lock = threading.Lock()
+
+    def reset_remote_tree(_command: str):
+        nonlocal reset_count
+        with reset_count_lock:
+            reset_count += 1
+            current_reset = reset_count
+        if current_reset == 2:
+            second_reset_started.set()
+        return SimpleNamespace(stdout="SKILLS_RESET_OK\n", stderr="", exit_code=0)
+
+    commands = FakeCommandsAPI([reset_remote_tree, reset_remote_tree])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    first_projection_root = projections[0].public.parent
+
+    def blocking_upload(_client, source, _destination, _read_only, *, budget):
+        del budget
+        if source.parent == first_projection_root and not first_upload_started.is_set():
+            first_upload_started.set()
+            assert allow_first_upload_to_finish.wait(timeout=5)
+
+    monkeypatch.setattr(provider, "_upload_tree", blocking_upload)
+    errors: list[BaseException] = []
+
+    def sync(
+        projection: SkillProjectionPaths,
+        *,
+        started: threading.Event | None = None,
+    ) -> None:
+        try:
+            if started is not None:
+                started.set()
+            provider.sync_agent_skills(
+                "sandbox-1",
+                thread_id="thread-1",
+                user_id="user-1",
+                projection=projection,
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    first = threading.Thread(target=sync, args=(projections[0],))
+    second = threading.Thread(
+        target=sync,
+        args=(projections[1],),
+        kwargs={"started": second_sync_started},
+    )
+    first.start()
+    assert first_upload_started.wait(timeout=5)
+    second.start()
+    try:
+        assert second_sync_started.wait(timeout=5)
+        assert not second_reset_started.wait(timeout=0.2)
+    finally:
+        allow_first_upload_to_finish.set()
+        first.join(timeout=5)
+        second.join(timeout=5)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert errors == []
+    assert second_reset_started.is_set()
+
+
+@pytest.mark.parametrize(
+    "container_path",
+    [
+        "skills",
+        "/",
+        "//mnt/skills",
+        "/mnt//skills",
+        "/mnt/skills/.",
+        "/mnt/skills/..",
+        "/mnt",
+        "/mnt/user-data",
+        "/mnt/acp-workspace",
+        "/home",
+        "/home/user",
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/etc/deerflow-skills",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/lost+found",
+        "/media",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/snap",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/usr/local/deerflow-skills",
+        "/var",
+        "/var/lib/deerflow-skills",
+    ],
+)
+def test_sync_agent_skills_rejects_unsafe_reset_roots_before_remote_access(
+    tmp_path,
+    container_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    client = FakeClient(sandbox_id="sandbox-1")
+    provider = _make_provider()
+    provider._config["skills_container_path"] = container_path
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+
+    with pytest.raises(ValueError, match="safe E2B skills reset target"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert client.files.read_calls == []
+    assert client.commands.calls == []
+
+
+@pytest.mark.parametrize(
+    ("container_path", "expected"),
+    [
+        ("/mnt/skills", "/mnt/skills"),
+        ("/mnt/skills/", "/mnt/skills"),
+        ("/home/user/skills", "/home/user/skills"),
+        ("/custom-skills", "/custom-skills"),
+        ("/custom/skills", "/custom/skills"),
+    ],
+)
+def test_validate_skills_reset_root_accepts_isolated_directories(
+    container_path,
+    expected,
+):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    assert mod._validate_skills_reset_root(container_path, home_dir="/home/user") == expected
+
+
+@pytest.mark.parametrize(
+    ("home_dir", "container_path"),
+    [
+        ("/opt/e2b-home", "/opt/e2b-home/skills"),
+        ("/tmp/e2b-home", "/tmp/e2b-home/skills"),
+    ],
+)
+def test_validate_skills_reset_root_accepts_isolated_custom_home_subtree(
+    home_dir,
+    container_path,
+):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    assert (
+        mod._validate_skills_reset_root(
+            container_path,
+            home_dir=home_dir,
+        )
+        == container_path
+    )
+
+
+def test_sync_agent_skills_rejects_symlinked_remote_root_before_deleting(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    manifest_path = root / ".projection-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+    legacy_signature = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    def reject_symlinked_root(command: str):
+        assert "if [ -L /mnt/skills ]" in command
+        return SimpleNamespace(
+            stdout="",
+            stderr="Refusing symlinked skills root\n",
+            exit_code=2,
+        )
+
+    client = FakeClient(
+        sandbox_id="sandbox-1",
+        commands=FakeCommandsAPI([reject_symlinked_root]),
+        files=FakeFilesAPI(
+            {
+                "/mnt/skills/.deerflow-projection-signature": legacy_signature.encode(),
+            }
+        ),
+    )
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_upload_tree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("upload must not start after a rejected reset")),
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to reset E2B skill projection"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert client.files.read_calls == []
+    assert client.files.write_calls == []
+
+
+def test_sync_agent_skills_leaves_no_signature_after_upload_failure(
+    monkeypatch,
+    tmp_path,
+):
+    from deerflow.skills.projection import SkillProjectionPaths
+
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    root = tmp_path / "skills-view"
+    projection = SkillProjectionPaths(
+        public=root / "public",
+        custom=root / "custom",
+        legacy=root / "legacy",
+        integrations=root / "integrations",
+    )
+    for category in (
+        projection.public,
+        projection.custom,
+        projection.legacy,
+        projection.integrations,
+    ):
+        category.mkdir(parents=True, exist_ok=True)
+    (root / ".projection-manifest.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    commands = FakeCommandsAPI([SimpleNamespace(stdout="SKILLS_RESET_OK\n", stderr="", exit_code=0)])
+    client = FakeClient(sandbox_id="sandbox-1", commands=commands)
+    provider = _make_provider()
+    provider._sandboxes["sandbox-1"] = mod.E2BSandbox(
+        id="sandbox-1",
+        client=client,
+        home_dir="/home/user",
+    )
+    monkeypatch.setattr(
+        provider,
+        "_upload_tree",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="upload failed"):
+        provider.sync_agent_skills(
+            "sandbox-1",
+            thread_id="thread-1",
+            user_id="user-1",
+            projection=projection,
+        )
+
+    assert "/mnt/skills/.deerflow-projection-signature" not in client.files.store
+
+
+def test_upload_tree_streams_file_contents(tmp_path):
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"mount content")
+    client = FakeClient()
+
+    provider = _make_provider()
+    provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == [("/mnt/data/large.bin", b"mount content")]
+    assert client.files.write_streamed == [True]
+
+
+@pytest.mark.parametrize("replacement_content", [b"123", b"12345"], ids=["smaller", "larger"])
+def test_upload_tree_rejects_file_size_changed_after_preflight(monkeypatch, tmp_path, replacement_content):
+    source = tmp_path / "small.bin"
+    source.write_bytes(b"1234")
+    replacement = tmp_path / "replacement.bin"
+    replacement.write_bytes(replacement_content)
+    original_open = Path.open
+
+    def replace_before_open(path: Path, *args, **kwargs):
+        if path == source and replacement.exists():
+            os.replace(replacement, source)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", replace_before_open)
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="changed during upload preflight"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_upload_tree_rejects_oversized_file_before_upload(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 4)
+    source = tmp_path / "large.bin"
+    source.write_bytes(b"12345")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="exceeds the 4-byte file limit"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_upload_tree_rejects_oversized_tree_before_upload(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 10)
+    monkeypatch.setattr(mod, "_MAX_MOUNT_TOTAL_SIZE", 8)
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.bin").write_bytes(b"12345")
+    (source / "second.bin").write_bytes(b"67890")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="exceeds the 8-byte total limit"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_upload_tree_rejects_excess_file_count_before_upload(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILES", 1)
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with pytest.raises(ValueError, match="exceeds the 1-file limit"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert client.files.write_calls == []
+
+
+def test_apply_mounts_continues_after_mount_exceeds_limit(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_FILE_SIZE", 4)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    oversized = tmp_path / "oversized"
+    oversized.mkdir()
+    (oversized / "large.bin").write_bytes(b"12345")
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    (valid / "small.bin").write_bytes(b"1234")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(oversized), container_path="/mnt/oversized", read_only=False),
+        SimpleNamespace(host_path=str(valid), container_path="/mnt/valid", read_only=False),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/valid/small.bin", b"1234")]
+
+
+def test_apply_mounts_bounds_total_bytes_across_mounts(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 7)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5678")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.bin", b"1234")]
+    assert "total byte budget 7" in caplog.text
+    assert "attempted_files=1" in caplog.text
+    assert "attempted_bytes=4" in caplog.text
+
+
+def test_apply_mounts_bounds_total_files_across_mounts(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.txt", b"first")]
+    assert "file count cap 1" in caplog.text
+    assert "attempted_files=1" in caplog.text
+
+
+def test_read_only_mount_remains_read_only_when_pass_limit_stops_mid_mount(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    source = tmp_path / "read-only"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/read-only", read_only=True),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert "chmod -R a-w /mnt/read-only" in client.commands.calls
+
+
+def test_read_only_mount_is_not_chmodded_when_no_upload_starts(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 0)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    source = tmp_path / "read-only"
+    source.mkdir()
+    (source / "file.txt").write_text("content", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/read-only", read_only=True),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == []
+    assert client.commands.calls == []
+
+
+def test_failed_write_consumes_aggregate_upload_budget(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_TOTAL_BYTES", 4)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+
+    class FailFirstWriteAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            if len(self.write_calls) == 1:
+                raise RuntimeError("response lost after upload")
+
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.bin").write_bytes(b"1234")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.bin").write_bytes(b"5")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient(files=FailFirstWriteAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/first/first.bin", b"1234")]
+    assert "attempted_files=1" in caplog.text
+    assert "attempted_bytes=4" in caplog.text
+    assert "completed_files=0" in caplog.text
+    assert "completed_bytes=0" in caplog.text
+
+
+def test_apply_mounts_deadline_stops_before_next_file(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert client.files.write_calls[0] in {
+        ("/mnt/data/first.txt", b"first"),
+        ("/mnt/data/second.txt", b"second"),
+    }
+    assert "time budget 1s" in caplog.text
+    assert "attempted_files=1" in caplog.text
+
+
+def test_apply_mounts_deadline_stops_directory_preflight(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    source = tmp_path / "mount"
+    source.mkdir()
+    first = source / "first.txt"
+    first.write_text("first", encoding="utf-8")
+    second = source / "second.txt"
+    second.write_text("second", encoding="utf-8")
+    original_is_file = Path.is_file
+    inspected: list[Path] = []
+
+    def slow_rglob(path: Path, pattern: str):
+        assert path == source
+        assert pattern == "*"
+        yield first
+        clock[0] = 2.0
+        yield second
+
+    def record_is_file(path: Path) -> bool:
+        inspected.append(path)
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "rglob", slow_rglob)
+    monkeypatch.setattr(Path, "is_file", record_is_file)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient()
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert first in inspected
+    assert second not in inspected
+    assert client.files.write_calls == []
+    assert "time budget 1s" in caplog.text
+
+
+def test_apply_mounts_deadline_stops_before_next_mount_preflight(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MOUNT_PASS_DEADLINE_SECONDS", 1)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 2.0
+
+    first = tmp_path / "first"
+    first.mkdir()
+    (first / "first.txt").write_text("first", encoding="utf-8")
+    second = tmp_path / "second"
+    second.mkdir()
+    (second / "second.txt").write_text("second", encoding="utf-8")
+    original_is_file = Path.is_file
+    inspected: list[Path] = []
+
+    def record_is_file(path: Path) -> bool:
+        inspected.append(path)
+        return original_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", record_is_file)
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(first), container_path="/mnt/first", read_only=False),
+        SimpleNamespace(host_path=str(second), container_path="/mnt/second", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert first in inspected
+    assert second not in inspected
+    assert client.files.write_calls == [("/mnt/first/first.txt", b"first")]
+    assert "time budget 1s" in caplog.text
+
+
+def test_apply_mounts_deadline_defaults_to_120_when_not_configured(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 121.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    assert "mount_upload_deadline_seconds" not in provider._config
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert "time budget 120s" in caplog.text
+
+
+def test_apply_mounts_deadline_uses_configured_value(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 61.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    provider._config["mount_upload_deadline_seconds"] = 60
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert "time budget 60s" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (0, 1),
+        (-5, 1),
+        (-100, 1),
+        (None, 120),
+        ("120s", 120),
+        ("abc", 120),
+        (float("inf"), 120),
+    ],
+    ids=["zero", "negative", "large_negative", "none", "suffix", "alpha", "infinity"],
+)
+def test_load_config_clamps_invalid_mount_upload_deadline(monkeypatch, caplog, raw, expected):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    class FakeConfig:
+        skills = SimpleNamespace(container_path="/mnt/skills")
+        sandbox = SimpleNamespace(
+            model_extra={"mount_upload_deadline_seconds": raw},
+            api_key="test-key",
+            template=None,
+            image=None,
+            domain=None,
+            home_dir=None,
+            idle_timeout=None,
+            replicas=None,
+            overflow_policy=None,
+            acquire_timeout=None,
+            burst_limit=None,
+            mounts=[],
+            environment=None,
+            ownership=None,
+            mount_upload_deadline_seconds=raw,
+        )
+
+    monkeypatch.setattr(mod, "get_app_config", lambda: FakeConfig())
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    with caplog.at_level("WARNING"):
+        config = provider._load_config()
+    assert config["mount_upload_deadline_seconds"] == expected
+    if raw is None:
+        assert "clamping" not in caplog.text
+    else:
+        assert "mount_upload_deadline_seconds" in caplog.text
+
+
+def test_load_config_custom_mount_upload_deadline_flows_to_apply_mounts(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 61.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+
+    class FakeConfig:
+        sandbox = SimpleNamespace(
+            model_extra={"mount_upload_deadline_seconds": 60},
+            api_key="test-key",
+            template=None,
+            image=None,
+            domain=None,
+            home_dir=None,
+            idle_timeout=None,
+            replicas=None,
+            overflow_policy=None,
+            acquire_timeout=None,
+            burst_limit=None,
+            mounts=[SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False)],
+            environment=None,
+            ownership=None,
+            mount_upload_deadline_seconds=60,
+        )
+        skills = SimpleNamespace(container_path="/mnt/skills")
+
+    monkeypatch.setattr(mod, "get_app_config", lambda: FakeConfig())
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    provider._config = provider._load_config()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert provider._config["mount_upload_deadline_seconds"] == 60
+    assert len(client.files.write_calls) == 1
+    assert "time budget 60s" in caplog.text
+
+
+def test_apply_mounts_deadline_reason_shows_configured_value(monkeypatch, tmp_path, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")),
+    )
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    class DeadlineFilesAPI(FakeFilesAPI):
+        def write(self, path: str, content: Any) -> None:
+            super().write(path, content)
+            clock[0] = 200.0
+
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_text("first", encoding="utf-8")
+    (source / "second.txt").write_text("second", encoding="utf-8")
+    provider = _make_provider()
+    provider._config["mount_upload_deadline_seconds"] = 180
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(source), container_path="/mnt/data", read_only=False),
+    ]
+    client = FakeClient(files=DeadlineFilesAPI())
+
+    with caplog.at_level("WARNING"):
+        provider._apply_mounts(client, user_id="user-1")
+
+    assert len(client.files.write_calls) == 1
+    assert "time budget 180s" in caplog.text
+    assert "attempted_files=1" in caplog.text
+
+
+def test_skill_projection_and_configured_mount_share_upload_budget(monkeypatch, tmp_path):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    monkeypatch.setattr(mod, "_MAX_MOUNT_PASS_FILES", 1)
+    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills")))
+    projection = tmp_path / "projection"
+    projection.mkdir()
+    (projection / "SKILL.md").write_text("skill", encoding="utf-8")
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    (configured / "notes.txt").write_text("notes", encoding="utf-8")
+
+    provider = _make_provider()
+    monkeypatch.setattr(provider, "_skill_projection_mounts", lambda _user_id: [(projection, "/mnt/skills/public", True)])
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(configured), container_path="/mnt/configured", read_only=False),
+    ]
+    client = FakeClient()
+
+    provider._apply_mounts(client, user_id="user-1")
+
+    assert client.files.write_calls == [("/mnt/skills/public/SKILL.md", b"skill")]
+
+
+def test_upload_tree_logs_upload_summary(caplog, tmp_path):
+    source = tmp_path / "mount"
+    source.mkdir()
+    (source / "first.txt").write_bytes(b"123")
+    (source / "second.txt").write_bytes(b"4567")
+    client = FakeClient()
+
+    provider = _make_provider()
+    with caplog.at_level("INFO"):
+        provider._upload_tree(client, source, "/mnt/data", read_only=False)
+
+    assert "source=" in caplog.text
+    assert "destination=/mnt/data" in caplog.text
+    assert "files=2" in caplog.text
+    assert "bytes=7" in caplog.text
+    assert "elapsed_ms=" in caplog.text
+
+
+def test_skill_projection_mounts_swallows_projection_failure(monkeypatch):
+    """``_skill_projection_mounts`` must not raise — a projection failure used
+    to propagate out of ``_apply_mounts`` before the configured-mounts loop
+    ran, dropping the operator's own configured mounts as collateral (#4107
+    review)."""
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.skills.projection.ensure_skill_projections",
+        lambda storage: (_ for _ in ()).throw(RuntimeError("simulated projection failure")),
+    )
+
+    provider = _make_provider()
+
+    assert provider._skill_projection_mounts("user-1") == []
+
+
+def test_apply_mounts_keeps_configured_mounts_when_projection_fails(monkeypatch, tmp_path):
+    """End-to-end: a skills-projection failure must not drop the operator's
+    own configured mounts too — the two mount sources are independent."""
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    host_dir = tmp_path / "operator-mount"
+    host_dir.mkdir()
+    (host_dir / "notes.txt").write_text("hello", encoding="utf-8")
+
+    config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
+    monkeypatch.setattr(mod, "get_app_config", lambda: config)
+    monkeypatch.setattr(
+        "deerflow.skills.projection.ensure_skill_projections",
+        lambda storage: (_ for _ in ()).throw(RuntimeError("simulated projection failure")),
+    )
+
+    provider = _make_provider()
+    provider._config["mounts"] = [
+        SimpleNamespace(host_path=str(host_dir), container_path="/mnt/operator", read_only=True),
+    ]
+
+    client = FakeClient()
+    provider._apply_mounts(client, user_id="user-1")
+
+    uploaded_paths = {path for path, _content in client.files.write_calls}
+    assert "/mnt/operator/notes.txt" in uploaded_paths
 
 
 def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:
@@ -297,9 +1522,9 @@ def _make_sandbox(client: FakeClient, *, sandbox_id: str | None = None) -> Any:
     )
 
 
-def test_thread_key_returns_user_thread_tuple():
+def test_thread_key_includes_the_provider_skills_root():
     p = _make_provider()
-    assert p._thread_key("t1", "u1") == ("u1", "t1")
+    assert p._thread_key("t1", "u1") == ("u1", "t1", "/mnt/skills")
 
 
 def test_sandbox_id_falls_back_when_client_id_is_none():
@@ -311,6 +1536,7 @@ def test_sandbox_id_falls_back_when_client_id_is_none():
 
 def test_stable_seed_is_deterministic_and_user_scoped():
     p = _make_provider()
+    custom_root = _make_provider(skills_container_path="/custom-skills")
     s_a = p._stable_seed("t1", "u1")
     s_b = p._stable_seed("t1", "u1")
     s_other_user = p._stable_seed("t1", "u2")
@@ -318,6 +1544,7 @@ def test_stable_seed_is_deterministic_and_user_scoped():
     assert s_a == s_b
     assert s_a != s_other_user
     assert s_a != s_other_thread
+    assert s_a != custom_root._stable_seed("t1", "u1")
 
 
 def test_is_sandbox_gone_error_matches_known_signatures():
@@ -536,7 +1763,7 @@ def test_refresh_owned_leases_reclaims_lapsed_lease():
     client = FakeClient(sandbox_id="sb-lapsed")
     sandbox = _make_sandbox(client, sandbox_id="sb-lapsed")
     p._sandboxes["sb-lapsed"] = sandbox
-    p._thread_sandboxes[("u1", "t1")] = "sb-lapsed"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-lapsed"
     p._owned_sandbox_ids.add("sb-lapsed")
 
     p._refresh_owned_leases()
@@ -551,7 +1778,8 @@ def test_refresh_owned_leases_forgets_peer_owned_sandbox():
     client = FakeClient(sandbox_id="sb-lost")
     sandbox = _make_sandbox(client, sandbox_id="sb-lost")
     p._sandboxes["sb-lost"] = sandbox
-    p._thread_sandboxes[("u1", "t1")] = "sb-lost"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-lost"
     p._owned_sandbox_ids.add("sb-lost")
     p._ownership = FakeOwnershipStore(
         {"sb-lost": ("owner-peer", "own")},
@@ -561,7 +1789,7 @@ def test_refresh_owned_leases_forgets_peer_owned_sandbox():
     p._refresh_owned_leases()
 
     assert p.get("sb-lost") is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
     assert "sb-lost" not in p._owned_sandbox_ids
     assert client.closed is True
 
@@ -571,7 +1799,7 @@ def test_reuse_in_process_sandbox_returns_cached_id_on_healthy_reuse():
     client = FakeClient()
     sb = _make_sandbox(client, sandbox_id="sb-1")
     p._sandboxes["sb-1"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-1"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-1"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid == "sb-1"
@@ -584,12 +1812,13 @@ def test_reuse_in_process_sandbox_evicts_dead_sandbox():
     sb = _make_sandbox(client, sandbox_id="sb-dead")
     sb._dead = True
     p._sandboxes["sb-dead"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-dead"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
     assert "sb-dead" not in p._sandboxes
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
 
 
 def test_reuse_in_process_sandbox_evicts_when_ping_fails():
@@ -597,7 +1826,7 @@ def test_reuse_in_process_sandbox_evicts_when_ping_fails():
     client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
     sb = _make_sandbox(client, sandbox_id="sb-stale")
     p._sandboxes["sb-stale"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-stale"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-stale"
 
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
@@ -607,10 +1836,11 @@ def test_reuse_in_process_sandbox_evicts_when_ping_fails():
 
 def test_reuse_in_process_sandbox_cleans_dangling_mapping():
     p = _make_provider()
-    p._thread_sandboxes[("u1", "t1")] = "ghost"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "ghost"
     sid = p._reuse_in_process_sandbox("t1", user_id="u1")
     assert sid is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
 
 
 def test_reuse_in_process_sandbox_returns_none_when_no_mapping():
@@ -627,7 +1857,7 @@ def test_reclaim_warm_pool_sandbox_happy_path(monkeypatch):
     sid = p._reclaim_warm_pool_sandbox("t1", user_id="u1")
     assert sid == "sb-warm"
     assert "sb-warm" in p._sandboxes
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-warm"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-warm"
     assert "sb-warm" not in p._warm_pool
     assert [c[0] for c in fake_cls.connect_calls] == ["sb-warm"]
 
@@ -716,15 +1946,40 @@ class _FakePaginator:
         return page
 
 
-def _info(sandbox_id: str, user_id: str, thread_id: str):
+def _info(
+    sandbox_id: str,
+    user_id: str,
+    thread_id: str,
+    *,
+    skills_container_path: str = "/mnt/skills",
+):
     return SimpleNamespace(
         sandbox_id=sandbox_id,
         metadata={
             "deer_flow_provider": "e2b_sandbox_provider",
             "deer_flow_user": user_id,
             "deer_flow_thread": thread_id,
+            "deer_flow_skills_root": skills_container_path,
         },
     )
+
+
+def test_discover_remote_sandbox_rejects_a_different_skills_root(monkeypatch):
+    p = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, p)
+    fake_cls.list_return = [_info("sb-old-root", "u1", "t1")]
+
+    assert p._discover_remote_sandbox("t1", user_id="u1") is None
+    assert fake_cls.connect_calls == []
+
+
+def test_create_metadata_records_the_snapshotted_skills_root(monkeypatch):
+    provider = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+
+    provider.acquire("t1", user_id="u1")
+
+    assert fake_cls.create_calls[0]["metadata"]["deer_flow_skills_root"] == "/custom-skills"
 
 
 def test_discover_remote_sandbox_walks_paginator(monkeypatch):
@@ -739,7 +1994,7 @@ def test_discover_remote_sandbox_walks_paginator(monkeypatch):
 
     sid = p._discover_remote_sandbox("t1", user_id="u1")
     assert sid == "sb-match"
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-match"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-match"
 
 
 def test_discover_remote_sandbox_accepts_legacy_list(monkeypatch):
@@ -762,7 +2017,7 @@ def test_discover_remote_sandbox_skips_dead_candidate(monkeypatch):
     fake_cls.connect_factory = lambda _sid, **_kw: client
 
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert p._thread_key("t1", "u1") not in p._thread_sandboxes
     assert client.closed is True
 
 
@@ -782,7 +2037,7 @@ def test_discover_remote_sandbox_tries_later_candidate_when_first_is_dead(monkey
 
     assert p._discover_remote_sandbox("t1", user_id="u1") == "sb-b-live"
     assert dead.closed is True
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-b-live"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-b-live"
     assert "sb-b-live" in p._owned_sandbox_ids
 
 
@@ -928,7 +2183,7 @@ def test_reconcile_adopts_canonical_after_restart_loses_local_state(monkeypatch)
     stats = p._reconcile_remote_sandboxes(now=100.0)
 
     assert stats.adopted == 1
-    assert p._thread_sandboxes[("u1", "t1")] == "sb-existing"
+    assert p._thread_sandboxes[p._thread_key("t1", "u1")] == "sb-existing"
     assert "sb-existing" in p._owned_sandbox_ids
 
 
@@ -999,6 +2254,33 @@ def test_reconcile_kills_metadata_orphan_only_after_ttl(monkeypatch):
     assert client.killed is True
 
 
+def test_reconcile_never_adopts_an_old_skills_root_and_reaps_it_after_grace(
+    monkeypatch,
+):
+    provider = _make_provider(skills_container_path="/custom-skills")
+    fake_cls = _install_fake_sdk(monkeypatch, provider)
+    fake_cls.list_return = [
+        _info(
+            "sb-old-root",
+            "u1",
+            "t1",
+            skills_container_path="/mnt/skills",
+        )
+    ]
+    client = FakeClient(sandbox_id="sb-old-root")
+    fake_cls.connect_factory = lambda _sid, **_kw: client
+    provider._config["reconciliation_grace_seconds"] = 5.0
+
+    first = provider._reconcile_remote_sandboxes(now=100.0)
+    second = provider._reconcile_remote_sandboxes(now=106.0)
+
+    assert first.adopted == 0
+    assert first.deferred == 1
+    assert provider._thread_key("t1", "u1") not in provider._thread_sandboxes
+    assert second.killed == 1
+    assert client.killed is True
+
+
 def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeypatch):
     p = _make_provider()
     fake_cls = _install_fake_sdk(monkeypatch, p)
@@ -1017,7 +2299,7 @@ def test_discover_remote_sandbox_discards_candidate_when_bootstrap_fails(monkeyp
     assert p._discover_remote_sandbox("t1", user_id="u1") is None
     assert client.killed is True
     assert client.closed is True
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert p._thread_key("t1", "u1") not in p._thread_sandboxes
 
 
 def test_discovery_claims_ownership_before_bootstrap_cleanup(monkeypatch):
@@ -1081,11 +2363,17 @@ def test_bootstrap_failure_does_not_kill_without_destroy_lease(monkeypatch):
 
 def test_kill_client_returns_exception_without_raising():
     p = _make_provider()
-    client = FakeClient()
+    store = _install_shared_deployment_capacity(p)
+    failed_client = FakeClient()
     error = RuntimeError("already gone")
-    client.kill = MagicMock(side_effect=error)
+    failed_client.kill = MagicMock(side_effect=error)
 
-    assert p._kill_client(client) is error
+    assert p._kill_client(failed_client) is error
+    store.release.assert_not_called()
+
+    client = FakeClient()
+    assert p._kill_client(client) is None
+    store.release.assert_called_once_with(client.sandbox_id)
 
 
 def test_kill_client_reports_uncertain_cleanup_without_callable_kill():
@@ -1132,6 +2420,34 @@ def test_sandbox_config_validates_e2b_capacity_fields():
         )
 
 
+def test_e2b_config_accepts_documented_reconciliation_fields(monkeypatch, caplog):
+    mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+    config = SandboxConfig(
+        use="deerflow.community.e2b_sandbox:E2BSandboxProvider",
+        api_key="test-key",
+        reconciliation_interval_seconds=60,
+        reconciliation_grace_seconds=120,
+        reconciliation_orphan_ttl_seconds=3600,
+        reconciliation_max_pages=10,
+        reconciliation_max_items=200,
+        reconciliation_max_seconds=15,
+    )
+    provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=config,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
+
+    with caplog.at_level("WARNING"):
+        provider._load_config()
+
+    assert "unknown sandbox config fields" not in caplog.text
+
+
 def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
     mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
     config = SandboxConfig(
@@ -1140,7 +2456,14 @@ def test_e2b_config_warns_about_unknown_fields(monkeypatch, caplog):
         overflo_policy="reject",
     )
     provider = mod.E2BSandboxProvider.__new__(mod.E2BSandboxProvider)
-    monkeypatch.setattr(mod, "get_app_config", lambda: SimpleNamespace(sandbox=config))
+    monkeypatch.setattr(
+        mod,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            sandbox=config,
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+        ),
+    )
 
     with caplog.at_level("WARNING"):
         provider._load_config()
@@ -1332,13 +2655,14 @@ def test_release_dead_sandbox_skips_warm_pool(monkeypatch):
     sb = _make_sandbox(client, sandbox_id="sb-dead")
     sb._dead = True
     p._sandboxes["sb-dead"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-dead"
+    key = p._thread_key("t1", "u1")
+    p._thread_sandboxes[key] = "sb-dead"
 
     p.release("sb-dead")
 
     assert "sb-dead" not in p._warm_pool, "dead sandbox must not be parked"
     assert "sb-dead" not in p._sandboxes
-    assert ("u1", "t1") not in p._thread_sandboxes
+    assert key not in p._thread_sandboxes
     assert client.killed is True, "release of dead sandbox must kill the remote VM"
 
 
@@ -1349,7 +2673,7 @@ def test_release_healthy_sandbox_parks_in_warm_pool(monkeypatch, tmp_path):
     client = FakeClient(commands=cmds)
     sb = _make_sandbox(client, sandbox_id="sb-warm-1")
     p._sandboxes["sb-warm-1"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-warm-1"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-warm-1"
 
     p.release("sb-warm-1")
 
@@ -1366,7 +2690,7 @@ def test_acquire_waits_for_same_thread_release_transition(monkeypatch):
     client = FakeClient(sandbox_id="sb-release-race")
     sandbox = _make_sandbox(client)
     provider._sandboxes[sandbox.id] = sandbox
-    provider._thread_sandboxes[("user-1", "thread-1")] = sandbox.id
+    provider._thread_sandboxes[provider._thread_key("thread-1", "user-1")] = sandbox.id
 
     sync_started = threading.Event()
     allow_sync_to_finish = threading.Event()
@@ -1414,7 +2738,7 @@ def test_release_skips_warm_pool_when_sync_reveals_dead_vm(monkeypatch, tmp_path
     client = FakeClient(commands=FakeCommandsAPI([FakeCommandsAPI.GONE]))
     sb = _make_sandbox(client, sandbox_id="sb-died-during-sync")
     p._sandboxes["sb-died-during-sync"] = sb
-    p._thread_sandboxes[("u1", "t1")] = "sb-died-during-sync"
+    p._thread_sandboxes[p._thread_key("t1", "u1")] = "sb-died-during-sync"
 
     p.release("sb-died-during-sync")
 
@@ -1599,6 +2923,54 @@ def test_sync_outputs_to_host_removes_manifest_entries_for_deleted_files(monkeyp
 
     manifest = json.loads((thread_dir / ".e2b-output-sync.json").read_text(encoding="utf-8"))
     assert set(manifest["files"]) == {"outputs/live.txt"}
+
+
+def test_sync_outputs_to_host_preserves_trailing_space_in_filename(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    # "report " (trailing space) is a legal Linux filename; the NUL-delimited
+    # listing preserves it, but a .strip() on each entry would truncate it.
+    listing = "5\t2.000000000\t/home/user/outputs/report \x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/report ": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-space")
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    expected = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1") / "user-data" / "outputs" / "report "
+    assert expected.exists()
+    assert expected.read_bytes() == b"hello"
+
+
+def test_sync_outputs_to_host_skips_mtime_restoration_on_overflow(monkeypatch, tmp_path):
+    p = _make_provider()
+    _setup_paths(monkeypatch, tmp_path)
+    # os.utime raises OverflowError (not OSError) when the ns value is out of
+    # range; the exact threshold is platform-dependent (macOS clamps, Linux
+    # raises), so force the failure deterministically and assert the file is
+    # still written and the manifest still updated.
+    listing = "5\t1720000000.1234567890\t/home/user/outputs/far-future.txt\x00"
+    files = FakeFilesAPI(store={"/home/user/outputs/far-future.txt": b"hello"})
+    cmds = FakeCommandsAPI([SimpleNamespace(stdout=listing, stderr="", exit_code=0)])
+    client = FakeClient(commands=cmds, files=files)
+    sb = _make_sandbox(client, sandbox_id="sb-sync-overflow")
+
+    e2b_provider_mod = importlib.import_module("deerflow.community.e2b_sandbox.e2b_sandbox_provider")
+
+    def _raise_overflow(path, times=None, ns=None):
+        raise OverflowError("timestamp out of range")
+
+    monkeypatch.setattr(e2b_provider_mod.os, "utime", _raise_overflow)
+
+    p._sync_outputs_to_host(sb, thread_id="t1", user_id="u1")
+
+    paths = Paths(base_dir=tmp_path).thread_dir("t1", user_id="u1")
+    target = paths / "user-data" / "outputs" / "far-future.txt"
+    assert target.exists()
+    assert target.read_bytes() == b"hello"
+    manifest = json.loads((paths / ".e2b-output-sync.json").read_text(encoding="utf-8"))
+    assert manifest["files"]["outputs/far-future.txt"]["remote_size"] == 5
 
 
 def test_sync_outputs_to_host_discards_manifest_from_another_sandbox(monkeypatch, tmp_path):
@@ -2107,9 +3479,141 @@ def test_grep_single_file_path_with_matching_glob():
     assert truncated is False
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Capacity enforcement tests (#4339)
-# ──────────────────────────────────────────────────────────────────────────────
+
+
+def test_deployment_capacity_reserves_commits_and_rejects_globally(monkeypatch) -> None:
+    gateway_a = _make_provider(replicas=1, overflow_policy="reject")
+    gateway_b = _make_provider(replicas=1, overflow_policy="reject")
+    store = _install_shared_deployment_capacity(
+        gateway_a,
+        gateway_b,
+        reserve_results=[ReserveStatus.GRANTED, ReserveStatus.FULL],
+    )
+    sdk_a = _install_fake_sdk(monkeypatch, gateway_a)
+    sdk_b = FakeSandboxClass()
+    monkeypatch.setattr(gateway_b, "_get_sandbox_cls", lambda: sdk_b)
+
+    sandbox_id = gateway_a.acquire("thread-a", user_id="user-a")
+    with pytest.raises(SandboxCapacityExceededError):
+        gateway_b.acquire("thread-b", user_id="user-b")
+
+    metadata = sdk_a.create_calls[0]["metadata"]
+    assert metadata["deer_flow_capacity_ledger"] == store.key
+    assert metadata["deer_flow_capacity_reservation"]
+    store.track.assert_called_once_with(
+        sandbox_id,
+        reservation_token=metadata["deer_flow_capacity_reservation"],
+    )
+    assert len(sdk_a.create_calls) == 1
+    assert sdk_b.create_calls == []
+    assert store.reserve.call_count == 2
+
+
+def test_ambiguous_create_failure_retains_deployment_reservation(monkeypatch) -> None:
+    provider = _make_provider(replicas=1, overflow_policy="reject")
+    store = _install_shared_deployment_capacity(provider)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.create_factory = lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("control-plane timeout"))
+
+    with pytest.raises(RuntimeError, match="control-plane timeout"):
+        provider.acquire("thread-a", user_id="user-a")
+
+    assert provider._reserved_slots == 0
+    store.reserve.assert_called_once()
+    store.track.assert_not_called()
+    store.release.assert_not_called()
+
+
+def test_discovery_uses_sdk_query_and_tracks_without_reserving(monkeypatch) -> None:
+    provider = _make_provider(replicas=1, overflow_policy="reject")
+    store = _install_shared_deployment_capacity(provider)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    entry = SimpleNamespace(
+        sandbox_id="sandbox-existing",
+        metadata={
+            "deer_flow_provider": "e2b_sandbox_provider",
+            "deer_flow_user": "user-a",
+            "deer_flow_thread": "thread-a",
+            "deer_flow_skills_root": "/mnt/skills",
+            "deer_flow_capacity_ledger": store.key,
+        },
+    )
+    expected_query = {
+        key: entry.metadata[key]
+        for key in (
+            "deer_flow_provider",
+            "deer_flow_user",
+            "deer_flow_thread",
+            "deer_flow_skills_root",
+        )
+    }
+    sdk.list_return = SimpleNamespace(
+        has_next=False,
+        next_items=lambda: [entry] if sdk.list_calls[-1]["query"].metadata == expected_query else [],
+    )
+    assert provider.acquire("thread-a", user_id="user-a") == entry.sandbox_id
+    assert sdk.create_calls == []
+    store.reserve.assert_not_called()
+    store.track.assert_called_once_with(entry.sandbox_id, reservation_token=None)
+
+
+def test_reconciliation_repairs_crash_and_uses_safe_reservation_age(monkeypatch) -> None:
+    provider = _make_provider(replicas=1, overflow_policy="reject")
+    provider._ownership_config.renewal_interval_seconds = 1.0
+    provider._ownership_config.ttl_multiplier = 2.0
+    provider._config["reconciliation_grace_seconds"] = 0.0
+    store = _install_shared_deployment_capacity(provider)
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list_return = [
+        {
+            "sandbox_id": "sandbox-existing",
+            "metadata": {
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_capacity_ledger": store.key,
+                "deer_flow_capacity_reservation": "reservation-crashed",
+            },
+        },
+        {
+            "sandbox_id": "sandbox-other-deployment",
+            "metadata": {
+                "deer_flow_provider": "e2b_sandbox_provider",
+                "deer_flow_capacity_ledger": "deerflow:other:e2b-capacity",
+            },
+        },
+    ]
+
+    stats = provider._reconcile_remote_sandboxes(now=100.0)
+    args = store.reconcile.call_args.kwargs
+    assert stats.discovered == 1
+    assert args["remote_sandboxes"] == {"sandbox-existing": "reservation-crashed"}
+    assert args["complete"] is True
+    assert args["reservation_max_age_ms"] == 120_000
+
+
+def test_failed_inventory_and_redis_error_both_prevent_create(monkeypatch) -> None:
+    provider = _make_provider(replicas=1, overflow_policy="reject")
+    store = _install_shared_deployment_capacity(
+        provider,
+        reserve_results=[ReserveStatus.NOT_READY],
+    )
+    sdk = _install_fake_sdk(monkeypatch, provider)
+    sdk.list = MagicMock(side_effect=RuntimeError("E2B unavailable"))
+
+    provider._reconcile_remote_sandboxes(now=100.0)
+
+    reconcile_args = store.reconcile.call_args.kwargs
+    assert reconcile_args["complete"] is False
+    assert reconcile_args["remote_sandboxes"] == {}
+    with pytest.raises(SandboxCapacityExceededError):
+        provider._create_sandbox("thread-a", user_id="user-a")
+    store.reserve.side_effect = CapacityBackendError("Redis unavailable")
+    with pytest.raises(SandboxCapacityExceededError) as error:
+        provider._create_sandbox("thread-a", user_id="user-a")
+
+    assert error.value.reason == "capacity_backend"
+    assert sdk.create_calls == []
+    assert provider._reserved_slots == 0
 
 
 def test_capacity_reject_policy_raises_when_full(monkeypatch):
@@ -2146,7 +3650,11 @@ def test_capacity_reject_frees_slot_on_release(monkeypatch):
 
 def test_capacity_reject_evicts_other_thread_warm_entry_before_create(monkeypatch):
     """Reject policy can evict one warm VM before it rejects new capacity."""
-    p = _make_provider(replicas=1, overflow_policy="reject")
+    p = _make_provider(replicas=3, overflow_policy="reject")
+    store = _install_shared_deployment_capacity(
+        p,
+        reserve_results=[ReserveStatus.GRANTED, ReserveStatus.FULL, ReserveStatus.GRANTED],
+    )
     fake_cls = _install_fake_sdk(monkeypatch, p)
 
     sid1 = p.acquire("t1", user_id="u1")
@@ -2158,6 +3666,7 @@ def test_capacity_reject_evicts_other_thread_warm_entry_before_create(monkeypatc
     assert sid2 != sid1
     assert len(p._warm_pool) == 0
     assert len(fake_cls.create_calls) == 2
+    store.release.assert_called_once_with(sid1)
 
 
 def test_capacity_wait_policy_times_out(monkeypatch):
@@ -3182,6 +4691,7 @@ def test_discovery_reports_busy_capacity_without_killing_remote_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u2",
                 "deer_flow_thread": "t2",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -3207,6 +4717,7 @@ def test_discovery_reports_shutdown_without_killing_remote_vm(monkeypatch, caplo
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -3244,6 +4755,7 @@ def test_discovery_bootstrap_kill_failure_retains_reserved_slot(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -3278,6 +4790,7 @@ def test_shutdown_does_not_retry_kill_for_unowned_discovery_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -3322,6 +4835,7 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
                 "deer_flow_provider": "e2b_sandbox_provider",
                 "deer_flow_user": "u1",
                 "deer_flow_thread": "t1",
+                "deer_flow_skills_root": "/mnt/skills",
             },
         )
     ]
@@ -3330,8 +4844,14 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
     allow_commit = threading.Event()
     reserve_capacity = p._reserve_capacity
 
-    def pause_after_reserve(thread_id, user_id, *, remote_id=None, remote_owned=True):
-        reserve_capacity(
+    def pause_after_reserve(
+        thread_id,
+        user_id,
+        *,
+        remote_id=None,
+        remote_owned=True,
+    ):
+        reservation = reserve_capacity(
             thread_id,
             user_id,
             remote_id=remote_id,
@@ -3339,6 +4859,7 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
         )
         reserved.set()
         assert allow_commit.wait(timeout=2)
+        return reservation
 
     monkeypatch.setattr(p, "_reserve_capacity", pause_after_reserve)
     result: list[str | None] = []
@@ -3357,3 +4878,15 @@ def test_shutdown_during_discovery_does_not_kill_unowned_vm(monkeypatch):
     assert client.closed
     assert p._sandboxes == {}
     assert p._reserved_slots == 0
+
+
+def test_stable_seed_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    provider = _make_provider(skills_container_path="/custom-skills")
+    base_scope = derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    expected = hashlib.sha256(
+        f"{base_scope}\0/custom-skills".encode(),
+    ).hexdigest()[:16]
+
+    assert provider._stable_seed("t-1", "u-1") == expected

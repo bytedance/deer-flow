@@ -20,12 +20,14 @@ from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
 from app.gateway.auth_disabled import (
     AUTH_SOURCE_AUTH_DISABLED,
     AUTH_SOURCE_INTERNAL,
+    AUTH_SOURCE_PAT,
     AUTH_SOURCE_SESSION,
     get_auth_disabled_user,
     is_auth_disabled,
 )
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
+from app.gateway.request_path import get_request_route_path
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
@@ -86,7 +88,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if _is_public(request.url.path):
+        if _is_public(get_request_route_path(request)):
             return await call_next(request)
 
         internal_user = None
@@ -105,11 +107,39 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         auth_source = AUTH_SOURCE_SESSION
         access_token = request.cookies.get("access_token")
+        authorization = request.headers.get("authorization")
+        pat_scopes: frozenset[str] = frozenset()
 
         # Non-public path: require session cookie
         if internal_user is not None:
             user = internal_user
             auth_source = AUTH_SOURCE_INTERNAL
+        elif authorization is not None and not is_auth_disabled():
+            # Bearer (PAT) credential precedence (#4849): a present-but-invalid
+            # Authorization header is a hard 401 and never silently falls back
+            # to the session cookie. This is also what makes the CSRF
+            # middleware's Bearer skip safe — a cross-site attacker cannot ride
+            # a victim's cookie by padding the request with a garbage Bearer
+            # header, because the request dies here before any route runs.
+            # Auth-disabled mode is an operator override of all authentication,
+            # so it stays ahead of the Bearer check (a stray Authorization
+            # header from a proxy must not 401 an E2E sandbox).
+            from app.gateway.auth.pat import authenticate_pat, is_pat_allowed_route
+
+            try:
+                user, pat_scopes = await authenticate_pat(request.app, authorization)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+            # Default-deny route boundary (#5041 review P1-1): scopes only
+            # constrain @require_permission routes, so any route outside the
+            # explicit PAT policy is closed to PAT callers outright — an
+            # all-scopes token must not reach undecorated mutation routes.
+            if not is_pat_allowed_route(request.method, get_request_route_path(request)):
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "PAT credentials are not permitted on this route"},
+                )
+            auth_source = AUTH_SOURCE_PAT
         elif access_token:
             # Strict JWT validation: reject junk/expired tokens with 401
             # right here instead of silently passing through. This closes
@@ -155,6 +185,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user,
             is_internal=auth_source == AUTH_SOURCE_INTERNAL,
         )
+        if auth_source == AUTH_SOURCE_PAT:
+            # A PAT can only narrow its owning user's permissions: the stored
+            # scopes intersect the resolved route permissions, never widen
+            # them, and role changes / authorization policy stay authoritative
+            # because they were resolved fresh from the owning user above.
+            permissions = [permission for permission in permissions if permission in pat_scopes]
         request.state.auth = AuthContext(user=user, permissions=permissions)
         token = set_current_user(user)
         try:

@@ -218,6 +218,67 @@ models:
 
 `PatchedChatMiMo` preserves MiMo's `choices[].message.reasoning_content`, streaming `delta.reasoning_content`, and request-history assistant `reasoning_content` fields. It does not reuse the DeepSeek provider.
 
+### RAGFlow Knowledge Retrieval
+
+RAGFlow integration is disabled by default. It adds one read-only Agent tool,
+`knowledge_search`. DeerFlow does not persist a copy of dataset or document
+metadata; RAGFlow is the sole source of truth. The configured API key is
+tenant-scoped. An optional operator-controlled `datasets` list restricts every
+Agent on this deployment to the same dataset-ID allowlist; omitting it searches
+all datasets visible to that tenant API key. An explicitly empty `datasets: []`
+is rejected rather than being treated as tenant-wide access.
+
+```yaml
+tool_groups:
+  - name: knowledge
+
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.community.ragflow.tools:knowledge_search_tool
+    base_url: http://localhost:9380
+    api_key: $RAGFLOW_API_KEY
+    datasets:
+      - 0123456789abcdef0123456789abcdef
+      - fedcba9876543210fedcba9876543210
+    timeout: 30
+    page_size: 8
+    similarity_threshold: 0.2
+    vector_similarity_weight: 0.3
+    top_k: 256
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+```
+
+The tool is opt-in through the normal `tools:` list. `datasets` is optional but,
+when present, must contain at least one ID. If
+it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
+does not validate their existence while loading configuration; on each search
+it verifies them with ID-filtered requests. If `datasets` is omitted, each
+search paginates through the tenant-visible dataset catalog. Both paths resolve
+current names, embedding models, and chunk counts. Empty datasets are ignored;
+an empty dataset that has no embedding-model metadata is also skipped with a
+server warning. The remaining datasets are grouped by the exact embedding-model
+identifier and each group is sent to RAGFlow with a non-empty `dataset_ids`
+list. At most four groups are retrieved concurrently. Because raw similarity
+scores from different embedding spaces are not globally comparable, DeerFlow
+preserves each group's RAGFlow ranking, interleaves equal rank positions, omits
+score labels when more than one group is searched, and applies `page_size` as a
+single global chunk limit. If any searchable group fails, the whole tool call
+fails rather than silently omitting part of the configured scope. A deleted or
+inaccessible configured dataset identifies its ordinal entry in
+`knowledge_search.datasets` and produces guidance to check `config.yaml`.
+Dataset IDs and catalog listing are not exposed to the Agent.
+
+Use an allowlist to narrow the tenant-wide scope; compatible embedding models
+are no longer required across selected datasets. `base_url` must not contain
+embedded username or password information. For Docker or Kubernetes, it must be
+reachable from the Gateway container or Pod; `localhost` refers to that
+container or Pod, not the host machine.
+
+This integration is retrieval-only. Dataset creation, uploads, parsing, and
+deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+
 ### Tool Groups
 
 Organize tools into logical groups:
@@ -237,17 +298,30 @@ The scheduled-task MVP adds a scheduler section to `config.yaml`:
 ```yaml
 scheduler:
   enabled: false
+  multi_instance: false
   poll_interval_seconds: 5
   lease_seconds: 120
   max_concurrent_runs: 3
+  queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
+  recursion_limit: 1000
 ```
 
 Notes:
 
 - `enabled: false` keeps background polling off by default.
-- `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
-- All scheduler fields are restart-required; edits need a Gateway restart.
+- `multi_instance: true` opts into lease-aware scheduler recovery across Gateway instances. It requires Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; otherwise startup fails fast. Leave it false for the default single-instance scheduler.
+- `max_concurrent_runs` is a shared global execution cap in multi-instance mode. Waiting `queued` rows do not consume capacity; an atomic `queued` → `launching` claim counts `launching`/`running` rows under a Postgres advisory lock so concurrent Pods cannot exceed the cap.
+- `queue_timeout_seconds` limits how long a persisted occurrence may wait for capacity or a reused thread to become available. Expired occurrences are marked `failed`; queued rows otherwise survive Gateway restarts.
+- A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
+- A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
+- Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
+- Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
+- `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
+- **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
+- **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
+- **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
 - Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
 - The MVP supports only `once` and `cron`.
@@ -293,7 +367,7 @@ tools:
 ```
 
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
@@ -445,6 +519,7 @@ sandbox:
    home_dir: /home/user             # /mnt/user-data is remapped under this directory
    idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
    replicas: 3                      # max concurrent sandboxes per gateway process
+   mount_upload_deadline_seconds: 120  # per-sandbox time budget for mount uploads (seconds)
    ownership:                       # use Redis when more than one gateway shares E2B
      type: redis
      redis_url: $REDIS_URL
@@ -469,10 +544,13 @@ provider in `config.yaml`.
 Notes specific to `E2BSandboxProvider`:
 
 - Each DeerFlow thread is bound to its E2B sandbox via metadata
-  (`deer_flow_user`, `deer_flow_thread`). Startup and periodic reconciliation
-  probe every bounded candidate, adopt one healthy canonical sandbox, and reap
-  duplicates after a grace period. Provider-tagged entries without a complete
-  user/thread identity are reaped only after the orphan TTL.
+  (`deer_flow_user`, `deer_flow_thread`, `deer_flow_skills_root`). Startup and
+  periodic reconciliation probe every bounded candidate, adopt one healthy
+  canonical sandbox, and reap duplicates after a grace period. A sandbox whose
+  skills root differs from the provider's startup snapshot is never adopted and
+  is reaped after the same grace period once no live peer owns it.
+  Provider-tagged entries without a complete user/thread identity are reaped
+  only after the orphan TTL.
 - Ownership leases prevent one gateway from adopting or destroying a sandbox
   another live gateway is responsible for. The default in-memory store is safe
   only for one gateway process. Multi-worker/load-balanced deployments must use
@@ -490,6 +568,52 @@ Notes specific to `E2BSandboxProvider`:
   `/mnt/user-data/outputs/` (which is mapped to `home_dir/outputs/` inside the
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
+- `mount_upload_deadline_seconds` sets the per-sandbox time budget for mount
+  uploads. The provider checks it before each mount, during directory preflight,
+  and before each SDK write. The deadline does not interrupt active filesystem or
+  E2B SDK calls. Omitting the key preserves the 120-second default. Values below
+  1 are clamped to 1; non-numeric or null values fall back to the default.
+
+**OpenSandbox Remote Sandbox** (runs code through an OpenSandbox deployment):
+
+```yaml
+sandbox:
+   use: deerflow.community.opensandbox:OpenSandboxProvider
+   image: python:3.11
+   api_key: $OPEN_SANDBOX_API_KEY     # optional when the SDK env var is set
+   domain: localhost:8080             # OPEN_SANDBOX_DOMAIN fallback
+   protocol: http
+   request_timeout: 30                # management request timeout seconds
+   ready_timeout: 30                  # create/readiness timeout seconds
+   use_server_proxy: false            # proxy execd/file traffic through server
+   sandbox_timeout: 14400             # remote lifetime; 0 = explicit cleanup
+   bash_command_timeout: 600          # default remote command timeout seconds
+   replicas: 3                        # active + warm cap per gateway process
+   idle_timeout: 600                  # warm seconds before destroy; 0 disables
+   environment:
+      PYTHONUNBUFFERED: "1"
+```
+
+Install the optional SDK before selecting this provider:
+
+```bash
+pip install "deerflow-harness[opensandbox]"
+```
+
+The provider creates a sandbox per effective user/thread scope and parks it in
+an in-process warm pool after each turn. The same scope can reclaim it after a
+health check; another user or thread cannot. Create-time readiness and
+`/mnt/user-data/{workspace,uploads,outputs}` bootstrap failures are cleaned up
+before `acquire()` returns. Each remote owns an independent SDK transport.
+Operations renew the configured server-side lifetime, and commands without an
+explicit timeout use `bash_command_timeout`; a longer explicit timeout extends
+the renewal horizon to cover the command. Operations on one remote are
+serialized so a shorter renewal cannot overwrite an in-flight command's
+horizon. File transfer uses OpenSandbox's native filesystem API; bounded
+`find`/`grep` commands implement the directory and content-search surface.
+Downloads are restricted to `/mnt/user-data` and all file paths reject
+traversal. Multi-process discovery and ownership coordination are not yet
+implemented, so `replicas` is a per-Gateway-process soft cap.
 
 Choose between local execution or Docker-based isolation:
 
@@ -540,7 +664,27 @@ sandbox:
 
 When you configure `sandbox.mounts`, DeerFlow exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
-For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+#### Sandbox container network exposure and hardening
+
+The sandbox HTTP API (`/v1/shell/*` and friends) has no authentication: anyone who can reach a published sandbox port can execute arbitrary commands in that sandbox. For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox port to `127.0.0.1` so it is not exposed on other host interfaces. For Docker-outside-of-Docker deployments that connect through `host.docker.internal`, the port is bound to the address that hostname actually resolves to — the daemon's `host-gateway-ip` mapping (customizable, possibly IPv6) — so the published port and the address the gateway connects to always match, and the port is no longer published on external network interfaces (previously it was bound to `0.0.0.0`). If resolution fails, the Docker default bridge gateway (via `docker network inspect bridge`, falling back to `172.17.0.1`) is used as a best-effort bind and a warning is logged. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address; setting it to `0.0.0.0` restores the legacy broad bind, which re-exposes the unauthenticated exec API on every interface and should be paired with an external firewall.
+
+Local Docker sandbox containers are also hardened by default: all Linux capabilities are dropped (`--cap-drop=ALL`) except the minimum four the shipped image needs — `CHOWN` (the entrypoint chowns /opt/jupyter), `SETUID`/`SETGID` (it creates the gem user and drops to it via `su`), and `DAC_OVERRIDE` (the root nginx master writes gem-owned logs under /var/log/nginx, a per-request runtime need) — privilege escalation is blocked across exec (`no-new-privileges`), and CPU/memory/PID resources are bounded.
+
+A custom image that is already fully initialized as a non-root user (no runtime root handoff) should set `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0` to drop every capability including those three: leaving them on would let sandboxed code chown bind-mounted paths or impersonate mounted-file UIDs/GIDs for the container's lifetime. Note that `no-new-privileges` does **not** mitigate that risk — it only blocks gaining privileges across exec; the risk comes from the retained `CAP_SETUID`/`CAP_SETGID` themselves. One hardening knob is relaxed by default: the shipped AIO image runs with `seccomp=unconfined` because its Chromium browser does not start under Docker's default seccomp profile (syscall filtering is disabled — see the two seccomp variables below to change that). The following environment variables (set them in the gateway process, e.g. via `.env` loaded by docker-compose, or the gateway service `environment:`) tune or disable each knob:
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `DEER_FLOW_SANDBOX_BIND_HOST` | loopback / bridge gateway (see above) | Host interface for the sandbox `-p` publish. Must be an IP literal (bare or bracketed IPv6) or a hostname, which is resolved to an address first — Docker publish specs do not accept hostnames. `0.0.0.0` restores the legacy broad bind (risky). |
+| `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | on | The shipped AIO image's Chromium browser does not start under Docker's default seccomp profile (see the upstream agent-infra sandbox FAQ), so `seccomp=unconfined` remains the default. Set to `0` to run with the built-in profile — passed explicitly as `seccomp=builtin`, so a daemon configured with a different default cannot weaken the opt-out — and only for images verified to start and pass browser checks with it. |
+| `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | on | Keeps the four capabilities (`CHOWN`/`SETUID`/`SETGID`/`DAC_OVERRIDE`) that the shipped image needs: three for the entrypoint's runtime user handoff, plus `DAC_OVERRIDE` because the root nginx master writes gem-owned log files for the container's lifetime. Set to `0` for images already fully initialized as a non-root user — every capability is then dropped, so sandboxed code cannot chown bind-mounted paths or impersonate mounted-file UIDs/GIDs. |
+| `DEER_FLOW_SANDBOX_SECCOMP_PROFILE` | unset | Path to a custom seccomp profile (e.g. a restricted, Chromium-compatible one built from Docker's default plus the namespace syscalls Chromium needs). Takes precedence over the unconfined default. |
+| `DEER_FLOW_SANDBOX_MEMORY` | `2g` | `--memory` limit per sandbox container. `0`/`none` disables the limit. |
+| `DEER_FLOW_SANDBOX_CPUS` | `2` | `--cpus` limit per sandbox container. `0`/`none` disables the limit. |
+| `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `512` | `--pids-limit` per sandbox container (fork-bomb guard). `0`/`none` disables the limit. |
+| `DEER_FLOW_SANDBOX_CONTAINER_USER` | unset (image default) | Passed through as `--user` (e.g. `1000:1000`). The default AIO image's user is upstream-controlled, so DeerFlow does not force one; set this only if you know your image's runtime user. |
+| `DEER_FLOW_SANDBOX_NETWORK` | unset (daemon default network) | Passed through as `--network`. Point it at a dedicated, egress-controlled Docker network so sandbox egress can be filtered by that network's policy; by default sandbox code can otherwise reach internal networks and cloud metadata endpoints directly. `host`, `container:<name>`, and `none` are rejected at startup (including through Docker's extended `name=<network>` syntax, whose effective target is validated): Docker drops `-p/--publish` in host mode (and shares the namespace for `container:<name>`), which would void the hardened port bind and re-expose the unauthenticated exec API; `none` leaves the container loopback-only, so the published sandbox API port cannot receive traffic and every acquisition would time out. |
+
+These hardening flags are Docker-only; Apple Container (`container` runtime) keeps its previous, unhardened invocation.
 
 Sandbox control-plane HTTP calls to loopback/private IPs, single-label cluster
 hosts, and Docker/Podman internal hostnames bypass `HTTP_PROXY`/`HTTPS_PROXY`
@@ -611,6 +755,15 @@ skills:
   container_path: /mnt/skills
 ```
 
+For the AIO provider (including the Kubernetes provisioner) and E2B,
+`skills.container_path` is captured when the provider starts and must be one
+canonical absolute, non-root POSIX path. Do not use redundant separators,
+`.`/`..`, or a path that contains or sits below DeerFlow's reserved mounts
+(`/mnt/user-data`, `/mnt/acp-workspace`, or `/mnt/integrations/lark-cli`).
+Restart the Gateway after changing it so sandbox identities and mounts use the
+same root. E2B also records the root in remote metadata and refuses to adopt a
+VM created for another root.
+
 **How Skills Work**:
 - Skills are stored in `deer-flow/skills/{public,custom}/`
 - Each skill has a `SKILL.md` file with metadata
@@ -635,6 +788,12 @@ Custom agents can restrict which skills they discover and activate by defining a
 This field is a discovery and activation allowlist; it does not activate every listed skill's `allowed-tools` policy when the agent is constructed. Use `tool_groups` to define the agent's baseline tools. A listed skill's policy applies only after slash activation or an actual `SKILL.md` load.
 
 The same semantics apply to `subagents.agents.<name>.skills` and `subagents.custom_agents.<name>.skills`: omitted or `null` exposes all enabled skills, `[]` exposes none, and a list limits discovery and activation. A passive subagent skill never removes baseline tools; its `allowed-tools` declaration becomes active only after slash activation or a completed `SKILL.md` read.
+
+`LocalSandboxProvider` enforces this filesystem view through its managed virtual
+path mappings only. Explicit per-Agent skill policies therefore fail closed when
+`sandbox.allow_host_bash` is enabled, because host subprocesses can bypass those
+mappings. Keep host bash disabled (the default), or use AIO/provisioner/E2B when
+shell access and filesystem isolation are both required.
 
 ### Title Generation
 
@@ -674,6 +833,7 @@ models:
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
+- `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
@@ -736,7 +896,7 @@ To keep this off the default attack surface:
 > for CLI auto-auth in **all** modes. These hold long-lived CLI credentials;
 > scope or omit them when the gateway runs untrusted workloads.
 
-### CLI Credential Mounts (Claude Code / Codex)
+### CLI Credential Mounts (Claude Code / Codex / MiniMax Code)
 
 DeerFlow can reuse your Claude Code / Codex CLI subscription login as a model
 provider (`ClaudeChatModel`, the Codex provider) or for ACP agents that run the
@@ -764,6 +924,16 @@ its config directory, so it needs no `~/.claude` mount at all. Prefer the
 adapter's documented env auth, and reach for the
 `docker-compose.cli-auth.yaml` overlay only as a fallback for an adapter that
 genuinely reads the full CLI config directory.
+
+MiniMax Code is a native ACP agent, so it does not need an adapter. For local
+Gateway runs, install it with `npm install --global @minimax-ai/code`, run
+`mcode login`, and configure `acp_agents.mcode` with `command: mcode` and
+`args: ["acp"]`. The executable and its authenticated runtime must be available
+inside the Gateway environment; a host-only installation is not visible to a
+Docker container. DeerFlow forwards enabled MCP servers to the MCode session.
+Leave `auto_approve_permissions` disabled for untrusted tasks, and enable it
+only when the agent is expected to edit files or run commands for a trusted
+task.
 
 
 ## Best Practices

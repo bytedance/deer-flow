@@ -1,6 +1,6 @@
 # DeerFlow - Unified Development Environment
 
-.PHONY: help config config-upgrade check install setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis
+.PHONY: help config config-upgrade check check-agent-guidance install extension-install extension-list extension-enable extension-disable extension-remove setup doctor support-bundle detect-thread-boundaries detect-blocking-io dev dev-daemon start start-daemon nginx stop up down clean docker-init docker-start docker-stop docker-logs docker-logs-frontend docker-logs-gateway docker-logs-redis setup-sandbox
 
 BASH ?= bash
 BACKEND_UV_RUN = cd backend && uv run
@@ -10,10 +10,13 @@ ifeq ($(OS),Windows_NT)
     SHELL := cmd.exe
     PYTHON ?= python
     # Run repo shell scripts through Git Bash when Make is launched from cmd.exe / PowerShell.
-    RUN_WITH_GIT_BASH = call scripts\run-with-git-bash.cmd
+    RUN_SHELL_SCRIPT = call scripts\run-with-git-bash.cmd
 else
     PYTHON ?= python3
-    RUN_WITH_GIT_BASH =
+    # Invoke repo shell scripts through an explicit interpreter, so recipes keep
+    # working in checkouts that lost the executable bit (zip download,
+    # core.fileMode=false, non-POSIX filesystem).
+    RUN_SHELL_SCRIPT = $(BASH)
 endif
 
 FRONTEND_PNPM = $(PYTHON) ../scripts/pnpm.py
@@ -26,9 +29,15 @@ help:
 	@echo "  make config          - Generate local config files (aborts if config already exists)"
 	@echo "  make config-upgrade  - Merge new fields from config.example.yaml into config.yaml"
 	@echo "  make check           - Check if all required tools are installed"
+	@echo "  make check-agent-guidance - Validate scoped AGENTS.md file and chain budgets"
 	@echo "  make detect-thread-boundaries - Inventory backend executor/thread/event-loop boundaries"
 	@echo "  make detect-blocking-io        - Inventory blocking IO that may block the backend event loop"
 	@echo "  make install         - Install all dependencies (frontend + backend + pre-commit hooks)"
+	@echo "  make extension-install SOURCE=... - Install and enable a trusted Python extension"
+	@echo "  make extension-list              - List configured Python extensions"
+	@echo "  make extension-enable NAME=...   - Enable an installed extension"
+	@echo "  make extension-disable NAME=...  - Disable an extension without uninstalling it"
+	@echo "  make extension-remove NAME=...   - Uninstall a managed extension"
 	@echo "  make setup-sandbox   - Pre-pull sandbox container image (recommended)"
 	@echo "  make dev             - Start all services in development mode (with hot-reloading)"
 	@echo "  make dev-daemon      - Start dev services in background (daemon mode)"
@@ -71,16 +80,19 @@ config:
 	@$(PYTHON) ./scripts/configure.py
 
 config-upgrade:
-	@$(RUN_WITH_GIT_BASH) ./scripts/config-upgrade.sh
+	@$(RUN_SHELL_SCRIPT) ./scripts/config-upgrade.sh
 
 # Check required tools
 check:
 	@$(PYTHON) ./scripts/check.py
 
+check-agent-guidance:
+	@$(PYTHON) ./scripts/check_agent_guidance.py
+
 # Install all dependencies
 install:
 	@echo "Installing backend dependencies..."
-	@cd backend && uv sync
+	@cd backend && uv sync --locked
 	@echo "Installing frontend dependencies..."
 	@cd frontend && $(FRONTEND_PNPM) install
 	@echo "Installing pre-commit hooks..."
@@ -96,37 +108,62 @@ install:
 	@echo "  make setup-sandbox"
 	@echo ""
 
+extension-install: export DEER_FLOW_EXTENSION_SOURCE := $(value SOURCE)
+extension-install:
+	$(if $(and $(filter command line,$(origin SOURCE)),$(strip $(value SOURCE))),,$(error usage: make extension-install SOURCE=<package|git-url|dir>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions install --source-env __deerflow_extension_source__
+
+extension-list:
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions list
+
+extension-enable: export DEER_FLOW_EXTENSION_NAME := $(value NAME)
+extension-enable:
+	$(if $(and $(filter command line,$(origin NAME)),$(strip $(value NAME))),,$(error usage: make extension-enable NAME=<extension>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions enable --name-env __deerflow_extension_name__
+
+extension-disable: export DEER_FLOW_EXTENSION_NAME := $(value NAME)
+extension-disable:
+	$(if $(and $(filter command line,$(origin NAME)),$(strip $(value NAME))),,$(error usage: make extension-disable NAME=<extension>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions disable --name-env __deerflow_extension_name__
+
+extension-remove: export DEER_FLOW_EXTENSION_NAME := $(value NAME)
+extension-remove:
+	$(if $(and $(filter command line,$(origin NAME)),$(strip $(value NAME))),,$(error usage: make extension-remove NAME=<extension>))
+	@cd backend && uv run --frozen --no-group extensions deerflow extensions remove --name-env __deerflow_extension_name__
+
 # Pre-pull sandbox Docker image (optional but recommended)
 setup-sandbox:
-	@$(RUN_WITH_GIT_BASH) ./scripts/setup-sandbox.sh
+	@$(RUN_SHELL_SCRIPT) ./scripts/setup-sandbox.sh
 
 # Start all services in development mode (with hot-reloading)
 dev:
 	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev
+	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --dev
 
-# Start all services in production mode (with optimizations)
+# Start all services in production mode (with optimizations).
+# SKIP_FRONTEND_BUILD=1 reuses the existing frontend build instead of running
+# `next build`; see scripts/serve.sh --skip-frontend-build.
 start:
 	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod
+	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --prod $(if $(filter 1,$(SKIP_FRONTEND_BUILD)),--skip-frontend-build)
 
 # Start all services in daemon mode (background)
 dev-daemon:
 	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --dev --daemon
+	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --dev --daemon
 
 # Start prod services in daemon mode (background)
 start-daemon:
 	@$(PYTHON) ./scripts/check.py
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --prod --daemon
+	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --prod --daemon $(if $(filter 1,$(SKIP_FRONTEND_BUILD)),--skip-frontend-build)
 
 # Start nginx alone in the foreground with the local dev config
 nginx:
-	@$(RUN_WITH_GIT_BASH) ./scripts/nginx.sh
+	@$(RUN_SHELL_SCRIPT) ./scripts/nginx.sh
 
 # Stop all services
 stop:
-	@$(RUN_WITH_GIT_BASH) ./scripts/serve.sh --stop
+	@$(RUN_SHELL_SCRIPT) ./scripts/serve.sh --stop
 
 # Clean up
 clean: stop
@@ -141,27 +178,27 @@ clean: stop
 
 # Initialize Docker containers and install dependencies
 docker-init:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh init
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh init
 
 # Start Docker development environment
 docker-start:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh start
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh start
 
 # Stop Docker development environment
 docker-stop:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh stop
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh stop
 
 # View Docker development logs
 docker-logs:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh logs
 
 # View Docker development logs
 docker-logs-frontend:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --frontend
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh logs --frontend
 docker-logs-gateway:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --gateway
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh logs --gateway
 docker-logs-redis:
-	@$(RUN_WITH_GIT_BASH) ./scripts/docker.sh logs --redis
+	@$(RUN_SHELL_SCRIPT) ./scripts/docker.sh logs --redis
 
 # ==========================================
 # Production Docker Commands
@@ -169,8 +206,8 @@ docker-logs-redis:
 
 # Build and start production services
 up:
-	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh
+	@$(RUN_SHELL_SCRIPT) ./scripts/deploy.sh
 
 # Stop and remove production containers
 down:
-	@$(RUN_WITH_GIT_BASH) ./scripts/deploy.sh down
+	@$(RUN_SHELL_SCRIPT) ./scripts/deploy.sh down

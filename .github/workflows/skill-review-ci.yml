@@ -8,6 +8,8 @@ on:
       - "backend/packages/harness/deerflow/skills/review/**"
       - "contracts/skill_review/**"
       - "scripts/review_changed_public_skills.py"
+      - "scripts/skill_review_waivers.py"
+      - ".github/skill-review-waivers.v1.json"
       - "backend/pyproject.toml"
       - "backend/uv.lock"
       - ".github/workflows/skill-review-ci.yml"
@@ -18,6 +20,8 @@ on:
       - "backend/packages/harness/deerflow/skills/review/**"
       - "contracts/skill_review/**"
       - "scripts/review_changed_public_skills.py"
+      - "scripts/skill_review_waivers.py"
+      - ".github/skill-review-waivers.v1.json"
       - "backend/pyproject.toml"
       - "backend/uv.lock"
       - ".github/workflows/skill-review-ci.yml"
@@ -48,6 +52,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
 
       - name: Install backend dependencies
         working-directory: backend

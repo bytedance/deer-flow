@@ -9,12 +9,17 @@ from typing import Any, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.prebuilt.tool_node import ToolCallRequest
+from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
+
 logger = logging.getLogger(__name__)
+
+ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 
 # Whitelisted form field types; anything else degrades to "text" so a bad
 # model-provided type can never produce an unrenderable card.
@@ -66,15 +71,48 @@ class ClarificationMiddlewareState(AgentState):
     pass
 
 
+def _filter_content_tool_use(content: Any, kept_ids: set[str], kept_names: set[str]) -> Any:
+    """Drop provider tool-use blocks that were stripped from ``tool_calls``.
+
+    Anthropic ``tool_use`` blocks carry an ``id`` that matches ``tool_calls``.
+    Gemini-style ``function_call`` blocks often have no ``id`` (langchain
+    synthesizes ids onto ``tool_calls`` only), so those are matched by ``name``.
+    """
+    if not isinstance(content, list):
+        return content
+    filtered: list[Any] = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") in {"tool_use", "function_call"}:
+            block_id = block.get("id")
+            if isinstance(block_id, str) and block_id:
+                if block_id not in kept_ids:
+                    continue
+            elif block.get("type") == "function_call":
+                name = block.get("name")
+                if not isinstance(name, str) or name not in kept_names:
+                    continue
+        filtered.append(block)
+    return filtered
+
+
 class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
     """Intercepts clarification tool calls and interrupts execution to present questions to the user.
 
     When the model calls the `ask_clarification` tool, this middleware:
-    1. Intercepts the tool call before execution
-    2. Extracts the clarification question and metadata
-    3. Formats a user-friendly message
-    4. Returns a Command that interrupts execution and presents the question
-    5. Waits for user response before continuing
+    1. Drops any sibling tool calls from the same AIMessage (``after_model``)
+       so they cannot execute before the user answers. langchain's
+       ``return_direct`` router inspects all client-side tool calls of the
+       last AIMessage and routes to END only when every one is
+       ``return_direct``. A mixed ``[ask_clarification, bash]`` batch would
+       both run the siblings *and* loop back to the model. Malformed
+       ``ask_clarification`` arguments land in ``invalid_tool_calls`` while a
+       valid sibling stays in ``tool_calls``; that still counts as a stop
+       signal and the siblings are dropped.
+    2. Intercepts the remaining ``ask_clarification`` call before execution
+    3. Extracts the clarification question and metadata
+    4. Formats a user-friendly message
+    5. Returns a Command that interrupts execution and presents the question
+    6. Waits for user response before continuing
 
     This replaces the tool-based approach where clarification continued the conversation flow.
     """
@@ -360,21 +398,82 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
 
         return "\n".join(message_parts)
 
-    def _is_disabled(self, request: ToolCallRequest) -> bool:
+    def _clarification_disabled(self, runtime: Any) -> bool:
         """Whether clarifications are suppressed for this run.
 
         Non-interactive channels (e.g. GitHub webhooks) set
         ``disable_clarification`` in the run context because a clarification
         would dead-end the run — the human only "replies" via a later
         webhook delivery, by which point the agent's turn is long over.
-        When set, we don't interrupt; we return a ToolMessage nudging the
-        agent to proceed with its best judgment instead.
         """
-        runtime = getattr(request, "runtime", None)
         context = getattr(runtime, "context", None)
         if not context:
             return False
         return bool(context.get("disable_clarification"))
+
+    def _is_disabled(self, request: ToolCallRequest) -> bool:
+        """Whether clarifications are suppressed for this tool-call request."""
+        return self._clarification_disabled(getattr(request, "runtime", None))
+
+    def _drop_parallel_non_clarification_tools(self, state: AgentState, runtime: Runtime) -> dict | None:
+        """Keep only ``ask_clarification`` when it was emitted alongside other tools.
+
+        Providers routinely batch tool calls. If ``ask_clarification`` shares a
+        turn with ``bash`` / ``write_file`` / ..., those siblings execute before
+        the user answers, and langchain's ``return_direct`` check (every
+        client-side tool call of the last AIMessage must be ``return_direct``)
+        routes back to the model. Rewrite the AIMessage so the tools node
+        never sees the siblings.
+
+        LangChain parses each provider call independently, so a malformed
+        ``ask_clarification`` is stored on ``invalid_tool_calls`` while a
+        valid sibling remains executable on ``tool_calls``. Treat that
+        malformed call as the same stop signal: drop the siblings so the
+        tools node cannot run them. With no remaining ``tool_calls``,
+        ``create_agent`` routes to END.
+
+        ``disable_clarification`` skips this rewrite: those runs must keep the
+        sibling actions, because the clarification itself is turned into a
+        "proceed" ToolMessage instead of an interrupt.
+        """
+        if self._clarification_disabled(runtime):
+            return None
+
+        messages = state.get("messages", [])
+        if not messages:
+            return None
+        last = messages[-1]
+        if not isinstance(last, AIMessage):
+            return None
+
+        tool_calls = list(last.tool_calls or [])
+        invalid_tool_calls = [tc for tc in (getattr(last, "invalid_tool_calls", None) or []) if isinstance(tc, dict)]
+        clarification_calls = [tc for tc in tool_calls if tc.get("name") == ASK_CLARIFICATION_TOOL_NAME]
+        invalid_clarification_calls = [tc for tc in invalid_tool_calls if tc.get("name") == ASK_CLARIFICATION_TOOL_NAME]
+        if not clarification_calls and not invalid_clarification_calls:
+            return None
+
+        sibling_calls = [tc for tc in tool_calls if tc.get("name") != ASK_CLARIFICATION_TOOL_NAME]
+        if not sibling_calls:
+            return None
+
+        dropped_names = [str(tc.get("name") or "unknown") for tc in sibling_calls]
+        logger.warning(
+            "ask_clarification was emitted with %d sibling tool call(s); dropping %s so the turn can interrupt",
+            len(dropped_names),
+            dropped_names,
+        )
+
+        kept_for_content = clarification_calls + invalid_clarification_calls
+        kept_ids = {tc["id"] for tc in kept_for_content if isinstance(tc.get("id"), str) and tc["id"]}
+        kept_names = {str(tc["name"]) for tc in kept_for_content if isinstance(tc.get("name"), str) and tc["name"]}
+        new_content = _filter_content_tool_use(last.content, kept_ids, kept_names)
+        patched = clone_ai_message_with_tool_calls(
+            last,
+            clarification_calls,
+            content=new_content if new_content is not last.content else None,
+        )
+        return {"messages": [patched]}
 
     def _handle_disabled_clarification(self, request: ToolCallRequest) -> ToolMessage:
         """Suppress a clarification and tell the agent to proceed.
@@ -395,7 +494,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
                 "you made in your final response."
             ),
             tool_call_id=tool_call_id,
-            name="ask_clarification",
+            name=ASK_CLARIFICATION_TOOL_NAME,
         )
 
     def _handle_clarification(self, request: ToolCallRequest) -> Command:
@@ -433,7 +532,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             id=request_id,
             content=formatted_message,
             tool_call_id=tool_call_id,
-            name="ask_clarification",
+            name=ASK_CLARIFICATION_TOOL_NAME,
             artifact={"human_input": human_input_payload},
         )
 
@@ -463,7 +562,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             Command that interrupts execution with the formatted clarification message
         """
         # Check if this is an ask_clarification tool call
-        if request.tool_call.get("name") != "ask_clarification":
+        if request.tool_call.get("name") != ASK_CLARIFICATION_TOOL_NAME:
             # Not a clarification call, execute normally
             return handler(request)
 
@@ -488,7 +587,7 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             Command that interrupts execution with the formatted clarification message
         """
         # Check if this is an ask_clarification tool call
-        if request.tool_call.get("name") != "ask_clarification":
+        if request.tool_call.get("name") != ASK_CLARIFICATION_TOOL_NAME:
             # Not a clarification call, execute normally
             return await handler(request)
 
@@ -496,3 +595,11 @@ class ClarificationMiddleware(AgentMiddleware[ClarificationMiddlewareState]):
             return self._handle_disabled_clarification(request)
 
         return self._handle_clarification(request)
+
+    @override
+    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._drop_parallel_non_clarification_tools(state, runtime)
+
+    @override
+    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._drop_parallel_non_clarification_tools(state, runtime)

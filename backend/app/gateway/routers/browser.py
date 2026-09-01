@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -10,6 +11,7 @@ from app.gateway.authz import require_permission
 from app.gateway.browser_capability import browser_capability
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
+from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +78,7 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
     description="Steer the thread's live browser session to a URL from the UI and capture a screenshot.",
 )
 @require_permission("threads", "write", owner_check=True, require_existing=True)
-async def navigate_browser(thread_id: str, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
+async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
     user_id = str(request.state.auth.user.id)
     thread_store = getattr(request.app.state, "thread_store", None)
     if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):
@@ -175,13 +177,40 @@ def _ws_origin_allowed(websocket: WebSocket) -> bool:
     return False
 
 
+async def _send_browser_frame(websocket: WebSocket, data: bytes, *, binary: bool) -> None:
+    if binary:
+        await websocket.send_bytes(data)
+        return
+    payload = {"type": "frame", "data": base64.b64encode(data).decode("ascii")}
+    await websocket.send_text(json.dumps(payload))
+
+
+async def _negotiate_browser_frame_format(websocket: WebSocket) -> bool | None:
+    """Accept the socket and resolve the optional frame transport capability."""
+    requested_format = websocket.query_params.get("frame_format")
+    await websocket.accept()
+    if requested_format not in {None, "binary"}:
+        await websocket.send_text(
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": f"Unsupported frame_format: {requested_format}",
+                },
+            ),
+        )
+        await websocket.close(code=1008)
+        return None
+    return requested_format == "binary"
+
+
 @router.websocket("/threads/{thread_id}/browser/stream")
-async def browser_stream(websocket: WebSocket, thread_id: str) -> None:
+async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
     """Bidirectional live browser stream.
 
-    Server → client: JSON ``{"type":"frame","data":"<base64 jpeg>"}`` frames
-    captured via CDP screencast. Client → server: input events (click, move,
-    down, up, wheel, key, text, navigate) that drive the live page.
+    Server → client: binary JPEG frames when ``frame_format=binary`` is
+    requested; legacy clients retain JSON base64 frames. Status and navigation
+    metadata remain JSON. Client → server: input events (click, move, down, up,
+    wheel, key, text, navigate) that drive the live page.
     """
     user = await _authenticate_ws(websocket)
     if user is None:
@@ -223,11 +252,13 @@ async def browser_stream(websocket: WebSocket, thread_id: str) -> None:
         await websocket.close(code=4501)
         return
 
-    await websocket.accept()
+    use_binary_frames = await _negotiate_browser_frame_format(websocket)
+    if use_binary_frames is None:
+        return
 
     token = set_current_user(user)
     loop = asyncio.get_running_loop()
-    frame_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=4)
+    frame_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=4)
     send_lock = asyncio.Lock()
     input_event = asyncio.Event()
     input_queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=64)
@@ -238,7 +269,7 @@ async def browser_stream(websocket: WebSocket, thread_id: str) -> None:
         async with send_lock:
             await websocket.send_text(json.dumps(payload))
 
-    def _on_frame(data: str) -> None:
+    def _on_frame(data: bytes) -> None:
         # Invoked on the private Playwright loop; hop to this loop and drop the
         # oldest frame when the client can't keep up (screencast is lossy).
         def _enqueue() -> None:
@@ -294,7 +325,8 @@ async def browser_stream(websocket: WebSocket, thread_id: str) -> None:
     async def _pump_frames() -> None:
         while True:
             data = await frame_queue.get()
-            await _send_payload({"type": "frame", "data": data})
+            async with send_lock:
+                await _send_browser_frame(websocket, data, binary=use_binary_frames)
 
     async def _send_url() -> None:
         # Report the page's real URL so the client's address bar reflects the

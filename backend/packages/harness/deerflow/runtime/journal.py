@@ -87,24 +87,16 @@ def _coerce_seed_message(message: Any) -> Any:
     return message
 
 
-def build_branch_history_seed_events(
+def _build_history_seed_events(
     messages: Sequence[Any],
     *,
     thread_id: str,
     run_id_prefix: str,
-    parent_thread_id: str,
+    seed_metadata: Mapping[str, Any],
 ) -> list[dict]:
-    """Serialize a branch checkpoint's messages into run-event message rows.
+    """Serialize checkpoint messages into run-event rows.
 
-    Thread branching copies checkpoint state, but the thread feed
-    (``list_messages`` / ``GET /threads/{id}/messages/page``) reads the
-    run-event store — which a fresh branch has no rows in, so the inherited
-    history vanishes from the UI as soon as the branch's first run refreshes
-    the feed (#4380). Seeding the branch's run_events from the same
-    checkpoint snapshot the branch was created from keeps the feed
-    consistent with what the branch actually contains.
-
-    Rows are grouped into one synthetic run per inherited turn
+    Rows are grouped into one synthetic run per checkpoint turn
     (``{run_id_prefix}-{n}``), a new turn starting at every persisted human
     message — the same boundary a real run has, since a run begins with a
     human input (including the allowlisted hidden ``ask_clarification``
@@ -117,9 +109,9 @@ def build_branch_history_seed_events(
     id per turn confines the drop to the turn actually regenerated.
 
     Mirrors RunJournal's message-event contract so seeded rows are
-    indistinguishable from journaled ones except by the ``branch_seed``
-    marker: same event types, ``category="message"``, ``content=
-    message.model_dump()``, the human-input persistence rule
+    indistinguishable from journaled ones except by the supplied seed metadata:
+    same event types, ``category="message"``, ``content=message.model_dump()``,
+    the human-input persistence rule
     (``_should_persist_human_input_message``), the original-user-text
     restoration, and the same treatment of ``hide_from_ui`` AI/tool rows —
     RunJournal persists them (``on_llm_end`` / ``_persist_tool_result_message``
@@ -136,7 +128,6 @@ def build_branch_history_seed_events(
     """
     events: list[dict] = []
     created_at = datetime.now(UTC).isoformat()
-    seed_metadata = {"branch_seed": True, "branch_parent_thread_id": parent_thread_id}
     # Messages ahead of the first human turn (none in practice) stay in turn 0.
     turn_index = 0
     for raw_message in messages:
@@ -175,6 +166,45 @@ def build_branch_history_seed_events(
     return events
 
 
+def build_branch_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+    parent_thread_id: str,
+) -> list[dict]:
+    """Serialize inherited branch history into the branch's empty event feed."""
+    return _build_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=run_id_prefix,
+        seed_metadata={
+            "branch_seed": True,
+            "branch_parent_thread_id": parent_thread_id,
+        },
+    )
+
+
+def build_checkpoint_history_seed_events(
+    messages: Sequence[Any],
+    *,
+    thread_id: str,
+    run_id_prefix: str,
+) -> list[dict]:
+    """Serialize legacy checkpoint history for a thread's empty event feed.
+
+    Reuse the branch seed's message normalization and per-turn synthetic run
+    grouping, but stamp migration-specific metadata so these rows are not
+    misidentified as history inherited from another thread.
+    """
+    return _build_history_seed_events(
+        messages,
+        thread_id=thread_id,
+        run_id_prefix=run_id_prefix,
+        seed_metadata={"checkpoint_history_seed": True},
+    )
+
+
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
 
@@ -204,7 +234,8 @@ class RunJournal(BaseCallbackHandler):
         super().__init__()
         self.run_id = run_id
         self.thread_id = thread_id
-        self._store = event_store
+        self._store: RunEventStore | None = event_store
+        self._closed = False
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
@@ -605,6 +636,8 @@ class RunJournal(BaseCallbackHandler):
                 self._persist_tool_result_message(message)
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
+        if self._closed:
+            return
         self._buffer.append(
             {
                 "thread_id": self.thread_id,
@@ -646,7 +679,10 @@ class RunJournal(BaseCallbackHandler):
 
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
-            await self._store.put_batch(batch)
+            store = self._store
+            if store is None:
+                return
+            await store.put_batch(batch)
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -856,25 +892,95 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        if self._closed:
+            return
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-        while self._pending_progress_task is not None and not self._pending_progress_task.done():
+        while self._pending_progress_task is not None:
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task.done():
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
+                break
             if self._pending_progress_delayed:
-                self._pending_progress_task.cancel()
-                await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
                 self._progress_dirty = False
                 self._pending_progress_delayed = False
                 break
-            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+            await asyncio.gather(pending_progress_task, return_exceptions=True)
+            if self._pending_progress_task is pending_progress_task:
+                self._pending_progress_task = None
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]
             del self._buffer[: self._flush_threshold]
             try:
-                await self._store.put_batch(batch)
+                store = self._store
+                if store is None:
+                    return
+                await store.put_batch(batch)
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
+
+    def _detach_runtime_dependencies(self) -> None:
+        """Drop every external or potentially cyclic run-scoped reference."""
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        self._buffer.clear()
+        self._pending_flush_tasks.clear()
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._tokens_by_model.clear()
+        self._counted_llm_run_ids.clear()
+        self._counted_external_source_ids.clear()
+        self._counted_message_llm_run_ids.clear()
+        self._llm_start_times.clear()
+        self._seen_llm_starts.clear()
+        self._current_run_tool_call_names.clear()
+        self._persisted_tool_message_identities.clear()
+        self._produced_artifacts.clear()
+        self._produced_artifact_keys.clear()
+        self._last_ai_msg = None
+        self._first_human_msg = None
+        self._llm_error_fallback_message = None
+
+    async def close(self, *, flush: bool = True) -> None:
+        """Release run-scoped references, optionally flushing buffered events."""
+        if self._closed:
+            return
+        if flush:
+            # A failed terminal write returns its batch to ``_buffer``. Keep the
+            # store and all buffered state attached so a later close/flush can retry
+            # instead of silently discarding the tail of the run event stream.
+            await self.flush()
+            self._detach_runtime_dependencies()
+            return
+
+        # A worker that lost its lease must detach without starting another
+        # durable write. Drop dependencies before cancelling already-scheduled
+        # work so tasks that have not begun observe the detached state. The
+        # final detach must survive a second cancellation while those tasks stop.
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        try:
+            pending_flush_tasks = tuple(self._pending_flush_tasks)
+            for task in pending_flush_tasks:
+                task.cancel()
+            if pending_flush_tasks:
+                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task is not None:
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+        finally:
+            self._detach_runtime_dependencies()
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""

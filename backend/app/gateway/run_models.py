@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from deerflow.runtime.stream_modes import RunStreamMode, UnsupportedStreamModeError, normalize_stream_modes
+from deerflow.utils.thread_id import validate_thread_id
 
 
 class RunCreateRequest(BaseModel):
@@ -35,6 +36,19 @@ class RunCreateRequest(BaseModel):
     after_seconds: None = Field(default=None, description="Compatibility placeholder; delayed execution is not supported")
     if_not_exists: Literal["create"] = Field(default="create", description="Compatibility default; missing threads are created")
     feedback_keys: None = Field(default=None, description="Compatibility placeholder; feedback key collection is not supported")
+
+    @model_validator(mode="after")
+    def validate_configurable_thread_id(self) -> RunCreateRequest:
+        """Validate the stateless-run thread selector inside RunnableConfig."""
+        if not isinstance(self.config, dict):
+            return self
+        configurable = self.config.get("configurable")
+        if not isinstance(configurable, dict) or "thread_id" not in configurable:
+            return self
+        thread_id = configurable["thread_id"]
+        if thread_id is not None:
+            validate_thread_id(thread_id)
+        return self
 
     @field_validator(
         "webhook",

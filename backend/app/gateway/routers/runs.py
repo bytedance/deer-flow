@@ -8,7 +8,6 @@ is reused so that conversation history is preserved across calls.
 from __future__ import annotations
 
 import logging
-import uuid
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -19,6 +18,7 @@ from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.services import build_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
 from deerflow.runtime import serialize_channel_values_for_api
+from deerflow.utils.thread_id import resolve_thread_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/runs", tags=["runs"])
@@ -27,12 +27,11 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 def _resolve_thread_id(body: RunCreateRequest) -> str:
     """Return the thread_id from the request body, or generate a new one."""
     thread_id = ((body.config or {}).get("configurable") or {}).get("thread_id")
-    if thread_id:
-        return str(thread_id)
-    return str(uuid.uuid4())
+    return resolve_thread_id(thread_id)
 
 
 @router.post("/stream")
+@require_permission("runs", "create")
 async def stateless_stream(body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
@@ -58,6 +57,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
 
 
 @router.post("/wait", response_model=dict)
+@require_permission("runs", "create")
 async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until completion.
 

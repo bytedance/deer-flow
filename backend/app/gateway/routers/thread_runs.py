@@ -23,7 +23,7 @@ from fastapi.responses import Response, StreamingResponse
 from langchain_core.messages import BaseMessage
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import require_cancel_permission_if, require_permission
 from app.gateway.checkpoint_lineage import (
     CheckpointLineageError,
     CheckpointParentMissingError,
@@ -33,6 +33,7 @@ from app.gateway.checkpoint_lineage import (
     find_checkpoint_before_message_chronologically,
     is_duration_only_checkpoint,
 )
+from app.gateway.context_usage import build_context_usage
 from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
@@ -42,6 +43,7 @@ from deerflow.agents.middlewares.dynamic_context_middleware import strip_injecte
 from deerflow.runtime import CancelOutcome, RunRecord, RunStatus, serialize_channel_values_for_api
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, get_original_user_content_text, message_to_text
+from deerflow.utils.thread_id import ThreadId
 from deerflow.workspace_changes import get_workspace_changes_response
 
 logger = logging.getLogger(__name__)
@@ -180,6 +182,12 @@ class ThreadTokenUsageCallerBreakdown(BaseModel):
     middleware: int = 0
 
 
+class ThreadContextUsage(BaseModel):
+    token_count: int = 0
+    max_context_tokens: int | None = None
+    percentage: float | None = None
+
+
 class ThreadTokenUsageResponse(BaseModel):
     thread_id: str
     total_tokens: int = 0
@@ -188,11 +196,26 @@ class ThreadTokenUsageResponse(BaseModel):
     total_runs: int = 0
     by_model: dict[str, ThreadTokenUsageModelBreakdown] = Field(default_factory=dict)
     by_caller: ThreadTokenUsageCallerBreakdown = Field(default_factory=ThreadTokenUsageCallerBreakdown)
+    context_usage: ThreadContextUsage | None = None
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def require_cancel_permission_when_action(request: Request, action: str | None) -> None:
+    """Conditionally require ``runs:cancel`` for cancel-then-stream requests.
+
+    ``stream_existing_run`` is gated at ``runs:read`` so action-less stream
+    joins keep working with read-only credentials, but its ``action`` branch
+    cancels the run — a separate permission. A read-only PAT (or any read-only
+    credential) must not reach the cancel path, and decorators cannot express
+    query-parameter-conditional permissions, so the check lives here. See
+    ``authz.require_cancel_permission_if`` — the shared primitive for every
+    request dimension that carries cancel capability.
+    """
+    require_cancel_permission_if(request, action is not None)
 
 
 def _cancel_conflict_detail(run_id: str, record: RunRecord) -> str:
@@ -805,7 +828,7 @@ async def _default_history_hidden_run_ids(run_mgr: Any, thread_id: str, *, user_
 @router.post("/{thread_id}/runs/regenerate/prepare", response_model=RegeneratePrepareResponse)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def prepare_regenerate_run(
-    thread_id: str,
+    thread_id: ThreadId,
     body: RegeneratePrepareRequest,
     request: Request,
 ) -> RegeneratePrepareResponse:
@@ -816,7 +839,7 @@ async def prepare_regenerate_run(
 @router.post("/{thread_id}/runs/edit-regenerate/prepare", response_model=EditRegeneratePrepareResponse)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
 async def prepare_edit_regenerate_run(
-    thread_id: str,
+    thread_id: ThreadId,
     body: EditRegeneratePrepareRequest,
     request: Request,
 ) -> EditRegeneratePrepareResponse:
@@ -826,7 +849,7 @@ async def prepare_edit_regenerate_run(
 
 @router.post("/{thread_id}/runs", response_model=RunResponse)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -> RunResponse:
+async def create_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> RunResponse:
     """Create a background run (returns immediately)."""
     record = await start_run(body, thread_id, request)
     return _record_to_response(record)
@@ -834,7 +857,7 @@ async def create_run(thread_id: str, body: RunCreateRequest, request: Request) -
 
 @router.post("/{thread_id}/runs/stream")
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -> StreamingResponse:
+async def stream_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> StreamingResponse:
     """Create a run and stream events via SSE.
 
     The response includes a ``Content-Location`` header with the run's
@@ -862,7 +885,7 @@ async def stream_run(thread_id: str, body: RunCreateRequest, request: Request) -
 
 @router.post("/{thread_id}/runs/wait", response_model=dict)
 @require_permission("runs", "create", owner_check=True, require_existing=True)
-async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> dict:
+async def wait_run(thread_id: ThreadId, body: RunCreateRequest, request: Request) -> dict:
     """Create a run and block until it completes, returning the final state."""
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
@@ -891,7 +914,7 @@ async def wait_run(thread_id: str, body: RunCreateRequest, request: Request) -> 
 
 @router.get("/{thread_id}/runs", response_model=list[RunResponse])
 @require_permission("runs", "read", owner_check=True)
-async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
+async def list_runs(thread_id: ThreadId, request: Request) -> list[RunResponse]:
     """List all runs for a thread."""
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
@@ -901,7 +924,7 @@ async def list_runs(thread_id: str, request: Request) -> list[RunResponse]:
 
 @router.get("/{thread_id}/runs/{run_id}", response_model=RunResponse)
 @require_permission("runs", "read", owner_check=True)
-async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
+async def get_run(thread_id: ThreadId, run_id: str, request: Request) -> RunResponse:
     """Get details of a specific run."""
     run_mgr = get_run_manager(request)
     user_id = await get_current_user(request)
@@ -914,7 +937,7 @@ async def get_run(thread_id: str, run_id: str, request: Request) -> RunResponse:
 @router.post("/{thread_id}/runs/{run_id}/cancel")
 @require_permission("runs", "cancel", owner_check=True, require_existing=True)
 async def cancel_run(
-    thread_id: str,
+    thread_id: ThreadId,
     run_id: str,
     request: Request,
     wait: bool = Query(default=False, description="Block until run completes after cancel"),
@@ -973,7 +996,7 @@ async def cancel_run(
 
 @router.get("/{thread_id}/runs/{run_id}/join")
 @require_permission("runs", "read", owner_check=True)
-async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingResponse:
+async def join_run(thread_id: ThreadId, run_id: str, request: Request) -> StreamingResponse:
     """Join an existing run's SSE stream."""
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
@@ -984,7 +1007,9 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
         raise HTTPException(status_code=409, detail=f"Run {run_id} is not active on this worker and cannot be streamed")
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        # Joins are read-only observation: the creator's cancel-on-disconnect
+        # policy must not fire because an observer closed their connection.
+        sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1002,7 +1027,7 @@ async def join_run(thread_id: str, run_id: str, request: Request) -> StreamingRe
 @router.post("/{thread_id}/runs/{run_id}/stream", response_model=None)
 @require_permission("runs", "read", owner_check=True)
 async def stream_existing_run(
-    thread_id: str,
+    thread_id: ThreadId,
     run_id: str,
     request: Request,
     action: Literal["interrupt", "rollback"] | None = Query(default=None, description="Cancel action"),
@@ -1015,6 +1040,8 @@ async def stream_existing_run(
     is present the run is cancelled first; the response then streams any
     remaining buffered events so the client observes a clean shutdown.
     """
+    require_cancel_permission_when_action(request, action)
+
     run_mgr = get_run_manager(request)
     record = await run_mgr.get(run_id)
     if record is None or record.thread_id != thread_id:
@@ -1057,7 +1084,12 @@ async def stream_existing_run(
             return Response(status_code=204 if completed else 202)
 
     return StreamingResponse(
-        sse_consumer(bridge, record, request, run_mgr),
+        # Both methods of this handler are join surfaces: a POST carrying an
+        # action cancels explicitly above (already gated by
+        # require_cancel_permission_when_action), and an action-less join is
+        # read-only observation — the creator's cancel-on-disconnect policy
+        # must not fire because a joiner closed their connection.
+        sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -1075,7 +1107,7 @@ async def stream_existing_run(
 @router.get("/{thread_id}/messages")
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     before_seq: int | None = Query(default=None, ge=1),
@@ -1320,16 +1352,21 @@ async def _enrich_thread_message_page(
                     "comment": feedback.get("comment"),
                 }
 
-        content = row.get("content")
-        if isinstance(content, dict) and content.get("type") == "ai" and run_id in run_durations:
-            content.setdefault("additional_kwargs", {})["turn_duration"] = run_durations[run_id]
+    # ``turn_duration`` is the run's wall-clock lifetime, not model thinking
+    # time — stamp it on the run's LAST visible AI message only so the UI does
+    # not repeat the same number on every intermediate AI message of a
+    # multi-step turn (#4152). The legacy ``GET /messages`` and ``/history``
+    # endpoints already use ``stamp_turn_duration_on_last_ai``; the page
+    # endpoint was inlining the equivalent loop but stamping every AI row,
+    # which #4163 fixed for the other paths and missed here.
+    stamp_turn_duration_on_last_ai(data, run_durations)
     return data
 
 
 @router.get("/{thread_id}/messages/page", response_model=ThreadMessagesPageResponse)
 @require_permission("runs", "read", owner_check=True)
 async def list_thread_messages_page(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     limit: int = Query(default=50, ge=1, le=200),
     before_seq: int | None = Query(default=None, ge=1),
@@ -1357,7 +1394,7 @@ async def list_thread_messages_page(
 @router.get("/{thread_id}/runs/{run_id}/messages")
 @require_permission("runs", "read", owner_check=True)
 async def list_run_messages(
-    thread_id: str,
+    thread_id: ThreadId,
     run_id: str,
     request: Request,
     limit: int = Query(default=50, le=200, ge=1),
@@ -1392,7 +1429,7 @@ async def list_run_messages(
 @router.get("/{thread_id}/runs/{run_id}/events")
 @require_permission("runs", "read", owner_check=True)
 async def list_run_events(
-    thread_id: str,
+    thread_id: ThreadId,
     run_id: str,
     request: Request,
     event_types: str | None = Query(default=None),
@@ -1429,7 +1466,7 @@ async def list_run_events(
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")
 @require_permission("runs", "read", owner_check=True)
 async def get_run_workspace_changes(
-    thread_id: str,
+    thread_id: ThreadId,
     run_id: str,
     request: Request,
     include_files: bool = Query(default=True),
@@ -1449,7 +1486,7 @@ async def get_run_workspace_changes(
 @router.get("/{thread_id}/token-usage", response_model=ThreadTokenUsageResponse)
 @require_permission("threads", "read", owner_check=True)
 async def thread_token_usage(
-    thread_id: str,
+    thread_id: ThreadId,
     request: Request,
     include_active: bool = Query(default=False, description="Include running run progress snapshots"),
 ) -> ThreadTokenUsageResponse:
@@ -1459,4 +1496,5 @@ async def thread_token_usage(
         agg = await run_store.aggregate_tokens_by_thread(thread_id, include_active=True)
     else:
         agg = await run_store.aggregate_tokens_by_thread(thread_id)
-    return ThreadTokenUsageResponse(thread_id=thread_id, **agg)
+    context_usage = await build_context_usage(request, thread_id, run_store)
+    return ThreadTokenUsageResponse(thread_id=thread_id, context_usage=context_usage, **agg)

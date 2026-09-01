@@ -31,12 +31,10 @@ from langchain.agents.middleware.types import (
 from langchain_core.messages import HumanMessage
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.message_utils import is_genuine_user_message
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
-
-_SUMMARY_MESSAGE_NAME = "summary"
 
 # Finite set of blocked tag names: system-reserved + common injection patterns.
 #
@@ -79,7 +77,6 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "critical_reminders",
         "response_style",
         "citations",
-        "uploaded_files",  # old uploads tag — still processed by deermem for backward-compat
         "current_uploads",
         "subagent_system",
         "skill_system",
@@ -93,6 +90,7 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "mcp_routing_hints",
         "available-deferred-tools",
         "goal_continuation",
+        "background_task_event",
         "file_editing_workflow",
         "guidelines",
         "output_format",
@@ -101,6 +99,14 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         # tool off-limits. Forging this in untrusted input could trick the
         # model into believing it has (or lacks) tool restrictions it does not.
         "tool_restrictions",
+        # Subagent report-contract blocks (subagents/report_contract.py, RFC
+        # #4651 PR3): injected by the executor into every subagent system
+        # prompt (the criteria pointer note carries no criterion values —
+        # those stay in the untrusted task message). Forging them in
+        # untrusted input could impersonate the verification contract (e.g.
+        # pre-declaring acceptance criteria as met).
+        "report_contract",
+        "acceptance_criteria",
         # Common prompt-injection tag patterns
         "system",
         "instruction",
@@ -150,7 +156,7 @@ def neutralize_untrusted_tags(text: str) -> str:
 
     Shared primitive for any content that originates outside the trust boundary
     and is about to enter the model context as *data* — currently the genuine
-    user message (via :func:`_check_user_content`) and remote tool results
+    user message (via :func:`frame_untrusted_text`) and remote tool results
     (web_fetch / web_search and friends, via
     :class:`ToolResultSanitizationMiddleware`).
 
@@ -173,23 +179,8 @@ def neutralize_untrusted_tags(text: str) -> str:
     return _neutralize_boundary_tokens(text)
 
 
-def _is_genuine_user_message(message: object) -> bool:
-    """Return True for real user messages, excluding system-injected HumanMessages.
-
-    ``hide_from_ui`` is also used by hidden UI replies from HumanInputCard, so
-    only skip hidden HumanMessages that do not carry a valid user response.
-    """
-    if not isinstance(message, HumanMessage):
-        return False
-    if message.name == _SUMMARY_MESSAGE_NAME:
-        return False
-    if message.additional_kwargs.get("hide_from_ui") and read_human_input_response(message.additional_kwargs) is None:
-        return False
-    return True
-
-
-def _check_user_content(text: str) -> str:
-    """Sanitize user content: escape blocked tags, then wrap in boundary markers.
+def frame_untrusted_text(text: str) -> str:
+    """Sanitize untrusted text, then wrap it in user-input boundary markers.
 
     * Empty/whitespace-only → return unchanged (no marker noise).
     * Blocked tags → HTML-escape ``<``/``>`` (e.g. ``<system>`` → ``&lt;system&gt;``).
@@ -218,6 +209,11 @@ def _check_user_content(text: str) -> str:
     return f"{_USER_INPUT_BEGIN}\n{text}\n{_USER_INPUT_END}"
 
 
+def _check_user_content(text: str) -> str:
+    """Backward-compatible internal alias for untrusted text framing."""
+    return frame_untrusted_text(text)
+
+
 class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
     """Guardrail middleware that escapes prompt-injection tags in user input.
 
@@ -232,16 +228,26 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         """Extract concatenated text from a plain-string or content-block-list.
 
         Returns ``(text, extracted_blocks)``. *extracted_blocks* is None when
-        *content* is a string, or the list of text-content-block dicts when a list.
+        *content* is a string, or the list of text-content blocks when a list.
+
+        A list can hold bare ``str`` items next to content-block dicts
+        (``message_content_to_text`` treats both as text, and some IM/SDK
+        clients send exactly that shape), so bare strings are collected too —
+        skipping them would skip sanitization entirely for that message.
         """
         if isinstance(content, str):
             return content, None
         if not isinstance(content, list):
             return "", None
         text_parts: list[str] = []
-        text_blocks: list[dict] = []
+        text_blocks: list[dict | str] = []
         for block in content:
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            if isinstance(block, str):
+                if not block:  # skip empty items — matches message_content_to_text behaviour
+                    continue
+                text_parts.append(block)
+                text_blocks.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
                 text = block["text"]
                 if not text:  # skip empty blocks — matches message_content_to_text behaviour
                     continue
@@ -253,7 +259,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
     def _rebuild_content(
         original_content: list,
         processed_text: str,
-        text_blocks: list[dict],
+        text_blocks: list,
     ) -> list:
         """Replace text blocks with a single merged text block, preserving interleaved non-text blocks.
 
@@ -287,7 +293,7 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         messages = list(request.messages)
         for i in range(len(messages) - 1, -1, -1):
             msg = messages[i]
-            if not _is_genuine_user_message(msg):
+            if not is_genuine_user_message(msg):
                 if isinstance(msg, HumanMessage):
                     logger.debug(
                         "_process_request: skipping non-genuine HumanMessage at pos=%d name=%s hide_from_ui=%s content_preview=%.80r",

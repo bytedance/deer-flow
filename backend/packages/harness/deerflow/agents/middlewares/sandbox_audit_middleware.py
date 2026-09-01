@@ -21,6 +21,31 @@ logger = logging.getLogger(__name__)
 # Command classification rules
 # ---------------------------------------------------------------------------
 
+# Executables whose output is dangerous to *execute*. Used by the command
+# substitution rules below; ``\b`` prevents matching unrelated names that merely
+# start with one of these words (``shellcheck``, ``shasum``, ``pythonic-tool``).
+_RISKY_SUBSTITUTION_EXECUTABLES = r"(?:curl|wget|bash|sh|python[\d.]*|ruby|perl|base64)\b"
+
+# A substitution opening one of those executables, in any of its spellings:
+# ``$(cmd``, ``<(cmd``, or the backtick form, which has no parenthesis. Sharing
+# one opener is what keeps ``eval `curl u` `` from slipping past a rule written
+# only for ``eval $(curl u)``.
+_RISKY_SUBSTITUTION = rf"(?:[$<]\(\s*|`\s*){_RISKY_SUBSTITUTION_EXECUTABLES}"
+
+# Interpreters that execute a *code string* handed to them as an argument, and
+# the flags that receive it: ``-c`` (shells, python), ``-e`` (perl/ruby/node),
+# ``-p`` (perl/node print loop), ``-r`` (php). Whatever the flag receives is
+# executed, so a risky substitution there is executed too -- the same class as
+# ``eval``/``source``, spelled with a flag instead. A here-string (``<<<``)
+# reaches the same place through stdin.
+#
+# These are position-blind on purpose: ``bash -c`` is an execution context
+# wherever it appears, including as an argument to something else
+# (``xargs sh -c "$(curl url)"``). The leading-flag repetition is bounded so the
+# alternation cannot backtrack on long input.
+_CODE_STRING_INTERPRETERS = r"(?:(?:ba|da|k|z)?sh|python[\d.]*|perl|ruby|node|php)"
+_LEADING_FLAGS = r"(?:-\w+\s+){0,4}"
+
 # Each pattern is compiled once at import time.
 _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     # --- original rules (retained) ---
@@ -31,8 +56,11 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r">+\s*/etc/"),
     # --- pipe to sh/bash (generalised, replaces old curl|sh rule) ---
     re.compile(r"\|\s*(ba)?sh\b"),
-    # --- command substitution (targeted – only dangerous executables) ---
-    re.compile(r"[`$]\(?\s*(curl|wget|bash|sh|python|ruby|perl|base64)"),
+    # --- eval/source execute a substitution regardless of its position ---
+    re.compile(rf"\b(eval|source)\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    # --- an interpreter's code-string flag is an execution context too ---
+    re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}-[cepr]\s+[\"']?{_RISKY_SUBSTITUTION}"),
+    re.compile(rf"\b{_CODE_STRING_INTERPRETERS}\s+{_LEADING_FLAGS}<<<\s*[\"']?{_RISKY_SUBSTITUTION}"),
     # --- base64 decode piped to execution ---
     re.compile(r"base64\s+.*-d.*\|"),
     # --- overwrite system binaries ---
@@ -50,6 +78,32 @@ _HIGH_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"while\s+true.*&\s*done"),  # while true; do bash & done
 ]
 
+# Command substitution in *command position*: the substitution result becomes the
+# command that runs, so fetched or interpreted content is executed.
+#
+# These are matched anchored against a single sub-command, never against the whole
+# compound string, because position is what distinguishes the two shapes:
+#
+#   $(curl url)          → executes what was downloaded          → block
+#   x=$(curl url)        → captures the output into a variable   → pass
+#   echo $(curl url)     → passes the output as an argument      → pass
+#
+# The previous unanchored rule could not tell them apart and refused everyday
+# output capture (issue #4611).
+#
+# A command position is not always the first character: POSIX shell allows leading
+# variable assignments, and exec wrappers keep what follows in command position
+# (``FOO=1 $(curl url)``, ``env FOO=1 $(curl url)``, ``nohup $(curl url)``). The
+# assignment branch cannot match ``x=$(curl url)`` because it requires whitespace
+# between the assignment and the substitution, so value position stays allowed.
+# The repetition is bounded to keep the alternation from backtracking on long input.
+_COMMAND_POSITION_PREFIX = r"(?:(?:env|command|builtin|exec|nohup|time|sudo|doas)\s+|\w+=\S*\s+){0,8}"
+
+_HIGH_RISK_COMMAND_POSITION_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?\$\(\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+    re.compile(rf"^{_COMMAND_POSITION_PREFIX}[\"']?`\s*{_RISKY_SUBSTITUTION_EXECUTABLES}"),
+]
+
 _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"chmod\s+777"),
     re.compile(r"pip3?\s+install"),
@@ -61,7 +115,39 @@ _MEDIUM_RISK_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
-def _split_compound_command(command: str) -> list[str]:
+# A heredoc header and its delimiter: ``<<EOF``, ``<< EOF``, ``<<-EOF``,
+# ``<<\EOF``, ``<<'EOF'``, ``<<"EOF"``. Both guards are needed to keep ``<<<``
+# (a here-string, which has no body) from opening one: the lookahead rejects it
+# at its first ``<``, and the lookbehind stops its trailing ``<<`` from matching
+# one character later, where ``<<< "text"`` would otherwise read as a heredoc
+# with delimiter ``text``.
+_HEREDOC_HEADER = re.compile(r"(?<!<)<<(?!<)-?[ \t]*(?:\\?([A-Za-z_][\w.-]*)|'([^'\n]*)'|\"([^\"\n]*)\")")
+
+
+def _consume_heredoc_bodies(command: str, pos: int, delimiters: list[str]) -> int:
+    """Return the index just past the bodies of the *delimiters* opened so far.
+
+    Bodies are consumed in the order their headers appeared, each running until a
+    line whose stripped content equals its delimiter (``<<-`` strips leading tabs,
+    which ``strip()`` covers). An unterminated body consumes the rest of the
+    string: everything after the header genuinely is body, and there is no later
+    statement to find.
+    """
+    for delimiter in delimiters:
+        while pos < len(command):
+            newline = command.find("\n", pos)
+            if newline == -1:
+                return len(command)
+            line = command[pos:newline]
+            pos = newline + 1
+            if line.strip() == delimiter:
+                break
+        else:
+            return len(command)
+    return pos
+
+
+def _split_compound_command(command: str, *, split_pipes: bool = False) -> list[str]:
     """Split a compound command into sub-commands (quote-aware).
 
     Scans the raw command string so unquoted shell control operators are
@@ -70,11 +156,36 @@ def _split_compound_command(command: str) -> list[str]:
     quotes are ignored. If the command ends with an unclosed quote or a
     dangling escape, return the whole command unchanged (fail-closed —
     safer to classify the unsplit string than silently drop parts).
+
+    Sequencing operators (``&&``, ``||``, ``;``) split, and so does an unquoted
+    newline — it separates statements exactly like ``;``, so leaving it joined let
+    ``echo hi\\n$(curl url)`` evade the anchored command-position rules that
+    ``echo hi; $(curl url)`` triggers, despite identical shell semantics.
+
+    A heredoc body is data, not statements: its newlines and operators are file
+    content. Headers (``<<EOF``, ``<<-EOF``, ``<<'EOF'``) are therefore recorded
+    as they are read and their bodies consumed verbatim at the newline that
+    starts them, so a body line beginning with ``$(curl url)`` is not promoted to
+    command position. ``<<<`` is a here-string, not a heredoc, and does not open
+    one; neither does a ``<<`` inside ``$(( ... ))`` or ``(( ... ))``, where it is
+    a bit shift whose right operand would otherwise read as a delimiter that never
+    appears — swallowing the rest of the command. This is a heuristic, not shell
+    parsing — the goal is only to avoid manufacturing command positions that the
+    shell would never create, and to avoid destroying real ones.
+
+    Pipes do not split by default, because a pipeline is one logical command.
+    Pass ``split_pipes=True`` to also split on ``|``, which is what
+    command-position detection needs — the word after a pipe starts a new
+    command. Rules that span a pipe (``| sh``, ``base64 -d | ...``) are matched by
+    the whole-command scan in :func:`_classify_command`, so they are unaffected by
+    the extra split.
     """
     parts: list[str] = []
     current: list[str] = []
+    pending_heredocs: list[str] = []
     in_single_quote = False
     in_double_quote = False
+    arithmetic_depth = 0
     escaping = False
     index = 0
 
@@ -106,12 +217,61 @@ def _split_compound_command(command: str) -> list[str]:
             continue
 
         if not in_single_quote and not in_double_quote:
+            # ``<<`` inside arithmetic is a bit shift, not a redirection, and a
+            # phantom header whose delimiter never appears would swallow the rest
+            # of the command. Both ``$(( ... ))`` and the bare arithmetic command
+            # ``(( ... ))`` are tracked. An unclosed ``((`` leaves the depth
+            # positive, which only disables heredoc detection — newlines keep
+            # splitting, so the failure direction stays towards seeing more
+            # command positions rather than fewer.
+            if char == "(" and command.startswith("((", index):
+                arithmetic_depth += 1
+                current.append("((")
+                index += 2
+                continue
+            if arithmetic_depth and char == ")" and command.startswith("))", index):
+                arithmetic_depth -= 1
+                current.append("))")
+                index += 2
+                continue
+            # A header can only start at ``<``; checking that first keeps the
+            # regex off every other character of a long command.
+            if char == "<" and not arithmetic_depth:
+                heredoc = _HEREDOC_HEADER.match(command, index)
+                if heredoc:
+                    pending_heredocs.append(next(group for group in heredoc.groups() if group is not None))
+                    current.append(heredoc.group(0))
+                    index = heredoc.end()
+                    continue
+            if char == "\n":
+                # The newline that follows a heredoc header is the statement
+                # separator, and its body belongs to the statement being closed.
+                if pending_heredocs:
+                    body_end = _consume_heredoc_bodies(command, index + 1, pending_heredocs)
+                    pending_heredocs = []
+                    current.append(command[index:body_end])
+                    index = body_end
+                else:
+                    index += 1
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                continue
             if command.startswith("&&", index) or command.startswith("||", index):
                 part = "".join(current).strip()
                 if part:
                     parts.append(part)
                 current = []
                 index += 2
+                continue
+            # Checked after "||" so a single "|" cannot steal that operator.
+            if split_pipes and char == "|":
+                part = "".join(current).strip()
+                if part:
+                    parts.append(part)
+                current = []
+                index += 1
                 continue
             if char == ";":
                 part = "".join(current).strip()
@@ -134,21 +294,27 @@ def _split_compound_command(command: str) -> list[str]:
     return parts if parts else [command]
 
 
+def _matches_high_risk(candidate: str) -> bool:
+    """Return True if *candidate* (one sub-command) matches any high-risk rule."""
+    if any(pattern.search(candidate) for pattern in _HIGH_RISK_PATTERNS):
+        return True
+    # Anchored: only meaningful for a single sub-command, not a compound string.
+    return any(pattern.match(candidate) for pattern in _HIGH_RISK_COMMAND_POSITION_PATTERNS)
+
+
 def _classify_single_command(command: str) -> str:
     """Classify a single (non-compound) command. Return 'block', 'warn', or 'pass'."""
     normalized = " ".join(command.split())
 
-    for pattern in _HIGH_RISK_PATTERNS:
-        if pattern.search(normalized):
-            return "block"
+    if _matches_high_risk(normalized):
+        return "block"
 
     # Also try shlex-parsed tokens for high-risk detection
     try:
         tokens = shlex.split(command)
         joined = " ".join(tokens)
-        for pattern in _HIGH_RISK_PATTERNS:
-            if pattern.search(joined):
-                return "block"
+        if _matches_high_risk(joined):
+            return "block"
     except ValueError:
         # Heredocs and other multiline shell forms may be valid bash but
         # unparseable by shlex. Raw high-risk patterns were already checked.
@@ -178,8 +344,9 @@ def _classify_command(command: str) -> str:
         if pattern.search(normalized):
             return "block"
 
-    # Pass 2: per-sub-command classification
-    sub_commands = _split_compound_command(command)
+    # Pass 2: per-sub-command classification. Pipes split here too, because the
+    # word after a pipe starts a new command position (``echo hi | $(curl ...)``).
+    sub_commands = _split_compound_command(command, split_pipes=True)
     worst = "pass"
     for sub in sub_commands:
         verdict = _classify_single_command(sub)

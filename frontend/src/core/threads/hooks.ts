@@ -19,7 +19,11 @@ import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
-import { isHiddenFromUIMessage } from "../messages/utils";
+import {
+  hasContent,
+  hasToolCalls,
+  isHiddenFromUIMessage,
+} from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
@@ -41,7 +45,10 @@ import {
   filterThreadSearchResults,
   type ThreadSearchParams,
 } from "./thread-search-query";
-import { threadTokenUsageQueryKey } from "./token-usage";
+import {
+  retainThreadTokenUsagePlaceholder,
+  threadTokenUsageQueryKey,
+} from "./token-usage";
 import type {
   AgentThread,
   AgentThreadState,
@@ -163,6 +170,7 @@ export function buildThreadSubmitMessages({
 const EMPTY_MESSAGES: Message[] = [];
 const EMPTY_RUN_MESSAGES: RunMessage[] = [];
 const EMPTY_MESSAGE_IDENTITIES: readonly string[] = [];
+const INJECTED_USER_MESSAGE_ID_SUFFIX = "__user";
 
 const EMPTY_THREAD_VALUES: AgentThreadState = {
   title: "",
@@ -189,7 +197,17 @@ function messageIdentity(message: Message): string | undefined {
     return `tool:${message.tool_call_id}`;
   }
   if (typeof message.id === "string" && message.id.length > 0) {
-    return `message:${message.id}`;
+    // DynamicContextMiddleware replaces the submitted HumanMessage(id=X) with
+    // a hidden SystemMessage(id=X) and the real HumanMessage(id=X__user).
+    // Treat those human copies as one UI message so a committed render ledger
+    // cannot retain X beside the later checkpoint copy X__user.
+    const messageId =
+      message.type === "human" &&
+      message.id.endsWith(INJECTED_USER_MESSAGE_ID_SUFFIX)
+        ? message.id.slice(0, -INJECTED_USER_MESSAGE_ID_SUFFIX.length) ||
+          message.id
+        : message.id;
+    return `message:${messageId}`;
   }
   return undefined;
 }
@@ -576,6 +594,191 @@ export function mergeMessages(
     }
     return message;
   });
+}
+
+/**
+ * Keep messages from a locally submitted turn behind that turn's user input.
+ * LangGraph `messages-tuple` events can publish the first AI/tool steps before
+ * the `values` event containing the user message. Those steps are not part of
+ * the pre-submit baseline, so move only that visible pending segment behind the
+ * first new human message without disturbing established history or hidden
+ * checkpoint controls. The caller keeps the baseline after stream completion
+ * because the SDK may retain its transient event order until the next submit.
+ */
+export function restoreLocalTurnMessageOrder(
+  messages: Message[],
+  baselineMessageIdentities: ReadonlySet<string>,
+): Message[] {
+  const pendingHumanIndex = messages.findIndex((message) => {
+    const identity = messageIdentity(message);
+    return (
+      message.type === "human" &&
+      !isHiddenFromUIMessage(message) &&
+      identity !== undefined &&
+      !baselineMessageIdentities.has(identity)
+    );
+  });
+  if (pendingHumanIndex <= 0) {
+    return messages;
+  }
+
+  const stablePrefix: Message[] = [];
+  const earlyPendingSteps: Message[] = [];
+  for (const message of messages.slice(0, pendingHumanIndex)) {
+    const identity = messageIdentity(message);
+    const isVisiblePendingStep =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message) &&
+      identity !== undefined &&
+      !baselineMessageIdentities.has(identity);
+    if (isVisiblePendingStep) {
+      earlyPendingSteps.push(message);
+    } else {
+      stablePrefix.push(message);
+    }
+  }
+  if (earlyPendingSteps.length === 0) {
+    return messages;
+  }
+
+  return [
+    ...stablePrefix,
+    messages[pendingHumanIndex]!,
+    ...earlyPendingSteps,
+    ...messages.slice(pendingHumanIndex + 1),
+  ];
+}
+
+/**
+ * Reconnect/reload counterpart of {@link restoreLocalTurnMessageOrder}.
+ *
+ * After a mid-run page reload the local-turn baseline is empty, so the local
+ * restore never runs — yet the same ordering race still applies: replayed
+ * `messages-tuple` steps can reach the merged list before the turn's human
+ * message (the retained replay buffer may even have dropped it), and the
+ * live-only human is then woven in before the next shared history anchor,
+ * leaving steps of the SAME run above the user message they belong to.
+ *
+ * Canonical history is seq-sorted, so a visible AI/tool step sitting above
+ * the last visible human while another message of the same run sits below it
+ * (a "same-run sandwich") is provably misplaced. Run_id-less steps are
+ * live-only (history rows always carry run_id) and are attributable to the
+ * reconnected run only when a run_id-less step also follows the human.
+ *
+ * Only steps after the last terminal assistant answer (visible content, no
+ * tool calls) in the segment are candidates: such an answer completes the
+ * turn that owns it, so everything up to it belongs to a finished turn and
+ * must keep its position even when run_ids are absent or uniform across
+ * turns (branch-seeded history, mocked feeds). A still-streaming text step
+ * can look like a terminal answer before its tool call arrives (#4304); it
+ * then stays above the human until canonical history heals the order — an
+ * accepted transient, far safer than pulling a completed turn's answer
+ * below the next user message. A resent turn after an interrupted run and
+ * pagination orphans from older turns (#4399) fail the checks as well and
+ * are left untouched. When an interrupted turn and the next turn share one
+ * synthetic run_id, the previous human anchor plus the missing terminal
+ * answer makes step ownership ambiguous, so that layout is also preserved.
+ */
+export function restoreReconnectedTurnMessageOrder(
+  messages: Message[],
+): Message[] {
+  let humanIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      humanIndex = index;
+      break;
+    }
+  }
+  if (humanIndex <= 0) {
+    return messages;
+  }
+
+  // Only the segment since the previous visible human can belong to the
+  // active turn; older turns are anchored by their own human message.
+  let segmentStart = 0;
+  for (let index = humanIndex - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message?.type === "human" && !isHiddenFromUIMessage(message)) {
+      segmentStart = index + 1;
+      break;
+    }
+  }
+  if (segmentStart >= humanIndex) {
+    return messages;
+  }
+
+  // A terminal assistant answer completes the turn that owns it. Only steps
+  // after the last such boundary can belong to the active turn.
+  let candidateStart = segmentStart;
+  for (let index = segmentStart; index < humanIndex; index++) {
+    const message = messages[index]!;
+    if (
+      message.type === "ai" &&
+      !isHiddenFromUIMessage(message) &&
+      hasContent(message) &&
+      !hasToolCalls(message)
+    ) {
+      candidateStart = index + 1;
+    }
+  }
+
+  const previousHumanRunId =
+    segmentStart > 0 ? getMessageRunId(messages[segmentStart - 1]!) : undefined;
+  const hasUniformRunIdSincePreviousHuman =
+    previousHumanRunId !== undefined &&
+    messages
+      .slice(segmentStart - 1)
+      .every(
+        (message) =>
+          isHiddenFromUIMessage(message) ||
+          getMessageRunId(message) === previousHumanRunId,
+      );
+  if (candidateStart === segmentStart && hasUniformRunIdSincePreviousHuman) {
+    return messages;
+  }
+
+  const runIdsAfter = new Set<string>();
+  let hasLiveOnlyStepAfter = false;
+  for (const message of messages.slice(humanIndex + 1)) {
+    const runId = getMessageRunId(message);
+    if (runId) {
+      runIdsAfter.add(runId);
+    } else if (
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message)
+    ) {
+      hasLiveOnlyStepAfter = true;
+    }
+  }
+
+  const misplacedSteps: Message[] = [];
+  const stablePrefix = messages.slice(0, candidateStart);
+  for (const message of messages.slice(candidateStart, humanIndex)) {
+    const isVisibleStep =
+      (message.type === "ai" || message.type === "tool") &&
+      !isHiddenFromUIMessage(message);
+    const runId = getMessageRunId(message);
+    if (
+      isVisibleStep &&
+      ((runId !== undefined && runIdsAfter.has(runId)) ||
+        (runId === undefined && hasLiveOnlyStepAfter))
+    ) {
+      misplacedSteps.push(message);
+    } else {
+      stablePrefix.push(message);
+    }
+  }
+  if (misplacedSteps.length === 0) {
+    return messages;
+  }
+
+  return [
+    ...stablePrefix,
+    messages[humanIndex]!,
+    ...misplacedSteps,
+    ...messages.slice(humanIndex + 1),
+  ];
 }
 
 /**
@@ -1612,6 +1815,7 @@ export function useThreadStream({
         transientHistoryThreadIdRef.current = null;
         summarizedRef.current = new Set<string>();
         pendingUsageBaselineMessageIdsRef.current = new Set();
+        localTurnOrderBaselineIdentitiesRef.current = null;
         tasksRef.current = {};
         setTasks({});
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
@@ -1731,6 +1935,12 @@ export function useThreadStream({
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   const messagesRef = useRef<Message[]>([]);
+  // Non-null only after a turn submitted by this mounted client. Keep it after
+  // finish/stop/error because the SDK can retain its transient event order in
+  // the settled frame. The next local submit replaces it and a thread switch or
+  // replay gap clears it. An empty set is meaningful for a new thread and must
+  // not be confused with a reconnect that has no local turn anchor.
+  const localTurnOrderBaselineIdentitiesRef = useRef<Set<string> | null>(null);
   // Current-stream lifecycle bridge for messages removed from the checkpoint
   // tail before the canonical run-event page refetch observes the journal
   // flush. It is never appended into useThreadHistory's persisted pages.
@@ -1779,6 +1989,7 @@ export function useThreadStream({
     };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
+    localTurnOrderBaselineIdentitiesRef.current = null;
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
@@ -1879,6 +2090,9 @@ export function useThreadStream({
         persistedMessages
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
+      );
+      localTurnOrderBaselineIdentitiesRef.current = new Set(
+        pendingUsageBaselineMessageIdsRef.current,
       );
 
       // Build optimistic files list with uploading status
@@ -2046,6 +2260,7 @@ export function useThreadStream({
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
         setIsUploading(false);
+        localTurnOrderBaselineIdentitiesRef.current = null;
         throw error;
       } finally {
         sendInFlightRef.current = false;
@@ -2082,6 +2297,9 @@ export function useThreadStream({
         persistedMessages
           .map(messageIdentity)
           .filter((id): id is string => Boolean(id)),
+      );
+      localTurnOrderBaselineIdentitiesRef.current = new Set(
+        pendingUsageBaselineMessageIdsRef.current,
       );
       setLiveMessagesThreadId(threadId);
       listeners.current.onSend?.(threadId);
@@ -2169,6 +2387,7 @@ export function useThreadStream({
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
+        localTurnOrderBaselineIdentitiesRef.current = null;
         if (preparedSupersededRunId) {
           const supersededRunId = preparedSupersededRunId;
           pendingPreparedReplayRef.current = null;
@@ -2329,11 +2548,15 @@ export function useThreadStream({
       transientHistoryOrder,
       previouslyRenderedOrder,
     );
-    return mergeMessages(
+    const merged = mergeMessages(
       effectiveHistory,
       renderMessages,
       visibleOptimisticMessages,
     );
+    const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
+    return localTurnOrderBaseline === null
+      ? restoreReconnectedTurnMessageOrder(merged)
+      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
   }, [
     previouslyRenderedOrder,
     renderMessages,
@@ -2399,6 +2622,11 @@ type ThreadHistoryOptions = {
   pendingSupersededRunIds?: ReadonlySet<string>;
 };
 
+export const THREAD_HISTORY_QUERY_POLICY = {
+  refetchOnWindowFocus: false,
+  staleTime: 5 * 60 * 1_000,
+} as const;
+
 export function useThreadHistory(
   threadId: string,
   { enabled = true, pendingSupersededRunIds }: ThreadHistoryOptions = {},
@@ -2410,6 +2638,7 @@ export function useThreadHistory(
     ReturnType<typeof threadHistoryQueryKey>,
     number | null
   >({
+    ...THREAD_HISTORY_QUERY_POLICY,
     queryKey: threadHistoryQueryKey(threadId),
     enabled: enabled && Boolean(threadId),
     initialPageParam: null,
@@ -2771,6 +3000,10 @@ export function useThreadTokenUsage(
     enabled: enabled && Boolean(threadId),
     retry: false,
     refetchOnWindowFocus: false,
+    // Keep same-thread data visible during refetches without carrying usage
+    // from the previous route into a newly selected thread.
+    placeholderData: (previous) =>
+      retainThreadTokenUsagePlaceholder(previous, threadId),
   });
 }
 

@@ -26,6 +26,7 @@ from deerflow.client import DeerFlowClient
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.manager import PathTraversalError
@@ -121,6 +122,16 @@ class TestClientInit:
         ):
             DeerFlowClient(config_path="/tmp/custom.yaml")
             mock_reload.assert_called_once_with("/tmp/custom.yaml")
+
+    def test_installs_process_subagent_capacity_from_frozen_config(self, mock_app_config):
+        runtime_config = SubagentRuntimeConfig(max_running=7)
+        mock_app_config.subagent_runtime = runtime_config
+        with (
+            patch("deerflow.client.get_app_config", return_value=mock_app_config),
+            patch("deerflow.client.configure_subagent_execution_capacity") as configure,
+        ):
+            DeerFlowClient()
+        configure.assert_called_once_with(runtime_config)
 
     def test_checkpointer_stored(self, mock_app_config):
         cp = MagicMock()
@@ -1088,6 +1099,8 @@ class TestExtractText:
 
 class TestEnsureAgent:
     def test_authorization_filters_framework_tools_and_reuses_provider(self, client, mock_app_config):
+        from deerflow.authz.provider import AuthzDecision, AuthzReason
+
         class Provider:
             name = "test"
 
@@ -1095,10 +1108,13 @@ class TestEnsureAgent:
                 return [name for name in candidates if name == "safe_tool"]
 
             def authorize(self, request):
-                raise AssertionError("not called while assembling")
+                # Phase 3: model:use is now checked during assembly; allow it so
+                # the model name passes through. Tool-level authorize is still
+                # not invoked here (filter_resources drives tool assembly).
+                return AuthzDecision(allow=True, reasons=[AuthzReason(code="authz.allowed")])
 
             async def aauthorize(self, request):
-                raise AssertionError("not called while assembling")
+                return self.authorize(request)
 
         provider = Provider()
         mock_app_config.authorization = AuthorizationConfig(
@@ -1121,6 +1137,7 @@ class TestEnsureAgent:
             patch("deerflow.client.build_skill_search_setup", return_value=SimpleNamespace(describe_skill_tool=describe_tool, skill_names=frozenset({"example"}))),
             patch.object(client, "_get_tools", return_value=[safe_tool, denied_tool]),
             patch("deerflow.authz.tool_filter.resolve_authorization_provider", return_value=provider),
+            patch("deerflow.agents.lead_agent.agent.resolve_authorization_provider", return_value=provider),
             patch("deerflow.runtime.checkpointer.get_checkpointer", return_value=None),
         ):
             client._ensure_agent(client._get_runnable_config("t1"), context={"user_role": "user"})
@@ -1861,10 +1878,8 @@ class TestSkillsManagement:
         skill = self._make_skill(enabled=True)
         updated_skill = self._make_skill(enabled=False)
 
-        ext_config = ExtensionsConfig()
-
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({}, f)
+            json.dump({"mcpServers": {}, "skills": {"untouched-skill": {"enabled": False}}}, f)
             tmp_path = Path(f.name)
 
         try:
@@ -1881,12 +1896,37 @@ class TestSkillsManagement:
                     side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
                 ),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.get_extensions_config", return_value=ext_config),
                 patch("deerflow.client.reload_extensions_config"),
             ):
                 result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
             assert client._agent is None  # M2: agent invalidated
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"]["untouched-skill"] == {"enabled": False}
+        finally:
+            tmp_path.unlink()
+
+    def test_update_skill_persists_state_when_source_omits_skills(self, client):
+        skill = self._make_skill(enabled=True)
+        updated_skill = self._make_skill(enabled=False)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"mcpServers": {}}, f)
+            tmp_path = Path(f.name)
+
+        try:
+            with (
+                patch(
+                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
+                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
+                ),
+                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
+                patch("deerflow.client.reload_extensions_config"),
+            ):
+                client.update_skill("test-skill", enabled=False)
+
+            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
+            assert persisted["skills"] == {"test-skill": {"enabled": False}}
         finally:
             tmp_path.unlink()
 

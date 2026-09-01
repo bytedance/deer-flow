@@ -118,9 +118,11 @@ def memory_add_tool(
         content_key = _memory_content_key(normalized_content)
         manager = get_memory_manager()
         existing_facts = manager.get_memory(agent_name=agent_name, user_id=user_id).get("facts", [])
-        # Tool calls normally run one-at-a-time per user turn. If tool-mode
-        # writing broadens to multiple concurrent calls for the same user,
-        # move duplicate rejection into the storage/update critical section.
+        # Fast-path duplicate rejection to spare a write attempt in the common
+        # case. The authoritative check lives in the backend's create critical
+        # section (DeerMem re-checks against a fresh snapshot on every
+        # revision-conflict retry in create_memory_fact), so concurrent tool
+        # calls for the same user cannot both store the same content.
         if any(_memory_content_key(str(fact.get("content", ""))) == content_key for fact in existing_facts):
             return json.dumps({"error": "Duplicate fact"})
 
@@ -139,9 +141,9 @@ def memory_add_tool(
         except NotImplementedError:
             return json.dumps({"error": f"memory backend {type(manager).__name__} does not support create_fact"})
         if fact_id is None:
-            # max_facts cap kept higher-confidence facts and evicted the new one;
-            # the fact was not stored -- report honestly instead of a dangling id.
-            return json.dumps({"error": "Fact was not stored because memory.max_facts kept higher-confidence facts"})
+            # The configured max_facts policy evicted the new fact; report the
+            # capacity result instead of a dangling id.
+            return json.dumps({"error": "Fact was not stored because the configured memory.max_facts capacity policy evicted it"})
         return json.dumps({"fact_id": fact_id, "status": "added"})
     except ValueError as exc:
         return json.dumps({"error": str(exc)})

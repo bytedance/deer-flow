@@ -15,6 +15,16 @@ provider fields during startup.
       overflow_policy: wait            # wait | reject | burst (default: wait)
       acquire_timeout: 30              # seconds for ``wait`` policy (default: 30)
       burst_limit: 2                   # extra slots for ``burst`` policy (default: 0)
+      reconciliation_interval_seconds: 60
+      reconciliation_grace_seconds: 120
+      reconciliation_orphan_ttl_seconds: 3600
+      reconciliation_max_pages: 10
+      reconciliation_max_items: 200
+      reconciliation_max_seconds: 15
+      mount_upload_deadline_seconds: 120   # mount upload pass deadline; default: 120
+      ownership:
+        type: redis                    # shares ownership and capacity across Gateways
+        redis_url: redis://redis:6379/0
       mounts:                          # one-shot uploads on sandbox start
         - host_path: /data/skills
           container_path: /home/user/skills
@@ -31,24 +41,29 @@ import hashlib
 import json
 import logging
 import os
+import posixpath
 import shlex
 import signal
 import threading
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from functools import partial
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, Any
 
+from e2b import SandboxQuery
 from e2b_code_interpreter import Sandbox as E2BClientSandbox
 
 from deerflow.config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 
@@ -56,11 +71,20 @@ from ..aio_sandbox.ownership import (
     OwnershipBackendError,
     RenewOutcome,
     SandboxOwnershipStore,
+    compute_lease_ttl,
     generate_owner_id,
     make_sandbox_ownership_store,
     resolve_ownership_config,
 )
+from .capacity import (
+    CapacityBackendError,
+    ReserveStatus,
+    make_e2b_capacity_store,
+)
 from .e2b_sandbox import DEFAULT_E2B_HOME_DIR, E2BSandbox, _is_sandbox_gone_error
+
+if TYPE_CHECKING:
+    from deerflow.skills.projection import SkillProjectionPaths
 
 logger = logging.getLogger(__name__)
 
@@ -77,9 +101,113 @@ DEFAULT_RECONCILIATION_ORPHAN_TTL_SECONDS = 3600.0
 DEFAULT_RECONCILIATION_MAX_PAGES = 10
 DEFAULT_RECONCILIATION_MAX_ITEMS = 200
 DEFAULT_RECONCILIATION_MAX_SECONDS = 15.0
+# Twice the E2B SDK's 60-second create request timeout. Short ownership lease
+# settings must not make an in-flight create look abandoned.
+MIN_CAPACITY_RESERVATION_SECONDS = 120.0
 # Hard upper bound for ``set_timeout`` (e2b currently caps at 24h on the
 # free plan; passing an excessive value is rejected by the control-plane).
 MAX_E2B_TIMEOUT = 24 * 60 * 60
+# These limits bound one E2B mount.
+_MAX_MOUNT_FILE_SIZE = 100 * 1024 * 1024
+_MAX_MOUNT_TOTAL_SIZE = 512 * 1024 * 1024
+_MAX_MOUNT_FILES = 2000
+# These limits bound all uploads during one sandbox creation pass.
+_MAX_MOUNT_PASS_TOTAL_BYTES = 512 * 1024 * 1024
+_MAX_MOUNT_PASS_FILES = 2000
+# Deadline checks stop preflight work and new writes. Active SDK writes finish.
+_MOUNT_PASS_DEADLINE_SECONDS = 120
+
+# Recursive skill projection replacement must never target an operating-system
+# tree. The configured E2B home is handled separately: an isolated descendant
+# such as /home/user/skills is supported, while the home directory itself and
+# every ancestor remain protected.
+_E2B_PROTECTED_SYSTEM_TREES = frozenset(
+    PurePosixPath(path)
+    for path in (
+        "/bin",
+        "/boot",
+        "/dev",
+        "/etc",
+        "/home",
+        "/lib",
+        "/lib32",
+        "/lib64",
+        "/libx32",
+        "/lost+found",
+        "/media",
+        "/opt",
+        "/proc",
+        "/root",
+        "/run",
+        "/sbin",
+        "/snap",
+        "/srv",
+        "/sys",
+        "/tmp",
+        "/usr",
+        "/var",
+    )
+)
+
+
+def _mount_deadline_reason(deadline_seconds: int) -> str:
+    return f"time budget {deadline_seconds}s"
+
+
+def _validate_skills_reset_root(container_path: str, *, home_dir: str) -> str:
+    """Return a canonical E2B root that is safe for recursive managed resets."""
+    candidate = container_path.rstrip("/")
+    if not candidate or not candidate.startswith("/") or candidate.startswith("//"):
+        raise ValueError("The skills container path is not a safe E2B skills reset target: it must be an absolute non-root path")
+
+    normalized = posixpath.normpath(candidate)
+    if normalized != candidate:
+        raise ValueError("The skills container path is not a safe E2B skills reset target: it must not contain redundant separators, '.' or '..'")
+
+    root = PurePosixPath(normalized)
+    protected_roots = {
+        PurePosixPath("/mnt/user-data"),
+        PurePosixPath("/mnt/acp-workspace"),
+    }
+    normalized_home = posixpath.normpath(home_dir.rstrip("/") or DEFAULT_E2B_HOME_DIR)
+    home_root: PurePosixPath | None = None
+    if normalized_home.startswith("/") and not normalized_home.startswith("//"):
+        home_root = PurePosixPath(normalized_home)
+        protected_roots.add(home_root)
+
+    for protected in protected_roots:
+        if protected == root or protected.is_relative_to(root):
+            raise ValueError(f"The skills container path is not a safe E2B skills reset target: {normalized!r} equals or contains protected path {str(protected)!r}")
+
+    is_isolated_home_subtree = home_root is not None and root != home_root and root.is_relative_to(home_root)
+    if not is_isolated_home_subtree:
+        for protected in _E2B_PROTECTED_SYSTEM_TREES:
+            if root == protected or root.is_relative_to(protected):
+                raise ValueError(f"The skills container path is not a safe E2B skills reset target: {normalized!r} is inside protected operating-system tree {str(protected)!r}")
+    return normalized
+
+
+class _MountPassLimitExceeded(Exception):
+    """Stop the current mount upload pass at its aggregate resource limit."""
+
+
+@dataclass
+class _MountUploadBudget:
+    deadline: float
+    deadline_seconds: int
+    attempted_bytes: int = 0
+    attempted_files: int = 0
+    completed_bytes: int = 0
+    completed_files: int = 0
+
+    @property
+    def expired(self) -> bool:
+        return time.monotonic() >= self.deadline
+
+    def check_deadline(self) -> None:
+        if self.expired:
+            raise _MountPassLimitExceeded(_mount_deadline_reason(self.deadline_seconds))
+
 
 # Metadata keys we attach to every sandbox so we can discover ours via
 # ``Sandbox.list(query={...})`` from any gateway process.
@@ -88,8 +216,25 @@ META_KEY_THREAD = "deer_flow_thread"
 META_KEY_PROVIDER = "deer_flow_provider"
 META_KEY_GATEWAY = "deer_flow_gateway"
 META_KEY_CREATED_AT = "deer_flow_created_at"
+META_KEY_CAPACITY_LEDGER = "deer_flow_capacity_ledger"
+META_KEY_CAPACITY_RESERVATION = "deer_flow_capacity_reservation"
+META_KEY_SKILLS_ROOT = "deer_flow_skills_root"
 META_VAL_PROVIDER = "e2b_sandbox_provider"
-E2B_EXTRA_CONFIG_KEYS = frozenset({"api_key", "domain", "home_dir", "template"})
+E2B_EXTRA_CONFIG_KEYS = frozenset(
+    {
+        "api_key",
+        "domain",
+        "home_dir",
+        "mount_upload_deadline_seconds",
+        "reconciliation_grace_seconds",
+        "reconciliation_interval_seconds",
+        "reconciliation_max_items",
+        "reconciliation_max_pages",
+        "reconciliation_max_seconds",
+        "reconciliation_orphan_ttl_seconds",
+        "template",
+    }
+)
 
 
 @dataclass
@@ -113,6 +258,7 @@ class E2BSandboxProvider(SandboxProvider):
     # remote backend in AioSandboxProvider sets the same flag).
     uses_thread_data_mounts = False
     needs_upload_permission_adjustment = True
+    supports_agent_skill_isolation = True
 
     # ── Construction & config ────────────────────────────────────────────
 
@@ -120,11 +266,13 @@ class E2BSandboxProvider(SandboxProvider):
         self._lock = threading.Lock()
         # Active sandboxes, keyed by DeerFlow-side sandbox id (== e2b id).
         self._sandboxes: dict[str, E2BSandbox] = {}
-        # (user_id, thread_id) -> sandbox id for fast in-process lookup.
-        self._thread_sandboxes: dict[tuple[str, str], str] = {}
-        # Per-(user,thread) lock to serialise acquire() and release() state
+        # (user_id, thread_id, skills_root) -> sandbox id for fast in-process
+        # lookup. The provider snapshots the root at startup, but keeping it in
+        # the key makes the identity boundary explicit and fail-safe.
+        self._thread_sandboxes: dict[tuple[str, str, str], str] = {}
+        # Per-(user,thread,skills_root) serializer for acquire() and release() state
         # transitions without holding the provider-wide lock across remote IO.
-        self._thread_locks: dict[tuple[str, str], threading.Lock] = {}
+        self._acquire_serializer: AcquireSerializer[tuple[str, str, str]] = AcquireSerializer(thread_name_prefix="e2b-sandbox-lock-wait")
         # Warm pool: released sandboxes whose remote micro-VM is still alive.
         # ``OrderedDict`` maintains insertion / move_to_end order for LRU.
         self._warm_pool: OrderedDict[str, tuple[str, float]] = OrderedDict()
@@ -168,6 +316,10 @@ class E2BSandboxProvider(SandboxProvider):
             self._ownership_config,
             owner_id=self._owner_id,
         )
+        self._deployment_capacity = make_e2b_capacity_store(
+            self._ownership_config,
+            hard_limit=self._capacity_limit(),
+        )
         if not self._ownership.supports_cross_process:
             logger.warning("E2B sandbox ownership is process-local. Multi-worker gateways must configure sandbox.ownership.type: redis for safe reconciliation.")
 
@@ -177,7 +329,8 @@ class E2BSandboxProvider(SandboxProvider):
 
     def _load_config(self) -> dict[str, Any]:
         """Read e2b options off ``SandboxConfig`` (``extra="allow"``)."""
-        sandbox_config = get_app_config().sandbox
+        app_config = get_app_config()
+        sandbox_config = app_config.sandbox
         unknown_keys = sorted(set(getattr(sandbox_config, "model_extra", None) or {}) - E2B_EXTRA_CONFIG_KEYS)
         if unknown_keys:
             logger.warning(
@@ -217,11 +370,18 @@ class E2BSandboxProvider(SandboxProvider):
             logger.warning("E2BSandboxProvider: overflow_policy is 'burst' but burst_limit is 0; falling back to 'reject'")
             overflow_policy = "reject"
 
+        home_dir = _opt("home_dir") or DEFAULT_E2B_HOME_DIR
+        skills_container_path = _validate_skills_reset_root(
+            app_config.skills.container_path,
+            home_dir=home_dir,
+        )
+
         return {
             "api_key": api_key,
             "template": _opt("template") or _opt("image") or DEFAULT_TEMPLATE,
             "domain": _opt("domain"),
-            "home_dir": _opt("home_dir") or DEFAULT_E2B_HOME_DIR,
+            "home_dir": home_dir,
+            "skills_container_path": skills_container_path,
             "idle_timeout": idle_timeout,
             "replicas": replicas,
             "overflow_policy": overflow_policy,
@@ -230,7 +390,7 @@ class E2BSandboxProvider(SandboxProvider):
             "mounts": _opt("mounts") or [],
             "environment": self._resolve_env_vars(_opt("environment") or {}),
             "ownership": _opt("ownership"),
-            "stream_bridge": getattr(get_app_config(), "stream_bridge", None),
+            "stream_bridge": getattr(app_config, "stream_bridge", None),
             "reconciliation_interval_seconds": max(
                 1.0,
                 float(_opt("reconciliation_interval_seconds", DEFAULT_RECONCILIATION_INTERVAL_SECONDS)),
@@ -255,6 +415,7 @@ class E2BSandboxProvider(SandboxProvider):
                 0.1,
                 float(_opt("reconciliation_max_seconds", DEFAULT_RECONCILIATION_MAX_SECONDS)),
             ),
+            "mount_upload_deadline_seconds": self._resolve_mount_upload_deadline(_opt),
         }
 
     @staticmethod
@@ -267,6 +428,28 @@ class E2BSandboxProvider(SandboxProvider):
                 resolved[key] = "" if value is None else str(value)
         return resolved
 
+    @staticmethod
+    def _resolve_mount_upload_deadline(_opt: Callable[[str, Any], Any]) -> int:
+        raw = _opt("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        if raw is None:
+            return _MOUNT_PASS_DEADLINE_SECONDS
+        try:
+            value = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            logger.warning(
+                "E2BSandboxProvider: non-numeric mount_upload_deadline_seconds=%r; falling back to %ds",
+                raw,
+                _MOUNT_PASS_DEADLINE_SECONDS,
+            )
+            return _MOUNT_PASS_DEADLINE_SECONDS
+        if value < 1:
+            logger.warning(
+                "E2BSandboxProvider: invalid mount_upload_deadline_seconds=%d; clamping to 1",
+                value,
+            )
+            return 1
+        return value
+
     def _get_sandbox_cls(self) -> type[E2BClientSandbox]:
         """Return the e2b SDK Sandbox class."""
         return E2BClientSandbox
@@ -277,13 +460,36 @@ class E2BSandboxProvider(SandboxProvider):
     def _effective_acquire_user_id(user_id: str | None) -> str:
         return user_id or get_effective_user_id()
 
-    @staticmethod
-    def _thread_key(thread_id: str, user_id: str) -> tuple[str, str]:
-        return (user_id, thread_id)
+    def _thread_key(self, thread_id: str, user_id: str) -> tuple[str, str, str]:
+        return (user_id, thread_id, self._config["skills_container_path"])
+
+    def _stable_seed(self, thread_id: str, user_id: str) -> str:
+        """Warm-pool lookup seed derived from user/thread/root scope.
+
+        For E2B this value is the warm-pool lookup seed, not the
+        provider-issued remote id (RFC #4741 §6).
+        """
+        base_scope = derive_sandbox_scope_token(user_id=user_id, thread_id=thread_id)
+        skills_root = self._config["skills_container_path"]
+        return hashlib.sha256(f"{base_scope}\0{skills_root}".encode()).hexdigest()[:16]
+
+    def _metadata_matches_capacity_ledger(
+        self,
+        metadata: dict[str, Any],
+    ) -> bool:
+        """Include this ledger and legacy sandboxes that predate the tag."""
+        store = self._deployment_capacity
+        if store is None:
+            return True
+        remote_ledger = metadata.get(META_KEY_CAPACITY_LEDGER)
+        return remote_ledger in (None, "", store.key)
 
     @staticmethod
-    def _stable_seed(thread_id: str, user_id: str) -> str:
-        return hashlib.sha256(f"{user_id}:{thread_id}".encode()).hexdigest()[:16]
+    def _capacity_reservation_from_metadata(
+        metadata: dict[str, Any],
+    ) -> str | None:
+        token = metadata.get(META_KEY_CAPACITY_RESERVATION)
+        return token if isinstance(token, str) and token else None
 
     # ── Signal / shutdown handling ───────────────────────────────────────
 
@@ -321,19 +527,10 @@ class E2BSandboxProvider(SandboxProvider):
                     sig_name,
                 )
 
-    def _get_thread_lock(self, thread_id: str, user_id: str) -> threading.Lock:
-        key = self._thread_key(thread_id, user_id)
-        with self._lock:
-            lock = self._thread_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._thread_locks[key] = lock
-            return lock
-
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         effective_user_id = self._effective_acquire_user_id(user_id)
         if thread_id:
-            with self._get_thread_lock(thread_id, effective_user_id):
+            with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
 
@@ -390,6 +587,7 @@ class E2BSandboxProvider(SandboxProvider):
                 sandbox.close()
             except Exception:
                 pass
+            self._release_deployment_sandbox(sid)
             return None
 
         try:
@@ -496,24 +694,34 @@ class E2BSandboxProvider(SandboxProvider):
         """
         sandbox_cls = self._get_sandbox_cls()
         seed = self._stable_seed(thread_id, user_id)
-        entries, _ = self._list_remote_entries(
+        entries, _, _ = self._list_remote_entries(
             {
                 META_KEY_PROVIDER: META_VAL_PROVIDER,
                 META_KEY_USER: user_id,
                 META_KEY_THREAD: thread_id,
+                META_KEY_SKILLS_ROOT: self._config["skills_container_path"],
             }
         )
         candidates = sorted(
-            ((sandbox_id, metadata) for entry in entries if (sandbox_id := self._entry_id(entry)) and (metadata := self._entry_metadata(entry)).get(META_KEY_USER) == user_id and metadata.get(META_KEY_THREAD) == thread_id),
+            (
+                (sandbox_id, metadata)
+                for entry in entries
+                if (sandbox_id := self._entry_id(entry))
+                and (metadata := self._entry_metadata(entry)).get(META_KEY_USER) == user_id
+                and metadata.get(META_KEY_THREAD) == thread_id
+                and metadata.get(META_KEY_SKILLS_ROOT) == self._config["skills_container_path"]
+                and self._metadata_matches_capacity_ledger(metadata)
+            ),
             key=lambda item: (item[1].get(META_KEY_CREATED_AT, ""), item[0]),
         )
-        for target_id, _metadata in candidates:
+        for target_id, metadata in candidates:
             adopted = self._adopt_remote_candidate(
                 sandbox_cls,
                 target_id,
                 thread_id=thread_id,
                 user_id=user_id,
                 seed=seed,
+                capacity_reservation=(self._capacity_reservation_from_metadata(metadata)),
             )
             if adopted is not None:
                 return adopted
@@ -527,6 +735,7 @@ class E2BSandboxProvider(SandboxProvider):
         thread_id: str,
         user_id: str,
         seed: str,
+        capacity_reservation: str | None = None,
     ) -> str | None:
         """Try to adopt one discovered candidate without harming peer-owned VMs."""
 
@@ -548,6 +757,10 @@ class E2BSandboxProvider(SandboxProvider):
             return None
 
         try:
+            self._track_deployment_sandbox(
+                target_id,
+                reservation_token=capacity_reservation,
+            )
             self._reserve_capacity(
                 thread_id,
                 user_id,
@@ -664,6 +877,66 @@ class E2BSandboxProvider(SandboxProvider):
         with self._lock:
             self._end_transition_locked()
 
+    def _capacity_reservation_max_age_ms(self) -> int:
+        configured = compute_lease_ttl(self._ownership_config) + float(self._config["reconciliation_grace_seconds"])
+        return int(max(configured, MIN_CAPACITY_RESERVATION_SECONDS) * 1_000)
+
+    def _capacity_error(
+        self,
+        message: str,
+        *,
+        reason: str = "capacity",
+    ) -> SandboxCapacityExceededError:
+        with self._lock:
+            return SandboxCapacityExceededError(
+                message,
+                active=len(self._sandboxes),
+                warm=len(self._warm_pool),
+                reserved=self._reserved_slots,
+                replicas=int(self._config["replicas"]),
+                reason=reason,
+            )
+
+    def _track_deployment_sandbox(
+        self,
+        sandbox_id: str,
+        *,
+        reservation_token: str | None = None,
+        required: bool = True,
+    ) -> None:
+        store = self._deployment_capacity
+        if store is None:
+            return
+        try:
+            store.track(
+                sandbox_id,
+                reservation_token=reservation_token,
+            )
+        except CapacityBackendError as error:
+            if required:
+                raise self._capacity_error(
+                    f"Deployment-wide E2B capacity is unavailable; cannot safely track sandbox {sandbox_id}",
+                    reason="capacity_backend",
+                ) from error
+            logger.warning(
+                "Could not track E2B sandbox %s in deployment capacity; reconciliation will retry: %s",
+                sandbox_id,
+                error,
+            )
+
+    def _release_deployment_sandbox(self, sandbox_id: str) -> None:
+        store = self._deployment_capacity
+        if store is None:
+            return
+        try:
+            store.release(sandbox_id)
+        except CapacityBackendError as error:
+            logger.warning(
+                "Could not release deployment capacity for destroyed E2B sandbox %s; reconciliation will retry: %s",
+                sandbox_id,
+                error,
+            )
+
     def _reserve_capacity(
         self,
         thread_id: str | None,
@@ -671,23 +944,71 @@ class E2BSandboxProvider(SandboxProvider):
         *,
         remote_id: str | None = None,
         remote_owned: bool = True,
-    ) -> None:
-        """Acquire a capacity slot, blocking or raising as configured.
-
-        Must be called before ``Sandbox.create()``.  The caller MUST call
-        ``_commit_capacity()`` on success or ``_release_capacity()`` on
-        failure — otherwise the reserved slot is leaked until shutdown.
-
-        Raises:
-            SandboxCapacityExceededError: when the overflow policy is
-                ``reject`` or the wait timeout expires.
-        """
+    ) -> str | None:
+        """Reserve local capacity, then deployment capacity for a new VM."""
+        store = self._deployment_capacity
         policy = self._config["overflow_policy"]
         timeout = float(self._config["acquire_timeout"])
         deadline = time.monotonic() + timeout
+        token = uuid.uuid4().hex if store is not None and remote_id is None else None
 
         while True:
-            # Reject immediately if the provider is shutting down.
+            self._reserve_local_capacity(
+                thread_id,
+                user_id,
+                remote_id=remote_id,
+                remote_owned=remote_owned,
+                deadline=deadline,
+            )
+            if store is None or remote_id is not None:
+                return token
+
+            assert token is not None
+            backend_error = None
+            try:
+                status = store.reserve(token)
+            except CapacityBackendError as error:
+                backend_error = error
+                status = None
+            if status is ReserveStatus.GRANTED:
+                return token
+            self._release_capacity()
+            if status is ReserveStatus.FULL and self._evict_oldest_warm() is not None:
+                continue
+
+            if policy != "wait":
+                if backend_error is not None:
+                    raise self._capacity_error(
+                        "Deployment-wide E2B capacity is unavailable",
+                        reason="capacity_backend",
+                    ) from backend_error
+                if status is ReserveStatus.NOT_READY:
+                    raise self._capacity_error(
+                        "Deployment-wide E2B capacity is initializing",
+                        reason="capacity_initializing",
+                    )
+                raise self._capacity_error("Deployment-wide E2B capacity is full")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise self._capacity_error(f"Timed out after {timeout}s waiting for deployment-wide E2B capacity")
+            with self._capacity_cond:
+                self._capacity_cond.wait(timeout=min(remaining, 1.0))
+
+    def _reserve_local_capacity(
+        self,
+        thread_id: str | None,
+        user_id: str,
+        *,
+        remote_id: str | None = None,
+        remote_owned: bool = True,
+        deadline: float | None = None,
+    ) -> None:
+        """Acquire the existing process-local lifecycle slot."""
+        policy = self._config["overflow_policy"]
+        timeout = float(self._config["acquire_timeout"])
+        deadline = deadline or time.monotonic() + timeout
+
+        while True:
             with self._lock:
                 if self._shutdown_called:
                     raise SandboxCapacityExceededError(
@@ -697,7 +1018,6 @@ class E2BSandboxProvider(SandboxProvider):
                         reason="shutdown",
                     )
 
-            # 1. Try immediate atomic reservation.
             with self._lock:
                 if self._shutdown_called:
                     raise SandboxCapacityExceededError(
@@ -714,7 +1034,6 @@ class E2BSandboxProvider(SandboxProvider):
                         remote_ops.add(remote_id)
                     return
 
-            # 2. Try evicting a warm entry to free a slot.
             evicted = self._evict_oldest_warm()
             if evicted is not None:
                 with self._lock:
@@ -731,9 +1050,7 @@ class E2BSandboxProvider(SandboxProvider):
                             remote_ops = self._remote_ops_in_progress if remote_owned else self._unowned_remote_ops_in_progress
                             remote_ops.add(remote_id)
                         return
-                    # Slot was stolen; fall through to policy / wait.
 
-            # 3. Apply overflow policy.
             with self._lock:
                 if self._shutdown_called:
                     raise SandboxCapacityExceededError(
@@ -764,7 +1081,6 @@ class E2BSandboxProvider(SandboxProvider):
                             replicas=int(self._config["replicas"]),
                         )
 
-                    # policy == "wait": block until a slot frees or timeout.
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise SandboxCapacityExceededError(
@@ -839,14 +1155,19 @@ class E2BSandboxProvider(SandboxProvider):
 
         Capacity is enforced atomically via :meth:`_reserve_capacity`.
         """
-        self._reserve_capacity(thread_id, user_id)
+        reservation_token = self._reserve_capacity(thread_id, user_id)
 
         sandbox_cls = self._get_sandbox_cls()
         metadata: dict[str, str] = {
             META_KEY_PROVIDER: META_VAL_PROVIDER,
             META_KEY_GATEWAY: self._owner_id,
             META_KEY_CREATED_AT: str(time.time()),
+            META_KEY_SKILLS_ROOT: self._config["skills_container_path"],
         }
+        if self._deployment_capacity is not None:
+            metadata[META_KEY_CAPACITY_LEDGER] = self._deployment_capacity.key
+        if reservation_token is not None:
+            metadata[META_KEY_CAPACITY_RESERVATION] = reservation_token
         if thread_id:
             metadata[META_KEY_USER] = user_id
             metadata[META_KEY_THREAD] = thread_id
@@ -869,6 +1190,11 @@ class E2BSandboxProvider(SandboxProvider):
             raise
 
         sandbox_id: str = getattr(client, "sandbox_id", None) or str(uuid.uuid4())[:8]
+        self._track_deployment_sandbox(
+            sandbox_id,
+            reservation_token=reservation_token,
+            required=False,
+        )
         if not self._track_reserved_remote_op(sandbox_id):
             kill_error = self._kill_client(client)
             cleanup_confirmed = kill_error is None
@@ -932,7 +1258,7 @@ class E2BSandboxProvider(SandboxProvider):
         # One-shot mount uploads.  e2b has no host bind-mount, so we copy
         # files from ``host_path`` into ``container_path`` at sandbox start.
         try:
-            self._apply_mounts(client)
+            self._apply_mounts(client, user_id=user_id, thread_id=thread_id)
         except Exception as e:
             logger.warning("Failed to apply some mounts to e2b sandbox %s: %s", sandbox_id, e)
 
@@ -998,26 +1324,25 @@ class E2BSandboxProvider(SandboxProvider):
             value = entry.get("metadata")
         return value if isinstance(value, dict) else {}
 
-    def _list_remote_entries(self, metadata: dict[str, str]) -> tuple[list[Any], bool]:
-        """List matching E2B entries within configured page/item/time budgets."""
+    def _list_remote_entries(
+        self,
+        metadata: dict[str, str],
+    ) -> tuple[list[Any], bool, bool]:
+        """List E2B entries and report budget exhaustion and completeness."""
         sandbox_cls = self._get_sandbox_cls()
         try:
-            result = sandbox_cls.list(query={"metadata": metadata}, **self._common_kwargs())  # type: ignore[attr-defined]
-        except TypeError:
-            try:
-                result = sandbox_cls.list(metadata=metadata, **self._common_kwargs())  # type: ignore[attr-defined]
-            except Exception as e:
-                logger.warning("E2B reconciliation list failed: %s", e)
-                return [], False
+            query = SandboxQuery(metadata=metadata)
+            result = sandbox_cls.list(query=query, **self._common_kwargs())  # type: ignore[attr-defined]
         except Exception as e:
             logger.warning("E2B reconciliation list failed: %s", e)
-            return [], False
+            return [], False, False
 
         max_pages = int(self._config["reconciliation_max_pages"])
         max_items = int(self._config["reconciliation_max_items"])
         deadline = time.monotonic() + float(self._config["reconciliation_max_seconds"])
         entries: list[Any] = []
         exhausted = False
+        complete = True
 
         if hasattr(result, "next_items") and hasattr(result, "has_next"):
             for page_number in range(max_pages):
@@ -1028,6 +1353,7 @@ class E2BSandboxProvider(SandboxProvider):
                     page = result.next_items()
                 except Exception as e:
                     logger.warning("E2B reconciliation paginator failed: %s", e)
+                    complete = False
                     break
                 if not page:
                     break
@@ -1045,13 +1371,15 @@ class E2BSandboxProvider(SandboxProvider):
                 all_entries = list(result or [])
             except TypeError:
                 logger.warning("E2B Sandbox.list returned non-iterable %s", type(result).__name__)
-                return [], False
+                return [], False, False
             entries = all_entries[:max_items]
             exhausted = len(all_entries) > max_items
 
         if time.monotonic() >= deadline:
             exhausted = True
-        return entries, exhausted
+        if exhausted:
+            complete = False
+        return entries, exhausted, complete
 
     def _publish_ownership(self, sandbox_id: str) -> None:
         """Publish acquire-side ownership before exposing a sandbox locally."""
@@ -1147,8 +1475,21 @@ class E2BSandboxProvider(SandboxProvider):
         self._lease_thread.start()
         self._reconcile_thread.start()
 
-    def _reserve_reconciliation_capacity(self, sandbox_id: str) -> bool:
+    def _reserve_reconciliation_capacity(
+        self,
+        sandbox_id: str,
+        *,
+        reservation_token: str | None = None,
+    ) -> bool:
         """Reserve one local slot for adoption without blocking maintenance."""
+        try:
+            self._track_deployment_sandbox(
+                sandbox_id,
+                reservation_token=reservation_token,
+            )
+        except SandboxCapacityExceededError as error:
+            logger.warning("Could not track discovered E2B sandbox %s: %s", sandbox_id, error)
+            return False
         with self._lock:
             if self._shutdown_called or self._total_capacity_used_locked() >= self._capacity_limit():
                 return False
@@ -1162,10 +1503,40 @@ class E2BSandboxProvider(SandboxProvider):
         observed_at = time.monotonic() if now is None else now
         deadline = time.monotonic() + float(self._config["reconciliation_max_seconds"])
         stats = ReconciliationStats()
-        entries, stats.budget_exhausted = self._list_remote_entries({META_KEY_PROVIDER: META_VAL_PROVIDER})
+        capacity_revision = None
+        capacity_store = self._deployment_capacity
+        if capacity_store is not None:
+            try:
+                capacity_revision = capacity_store.revision()
+            except CapacityBackendError as error:
+                logger.warning(
+                    "Could not read E2B capacity before reconciliation: %s",
+                    error,
+                )
+
+        entries, stats.budget_exhausted, inventory_complete = self._list_remote_entries({META_KEY_PROVIDER: META_VAL_PROVIDER})
+        entries = [entry for entry in entries if self._metadata_matches_capacity_ledger(self._entry_metadata(entry))]
         stats.discovered = len(entries)
+
+        if capacity_store is not None and capacity_revision is not None:
+            records = {sandbox_id: self._capacity_reservation_from_metadata(self._entry_metadata(entry)) for entry in entries if (sandbox_id := self._entry_id(entry))}
+            try:
+                applied = capacity_store.reconcile(
+                    expected_revision=capacity_revision,
+                    remote_sandboxes=records,
+                    complete=inventory_complete,
+                    reservation_max_age_ms=self._capacity_reservation_max_age_ms(),
+                )
+                if not applied:
+                    logger.debug("E2B capacity inventory became stale during reconciliation; retrying on the next pass")
+            except CapacityBackendError as error:
+                logger.warning(
+                    "Could not apply E2B capacity inventory: %s",
+                    error,
+                )
+
         groups: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = {}
-        orphans: list[tuple[str, dict[str, Any]]] = []
+        stale_entries: list[tuple[str, dict[str, Any], float]] = []
         present_ids: set[str] = set()
 
         for entry in entries:
@@ -1176,15 +1547,34 @@ class E2BSandboxProvider(SandboxProvider):
             metadata = self._entry_metadata(entry)
             user_id = metadata.get(META_KEY_USER)
             thread_id = metadata.get(META_KEY_THREAD)
-            if isinstance(user_id, str) and user_id and isinstance(thread_id, str) and thread_id:
+            skills_root = metadata.get(META_KEY_SKILLS_ROOT)
+            has_thread_identity = isinstance(user_id, str) and user_id and isinstance(thread_id, str) and thread_id
+            if has_thread_identity and skills_root == self._config["skills_container_path"]:
                 groups.setdefault((user_id, thread_id), []).append((sandbox_id, metadata))
+            elif has_thread_identity:
+                # A VM from an older root must never be adopted by this
+                # provider. Reap it after the shorter duplicate grace once no
+                # peer still owns it, so it does not strand deployment capacity.
+                stale_entries.append(
+                    (
+                        sandbox_id,
+                        metadata,
+                        float(self._config["reconciliation_grace_seconds"]),
+                    )
+                )
             else:
-                orphans.append((sandbox_id, metadata))
+                stale_entries.append(
+                    (
+                        sandbox_id,
+                        metadata,
+                        float(self._config["reconciliation_orphan_ttl_seconds"]),
+                    )
+                )
 
         for (user_id, thread_id), candidates in groups.items():
             candidates.sort(key=lambda item: (item[1].get(META_KEY_CREATED_AT, ""), item[0]))
             with self._lock:
-                local_id = self._thread_sandboxes.get((user_id, thread_id))
+                local_id = self._thread_sandboxes.get(self._thread_key(thread_id, user_id))
             if local_id:
                 candidates.sort(key=lambda item: item[0] != local_id)
 
@@ -1206,12 +1596,15 @@ class E2BSandboxProvider(SandboxProvider):
             if not live:
                 continue
             stats.duplicates += max(0, len(live) - 1)
-            canonical_id, _metadata, canonical_client = live[0]
+            canonical_id, canonical_metadata, canonical_client = live[0]
             with self._lock:
                 already_local = canonical_id in self._sandboxes
             if already_local:
                 self._safe_close_client(canonical_client)
-            elif not self._reserve_reconciliation_capacity(canonical_id):
+            elif not self._reserve_reconciliation_capacity(
+                canonical_id,
+                reservation_token=self._capacity_reservation_from_metadata(canonical_metadata),
+            ):
                 self._safe_close_client(canonical_client)
                 stats.deferred += 1
             elif not self._claim_ownership(canonical_id):
@@ -1271,7 +1664,7 @@ class E2BSandboxProvider(SandboxProvider):
                     self._release_ownership(sandbox_id)
                 self._safe_close_client(client)
 
-        for sandbox_id, metadata in orphans:
+        for sandbox_id, metadata, minimum_age in stale_entries:
             if time.monotonic() >= deadline:
                 stats.budget_exhausted = True
                 break
@@ -1281,7 +1674,7 @@ class E2BSandboxProvider(SandboxProvider):
                 age = time.time() - float(created_at) if created_at is not None else observed_at - first_seen
             except (TypeError, ValueError):
                 age = observed_at - first_seen
-            if age < float(self._config["reconciliation_orphan_ttl_seconds"]):
+            if age < minimum_age:
                 stats.deferred += 1
                 continue
             if not self._claim_ownership(sandbox_id, for_destroy=True):
@@ -1332,10 +1725,16 @@ class E2BSandboxProvider(SandboxProvider):
         reaped the VM. Closing that host-side client before returning ``None``
         keeps both acquire paths from leaking a connection.
         """
-        client = self._reconnect_client(sandbox_cls, sandbox_id)
+        try:
+            client = self._reconnect_client(sandbox_cls, sandbox_id)
+        except Exception as error:
+            if _is_sandbox_gone_error(error):
+                self._release_deployment_sandbox(sandbox_id)
+            raise
         if self._client_alive(client):
             return client
         self._safe_close_client(client)
+        self._release_deployment_sandbox(sandbox_id)
         return None
 
     def _register_connected_sandbox(
@@ -1485,9 +1884,10 @@ class E2BSandboxProvider(SandboxProvider):
             f"if [ ! -e /mnt/acp-workspace ] || [ -L /mnt/acp-workspace ]; then "
             f"  sudo ln -sfn {shlex.quote(home_dir)}/acp-workspace /mnt/acp-workspace; "
             f"fi; "
-            # /mnt/skills is left alone here; the optional ``mounts`` config
-            # uploads its content via _apply_mounts and creates the directory
-            # on demand. We only ensure that /mnt itself is traversable.
+            # The configured skills root is left alone here; the optional
+            # ``mounts`` config uploads its content via _apply_mounts and
+            # creates the directory on demand. We only ensure that /mnt itself
+            # is traversable for the default layout.
             f"sudo chmod a+rx /mnt 2>/dev/null || true; "
             f"echo BOOTSTRAP_OK"
         )
@@ -1503,11 +1903,85 @@ class E2BSandboxProvider(SandboxProvider):
         if exit_code not in (0, None) or "BOOTSTRAP_OK" not in stdout:
             raise RuntimeError(f"e2b bootstrap script failed with exit code {exit_code}; stderr={stderr.strip()}")
 
-    def _apply_mounts(self, client: E2BClientSandbox) -> None:
-        mounts = self._config.get("mounts") or []
-        if not mounts:
-            return
-        for mount in mounts:
+    def _skill_projection_mounts(
+        self,
+        user_id: str,
+        thread_id: str | None = None,
+    ) -> list[tuple[Path, str, bool]]:
+        """Best-effort: a projection failure must not drop configured mounts too.
+
+        Unlike Local/AIO's ``_ensure_skills_projection``, this used to raise
+        straight out of ``_apply_mounts`` before the configured-mounts loop
+        ran, so a projection hiccup dropped the operator's own mounts as
+        collateral damage (only caught by ``create()``'s outer warning, with
+        no mounts applied at all). Swallowing here keeps the two mount
+        sources independent, matching the other two providers.
+        """
+        from deerflow.config.paths import get_paths
+        from deerflow.skills.projection import ensure_skill_projections
+        from deerflow.skills.storage import get_or_new_user_skill_storage
+
+        try:
+            # The middleware performs a strict, fail-closed upload after acquire
+            # for a policy-scoped thread. Do not first upload the shared view and
+            # briefly hydrate the VM with skills outside the Agent allowlist.
+            if (
+                thread_id
+                and get_paths()
+                .thread_skills_view_dir(
+                    thread_id,
+                    user_id=user_id,
+                )
+                .exists()
+            ):
+                return []
+            config = get_app_config()
+            storage = get_or_new_user_skill_storage(user_id, app_config=config)
+            projection = ensure_skill_projections(storage)
+            container_root = self._config["skills_container_path"]
+            return [
+                (projection.public, f"{container_root}/public", True),
+                (projection.custom, f"{container_root}/custom", True),
+                (projection.legacy, f"{container_root}/legacy", True),
+                (projection.integrations, f"{container_root}/integrations", True),
+            ]
+        except Exception as exc:
+            logger.warning("Could not ensure skills projection for user %s: %s", user_id, exc, exc_info=True)
+            return []
+
+    def _apply_mounts(
+        self,
+        client: E2BClientSandbox,
+        *,
+        user_id: str | None = None,
+        thread_id: str | None = None,
+    ) -> None:
+        started_at = time.monotonic()
+        deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        budget = _MountUploadBudget(
+            deadline=started_at + deadline_seconds,
+            deadline_seconds=deadline_seconds,
+        )
+
+        def warn_pass_stopped(reason: str) -> None:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            logger.warning(
+                "e2b mount upload pass stopped: reason=%s attempted_files=%d attempted_bytes=%d completed_files=%d completed_bytes=%d elapsed_ms=%d",
+                reason,
+                budget.attempted_files,
+                budget.attempted_bytes,
+                budget.completed_files,
+                budget.completed_bytes,
+                elapsed_ms,
+            )
+
+        effective_user_id = user_id or get_effective_user_id()
+        projection_mounts = self._skill_projection_mounts(effective_user_id, thread_id) if thread_id is not None else self._skill_projection_mounts(effective_user_id)
+        configured_mounts = self._config.get("mounts") or []
+        skills_root = self._config["skills_container_path"]
+
+        mounts: list[tuple[Path, str, bool]] = list(projection_mounts)
+        for mount in configured_mounts:
             try:
                 host_path = Path(getattr(mount, "host_path", "") or "")
                 container_path = (getattr(mount, "container_path", "") or "").rstrip("/")
@@ -1517,6 +1991,15 @@ class E2BSandboxProvider(SandboxProvider):
                 container_path = (mount.get("container_path", "") or "").rstrip("/")
                 read_only = bool(mount.get("read_only", False))
 
+            if container_path == skills_root or container_path.startswith(skills_root + "/"):
+                logger.warning("Skipping e2b mount that conflicts with managed skills projection: %s", container_path)
+                continue
+            mounts.append((host_path, container_path, read_only))
+
+        for host_path, container_path, read_only in mounts:
+            if budget.expired:
+                warn_pass_stopped(_mount_deadline_reason(deadline_seconds))
+                break
             if not host_path.exists():
                 logger.warning("Skipping e2b mount: host_path %s does not exist", host_path)
                 continue
@@ -1535,9 +2018,101 @@ class E2BSandboxProvider(SandboxProvider):
                 logger.debug("make_dir(%s) failed (continuing): %s", container_path, e)
 
             try:
-                self._upload_tree(client, host_path, container_path, read_only)
+                self._upload_tree(client, host_path, container_path, read_only, budget=budget)
+            except _MountPassLimitExceeded as e:
+                warn_pass_stopped(str(e))
+                break
             except Exception as e:
                 logger.warning("Failed to upload mount %s -> %s: %s", host_path, container_path, e)
+
+    def sync_agent_skills(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection: SkillProjectionPaths,
+    ) -> None:
+        """Atomically rebuild E2B's managed skills for one thread scope.
+
+        The remote reset and all four category uploads form one critical
+        section. Reuse the acquire/release lock for the same user/thread so a
+        concurrent policy cannot wipe or repopulate the sandbox mid-upload.
+        """
+        with self._acquire_serializer.hold(self._thread_key(thread_id, user_id)):
+            self._sync_agent_skills_locked(
+                sandbox_id,
+                projection=projection,
+            )
+
+    def _sync_agent_skills_locked(
+        self,
+        sandbox_id: str,
+        *,
+        projection: SkillProjectionPaths,
+    ) -> None:
+        with self._lock:
+            sandbox = self._sandboxes.get(sandbox_id)
+        if sandbox is None:
+            raise RuntimeError(f"E2B sandbox {sandbox_id} is not available for skill synchronization")
+
+        skills_root = _validate_skills_reset_root(
+            self._config["skills_container_path"],
+            home_dir=sandbox.home_dir,
+        )
+
+        # A sandbox-visible marker cannot prove integrity: the sandbox user can
+        # modify the marker and replace category directories between turns.
+        # Rebuild on every policy sync so the no-follow root check and managed
+        # directory replacement always run before the sandbox is handed out.
+        marker_path = f"{skills_root}/.deerflow-projection-signature"
+
+        category_paths = [
+            f"{skills_root}/public",
+            f"{skills_root}/custom",
+            f"{skills_root}/legacy",
+            f"{skills_root}/integrations",
+        ]
+        quoted_root = shlex.quote(skills_root)
+        quoted_categories = " ".join(shlex.quote(path) for path in category_paths)
+        quoted_managed_paths = " ".join(shlex.quote(path) for path in (*category_paths, marker_path))
+        reset_script = (
+            f"set -e; if [ -L {quoted_root} ]; then echo 'Refusing symlinked skills root' >&2; exit 2; fi; "
+            f"sudo rm -rf -- {quoted_managed_paths}; "
+            f"sudo mkdir -p -- {quoted_categories}; "
+            f'sudo chown "$(id -u):$(id -g)" -- {quoted_root} {quoted_categories}; '
+            "echo SKILLS_RESET_OK"
+        )
+        result = sandbox.client.commands.run(reset_script)
+        stdout = getattr(result, "stdout", "") or ""
+        stderr = getattr(result, "stderr", "") or ""
+        exit_code = getattr(result, "exit_code", 0)
+        if exit_code not in (0, None) or "SKILLS_RESET_OK" not in stdout:
+            raise RuntimeError(f"Failed to reset E2B skill projection (exit_code={exit_code}, stderr={stderr.strip()})")
+
+        started_at = time.monotonic()
+        deadline_seconds = self._config.get("mount_upload_deadline_seconds", _MOUNT_PASS_DEADLINE_SECONDS)
+        budget = _MountUploadBudget(
+            deadline=started_at + deadline_seconds,
+            deadline_seconds=deadline_seconds,
+        )
+        for source, destination in zip(
+            (
+                projection.public,
+                projection.custom,
+                projection.legacy,
+                projection.integrations,
+            ),
+            category_paths,
+            strict=True,
+        ):
+            self._upload_tree(
+                sandbox.client,
+                source,
+                destination,
+                True,
+                budget=budget,
+            )
 
     # ── Output mirroring ────────────────────────────────────────────────
     _SYNC_BACK_SUBDIRS = ("outputs", "workspace")
@@ -1690,7 +2265,10 @@ class E2BSandboxProvider(SandboxProvider):
             if time.monotonic() >= deadline:
                 truncated_reason = f"time budget {self._SYNC_DEADLINE_SECONDS}s"
                 break
-            entry = entry.strip()
+            # NUL already delimits records, so do NOT strip: a filename that
+            # legitimately ends in whitespace (e.g. "report ") would have its
+            # trailing space trimmed here, pointing host_path at the wrong
+            # file and recording a manifest key that never matches again.
             if not entry:
                 continue
             try:
@@ -1770,7 +2348,21 @@ class E2BSandboxProvider(SandboxProvider):
                 host_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = host_path.with_name(host_path.name + ".e2bsync.tmp")
                 tmp_path.write_bytes(data)
-                os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
+                # os.utime rejects ns values outside roughly +/-2^63; a remote
+                # mtime far in the future (e.g. `touch -d "99999 years" file`)
+                # raises OverflowError, which is not an OSError and would
+                # escape the outer except below, skipping the manifest write
+                # and forcing a full re-download next release. Drop only the
+                # timestamp restoration in that case — the file is still
+                # written correctly.
+                try:
+                    os.utime(tmp_path, ns=(remote_mtime_ns, remote_mtime_ns))
+                except (OSError, OverflowError):
+                    logger.debug(
+                        "e2b sync: skipped mtime restoration for %s (ns=%d)",
+                        host_path,
+                        remote_mtime_ns,
+                    )
                 tmp_path.replace(host_path)
                 host_stat = host_path.stat()
                 manifest[manifest_key] = {
@@ -1823,39 +2415,85 @@ class E2BSandboxProvider(SandboxProvider):
         src: Path,
         dest_dir: str,
         read_only: bool,
+        *,
+        budget: _MountUploadBudget | None = None,
     ) -> None:
         """Recursively upload ``src`` into ``dest_dir`` inside the sandbox."""
-        if src.is_file():
-            target = f"{dest_dir}/{src.name}"
-            with src.open("rb") as fh:
-                client.files.write(target, fh.read())
-            if read_only:
+        started_at = time.monotonic()
+        source_is_file = src.is_file()
+        files: list[tuple[Path, str, int]] = []
+        total_size = 0
+
+        def add_file(path: Path, target: str) -> None:
+            nonlocal total_size
+            if budget is not None:
+                budget.check_deadline()
+            file_size = path.stat().st_size
+            if file_size > _MAX_MOUNT_FILE_SIZE:
+                raise ValueError(f"Mount file {path} is {file_size} bytes and exceeds the {_MAX_MOUNT_FILE_SIZE}-byte file limit")
+            if len(files) >= _MAX_MOUNT_FILES:
+                raise ValueError(f"Mount {src} contains more than {_MAX_MOUNT_FILES} files and exceeds the {_MAX_MOUNT_FILES}-file limit")
+            total_size += file_size
+            if total_size > _MAX_MOUNT_TOTAL_SIZE:
+                raise ValueError(f"Mount {src} is at least {total_size} bytes and exceeds the {_MAX_MOUNT_TOTAL_SIZE}-byte total limit")
+            files.append((path, target, file_size))
+
+        if source_is_file:
+            add_file(src, f"{dest_dir}/{src.name}")
+        else:
+            for path in src.rglob("*"):
+                if budget is not None:
+                    budget.check_deadline()
+                if path.is_file():
+                    rel = path.relative_to(src).as_posix()
+                    add_file(path, f"{dest_dir}/{rel}")
+
+        upload_attempted = False
+        try:
+            for path, target, expected_size in files:
+                if budget is not None:
+                    budget.check_deadline()
+                if budget is not None and budget.attempted_files >= _MAX_MOUNT_PASS_FILES:
+                    raise _MountPassLimitExceeded(f"file count cap {_MAX_MOUNT_PASS_FILES}")
+                if budget is not None and budget.attempted_bytes + expected_size > _MAX_MOUNT_PASS_TOTAL_BYTES:
+                    raise _MountPassLimitExceeded(f"total byte budget {_MAX_MOUNT_PASS_TOTAL_BYTES}")
                 try:
-                    client.commands.run(f"chmod a-w {shlex.quote(target)}")
+                    make_dir = getattr(client.files, "make_dir", None)
+                    if callable(make_dir):
+                        parent = target.rsplit("/", 1)[0]
+                        if parent and parent != dest_dir:
+                            make_dir(parent)
                 except Exception:
                     pass
-            return
-
-        for path in src.rglob("*"):
-            if not path.is_file():
-                continue
-            rel = path.relative_to(src).as_posix()
-            target = f"{dest_dir}/{rel}"
-            try:
-                make_dir = getattr(client.files, "make_dir", None)
-                if callable(make_dir):
-                    parent = target.rsplit("/", 1)[0]
-                    if parent and parent != dest_dir:
-                        make_dir(parent)
-            except Exception:
-                pass
-            with path.open("rb") as fh:
-                client.files.write(target, fh.read())
-        if read_only:
-            try:
-                client.commands.run(f"chmod -R a-w {shlex.quote(dest_dir)}")
-            except Exception:
-                pass
+                with path.open("rb") as fh:
+                    actual_size = os.fstat(fh.fileno()).st_size
+                    if actual_size != expected_size:
+                        raise ValueError(f"Mount file {path} changed during upload preflight")
+                    upload_attempted = True
+                    if budget is not None:
+                        budget.attempted_files += 1
+                        budget.attempted_bytes += expected_size
+                    client.files.write(target, fh)
+                if budget is not None:
+                    budget.completed_files += 1
+                    budget.completed_bytes += expected_size
+        finally:
+            if read_only and upload_attempted:
+                try:
+                    chmod_target = files[0][1] if source_is_file else dest_dir
+                    chmod_flag = "" if source_is_file else "-R "
+                    client.commands.run(f"chmod {chmod_flag}a-w {shlex.quote(chmod_target)}")
+                except Exception:
+                    pass
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        logger.info(
+            "e2b mount upload: source=%s destination=%s files=%d bytes=%d elapsed_ms=%d",
+            src,
+            dest_dir,
+            len(files),
+            total_size,
+            elapsed_ms,
+        )
 
     def _evict_oldest_warm(self) -> str | None:
         """Evict the oldest warm entry, holding a transitioning slot.
@@ -1953,8 +2591,8 @@ class E2BSandboxProvider(SandboxProvider):
             self._release_internal(sandbox_id)
             return
 
-        user_id, thread_id = thread_key
-        with self._get_thread_lock(thread_id, user_id):
+        user_id, thread_id, _skills_root = thread_key
+        with self._acquire_serializer.hold(self._thread_key(thread_id, user_id)):
             self._release_internal(sandbox_id)
 
     def _release_internal(self, sandbox_id: str) -> None:
@@ -1968,7 +2606,7 @@ class E2BSandboxProvider(SandboxProvider):
         """
         sandbox: E2BSandbox | None = None
         seed: str | None = None
-        removed_keys: list[tuple[str, str]] = []
+        removed_keys: list[tuple[str, str, str]] = []
         transition_slot_held = False
 
         with self._lock:
@@ -1981,7 +2619,7 @@ class E2BSandboxProvider(SandboxProvider):
             for key in removed_keys:
                 self._thread_sandboxes.pop(key, None)
             if removed_keys:
-                user_id, thread_id = removed_keys[0]
+                user_id, thread_id, _skills_root = removed_keys[0]
                 seed = self._stable_seed(thread_id, user_id)
 
         # E2BSandbox.close() clears its client reference. Keep this reference
@@ -1999,7 +2637,7 @@ class E2BSandboxProvider(SandboxProvider):
 
             sync_failed_due_to_dead_vm = False
             if seed is not None and removed_keys:
-                user_id_sync, thread_id_sync = removed_keys[0]
+                user_id_sync, thread_id_sync, _skills_root = removed_keys[0]
                 try:
                     self._sync_outputs_to_host(sandbox, thread_id=thread_id_sync, user_id=user_id_sync)
                 except Exception as e:  # pragma: no cover - defensive
@@ -2073,13 +2711,14 @@ class E2BSandboxProvider(SandboxProvider):
         except Exception:
             pass
 
-    @staticmethod
     def _kill_client(
+        self,
         client: E2BClientSandbox | None,
     ) -> Exception | None:
         """Kill a remote VM and return an exception for the caller to log."""
         if client is None:
             return RuntimeError("Cannot confirm remote VM destruction without a client")
+        sandbox_id = getattr(client, "sandbox_id", None)
         try:
             kill = getattr(client, "kill", None)
             if not callable(kill):
@@ -2087,6 +2726,8 @@ class E2BSandboxProvider(SandboxProvider):
             kill()
         except Exception as e:
             return e
+        if sandbox_id is not None:
+            self._release_deployment_sandbox(sandbox_id)
         return None
 
     def reset(self) -> None:
@@ -2113,7 +2754,7 @@ class E2BSandboxProvider(SandboxProvider):
             self._remote_ops_in_progress.clear()
             self._unowned_remote_ops_in_progress.clear()
             self._thread_sandboxes.clear()
-            self._thread_locks.clear()
+            self._acquire_serializer.close()
             self._owned_sandbox_ids.clear()
             self._acquire_inflight.clear()
             self._orphan_first_seen.clear()
@@ -2178,3 +2819,11 @@ class E2BSandboxProvider(SandboxProvider):
             self._ownership.close()
         except Exception as e:
             logger.warning("Failed to close E2B ownership store: %s", e)
+        if self._deployment_capacity is not None:
+            try:
+                self._deployment_capacity.close()
+            except Exception as e:
+                logger.warning(
+                    "Failed to close E2B deployment capacity store: %s",
+                    e,
+                )

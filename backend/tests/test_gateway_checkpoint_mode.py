@@ -1,7 +1,8 @@
 """Dual-mode (full/delta) parity for the gateway thread-state endpoints.
 
-Drives ``GET /api/threads/{id}``, ``GET /api/threads/{id}/state`` and
-``POST /api/threads/{id}/history`` through the real route stack
+Drives ``GET /api/threads/{id}``, ``GET /api/threads/{id}/state``,
+``POST /api/threads/{id}/history``, and the context-usage checkpoint reader
+through the real materialization stack
 (``build_thread_checkpoint_state_accessor`` -> factory-built graph ->
 ``CheckpointStateAccessor``) against a real ``InMemorySaver``, once per
 checkpoint channel mode, and asserts the wire responses are identical apart
@@ -24,6 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.store.memory import InMemoryStore
 
+from app.gateway import context_usage
 from app.gateway import services as gateway_services
 from app.gateway.routers import threads
 from deerflow.agents.thread_state import get_thread_state_schema
@@ -111,6 +113,46 @@ def test_thread_state_endpoints_are_mode_invariant(_stub_app_config, monkeypatch
     # Guard against a vacuous pass: the flow must have observed real messages.
     assert full["thread_messages"], "expected seeded messages in the thread response"
     assert any(full["history_messages"]), "expected history snapshots with messages"
+
+
+@pytest.mark.parametrize("mode", ["full", "delta"])
+def test_context_usage_reads_materialized_messages_in_both_modes(
+    mode: str,
+    _stub_app_config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Context usage must not read raw delta ``channel_values``."""
+    app = make_authed_test_app()
+    store = InMemoryStore()
+    checkpointer = InMemorySaver()
+    app.state.store = store
+    app.state.checkpointer = checkpointer
+    app.state.thread_store = MemoryThreadMetaStore(store)
+    app.state.checkpoint_channel_mode = mode
+    app.state.run_event_store = SimpleNamespace()
+
+    graph = _build_reply_graph(mode, checkpointer)
+    monkeypatch.setattr(
+        gateway_services,
+        "resolve_agent_factory",
+        lambda assistant_id=None: lambda config: graph,
+    )
+
+    config: dict[str, Any] = {"configurable": {"thread_id": _THREAD_ID}}
+    inject_checkpoint_mode(config, mode)
+    for i in range(2):
+        asyncio.run(graph.ainvoke({"messages": [HumanMessage(content=f"question-{i}", id=f"h{i}")]}, config))
+
+    request = SimpleNamespace(app=app)
+    accessor, read_config = asyncio.run(gateway_services.build_thread_checkpoint_state_accessor(request, thread_id=_THREAD_ID))
+    messages = asyncio.run(context_usage._load_checkpoint_messages(accessor, read_config))
+
+    assert [(message.type, message.content, message.id) for message in messages] == [
+        ("human", "question-0", "h0"),
+        ("ai", "answer-1", "a1"),
+        ("human", "question-1", "h1"),
+        ("ai", "answer-3", "a3"),
+    ]
 
 
 def test_full_mode_gateway_rejects_delta_thread_with_409(_stub_app_config, monkeypatch: pytest.MonkeyPatch) -> None:

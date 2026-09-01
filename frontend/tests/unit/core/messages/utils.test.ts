@@ -2,6 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
@@ -11,6 +12,7 @@ import {
   getAssistantTurnCopyData,
   getAssistantTurnUsageMessages,
   getMessageGroups,
+  getStreamMetadataSnapshot,
   getStreamingMessageLookup,
   hasContent,
   hasReasoning,
@@ -456,6 +458,30 @@ describe("inline <think> tag splitting", () => {
     expect(hasReasoning(message)).toBe(false);
   });
 
+  test("a closed <think> pair inside markdown inline code stays in content", () => {
+    // The model talking about the tag literally, e.g. when explaining prompt
+    // engineering. Hollowing the code span out into the reasoning panel
+    // corrupts the visible answer.
+    const message = aiMessage(
+      "Wrap your reasoning in `<think>your reasoning</think>` before answering.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Wrap your reasoning in `<think>your reasoning</think>` before answering.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBeNull();
+    expect(hasReasoning(message)).toBe(false);
+  });
+
+  test("a closed <think> pair outside code is still stripped when another sits in inline code", () => {
+    const message = aiMessage(
+      "<think>real reasoning</think>Use `<think>text</think>` markers.",
+    );
+    expect(extractContentFromMessage(message)).toBe(
+      "Use `<think>text</think>` markers.",
+    );
+    expect(extractReasoningContentFromMessage(message)).toBe("real reasoning");
+  });
+
   test("a backtick-prefixed <think> mid-stream is not split into reasoning", () => {
     // Simulates the moment the model has emitted the opening backtick and
     // `<think>` for a literal documentation reference, before the closing
@@ -558,9 +584,12 @@ describe("isHiddenFromUIMessage", () => {
 });
 
 describe("human message internal context stripping", () => {
-  test("strips uploaded file context from copy data", () => {
+  test("strips legacy uploaded_files context from copy data", () => {
+    // Display-only backward compatibility (#4212): pre-#4174 history still
+    // carries <uploaded_files> blocks, which copy data must strip rather
+    // than leak as raw XML with server-side paths.
     const message = {
-      id: "human-with-upload",
+      id: "human-with-legacy-upload",
       type: "human",
       content:
         "<uploaded_files>\nThe following files were uploaded in this message:\n\n- paper.pdf (1.0 MB)\n  Path: /mnt/user-data/uploads/paper.pdf\n</uploaded_files>\n\nSummarize this paper",
@@ -599,6 +628,31 @@ describe("human message internal context stripping", () => {
         filename: "data.xlsx",
         size: 12 * 1024, // 12288
         path: "/mnt/user-data/uploads/data.xlsx",
+      },
+    ]);
+  });
+
+  test("parses uploaded filenames that contain parentheses", () => {
+    // Browsers name duplicate downloads "photo (1).png"; the backend emits the
+    // filename verbatim, so the parser must not stop the name at the first "(".
+    const content =
+      "<current_uploads>\nThe following files were uploaded in this message:\n\n- photo (1).png (12.3 KB)\n  Path: /mnt/user-data/uploads/photo (1).png\n- report (final) (2).docx (1.5 MB)\n  Path: /mnt/user-data/uploads/report (final) (2).docx\n- normal.pdf (3.0 KB)\n  Path: /mnt/user-data/uploads/normal.pdf\n</current_uploads>\n\nSummarize";
+
+    expect(parseUploadedFiles(content)).toEqual([
+      {
+        filename: "photo (1).png",
+        size: Math.round(12.3 * 1024),
+        path: "/mnt/user-data/uploads/photo (1).png",
+      },
+      {
+        filename: "report (final) (2).docx",
+        size: Math.round(1.5 * 1024 * 1024),
+        path: "/mnt/user-data/uploads/report (final) (2).docx",
+      },
+      {
+        filename: "normal.pdf",
+        size: 3 * 1024,
+        path: "/mnt/user-data/uploads/normal.pdf",
       },
     ]);
   });
@@ -688,6 +742,73 @@ test("hides assistant copy data while that turn is streaming", () => {
   expect(getAssistantTurnCopyData(messages, { isStreaming: true })).toBeNull();
 });
 
+test("falls back to reasoning for a reasoning-only assistant turn's copy data", () => {
+  // A turn can end with reasoning but no answer text (e.g. stopped during
+  // thinking). getMessageCopyData already copies the reasoning in that case;
+  // the turn-level copy button must not disappear instead.
+  const messages = [
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      additional_kwargs: { reasoning_content: "the actual reasoning" },
+    },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("the actual reasoning");
+});
+
+test("settled copy data is derived once per messages array reference (#5094)", () => {
+  // Settled group arrays keep their identity across streaming chunks, and the
+  // copy button re-renders per chunk. Reading `content` through a getter
+  // proves the second settled call is served from the array-reference cache
+  // instead of re-running the O(turn bytes) extraction.
+  let contentReads = 0;
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    get content() {
+      contentReads += 1;
+      return "Final answer";
+    },
+  } as unknown as Message;
+  const messages = [message];
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  const readsAfterFirstCall = contentReads;
+  expect(readsAfterFirstCall).toBeGreaterThan(0);
+
+  expect(getAssistantTurnCopyData(messages)).toBe("Final answer");
+  expect(contentReads).toBe(readsAfterFirstCall);
+});
+
+test("copy-data cache does not leak across array references", () => {
+  const first = [
+    { id: "ai-1", type: "ai", content: "first answer" },
+  ] as Message[];
+  const second = [
+    { id: "ai-2", type: "ai", content: "second answer" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(first)).toBe("first answer");
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+  // The streaming short-circuit stays ahead of the cache.
+  expect(getAssistantTurnCopyData(second, { isStreaming: true })).toBeNull();
+  expect(getAssistantTurnCopyData(second)).toBe("second answer");
+});
+
+test("null copy data is not cached for a reference", () => {
+  // A turn with no copyable AI text must keep recomputing (and stay null)
+  // rather than a cached null hiding a later value — the same array can be
+  // re-used once messages are appended to a rebuilt group.
+  const messages = [
+    { id: "human-1", type: "human", content: "hi" },
+  ] as Message[];
+
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+  expect(getAssistantTurnCopyData(messages)).toBeNull();
+});
+
 test("marks the latest assistant message as streaming", () => {
   const messages = [
     {
@@ -722,6 +843,139 @@ test("marks the latest assistant message as streaming", () => {
       })),
     ),
   ).toBe(false);
+});
+
+test("compares stream metadata snapshots by keys and metadata identity", () => {
+  const identifiedMessage = {
+    id: "ai-1",
+    type: "ai",
+    content: "Completed answer",
+  } as Message;
+  const anonymousMessage = {
+    type: "ai",
+    content: "Anonymous answer",
+  } as Message;
+  const identifiedMetadata = { langgraph_node: "agent" };
+  const anonymousMetadata = { langgraph_node: "agent" };
+  const messages = [identifiedMessage, anonymousMessage];
+  const snapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const equivalentSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage ? identifiedMetadata : anonymousMetadata,
+  }));
+  const changedSnapshot = getStreamMetadataSnapshot(messages, (message) => ({
+    streamMetadata:
+      message === identifiedMessage
+        ? { ...identifiedMetadata }
+        : anonymousMetadata,
+  }));
+  const missingSnapshot = getStreamMetadataSnapshot(
+    [identifiedMessage],
+    () => ({ streamMetadata: identifiedMetadata }),
+  );
+
+  expect(areStreamMetadataSnapshotsEqual(snapshot, equivalentSnapshot)).toBe(
+    true,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, changedSnapshot)).toBe(
+    false,
+  );
+  expect(areStreamMetadataSnapshotsEqual(snapshot, missingSnapshot)).toBe(
+    false,
+  );
+});
+
+test("ignores stream metadata retained from a completed turn", () => {
+  const completedMetadata = { langgraph_node: "agent", langgraph_step: 1 };
+  const activeMetadata = { langgraph_node: "agent", langgraph_step: 2 };
+  const completedMessages = [
+    {
+      id: "human-1",
+      type: "human",
+      content: "Hello",
+    },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Completed answer",
+    },
+  ] as Message[];
+  const settledMetadata = getStreamMetadataSnapshot(
+    completedMessages,
+    (message) =>
+      message.id === "ai-1" ? { streamMetadata: completedMetadata } : undefined,
+  );
+  const messages = [
+    ...completedMessages,
+    {
+      id: "human-2",
+      type: "human",
+      content: "Continue",
+    },
+    {
+      id: "ai-2",
+      type: "ai",
+      content: "Still generating",
+    },
+  ] as Message[];
+  const groups = getMessageGroups(messages).filter(
+    (group) => group.type === "assistant",
+  );
+  const streamingMessages = getStreamingMessageLookup(
+    messages,
+    true,
+    (message) => {
+      if (message.id === "ai-1") {
+        return { streamMetadata: completedMetadata };
+      }
+      if (message.id === "ai-2") {
+        return { streamMetadata: activeMetadata };
+      }
+      return undefined;
+    },
+    settledMetadata,
+  );
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[0]?.messages ?? [],
+      streamingMessages,
+    ),
+  ).toBe(false);
+  expect(
+    isAssistantMessageGroupStreaming(
+      groups[1]?.messages ?? [],
+      streamingMessages,
+    ),
+  ).toBe(true);
+});
+
+test("treats updated metadata for the same message id as active", () => {
+  const message = {
+    id: "ai-1",
+    type: "ai",
+    content: "Partial answer",
+  } as Message;
+  const completedMetadata = { langgraph_node: "agent", langgraph_step: 1 };
+  const activeMetadata = { langgraph_node: "agent", langgraph_step: 2 };
+  const settledMetadata = getStreamMetadataSnapshot([message], () => ({
+    streamMetadata: completedMetadata,
+  }));
+
+  expect(
+    isAssistantMessageGroupStreaming(
+      [message],
+      getStreamingMessageLookup(
+        [message],
+        true,
+        () => ({ streamMetadata: activeMetadata }),
+        settledMetadata,
+      ),
+    ),
+  ).toBe(true);
 });
 
 test("keeps previous assistant copyable while waiting for a new visible answer", () => {

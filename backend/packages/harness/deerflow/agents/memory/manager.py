@@ -63,6 +63,24 @@ class MemoryCallbacks:
         """Pre-LLM-call: mutate ``invoke_config`` (e.g. merge trace metadata)
         before the backend invokes the model. Default: no-op."""
 
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Post-LLM-call hook for host-owned observation. Default: no-op.
+
+        This callback keeps the vendorable DeerMem backend independent from
+        DeerFlow's extension API. It is invoked for both provider success and
+        failure, and backend callers isolate exceptions raised by an
+        implementation.
+        """
+
 
 class MemoryManagerError(RuntimeError):
     """Backend-neutral base error exposed at the MemoryManager boundary."""
@@ -623,6 +641,13 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
     langfuse is not an enabled tracing provider.
     """
 
+    def __init__(self, *, extensions=None) -> None:
+        if extensions is None:
+            from deerflow.extensions import get_loaded_extensions
+
+            extensions = get_loaded_extensions()
+        self._extensions = extensions
+
     def on_memory_llm_call(
         self,
         invoke_config: dict[str, Any],
@@ -643,6 +668,60 @@ class LangfuseMemoryCallbacks(MemoryCallbacks):
             environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=trace_id,
         )
+
+    def on_memory_llm_result(
+        self,
+        invoke_config: dict[str, Any],
+        *,
+        prompt: Any,
+        response: Any,
+        error: BaseException | None,
+        duration_ms: float,
+        model_name: str | None,
+    ) -> None:
+        """Forward a DeerMem provider result using the captured snapshot."""
+        extensions = self._extensions
+        if not extensions.has_system_model_observers:
+            return
+        try:
+            from deerflow_extension_api import (
+                SystemModelRequest,
+                SystemModelResult,
+                SystemOperationKind,
+            )
+
+            from deerflow.extensions.notify import (
+                dispatch_system_model_observation,
+                notify_system_model_call,
+                task_store_for_system_call,
+            )
+
+            dispatch_system_model_observation(
+                notify_system_model_call(
+                    extensions,
+                    task_store_for_system_call(invoke_config),
+                    SystemOperationKind.MEMORY,
+                    SystemModelRequest(
+                        messages=prompt,
+                        model_name=model_name,
+                        invoke_config=invoke_config,
+                    ),
+                    SystemModelResult(
+                        response=response,
+                        error=error,
+                        duration_ms=duration_ms,
+                    ),
+                ),
+                SystemOperationKind.MEMORY.value,
+            )
+        except Exception:
+            # Only the bridge's own failures are non-fatal. A teardown signal
+            # must propagate, matching the boundary the DeerMem-side call
+            # site documents and tests.
+            logger.warning(
+                "Extension observation of the memory model call failed (non-fatal)",
+                exc_info=True,
+            )
 
 
 def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
@@ -694,6 +773,8 @@ def _host_default_extraction_callback(payload: Any) -> None:
     extracted = payload.get("facts_extracted")
     passed_confidence = payload.get("facts_passed_confidence")
     rejected = payload.get("rejected_low_confidence", 0)
+    rejected_by_scope = payload.get("rejected_by_scope_gate", 0)
+    scope_breakdown = payload.get("scope_gate_rejections")
     thread_id = payload.get("thread_id")
     model_name = payload.get("model_name")
     if isinstance(extracted, int) and isinstance(passed_confidence, int) and extracted > 0:
@@ -721,6 +802,22 @@ def _host_default_extraction_callback(payload: Any) -> None:
             payload.get("success"),
             payload.get("token_usage"),
         )
+    if isinstance(scope_breakdown, dict):
+        logger.info(
+            "Memory scope-gate metrics: thread=%s model=%s rejected=%s breakdown=%s",
+            thread_id,
+            model_name,
+            rejected_by_scope,
+            scope_breakdown,
+        )
+        fact_breakdown = scope_breakdown.get("facts")
+        fact_scope_rejected = sum(value for value in fact_breakdown.values() if isinstance(value, int)) if isinstance(fact_breakdown, dict) else 0
+        if isinstance(extracted, int) and extracted > 0 and fact_scope_rejected / extracted > 0.6:
+            logger.warning(
+                "Memory fact scope-gate rejection rate %.0f%% exceeds 60%% - review extraction model classification / prompt (thread=%s)",
+                fact_scope_rejected / extracted * 100,
+                thread_id,
+            )
 
 
 def _collect_host_hooks() -> dict[str, Any]:

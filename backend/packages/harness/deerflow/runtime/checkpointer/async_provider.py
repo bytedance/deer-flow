@@ -185,24 +185,14 @@ async def _async_checkpointer_from_database(db_config) -> AsyncIterator[Checkpoi
 
 
 @contextlib.asynccontextmanager
-async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]:
-    """Async context manager that yields a checkpointer for the caller's lifetime.
-    Resources are opened on enter and closed on exit -- no global state::
-
-        async with make_checkpointer(app_config) as checkpointer:
-            app.state.checkpointer = checkpointer
-
-    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+async def _select_inner_checkpointer(app_config: AppConfig) -> AsyncIterator[Checkpointer]:
+    """Yield the raw checkpointer selected by *app_config* (no delta-cache wrapping).
 
     Priority:
     1. Legacy ``checkpointer:`` config section (backward compatible)
     2. Unified ``database:`` config section
     3. Default InMemorySaver
     """
-
-    if app_config is None:
-        app_config = get_app_config()
-
     # Legacy: standalone checkpointer config takes precedence
     if app_config.checkpointer is not None:
         async with _async_checkpointer(app_config.checkpointer) as saver:
@@ -220,3 +210,44 @@ async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterato
     from langgraph.checkpoint.memory import InMemorySaver
 
     yield InMemorySaver()
+
+
+@contextlib.asynccontextmanager
+async def make_checkpointer(app_config: AppConfig | None = None) -> AsyncIterator[Checkpointer]:
+    """Async context manager that yields a checkpointer for the caller's lifetime.
+    Resources are opened on enter and closed on exit -- no global state::
+
+        async with make_checkpointer(app_config) as checkpointer:
+            app.state.checkpointer = checkpointer
+
+    Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
+
+    Backend selection priority:
+    1. Legacy ``checkpointer:`` config section (backward compatible)
+    2. Unified ``database:`` config section
+    3. Default InMemorySaver
+
+    When the effective checkpoint channel mode is ``delta`` (the process-frozen
+    mode wins, falling back to ``database.checkpoint_channel_mode``), the raw
+    saver is wrapped in a :class:`CachedHistorySaver` backed by a history cache
+    whose lifetime equals this context manager's.
+    """
+    from deerflow.runtime.checkpoint_mode import frozen_checkpoint_channel_mode
+
+    if app_config is None:
+        app_config = get_app_config()
+
+    async with _select_inner_checkpointer(app_config) as saver:
+        db_config = getattr(app_config, "database", None)
+        mode = frozen_checkpoint_channel_mode() or (db_config.checkpoint_channel_mode if db_config is not None else "full")
+        if mode == "delta":
+            from deerflow.runtime.checkpoint_cache.provider import (
+                checkpoint_cache_key_prefix,
+                make_checkpoint_cache,
+            )
+            from deerflow.runtime.checkpointer.cached_saver import CachedHistorySaver
+
+            async with make_checkpoint_cache(app_config, serde=saver.serde) as cache:
+                yield CachedHistorySaver(saver, cache, key_prefix=checkpoint_cache_key_prefix(app_config))
+        else:
+            yield saver

@@ -24,7 +24,7 @@ from typing import Literal
 # ---------------------------------------------------------------------------
 
 Status = Literal["ok", "warn", "fail", "skip"]
-PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
+PNPM_SCRIPT_PATH = Path(__file__).resolve().with_name("pnpm.py")
 FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
 
 
@@ -496,6 +496,8 @@ def check_web_tool(config_path: Path, *, tool_name: str, label: str) -> CheckRes
                 "fastcrw": "CRW_API_KEY",
                 "brave": "BRAVE_SEARCH_API_KEY",
                 "serper": "SERPER_API_KEY",
+                "serply": "SERPLY_API_KEY",
+                "tencent_wsa": "TENCENTCLOUD_WSA_APIKEY",
             },
             "web_fetch": {
                 "infoquest": "INFOQUEST_API_KEY",

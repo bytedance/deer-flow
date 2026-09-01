@@ -1,10 +1,14 @@
 import asyncio
 import threading
 from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
 from deerflow.sandbox.sandbox import Sandbox
+
+if TYPE_CHECKING:
+    from deerflow.skills.projection import SkillProjectionPaths
 
 
 class SandboxProvider(ABC):
@@ -12,6 +16,10 @@ class SandboxProvider(ABC):
 
     uses_thread_data_mounts: bool = False
     needs_upload_permission_adjustment: bool = True
+    # Capability for enforcing a lead Agent's physical skill view across the
+    # provider's current Agent-accessible tool surface. Host-backed providers
+    # must return False whenever shell access can bypass managed path mappings.
+    supports_agent_skill_isolation: bool = False
 
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
@@ -31,6 +39,37 @@ class SandboxProvider(ABC):
         of stalling the event loop.
         """
         return await asyncio.to_thread(self.acquire, thread_id, user_id=user_id)
+
+    def sync_agent_skills(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection: "SkillProjectionPaths",
+    ) -> None:
+        """Synchronize a prepared thread skill projection into a sandbox.
+
+        Bind-mount providers observe the stable projection roots directly and
+        use this no-op implementation. Upload-based providers override it.
+        """
+
+    async def sync_agent_skills_async(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        projection: "SkillProjectionPaths",
+    ) -> None:
+        """Async wrapper for upload-based skill synchronization."""
+        await asyncio.to_thread(
+            self.sync_agent_skills,
+            sandbox_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            projection=projection,
+        )
 
     @abstractmethod
     def get(self, sandbox_id: str) -> Sandbox | None:

@@ -6,9 +6,24 @@ Run from repo root:
 
 from __future__ import annotations
 
+import importlib.util
 import sys
+from pathlib import Path
 
 import doctor
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _load_script(path: Path, name: str):
+    assert path.exists(), f"{path} must exist"
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
 
 # ---------------------------------------------------------------------------
 # check_python
@@ -28,6 +43,18 @@ class TestCheckPython:
 
 
 class TestCheckPnpm:
+    def test_resolves_shared_runner_from_relative_script_path(self, monkeypatch):
+        # Load the script as `scripts/doctor.py`, as a user would from the
+        # repository root. The derived paths must not depend on that relative
+        # invocation path.
+        monkeypatch.chdir(REPO_ROOT)
+        relative_doctor = _load_script(Path("scripts/doctor.py"), "deerflow_doctor_relative")
+
+        assert relative_doctor.PNPM_SCRIPT_PATH == REPO_ROOT / "scripts" / "pnpm.py"
+        assert relative_doctor.PNPM_SCRIPT_PATH.is_absolute()
+        assert relative_doctor.FRONTEND_DIR == REPO_ROOT / "frontend"
+        assert relative_doctor.FRONTEND_DIR.is_absolute()
+
     def test_uses_shared_runner_from_frontend(self, monkeypatch):
         captured = {}
 
@@ -328,6 +355,33 @@ class TestCheckWebSearch:
         result = doctor.check_web_search(cfg)
         assert result.status == "warn"
         assert "SERPER_API_KEY" in (result.fix or "")
+
+    def test_tencent_wsa_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TENCENTCLOUD_WSA_APIKEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.tencent_wsa.tools:web_search_tool\n")
+
+        result = doctor.check_web_search(cfg)
+
+        assert result.status == "warn"
+        assert "tencent_wsa configured but TENCENTCLOUD_WSA_APIKEY not set" in result.detail
+        assert "TENCENTCLOUD_WSA_APIKEY" in (result.fix or "")
+
+    def test_serply_with_key_ok(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SERPLY_API_KEY", "test-key")
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serply.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "ok"
+        assert "serply" in result.detail
+
+    def test_serply_without_key_warns(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SERPLY_API_KEY", raising=False)
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("config_version: 5\ntools:\n  - name: web_search\n    use: deerflow.community.serply.tools:web_search_tool\n")
+        result = doctor.check_web_search(cfg)
+        assert result.status == "warn"
+        assert "SERPLY_API_KEY" in (result.fix or "")
 
     def test_no_search_tool_warns(self, tmp_path):
         cfg = tmp_path / "config.yaml"

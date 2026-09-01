@@ -82,6 +82,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         self._user_id = _validate_user_id(user_id)
         paths = get_paths()
+        self._paths = paths
         self._user_custom_root: Path = paths.user_custom_skills_dir(self._user_id)
         self._integrations_root: Path = paths.integration_skills_dir()
         self._user_skills_root: Path = paths.user_skills_dir(self._user_id)
@@ -153,9 +154,11 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
     def set_skill_enabled_state(self, skill_name: str, enabled: bool) -> None:
         """Set the enabled state for a custom/legacy skill and persist."""
-        states = self._read_skill_states()
-        states[skill_name] = {"enabled": enabled}
-        self._write_skill_states(states)
+        removal_names = (skill_name,) if not enabled else ()
+        with self._skill_projection_mutation(remove_names=removal_names):
+            states = self._read_skill_states()
+            states[skill_name] = {"enabled": enabled}
+            self._write_skill_states(states)
 
     # ------------------------------------------------------------------
     # Path helpers — redirect custom skill paths to user directory
@@ -204,10 +207,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # being silently re-enabled by an absent per-user entry, while still
         # letting the per-user state override the global default when both
         # are present. PUBLIC skill state remains governed solely by
-        # extensions_config (handled by ``super().load_skills`` above).
-        from deerflow.config.extensions_config import get_extensions_config
+        # extensions_config (handled by ``super().load_skills`` above). Re-read
+        # from disk here too so another worker's update cannot be masked by
+        # this process's singleton cache while rebuilding a user projection.
+        from deerflow.config.extensions_config import ExtensionsConfig
 
-        extensions_config = get_extensions_config()
+        extensions_config = ExtensionsConfig.from_file()
         skills = [
             dataclasses.replace(s, enabled=self.get_skill_enabled_state(s.name) and extensions_config.is_skill_enabled(s.name, s.category.value if hasattr(s.category, "value") else s.category))
             if dataclasses.is_dataclass(s) and not isinstance(s, type) and (s.category.value if hasattr(s.category, "value") else s.category) != SkillCategory.PUBLIC.value
@@ -369,8 +374,13 @@ class UserScopedSkillStorage(LocalSkillStorage):
         ) as tmp_file:
             tmp_file.write(content)
             tmp_path = Path(tmp_file.name)
-        tmp_path.replace(target)
-        make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        try:
+            with self._skill_projection_mutation():
+                tmp_path.replace(target)
+                make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -402,7 +412,12 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
         Custom and managed integration skills live outside ``_host_root``, so
         the default implementation's single-root check would reject them.
+        One-level package-directory symlinks under either configured custom-skill
+        category root retain the operator-managed external-skill compatibility
+        of the base storage.
         """
+        if skill_file.is_symlink():
+            raise ValueError(f"Resolved skill file {skill_file} must stay within the configured skill roots and cannot be a symlink.")
         resolved_file = skill_file.resolve()
         allowed_roots = (
             self._host_root.resolve(),
@@ -415,6 +430,8 @@ class UserScopedSkillStorage(LocalSkillStorage):
                 return resolved_file
             except ValueError:
                 continue
+        if any(self._is_external_skill_directory_symlink(skill_file, custom_root) for custom_root in (self._user_custom_root, self._global_custom_root)):
+            return resolved_file
         raise ValueError(
             f"Resolved skill file {resolved_file} must stay within the global skills root "
             f"({self._host_root.resolve()}), the per-user custom root "
