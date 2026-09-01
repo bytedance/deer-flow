@@ -553,6 +553,21 @@ def test_markdown_label_and_structural_adjacency_are_redacted():
     assert "thread" not in neutralize("[see /api/threads/t1/uploads](https://example.com/public)")
 
 
+def test_markdown_private_label_collapses_the_link_even_with_private_destination():
+    """Round-9 P1: a link whose LABEL is private must collapse entirely even
+    when the destination is private too — the destination-private branch
+    would otherwise republish the private label verbatim beside the marker,
+    leaking the thread route through shared messages."""
+    from app.gateway.shares.snapshot import _neutralize_private_references as neutralize
+
+    collapsed = neutralize("[/api/threads/t1/uploads/x](/api/threads/t1/uploads/x)")
+    assert collapsed == "[private artifact omitted]"
+    assert "api/threads" not in collapsed
+    # Control: a public label with a private destination still publishes the
+    # label next to the marker (round-6 P3 behavior is unchanged).
+    assert neutralize("[report](/api/threads/t1/uploads/x)") == "report [private artifact omitted]"
+
+
 def test_neutralize_html_entity_separators():
     """Round 8 P1: HTML character references decode to real separators before
     display, so classification must collapse them in the shadow while the

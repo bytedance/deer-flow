@@ -195,6 +195,37 @@ def test_public_resolution_defensively_neutralizes_private_title_from_storage(tm
     assert response.json()["title"] == "[private artifact omitted]"
 
 
+def test_public_resolution_defensively_neutralizes_private_message_from_storage(tmp_path):
+    """Round-9 P1: snapshots are immutable once minted, so a stored message
+    that still carries a private path — written through a sanitizer defect or
+    before the rules were tightened — must be re-sanitized at the public read
+    boundary, exactly like the title already is."""
+    bad_snapshot = {
+        "version": 1,
+        "messages": [
+            {"id": "m1", "role": "user", "content": "fetch /api/threads/thread-secret/artifacts/report.pdf for the data"},
+        ],
+    }
+    token = "dfs_legacy-private-message"
+    with _client(tmp_path) as (client, repo):
+        asyncio.run(
+            repo.create(
+                thread_id=THREAD_A,
+                owner_user_id=str(USER_A.id),
+                token_hash=_hash(token),
+                title="Fine title",
+                snapshot_json=bad_snapshot,
+            )
+        )
+
+        response = client.get(f"/api/shares/{token}")
+
+    assert response.status_code == 200
+    content = response.json()["snapshot"]["messages"][0]["content"]
+    assert "thread-secret" not in content
+    assert "[private artifact omitted]" in content
+
+
 def test_operator_default_expiry_is_honored_without_coercion(tmp_path):
     """A configured default outside {1,7,30} must be used as-is, not coerced."""
     with _client(tmp_path, default_expiry_days=14) as (client, repo):

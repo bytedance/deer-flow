@@ -454,9 +454,12 @@ def _neutralize_private_references(text: str) -> str:
         if not destination_is_private and not label_is_private:
             return
         begin, stop = original_span(match.start(), match.end())
-        if label_is_private and not destination_is_private:
+        if label_is_private:
             # The leak is the LABEL itself (round 7): publishing it next to
             # the marker would defeat the point — collapse the whole link.
+            # That holds even when the destination is private too (round 9):
+            # falling through to the destination branch would republish the
+            # private label verbatim beside the marker.
             edits.append((begin, stop, _PRIVATE_REFERENCE_MARKER))
             return
         # The label must come from the original bytes, not the normalized
@@ -515,6 +518,30 @@ def sanitize_share_title(
     if not title:
         title = _neutralize_private_references(str(fallback)).strip()
     return (title or "Shared conversation")[:max_length]
+
+
+def resanitize_share_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Re-apply the private-reference neutralizer to a stored snapshot.
+
+    Snapshots are immutable once minted, so a message that still carries an
+    owner-only path — written through a sanitizer defect or before the rules
+    were tightened — would otherwise stay exposed on every public read until
+    the share is revoked. The public read boundary runs this pass next to
+    ``sanitize_share_title`` for the same reason.
+    """
+    messages = snapshot.get("messages")
+    if not isinstance(messages, list):
+        return snapshot
+    sanitized_messages: list[Any] = []
+    changed = False
+    for message in messages:
+        if isinstance(message, dict) and isinstance(message.get("content"), str):
+            sanitized = _neutralize_private_references(message["content"])
+            if sanitized != message["content"]:
+                changed = True
+                message = {**message, "content": sanitized}
+        sanitized_messages.append(message)
+    return {**snapshot, "messages": sanitized_messages} if changed else snapshot
 
 
 async def resolve_share_title(thread_id: str, *, request: Any, fallback: str = "Shared conversation") -> str:

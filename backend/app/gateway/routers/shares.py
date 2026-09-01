@@ -25,6 +25,7 @@ from app.gateway.deps import get_config, get_current_user
 from app.gateway.shares.snapshot import (
     ShareSnapshotTooLarge,
     build_share_snapshot,
+    resanitize_share_snapshot,
     resolve_share_title,
     sanitize_share_title,
 )
@@ -309,7 +310,7 @@ async def get_public_share(share_token: str, request: Request, response: Respons
         # Never log the token itself; hash-side failures stay generic.
         logger.debug("Share token did not resolve")
         raise _public_not_found()
-    snapshot = record.get("snapshot_json") or {}
+    snapshot = resanitize_share_snapshot(record.get("snapshot_json") or {})
     return PublicShareResponse(
         title=sanitize_share_title(record["title"]),
         snapshot_version=int(record.get("snapshot_version") or 1),
