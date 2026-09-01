@@ -27,6 +27,16 @@ Fail-closed by default: a mapped key that is absent from the request secrets
 falling back to the server's static discovery credential, which in a
 multi-tenant deployment would send one tenant's request under another
 tenant's authority. ``on_missing: "passthrough"`` is the explicit opt-out.
+
+A resolved value the transport would refuse (line break, surrounding
+whitespace, non-ASCII — see ``mcp/headers.py``) is always denied, regardless
+of ``on_missing``. h11 renders the full value into its exception message when
+it refuses a line break or surrounding whitespace, and that message would
+otherwise travel into a model-visible tool error and the trace; the non-ASCII
+case fails inside httpx instead, which names only the offending character, so
+denying it here buys an actionable error rather than secrecy. Either way a
+passthrough fallback would run the call under the shared discovery credential
+even though the caller did supply a key.
 """
 
 from __future__ import annotations
@@ -37,7 +47,11 @@ from typing import Any
 from langchain_core.tools import ToolException
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpContextHeadersConfig
-from deerflow.mcp.headers import apply_header_overrides, header_spellings
+from deerflow.mcp.headers import (
+    apply_header_overrides,
+    header_spellings,
+    illegal_header_value_reason,
+)
 from deerflow.runtime.secret_context import extract_request_secrets
 
 logger = logging.getLogger(__name__)
@@ -128,14 +142,44 @@ def build_context_headers_interceptor(extensions_config: ExtensionsConfig) -> An
         secrets = _request_secrets(request)
         resolved: dict[str, str] = {}
         missing: list[str] = []
+        illegal: dict[str, str] = {}
         for header_name, secret_key in context_headers.headers.items():
             # Empty string covers a caller-side `$ENV_VAR` that was unset: an
             # empty credential must fail closed rather than send an empty header.
             value = secrets.get(secret_key, "")
-            if value:
-                resolved[header_name] = value
-            else:
+            if not value:
                 missing.append(secret_key)
+                continue
+            # A value the transport would refuse (trailing newline from reading
+            # a token file, CR/LF, non-ASCII) must be rejected *here*. h11
+            # renders the full value into its exception message on the line
+            # break and whitespace cases, and ToolErrorHandlingMiddleware
+            # copies that message into a model-visible ToolMessage — putting
+            # the secret in the prompt, the checkpoint, and traces, everywhere
+            # this module promises it never goes. Always denied, regardless of
+            # on_missing: the key is present, so falling back to the discovery
+            # credential would silently run this tenant's call under the shared
+            # authority.
+            reason = illegal_header_value_reason(value)
+            if reason is not None:
+                illegal[secret_key] = reason
+                continue
+            resolved[header_name] = value
+
+        if illegal:
+            illegal_keys = ", ".join(sorted(illegal))
+            logger.warning(
+                "Denied MCP tool call to server '%s': request-scoped secret(s) %s cannot be sent as an HTTP header value",
+                request.server_name,
+                illegal_keys,
+            )
+            details = "; ".join(f"'{key}' {reason}" for key, reason in sorted(illegal.items()))
+            # Like the missing-key denial below, only the configured key names
+            # (plus the reason) are surfaced — never the value.
+            raise ToolException(
+                f"MCP server '{request.server_name}' cannot send request-scoped credential(s) as HTTP header values: {details}. "
+                "Fix the value passed in config.context.secrets; a stray newline picked up when reading a token from a file is the usual cause."
+            )
 
         if missing and context_headers.on_missing == "deny":
             missing_keys = ", ".join(sorted(missing))

@@ -1166,6 +1166,11 @@ export const zhCN: Translations = {
       emptyButton: "创建你的第一个技能",
       adminRequired: "需要管理员权限才能管理 Agent Skill。",
       installAdminRequired: "需要管理员权限才能安装 Agent Skill。",
+      installFromFile: "安装 .skill",
+      installingArchive: "正在安装…",
+      invalidArchive: "请选择扩展名为 .skill 的文件。",
+      archiveTooLarge: "技能包大小不能超过 100 MiB。",
+      installFailed: "安装技能包失败。",
     },
     notification: {
       title: "通知",
