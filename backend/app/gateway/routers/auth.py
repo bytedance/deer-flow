@@ -367,7 +367,12 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
+    # Same runtime flag as /me: these are the endpoints a fresh client hits
+    # first, and the field reports the deployment state, not this caller's
+    # just-minted session.
+    from app.gateway.auth_disabled import is_auth_disabled
+
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider, auth_disabled=is_auth_disabled())
 
 
 @router.post("/logout", response_model=MessageResponse)
@@ -700,7 +705,12 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
+    # Same runtime flag as /me: these are the endpoints a fresh client hits
+    # first, and the field reports the deployment state, not this caller's
+    # just-minted session.
+    from app.gateway.auth_disabled import is_auth_disabled
+
+    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider, auth_disabled=is_auth_disabled())
 
 
 # ── OIDC / SSO Endpoints ────────────────────────────────────────────────
