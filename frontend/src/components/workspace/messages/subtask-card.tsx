@@ -138,19 +138,26 @@ export function SubtaskCard({
           >
             <div className="flex w-full items-center justify-between">
               <ChainOfThoughtStep
-                className="font-normal"
+                className="min-w-0 flex-1 font-normal"
                 label={
-                  task.status === "in_progress" ? (
-                    <Shimmer duration={3} spread={3}>
-                      {task.description}
-                    </Shimmer>
-                  ) : (
-                    task.description
-                  )
+                  <span className="block truncate" title={task.description}>
+                    {task.status === "in_progress" ? (
+                      <Shimmer
+                        as="span"
+                        className="inline"
+                        duration={3}
+                        spread={3}
+                      >
+                        {task.description}
+                      </Shimmer>
+                    ) : (
+                      task.description
+                    )}
+                  </span>
                 }
                 icon={<ClipboardListIcon />}
               ></ChainOfThoughtStep>
-              <div className="flex items-center gap-1">
+              <div className="flex shrink-0 items-center gap-1">
                 {collapsed && (
                   <div
                     className={cn(
