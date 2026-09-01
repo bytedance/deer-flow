@@ -106,6 +106,27 @@ class TestCancelRunEndpointIdempotency:
         resp = client.post(f"/api/threads/{THREAD_ID}/runs/no-such-run/cancel")
         assert resp.status_code == 404
 
+    def test_cancel_after_record_eviction_returns_202_not_409(self):
+        """Single-worker mode with a store: once the finished run's record is
+        evicted from the registry, a durably interrupted run must still cancel
+        idempotently (202), not degrade to 409."""
+
+        async def _setup():
+            from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+            mgr = RunManager(store=MemoryRunStore())
+            record = await mgr.create(THREAD_ID)
+            await mgr.set_status(record.run_id, RunStatus.running)
+            await mgr.cancel(record.run_id)
+            await mgr.evict_finished_run(record.run_id)
+            assert record.run_id not in mgr._runs
+            return mgr, record.run_id
+
+        mgr, run_id = asyncio.run(_setup())
+        client = _make_app(mgr)
+        resp = client.post(f"/api/threads/{THREAD_ID}/runs/{run_id}/cancel")
+        assert resp.status_code == 202, f"Expected 202, got {resp.status_code}: {resp.text}"
+
     def test_cancel_successful_run_returns_409(self):
         """Successfully-completed runs cannot be cancelled — must return 409."""
 

@@ -48,6 +48,9 @@ class _FakeRunManager:
     async def wait_for_prior_finalizing(self, *_args, **_kwargs) -> None:
         return None
 
+    async def evict_finished_run(self, *_args, **_kwargs) -> None:
+        return None
+
     async def has_later_run(self, *_args, **_kwargs) -> bool:
         return False
 

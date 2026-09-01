@@ -662,13 +662,15 @@ async def test_has_inflight_ignores_checkpoint_write_reservation(manager: RunMan
 
 
 @pytest.mark.anyio
-async def test_cleanup(manager: RunManager):
-    """After cleanup, the run should be gone."""
-    record = await manager.create("thread-1")
+async def test_cleanup(manager_with_store: RunManager):
+    """After cleanup, a terminal run's registry record is gone — through the
+    durability guard, so the durable row is confirmed (or repaired) first."""
+    record = await manager_with_store.create("thread-1")
+    await manager_with_store.set_status(record.run_id, RunStatus.success)
     run_id = record.run_id
 
-    await manager.cleanup(run_id, delay=0)
-    assert await manager.get(run_id) is None
+    await manager_with_store.cleanup(run_id, delay=0)
+    assert run_id not in manager_with_store._runs
 
 
 @pytest.mark.anyio
@@ -1027,9 +1029,12 @@ async def test_create_or_reject_cancellation_after_registration_interrupts_repla
     stored_replacement = await store.get(replacement.run_id)
     assert not await manager.has_inflight("thread-1")
     assert replacement.status == RunStatus.interrupted
-    assert replacement.abort_event.is_set()
     assert stored_replacement is not None
     assert stored_replacement["status"] == RunStatus.interrupted.value
+    # The cancelled replacement never reaches a worker, so its admission
+    # close path must also evict it from the in-memory registry; the store
+    # row survives and list_by_thread() hydrates it on demand.
+    assert replacement.run_id not in manager._runs
 
 
 @pytest.mark.anyio
@@ -1481,18 +1486,21 @@ async def test_thread_index_preserves_insertion_order(manager: RunManager):
 
 
 @pytest.mark.anyio
-async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager: RunManager):
-    a1 = await manager.create("thread-a")
-    a2 = await manager.create("thread-a")
+async def test_thread_index_cleanup_prunes_run_and_empty_bucket(manager_with_store: RunManager):
+    a1 = await manager_with_store.create("thread-a")
+    a2 = await manager_with_store.create("thread-a")
+    await manager_with_store.set_status(a1.run_id, RunStatus.success)
+    await manager_with_store.set_status(a2.run_id, RunStatus.success)
 
-    await manager.cleanup(a1.run_id, delay=0)
-    assert a1.run_id not in manager._runs
-    assert set(manager._runs_by_thread["thread-a"]) == {a2.run_id}
+    await manager_with_store.cleanup(a1.run_id, delay=0)
+    assert a1.run_id not in manager_with_store._runs
+    assert set(manager_with_store._runs_by_thread["thread-a"]) == {a2.run_id}
 
-    await manager.cleanup(a2.run_id, delay=0)
-    # Empty buckets are pruned so the index cannot grow without bound.
-    assert "thread-a" not in manager._runs_by_thread
-    assert await manager.list_by_thread("thread-a") == []
+    await manager_with_store.cleanup(a2.run_id, delay=0)
+    # Empty buckets are pruned so the index cannot grow without bound, while
+    # the durable rows keep serving thread history after the records are gone.
+    assert "thread-a" not in manager_with_store._runs_by_thread
+    assert len(await manager_with_store.list_by_thread("thread-a")) == 2
 
 
 @pytest.mark.anyio

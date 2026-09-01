@@ -634,6 +634,9 @@ async def test_run_agent_does_not_stream_continuation_after_abort(monkeypatch):
         async def wait_for_prior_finalizing(self, *_args, **_kwargs):
             return None
 
+        async def evict_finished_run(self, *_args, **_kwargs):
+            return None
+
         async def set_finalizing(self, _run_id, finalizing):
             record.finalizing = finalizing
 
@@ -717,6 +720,9 @@ async def test_run_agent_reuses_goal_evaluator_model_for_goal_loop(monkeypatch):
             return None
 
         async def wait_for_prior_finalizing(self, *_args, **_kwargs):
+            return None
+
+        async def evict_finished_run(self, *_args, **_kwargs):
             return None
 
         async def set_finalizing(self, _run_id, finalizing):
@@ -901,6 +907,9 @@ async def test_run_agent_strips_branch_checkpoint_for_goal_continuation(monkeypa
             return None
 
         async def wait_for_prior_finalizing(self, *_args, **_kwargs):
+            return None
+
+        async def evict_finished_run(self, *_args, **_kwargs):
             return None
 
         async def set_finalizing(self, _run_id, finalizing):

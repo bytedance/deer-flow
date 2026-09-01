@@ -1,0 +1,837 @@
+"""Regression tests for event-driven in-memory run-record eviction.
+
+The ``RunManager._runs`` registry used to grow without bound: no production
+path ever removed a finished record, so every ``RunRecord`` — including its
+``kwargs["input"]`` copy of the full conversation payload — stayed resident
+for the lifetime of the Gateway process. These tests pin the terminal-path
+contract: once a run is terminal and finalization has completed, the registry
+record is evicted immediately, but only after the terminal state is confirmed
+in the backing RunStore (repaired from the in-memory snapshot when the
+best-effort durable writes failed).
+"""
+
+import asyncio
+
+import pytest
+from langchain_core.messages import AIMessage
+
+from deerflow.config.run_ownership_config import RunOwnershipConfig
+from deerflow.runtime import CancelOutcome
+from deerflow.runtime.runs import manager as runs_manager
+from deerflow.runtime.runs.manager import RunManager
+from deerflow.runtime.runs.schemas import RunStatus
+from deerflow.runtime.runs.store.memory import MemoryRunStore
+from deerflow.runtime.runs.worker import RunContext, run_agent
+
+
+def _make_bridge():
+    class _Bridge:
+        async def publish(self, run_id, event, data):
+            return None
+
+        async def publish_end(self, run_id):
+            return None
+
+        async def cleanup(self, run_id, *, delay=0):
+            return None
+
+    return _Bridge()
+
+
+class _OkAgent:
+    async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+        yield {"messages": [AIMessage(content="done")]}
+
+
+class _ExplodingAgent:
+    async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+        raise RuntimeError("boom")
+        yield  # pragma: no cover - keeps this a generator
+
+
+async def _run_to_completion(run_manager: RunManager, record, *, agent_factory, bridge=None) -> None:
+    await run_agent(
+        bridge or _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=None),
+        agent_factory=agent_factory,
+        graph_input={},
+        config={},
+    )
+
+
+@pytest.mark.anyio
+async def test_successful_run_evicts_record_after_finalization():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _OkAgent())
+    assert record.status == RunStatus.success
+
+    # Event-driven: once run_agent returns, finalization is complete and the
+    # record is already gone from the registry — no delay window.
+    assert record.run_id not in run_manager._runs
+    # The durable store row survives and hydrates on demand.
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+    assert await run_manager.list_by_thread("thread-1") != []
+
+
+@pytest.mark.anyio
+async def test_failed_run_evicts_record_after_finalization():
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _ExplodingAgent())
+    assert record.status == RunStatus.error
+
+    assert record.run_id not in run_manager._runs
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_fail_start_if_pending_retains_record_until_caller_evicts():
+    """fail_start_if_pending no longer evicts: the metadata-failure caller
+    continues into run_agent (whose tail owns the eviction), so evicting here
+    would race its try_start. The attach-failure caller evicts explicitly."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    marked = await run_manager.fail_start_if_pending(record.run_id, error="worker attach failed")
+    assert marked is True
+
+    assert record.run_id in run_manager._runs
+    assert (await store.get(record.run_id))["status"] == RunStatus.error.value
+
+    # The attach-failure site's explicit eviction (no run_agent follows).
+    await run_manager.evict_finished_run(record.run_id)
+    assert record.run_id not in run_manager._runs
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.error
+
+
+@pytest.mark.anyio
+async def test_run_agent_after_fail_start_if_pending_publishes_only_end():
+    """Regression (review #5061000616): the metadata-failure path calls
+    fail_start_if_pending and then continues into run_agent — the startup
+    barrier must turn the failed admission into no-agent-construction plus a
+    single end frame, not a spurious RunStartupError error frame."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+
+    events: list[tuple[str, object]] = []
+
+    class _RecordingBridge:
+        async def publish(self, run_id, event, data):
+            events.append((event, data))
+
+        async def publish_end(self, run_id):
+            events.append(("end", None))
+
+        async def cleanup(self, run_id, *, delay=0):
+            return None
+
+    assert await run_manager.fail_start_if_pending(record.run_id, error="Timed out verifying existing thread metadata") is True
+    assert record.run_id in run_manager._runs
+
+    await _run_to_completion(
+        run_manager,
+        record,
+        agent_factory=lambda *, config: _OkAgent(),
+        bridge=_RecordingBridge(),
+    )
+
+    # Exactly one end frame, no error frame — main's behavior.
+    assert [event for event, _ in events] == ["end"]
+    # run_agent's tail evicts the failed record once durable.
+    assert record.run_id not in run_manager._runs
+    assert (await store.get(record.run_id))["status"] == RunStatus.error.value
+
+
+@pytest.mark.anyio
+async def test_skipped_eviction_does_not_rearm_stalled_records(monkeypatch):
+    """A skipped eviction (no store read at all) proves nothing about store
+    health and must not send stalled records back through failing retries."""
+    monkeypatch.setattr("deerflow.runtime.runs.manager.RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS", 0.0)
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+
+    # One record whose eviction retries exhaust while the store is down.
+    stalled = await run_manager.create("thread-stalled")
+    await run_manager.set_status(stalled.run_id, RunStatus.success, persist=False)
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store down")
+
+    store.get = failing_get
+    await run_manager.evict_finished_run(stalled.run_id)
+    await run_manager._eviction_retry_tasks[stalled.run_id]
+    assert stalled.run_id in run_manager._stalled_evictions
+
+    # An eviction that early-exits without touching the store (active record)
+    # must NOT re-arm the stalled one.
+    active = await run_manager.create("thread-active")
+    await run_manager.set_status(active.run_id, RunStatus.running)
+    assert await run_manager._evict_run_record_if_durable(active.run_id) == "skipped"
+    assert run_manager._eviction_retry_tasks == {}
+
+
+@pytest.mark.anyio
+async def test_eviction_skipped_without_store_backing():
+    """No RunStore means no fallback for get()/list_by_thread() and the
+    registry is the only idempotency dedup — records must be retained."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+
+    await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _OkAgent())
+    assert record.status == RunStatus.success
+
+    assert record.run_id in run_manager._runs
+    assert await run_manager.get(record.run_id) is record
+
+
+@pytest.mark.anyio
+async def test_eviction_retains_record_until_terminal_state_durable():
+    """When the store cannot confirm the terminal state, the record — which
+    may hold the only correct snapshot — is retained for retry."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success)
+
+    original_get = store.get
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store unavailable")
+
+    store.get = failing_get
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "unconfirmed"
+    assert record.run_id in run_manager._runs
+
+    store.get = original_get
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_eviction_repairs_stale_store_row_from_memory_snapshot():
+    """A still-active durable row is repaired from the in-memory terminal
+    snapshot before the record is dropped."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    # Stage a terminal outcome in memory without a durable write.
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    row = await store.get(record.run_id)
+    assert row is not None and row["status"] != RunStatus.success.value
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+
+    row = await store.get(record.run_id)
+    assert row is not None and row["status"] == RunStatus.success.value
+    assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_idempotent_reuse_does_not_cache_store_rows():
+    """Store-only idempotency hydrations are returned uncached: an active row
+    belongs to another worker and a cached active copy would outlive the
+    owner's completion (fencing the thread via local_inflight forever), while
+    a terminal row is served on demand by store hydration."""
+    store = MemoryRunStore()
+    owning = RunManager(store=store)
+    admitted = await owning.create_or_reject("thread-1", idempotency_key="idem-1")
+    await owning.set_status(admitted.run_id, RunStatus.running)
+
+    reusing = RunManager(store=store)
+    reused = await reusing.create_or_reject("thread-1", idempotency_key="idem-1")
+    assert reused.run_id == admitted.run_id
+    assert reused.idempotency_reused is True
+    assert reused.run_id not in reusing._runs
+
+    # After the owning worker finishes, the reusing worker neither holds a
+    # stale active copy nor fences the thread.
+    await owning.set_status(admitted.run_id, RunStatus.success)
+    assert not await reusing.has_inflight("thread-1")
+    terminal_reuse = await reusing.create_or_reject("thread-1", idempotency_key="idem-1")
+    assert terminal_reuse.run_id == admitted.run_id
+    assert terminal_reuse.idempotency_reused is True
+    assert terminal_reuse.run_id not in reusing._runs
+
+    hydrated = await reusing.get(admitted.run_id, raise_on_store_error=True)
+    assert hydrated is not None
+    assert hydrated.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_idempotent_reuse_of_active_local_run_returns_live_record():
+    """Same-worker reuse of a live run returns the registered record itself."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create_or_reject("thread-1", idempotency_key="idem-2")
+
+    reused = await run_manager.create_or_reject("thread-1", idempotency_key="idem-2")
+    assert reused is record
+    assert reused.idempotency_reused is True
+
+
+@pytest.mark.anyio
+async def test_cancel_stays_idempotent_after_record_eviction():
+    """Single-worker mode: after eviction, a durably interrupted run still
+    cancels idempotently (202 semantics) instead of 409."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+    assert await run_manager.cancel(record.run_id) == CancelOutcome.cancelled
+
+    await run_manager.evict_finished_run(record.run_id)
+    assert record.run_id not in run_manager._runs
+
+    assert await run_manager.cancel(record.run_id) == CancelOutcome.cancelled
+
+
+@pytest.mark.anyio
+async def test_fenced_worker_never_repairs_store_on_eviction():
+    """Multi-worker regression: a worker that lost lease ownership reaches
+    the eviction tail while the durable row is still active — its fenced
+    local error snapshot must never be published over the peer's row."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+
+    # A peer takes over the lease: the durable row stays active but flips to
+    # the peer's ownership.
+    row = await store.get(record.run_id)
+    row["owner_worker_id"] = "worker-b"
+    row["lease_expires_at"] = "2999-01-01T00:00:00+00:00"
+
+    # The stalled worker is fenced: local error rewrite only, no store write.
+    assert await run_manager._mark_ownership_lost(record, reason="lease expired") is True
+    assert record.status is RunStatus.error
+    assert record.ownership_lost is True
+    assert (await store.get(record.run_id))["status"] == RunStatus.running.value
+
+    puts: list[dict] = []
+    original_put = store.put
+
+    async def counting_put(run_id, **payload):
+        puts.append(payload)
+        return await original_put(run_id, **payload)
+
+    store.put = counting_put
+
+    # Eviction with the row still active: no store write, record retained.
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "unconfirmed"
+    assert puts == []
+    assert record.run_id in run_manager._runs
+    assert (await store.get(record.run_id))["status"] == RunStatus.running.value
+    assert (await store.get(record.run_id))["owner_worker_id"] == "worker-b"
+
+    # The peer terminalizes the row; the next eviction is read-only and drops
+    # the fenced overlay.
+    row["status"] = RunStatus.success.value
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert puts == []
+    assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_fenced_worker_evicts_overlay_when_row_missing():
+    """A fenced record whose store row disappeared (no peer will ever
+    terminalize it) drops its overlay instead of lingering in the registry."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.running)
+    assert await run_manager._mark_ownership_lost(record, reason="lease expired") is True
+
+    await store.delete(record.run_id)
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert record.run_id not in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_eviction_repairs_completion_data_when_status_only_durable():
+    """The completion write is best-effort: when only the terminal status
+    reached the store, eviction repairs the completion snapshot before
+    dropping the record that holds the only copy."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success)
+    record.total_tokens = 123
+    record.message_count = 4
+    record.last_ai_message = "done"
+    row = await store.get(record.run_id)
+    assert row["status"] == RunStatus.success.value
+    assert row.get("total_tokens", 0) == 0
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+
+    row = await store.get(record.run_id)
+    assert row["total_tokens"] == 123
+    assert row["message_count"] == 4
+    assert row["last_ai_message"] == "done"
+    assert record.run_id not in run_manager._runs
+    hydrated = await run_manager.get(record.run_id, raise_on_store_error=True)
+    assert hydrated.total_tokens == 123
+
+
+@pytest.mark.anyio
+async def test_shutdown_drains_runs_before_eviction_retries():
+    """A cancellation-resistant eviction retry must not consume the run-drain
+    budget: runs are drained first, retries only afterwards."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    done = await run_manager.create("thread-1")
+    await run_manager.set_status(done.run_id, RunStatus.success, persist=False)
+    live = await run_manager.create("thread-2")
+    await run_manager.set_status(live.run_id, RunStatus.running)
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store unavailable")
+
+    resist_cancellation = asyncio.Event()
+
+    async def resistant_retry(run_id):
+        while not resist_cancellation.is_set():
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                if resist_cancellation.is_set():
+                    raise
+
+    store.get = failing_get
+    run_manager._retry_eviction_until_durable = resistant_retry  # type: ignore[method-assign]
+    await run_manager.evict_finished_run(done.run_id)
+    retry = run_manager._eviction_retry_tasks[done.run_id]
+    assert not retry.done()
+    await asyncio.sleep(0)  # start the retry so cancellation hits a running task
+
+    async def slow_run():
+        try:
+            await asyncio.sleep(10)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.05)  # bounded cleanup after cancellation
+            raise
+
+    live.task = asyncio.create_task(slow_run())
+    await asyncio.sleep(0)  # park the run in its sleep before shutdown signals it
+
+    await run_manager.shutdown(timeout=1.0)
+
+    # The run drained within the budget despite the resistant retry.
+    assert live.task.done()
+    assert not retry.done()  # still resistant, but fenced and re-cancelled
+    resist_cancellation.set()
+    retry.cancel()
+    await asyncio.gather(retry, return_exceptions=True)
+    assert run_manager._eviction_retry_tasks == {}
+
+
+@pytest.mark.anyio
+async def test_eviction_retry_lifecycle_is_deduplicated_and_shutdown_fenced():
+    """Retry tasks are deduplicated per run, cancelled at shutdown, and the
+    shutdown fence prevents a finalizing worker from spawning new ones."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store unavailable")
+
+    store.get = failing_get
+    await run_manager.evict_finished_run(record.run_id)
+    retry = run_manager._eviction_retry_tasks[record.run_id]
+    await run_manager.evict_finished_run(record.run_id)
+    assert run_manager._eviction_retry_tasks[record.run_id] is retry
+
+    await run_manager.shutdown(timeout=1)
+    assert run_manager._eviction_retry_tasks == {}
+    assert retry.cancelled()
+
+    # Fenced: durability stays unconfirmed, but no new retry is spawned.
+    await run_manager.evict_finished_run(record.run_id)
+    assert run_manager._eviction_retry_tasks == {}
+    assert record.run_id in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_store_canonicalization_alone_does_not_trigger_repair():
+    """Rows differing only by the owning store's canonicalization — its
+    declared summary-prefix truncation, empty containers stored as absent
+    keys — are durable as-is; only genuinely missing values repair."""
+
+    class _TruncatingStore(MemoryRunStore):
+        message_summary_max_chars = 2000
+
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    record.last_ai_message = "x" * 3000
+    record.token_usage_by_model = {}
+
+    full_row = {"last_ai_message": "x" * 3000, "token_usage_by_model": {}}
+    assert run_manager._completion_needs_repair(full_row, record) is False
+
+    # A full-preservation store detects the truncated row as a divergence.
+    truncated_row = {"last_ai_message": "x" * 2000}
+    assert run_manager._completion_needs_repair(truncated_row, record) is True
+
+    # A store declaring the truncation sees its own canonicalized row — with
+    # the empty usage dict stored as an absent key — as durable.
+    truncating = RunManager(store=_TruncatingStore())
+    assert truncating._completion_needs_repair(truncated_row, record) is False
+
+    # A genuinely missing completion value still reports repair.
+    record.total_tokens = 5
+    assert truncating._completion_needs_repair(truncated_row, record) is True
+
+
+@pytest.mark.anyio
+async def test_exhausted_eviction_rearms_after_store_recovers(monkeypatch):
+    """A record whose bounded retries exhausted is re-armed by the next
+    successful eviction once the store is healthy again."""
+    monkeypatch.setattr(runs_manager, "RUN_RECORD_EVICTION_RETRY_MAX_ATTEMPTS", 1)
+    monkeypatch.setattr(runs_manager, "RUN_RECORD_EVICTION_RETRY_DELAY_SECONDS", 0.01)
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    stuck = await run_manager.create("thread-1")
+    await run_manager.set_status(stuck.run_id, RunStatus.success, persist=False)
+    original_get = store.get
+
+    async def failing_get(run_id, *, user_id=None):
+        raise OSError("store unavailable")
+
+    store.get = failing_get
+    await run_manager.evict_finished_run(stuck.run_id)
+    await asyncio.wait_for(run_manager._eviction_retry_tasks[stuck.run_id], timeout=5)
+    assert stuck.run_id in run_manager._runs
+    assert stuck.run_id in run_manager._stalled_evictions
+
+    # Store recovers; an unrelated run's successful eviction re-arms the
+    # stalled record, whose own retry now repairs and evicts it.
+    store.get = original_get
+    healthy = await run_manager.create("thread-2")
+    await run_manager.set_status(healthy.run_id, RunStatus.success)
+    await run_manager.evict_finished_run(healthy.run_id)
+    assert healthy.run_id not in run_manager._runs
+
+    rearmed = run_manager._eviction_retry_tasks.get(stuck.run_id)
+    assert rearmed is not None and not rearmed.done()
+    await asyncio.wait_for(rearmed, timeout=5)
+    assert stuck.run_id not in run_manager._runs
+    assert stuck.run_id not in run_manager._stalled_evictions
+    assert (await store.get(stuck.run_id))["status"] == RunStatus.success.value
+
+
+class _CompletionRefusingStore(MemoryRunStore):
+    """``update_run_completion`` reports False without applying the write."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refuse_completion = False
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        if self.refuse_completion:
+            return False
+        return await super().update_run_completion(run_id, status=status, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_eviction_retains_record_when_completion_repair_reports_failure():
+    """An explicit ``update_run_completion`` False is an unconfirmed repair:
+    the record — holding the only completion snapshot — is retained instead
+    of being dropped as if the write had landed."""
+    store = _CompletionRefusingStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    store.refuse_completion = True
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "unconfirmed"
+    assert record.run_id in run_manager._runs
+    assert (await store.get(record.run_id)).get("total_tokens") is None
+
+    store.refuse_completion = False
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert (await store.get(record.run_id))["total_tokens"] == 123
+    assert record.run_id not in run_manager._runs
+
+
+class _ConflictingTerminalStore(MemoryRunStore):
+    """A peer reconciler wins the race and terminalizes the row differently
+    between the repair's ``put`` and its completion write."""
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        run = self._runs.get(run_id)
+        if run is not None:
+            run["status"] = "error"
+            run["error"] = "taken over by peer"
+        return False
+
+
+@pytest.mark.anyio
+async def test_eviction_drops_overlay_when_peer_wrote_conflicting_terminal():
+    """When the recheck shows a peer's terminal outcome, that row is the
+    durable authority: the overlay is dropped without republishing our
+    snapshot or completion data over it."""
+    store = _ConflictingTerminalStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert record.run_id not in run_manager._runs
+
+    row = await store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row.get("total_tokens") is None
+
+
+class _WriteTrackingStore(MemoryRunStore):
+    """Records every mutation attempt against the durable row."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.writes: list[str] = []
+
+    async def put(self, run_id, **payload):
+        self.writes.append("put")
+        return await super().put(run_id, **payload)
+
+    async def update_status(self, run_id, status, **kwargs):
+        self.writes.append("update_status")
+        return await super().update_status(run_id, status, **kwargs)
+
+    async def update_run_completion(self, run_id, *, status, **kwargs):
+        self.writes.append("update_run_completion")
+        return await super().update_run_completion(run_id, status=status, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_eviction_never_overwrites_an_already_conflicting_terminal_row():
+    """A durable peer terminal outcome is authoritative: the local snapshot
+    is dropped without a single write to the row."""
+    store = _WriteTrackingStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    row = await store.get(record.run_id)
+    row["status"] = "error"
+    row["error"] = "taken over by peer"
+    store.writes.clear()
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert record.run_id not in run_manager._runs
+    assert store.writes == []
+
+    row = await store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row["error"] == "taken over by peer"
+    assert row.get("total_tokens") is None
+
+
+class _PeerTakeoverAfterFirstReadStore(_WriteTrackingStore):
+    """The eviction-time read still sees an active row; the peer
+    terminalizes it immediately afterwards."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._reads = 0
+
+    async def get(self, run_id, *, user_id=None):
+        self._reads += 1
+        if self._reads == 1:
+            snapshot = dict(await super().get(run_id, user_id=user_id))
+            row = self._runs[run_id]
+            row["status"] = "error"
+            row["error"] = "taken over by peer"
+            return snapshot
+        return await super().get(run_id, user_id=user_id)
+
+
+@pytest.mark.anyio
+async def test_eviction_detects_peer_takeover_between_read_and_repair():
+    """A peer terminalizing after the eviction-time read must not be
+    clobbered by the repair that follows it."""
+    store = _PeerTakeoverAfterFirstReadStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    store.writes.clear()
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+    assert record.run_id not in run_manager._runs
+    assert store.writes == []
+
+    row = await store.get(record.run_id)
+    assert row["status"] == "error"
+    assert row.get("total_tokens") is None
+
+
+@pytest.mark.anyio
+async def test_full_preservation_store_detects_summary_divergence_beyond_shared_prefix():
+    """MemoryRunStore stores summaries in full: an older durable summary that
+    shares the record's first 2000 characters is still a mismatch (a global
+    SQL-style prefix comparison would miss the suffix and drop it)."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    shared = "A" * 2500
+    record.last_ai_message = f"{shared}-record"
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    # The durable row is terminal but carries the older summary.
+    row = await store.get(record.run_id)
+    row["status"] = RunStatus.success.value
+    row["last_ai_message"] = f"{shared}-store"
+
+    assert await run_manager._evict_run_record_if_durable(record.run_id) == "evicted"
+
+    row = await store.get(record.run_id)
+    assert row["last_ai_message"] == f"{shared}-record"
+    assert record.run_id not in run_manager._runs
+
+
+class _FailingRereadStore(_CompletionRefusingStore):
+    """The final re-read after a refused completion repair fails."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._reads = 0
+
+    async def get(self, run_id, *, user_id=None):
+        self._reads += 1
+        if self._reads >= 3:
+            raise OSError("store unavailable")
+        return await super().get(run_id, user_id=user_id)
+
+
+@pytest.mark.anyio
+async def test_failed_reread_after_refused_completion_repair_stays_in_retry_lifecycle():
+    """A refused completion repair followed by a failing re-read falls back
+    into the bounded retry lifecycle instead of escaping ``evict_finished_run``
+    and stranding the record with neither a retry task nor a stalled marker."""
+    store = _FailingRereadStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+    record.total_tokens = 123
+    store.refuse_completion = True
+
+    await run_manager.evict_finished_run(record.run_id)
+
+    assert record.run_id in run_manager._runs
+    assert record.run_id in run_manager._eviction_retry_tasks
+    assert record.run_id not in run_manager._stalled_evictions
+    # Clean up the sleeping retry so the test loop does not outlive it.
+    await run_manager.shutdown(timeout=1)
+
+
+@pytest.mark.anyio
+async def test_worker_eviction_happens_after_durable_completion_and_end_frame():
+    """The registry eviction strictly follows the durable terminal write and
+    the stream END frame — never before what finalization owes."""
+    store = MemoryRunStore()
+    events: list[str] = []
+    original_finalize = store.finalize_if_not_cancelled
+
+    async def recording_finalize(run_id, *, status, **kwargs):
+        result = await original_finalize(run_id, status=status, **kwargs)
+        events.append("durable-terminal")
+        return result
+
+    store.finalize_if_not_cancelled = recording_finalize
+
+    class _OrderBridge:
+        async def publish(self, run_id, event, data):
+            return None
+
+        async def publish_end(self, run_id):
+            events.append("publish_end")
+
+        async def cleanup(self, run_id, *, delay=0):
+            return None
+
+    # Take the real CAS terminal path (``finalize_if_not_cancelled``) rather
+    # than the heartbeat-disabled plain ``set_status`` fallback.
+    run_manager = RunManager(store=store, run_ownership_config=RunOwnershipConfig(heartbeat_enabled=True))
+    original_evict = run_manager.evict_finished_run
+
+    async def recording_evict(run_id):
+        await original_evict(run_id)
+        events.append("evict")
+
+    run_manager.evict_finished_run = recording_evict
+    record = await run_manager.create("thread-1")
+
+    await run_agent(
+        _OrderBridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=None),
+        agent_factory=lambda *, config: _OkAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert events.index("durable-terminal") < events.index("publish_end") < events.index("evict")
+
+
+@pytest.mark.anyio
+async def test_cancellation_during_eviction_hands_off_to_background():
+    """A cancellation unwinding through the eviction await must not strand the
+    record: the manager's tracked background path takes over, then the
+    cancellation keeps propagating."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    handed_off: list[str] = []
+
+    async def cancelling_evict(run_id):
+        raise asyncio.CancelledError
+
+    run_manager.evict_finished_run = cancelling_evict
+    run_manager.evict_finished_run_soon = handed_off.append
+    record = await run_manager.create("thread-1")
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run_to_completion(run_manager, record, agent_factory=lambda *, config: _OkAgent())
+
+    assert handed_off == [record.run_id]
+    # The record stays registered: its eviction is now the background task's job.
+    assert record.run_id in run_manager._runs
+
+
+@pytest.mark.anyio
+async def test_public_cleanup_routes_through_durability_guard():
+    """cleanup() no longer drops a record unconditionally: a stale durable row
+    is repaired from the snapshot first, and the drop follows confirmation."""
+    store = MemoryRunStore()
+    run_manager = RunManager(store=store)
+    record = await run_manager.create("thread-1")
+    await run_manager.set_status(record.run_id, RunStatus.success, persist=False)
+
+    await run_manager.cleanup(record.run_id, delay=0)
+
+    row = await store.get(record.run_id)
+    assert row is not None and row["status"] == RunStatus.success.value
+    assert record.run_id not in run_manager._runs
+    # Durable history survives the cleanup-driven eviction.
+    assert await run_manager.get(record.run_id, raise_on_store_error=True) is not None
