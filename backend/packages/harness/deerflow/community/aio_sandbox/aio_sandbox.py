@@ -266,6 +266,14 @@ class AioSandbox(Sandbox):
                     _ScopedShellSession(),
                 )
             with scoped.lock:
+                # Registration and command execution are separated by the
+                # per-scope wait.  Revalidate identity after that wait so a
+                # release/close which removed this exact scope is a hard
+                # lifecycle fence: queued callers cannot resurrect a session
+                # on an orphaned registry entry.
+                with self._scope_registry_lock:
+                    if self._closed or self._scoped_shell_sessions.get(scope_id) is not scoped:
+                        raise RuntimeError("sandbox command scope is no longer active")
                 client = self._client
                 if client is None:
                     raise RuntimeError("sandbox client is closed")

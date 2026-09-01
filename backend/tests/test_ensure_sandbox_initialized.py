@@ -6,6 +6,7 @@ import pytest
 from langchain.tools import ToolRuntime
 from langgraph.types import Overwrite
 
+from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, get_sandbox_lease_manager
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -178,6 +179,39 @@ async def test_ensure_sandbox_initialized_async_plain_state_unchanged() -> None:
 
     assert sandbox is provider.sandbox
     assert runtime.context["sandbox_id"] == "parent-sandbox"
+
+
+def test_reuse_with_config_only_thread_id_binds_execution_owner() -> None:
+    provider = _RecordingProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = "config-owner"
+        runtime.config["configurable"]["thread_id"] = "thread-from-config"
+
+        sandbox = ensure_sandbox_initialized(runtime)
+
+        assert sandbox is provider.sandbox
+        assert get_sandbox_lease_manager(provider).binding_for("config-owner") == "parent-sandbox"
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_async_reuse_with_config_only_thread_id_binds_execution_owner() -> None:
+    provider = _RecordingProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = "config-owner"
+        runtime.config["configurable"]["thread_id"] = "thread-from-config"
+
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+
+        assert sandbox is provider.sandbox
+        assert get_sandbox_lease_manager(provider).binding_for("config-owner") == "parent-sandbox"
+    finally:
+        reset_sandbox_provider()
 
 
 @pytest.mark.anyio

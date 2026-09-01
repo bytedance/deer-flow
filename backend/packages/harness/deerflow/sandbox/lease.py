@@ -92,7 +92,13 @@ class SandboxLeaseManager:
         return previous, release_previous
 
     def _release_unbound_acquire(self, sandbox_id: str) -> None:
-        """Undo a cancelled acquire when no admitted execution uses its result."""
+        """Undo a cancelled acquire when no admitted execution uses its result.
+
+        The caller must still hold the serializer for the originating thread
+        key.  That makes the owner check and provider release one transition:
+        another execution for the same thread cannot bind the sandbox between
+        them.
+        """
         with self._metadata_lock:
             has_owners = bool(self._owners_by_sandbox.get(sandbox_id))
         if not has_owners:
@@ -298,3 +304,42 @@ def sandbox_command_scope(context: Any) -> str | None:
         return None
     scope_id = context.get(SANDBOX_COMMAND_SCOPE_CONTEXT_KEY)
     return scope_id if isinstance(scope_id, str) and scope_id else None
+
+
+def _sandbox_execution_lease(context: Any) -> tuple[str, str] | None:
+    """Return a bound execution lease without initializing a provider."""
+    owner_id = sandbox_lease_owner(context)
+    if owner_id is None or not isinstance(context, dict):
+        return None
+    sandbox_id = context.get("sandbox_id")
+    if not isinstance(sandbox_id, str) or not sandbox_id:
+        return None
+    return owner_id, sandbox_id
+
+
+def release_sandbox_execution_lease(context: Any) -> None:
+    """Release a lead/embedded execution lease at its outer lifecycle fence."""
+    lease = _sandbox_execution_lease(context)
+    if lease is None:
+        return
+
+    # Import lazily so runs that never touch a sandbox do not initialize the
+    # provider during terminal cleanup.
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+    owner_id, _sandbox_id = lease
+    provider = get_sandbox_provider()
+    get_sandbox_lease_manager(provider).release(owner_id)
+
+
+async def release_sandbox_execution_lease_async(context: Any) -> None:
+    """Async counterpart to :func:`release_sandbox_execution_lease`."""
+    lease = _sandbox_execution_lease(context)
+    if lease is None:
+        return
+
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+    owner_id, _sandbox_id = lease
+    provider = get_sandbox_provider()
+    await get_sandbox_lease_manager(provider).release_async(owner_id)

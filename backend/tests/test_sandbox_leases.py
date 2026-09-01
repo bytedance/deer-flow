@@ -174,6 +174,62 @@ async def test_cancelled_async_acquire_releases_unbound_provider_result() -> Non
     assert provider.release_calls == ["shared"]
 
 
+@pytest.mark.anyio
+async def test_cancelled_async_acquire_keeps_same_thread_serialized_through_reconciliation() -> None:
+    acquire_started = asyncio.Event()
+    allow_acquire = asyncio.Event()
+    release_started = threading.Event()
+    allow_release = threading.Event()
+
+    class _BlockingReconciliationProvider(_LeaseProvider):
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            self.acquire_calls.append((thread_id, user_id))
+            acquire_started.set()
+            await allow_acquire.wait()
+            return self.sandbox.id
+
+        def release(self, sandbox_id):
+            release_started.set()
+            allow_release.wait(timeout=1)
+            super().release(sandbox_id)
+
+    provider = _BlockingReconciliationProvider()
+    manager = SandboxLeaseManager(provider)
+    acquire_task = asyncio.create_task(manager.acquire_async("cancelled", "thread-1", user_id="user-1"))
+    await acquire_started.wait()
+
+    acquire_task.cancel()
+    allow_acquire.set()
+    assert await asyncio.to_thread(release_started.wait, 1)
+
+    retain_done = threading.Event()
+
+    def retain_next_owner() -> None:
+        manager.retain(
+            "next",
+            "shared",
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+        retain_done.set()
+
+    retain_thread = threading.Thread(target=retain_next_owner)
+    retain_thread.start()
+    retain_thread.join(timeout=0.05)
+    assert retain_thread.is_alive()
+
+    allow_release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await acquire_task
+    retain_thread.join(timeout=1)
+
+    assert not retain_thread.is_alive()
+    assert retain_done.is_set()
+    assert provider.release_calls == ["shared"]
+    assert manager.binding_for("cancelled") is None
+    assert manager.binding_for("next") == "shared"
+
+
 def test_new_acquire_waits_until_last_release_transition_finishes() -> None:
     release_started = threading.Event()
     allow_release = threading.Event()

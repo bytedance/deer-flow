@@ -7,6 +7,29 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+class _TeardownFirstScopeLock:
+    """Let teardown clean a scope before one already-admitted waiter runs."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.command_waiting = threading.Event()
+        self.allow_command = threading.Event()
+        self.command_done = threading.Event()
+
+    def __enter__(self):
+        if threading.current_thread().name == "queued-command":
+            self.command_waiting.set()
+            self.allow_command.wait(timeout=2)
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._lock.release()
+        if threading.current_thread().name == "scope-teardown":
+            self.allow_command.set()
+            self.command_done.wait(timeout=2)
+
+
 def test_local_sandbox_client_bypasses_environment_proxy():
     """Local sandbox API calls must not inherit HTTP_PROXY (#3441)."""
     from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
@@ -362,6 +385,82 @@ class TestScopedShellSessions:
         assert exec_ids[-1] == created_ids[1]
 
         sandbox.release_command_scope("subagent-a")
+        assert cleaned_ids == created_ids
+
+    def test_queued_command_cannot_restart_session_after_scope_release(self, sandbox):
+        created_ids: list[str] = []
+        executed_commands: list[str] = []
+        cleaned_ids: list[str] = []
+
+        sandbox._client.shell.create_session = lambda id, **kwargs: created_ids.append(id)
+        sandbox._client.shell.exec_command = lambda command, **kwargs: executed_commands.append(command) or SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+        sandbox._client.shell.cleanup_session = lambda session_id, **kwargs: cleaned_ids.append(session_id)
+
+        assert sandbox.execute_command_in_scope("initial", scope_id="subagent-a") == "ok"
+        scoped = sandbox._scoped_shell_sessions["subagent-a"]
+        controlled_lock = _TeardownFirstScopeLock()
+        scoped.lock = controlled_lock
+        queued_results: list[str] = []
+
+        def queued_command() -> None:
+            try:
+                queued_results.append(sandbox.execute_command_in_scope("late", scope_id="subagent-a"))
+            finally:
+                controlled_lock.command_done.set()
+
+        command_thread = threading.Thread(target=queued_command, name="queued-command")
+        command_thread.start()
+        assert controlled_lock.command_waiting.wait(timeout=1)
+        teardown_thread = threading.Thread(
+            target=sandbox.release_command_scope,
+            args=("subagent-a",),
+            name="scope-teardown",
+        )
+        teardown_thread.start()
+        command_thread.join(timeout=2)
+        teardown_thread.join(timeout=2)
+
+        assert not command_thread.is_alive()
+        assert not teardown_thread.is_alive()
+        assert queued_results == ["Error: sandbox command scope is no longer active"]
+        assert len(created_ids) == 1
+        assert executed_commands == ["initial"]
+        assert cleaned_ids == created_ids
+
+    def test_queued_command_cannot_restart_session_while_sandbox_closes(self, sandbox):
+        created_ids: list[str] = []
+        executed_commands: list[str] = []
+        cleaned_ids: list[str] = []
+
+        sandbox._client.shell.create_session = lambda id, **kwargs: created_ids.append(id)
+        sandbox._client.shell.exec_command = lambda command, **kwargs: executed_commands.append(command) or SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0))
+        sandbox._client.shell.cleanup_session = lambda session_id, **kwargs: cleaned_ids.append(session_id)
+
+        assert sandbox.execute_command_in_scope("initial", scope_id="subagent-a") == "ok"
+        scoped = sandbox._scoped_shell_sessions["subagent-a"]
+        controlled_lock = _TeardownFirstScopeLock()
+        scoped.lock = controlled_lock
+        queued_results: list[str] = []
+
+        def queued_command() -> None:
+            try:
+                queued_results.append(sandbox.execute_command_in_scope("late", scope_id="subagent-a"))
+            finally:
+                controlled_lock.command_done.set()
+
+        command_thread = threading.Thread(target=queued_command, name="queued-command")
+        command_thread.start()
+        assert controlled_lock.command_waiting.wait(timeout=1)
+        teardown_thread = threading.Thread(target=sandbox.close, name="scope-teardown")
+        teardown_thread.start()
+        command_thread.join(timeout=2)
+        teardown_thread.join(timeout=2)
+
+        assert not command_thread.is_alive()
+        assert not teardown_thread.is_alive()
+        assert queued_results == ["Error: sandbox command scope is no longer active"]
+        assert len(created_ids) == 1
+        assert executed_commands == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_env_command_keeps_fresh_bash_exec_semantics(self, sandbox):

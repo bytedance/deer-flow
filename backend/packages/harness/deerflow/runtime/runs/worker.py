@@ -1578,11 +1578,28 @@ async def run_agent(
                     except Exception:
                         logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
             finally:
-                _release_run_scoped_references(
-                    runnable_configs,
-                    runtime_ctx,
-                    journal,
-                )
+                lease_cleanup_interrupt: BaseException | None = None
+                try:
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+
+                    await release_sandbox_execution_lease_async(runtime_ctx)
+                except Exception:
+                    logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
+                except BaseException as exc:
+                    # release_async completes the underlying cleanup before it
+                    # re-raises cancellation. Defer that interruption until the
+                    # worker has dropped all other run-scoped references too.
+                    lease_cleanup_interrupt = exc
+                    logger.warning(
+                        "Sandbox execution lease cleanup was interrupted for run %s; completing local cleanup first",
+                        run_id,
+                    )
+                finally:
+                    _release_run_scoped_references(
+                        runnable_configs,
+                        runtime_ctx,
+                        journal,
+                    )
                 # Drop graph and per-run payload references before the terminal
                 # worker task itself becomes collectable.
                 agent = None
@@ -1608,6 +1625,9 @@ async def run_agent(
                 # through RunStore.
                 _create_contextless_task(run_manager.cleanup(run_id))
                 _schedule_terminal_cycle_collection()
+
+                if lease_cleanup_interrupt is not None:
+                    raise lease_cleanup_interrupt
 
 
 # ---------------------------------------------------------------------------

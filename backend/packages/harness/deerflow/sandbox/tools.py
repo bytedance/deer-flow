@@ -1445,6 +1445,14 @@ async def sandbox_authorization_scope_async(runtime: Runtime) -> AsyncIterator[N
         _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
 
 
+def _resolve_runtime_thread_id(runtime: Runtime) -> str | None:
+    """Resolve the thread identity consistently for reuse and acquisition."""
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    return thread_id
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1490,7 +1498,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             sandbox = provider.get(sandbox_id)
             if sandbox is not None:
                 owner_id = sandbox_lease_owner(runtime.context)
-                thread_id = runtime.context.get("thread_id") if runtime.context else None
+                thread_id = _resolve_runtime_thread_id(runtime)
                 if owner_id is not None and thread_id is not None and not fork_restored:
                     get_sandbox_lease_manager(provider).retain(
                         owner_id,
@@ -1504,9 +1512,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
@@ -1566,7 +1572,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             sandbox = provider.get(sandbox_id)
             if sandbox is not None:
                 owner_id = sandbox_lease_owner(runtime.context)
-                thread_id = runtime.context.get("thread_id") if runtime.context else None
+                thread_id = _resolve_runtime_thread_id(runtime)
                 if owner_id is not None and thread_id is not None and not fork_restored:
                     await get_sandbox_lease_manager(provider).retain_async(
                         owner_id,
@@ -1578,9 +1584,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
                     runtime.context["sandbox_id"] = sandbox_id
                 return sandbox
 
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
