@@ -8,7 +8,9 @@ from deerflow.agents.memory.backends.deermem.deermem.core.queue import Conversat
 
 def _queue(updater: MagicMock | None = None) -> MemoryUpdateQueue:
     """A MemoryUpdateQueue with DI config + a (mock) updater; timer disabled."""
-    return MemoryUpdateQueue(DeerMemConfig(), updater or MagicMock())
+    updater = updater or MagicMock()
+    updater.peek_clear_generation.return_value = (0, 0)
+    return MemoryUpdateQueue(DeerMemConfig(), updater)
 
 
 def test_queue_add_preserves_existing_correction_flag_for_same_thread() -> None:
@@ -38,6 +40,7 @@ def test_process_queue_forwards_correction_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        expected_clear_generation=None,
     )
 
 
@@ -68,6 +71,7 @@ def test_process_queue_forwards_reinforcement_flag_to_updater() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        expected_clear_generation=None,
     )
 
 
@@ -224,8 +228,8 @@ def test_process_queue_updates_different_agents_in_same_thread_separately() -> N
     assert mock_updater.update_memory.call_count == 2
     mock_updater.update_memory.assert_has_calls(
         [
-            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False),
-            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False),
+            call(messages=["agent-a"], thread_id="thread-1", agent_name="agent-a", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0)),
+            call(messages=["agent-b"], thread_id="thread-1", agent_name="agent-b", signals=frozenset(), user_id=None, trace_id=None, bypass_watermark=False, expected_clear_generation=(0, 0)),
         ]
     )
 
@@ -246,6 +250,7 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         user_id=None,
         trace_id="trace-memory-1",
         bypass_watermark=False,
+        expected_clear_generation=None,
     )
 
 
@@ -290,6 +295,7 @@ def test_flush_sync_drains_pending_queue_and_returns_true() -> None:
         user_id=None,
         trace_id=None,
         bypass_watermark=False,
+        expected_clear_generation=None,
     )
 
 
@@ -403,3 +409,40 @@ def test_flush_sync_skips_inter_item_delay_on_drain_path() -> None:
     # No inter-item rate-limit sleep on the drain path.
     mock_sleep.assert_not_called()
     assert mock_updater.update_memory.call_count == 3
+
+
+def test_queue_add_captures_clear_generation_from_updater_peek() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (2, 5)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+
+    mock_updater.peek_clear_generation.assert_called_once_with("researcher", user_id="alice")
+    assert queue._items[0].clear_generation == (2, 5)
+
+
+def test_queue_coalesce_keeps_earlier_clear_generation_and_does_not_reread() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["second"]
+    assert queue._items[0].clear_generation == (0, 0)
+    assert mock_updater.peek_clear_generation.call_count == 1
+
+
+def test_queue_coalesce_does_not_refresh_missing_generation_from_storage() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (1, 0)
+    queue = _queue(mock_updater)
+    queue._items = [ConversationContext(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")]
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue._items[0].clear_generation is None
+    mock_updater.peek_clear_generation.assert_not_called()

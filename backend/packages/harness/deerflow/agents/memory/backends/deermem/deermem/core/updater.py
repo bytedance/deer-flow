@@ -33,6 +33,7 @@ from .storage import (
     MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
+    is_stale_clear_generation,
     scope_clear_generation,
     utc_now_iso_z,
 )
@@ -825,6 +826,10 @@ class MemoryUpdater:
         """Get the current memory data via the injected storage."""
         return self._storage.load(agent_name, user_id=user_id)
 
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        """Read the scope clear-generation fence without loading fact files."""
+        return self._storage.peek_clear_generation(agent_name, user_id=user_id)
+
     def reload_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Reload memory data via the injected storage."""
         return self._storage.reload(agent_name, user_id=user_id)
@@ -1387,6 +1392,7 @@ class MemoryUpdater:
         *,
         metrics: dict[str, Any] | None = None,
         signals: frozenset[str] = frozenset(),
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
@@ -1397,7 +1403,7 @@ class MemoryUpdater:
             # facts_passed_confidence / rejected_low_confidence are populated
             # inside _apply_updates at the real confidence-filter site, so the
             # metric tracks the actual filter rather than a re-derived copy here.
-        captured_clear_generation = scope_clear_generation(current_memory, agent_name)
+        captured_clear_generation = expected_clear_generation if expected_clear_generation is not None else scope_clear_generation(current_memory, agent_name)
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] = []
@@ -1502,6 +1508,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Update memory asynchronously by delegating to the sync path.
 
@@ -1520,6 +1527,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            expected_clear_generation=expected_clear_generation,
         )
 
     def _do_update_memory_sync(
@@ -1532,6 +1540,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
@@ -1555,6 +1564,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    expected_clear_generation=expected_clear_generation,
                 )
         return self._do_update_memory_sync_impl(
             messages=messages,
@@ -1564,6 +1574,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            expected_clear_generation=expected_clear_generation,
         )
 
     def _watermark_get(self, key: tuple[str | None, str | None, str | None]) -> tuple[str, ...] | None:
@@ -1627,6 +1638,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Pure-sync memory update using ``model.invoke()``.
 
@@ -1663,6 +1675,17 @@ class MemoryUpdater:
             if not feed_messages:
                 logger.debug("Memory update skipped: no new messages since watermark (thread=%s)", thread_id)
                 return True
+            if expected_clear_generation is not None:
+                current_generation = self.peek_clear_generation(agent_name, user_id=user_id)
+                if is_stale_clear_generation(expected_clear_generation, current_generation):
+                    logger.info(
+                        "Dropping memory extraction before LLM invocation because a newer clear completed (user_id=%s agent_name=%s expected=%s current=%s)",
+                        user_id,
+                        agent_name,
+                        expected_clear_generation,
+                        current_generation,
+                    )
+                    return False
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
             # ``signals`` (detected on the full conversation in DeerMem) already
@@ -1734,6 +1757,7 @@ class MemoryUpdater:
                 user_id=user_id,
                 metrics=metrics,
                 signals=frozenset(feed_signals),
+                expected_clear_generation=expected_clear_generation,
             )
             if success and not bypass_watermark:
                 # Advance the watermark to the last message fed (the feed is a
@@ -1806,6 +1830,7 @@ class MemoryUpdater:
         trace_id: str | None = None,
         *,
         bypass_watermark: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
     ) -> bool:
         """Synchronously update memory using the sync LLM path.
 
@@ -1825,6 +1850,9 @@ class MemoryUpdater:
             signals: Signal classes detected in the conversation (correction /
                 reinforcement / preference / ...), used as extraction hints.
             user_id: If provided, scopes memory to a specific user.
+            expected_clear_generation: Fence token captured when the
+                conversation became pending work. A newer clear drops the
+                write. ``None`` falls back to the pre-LLM snapshot.
 
         Returns:
             True if the update persisted. False on any failure (no content,
@@ -1848,6 +1876,7 @@ class MemoryUpdater:
                     user_id=user_id,
                     trace_id=trace_id,
                     bypass_watermark=bypass_watermark,
+                    expected_clear_generation=expected_clear_generation,
                 )
                 return future.result()
             except Exception:
@@ -1862,6 +1891,7 @@ class MemoryUpdater:
             user_id=user_id,
             trace_id=trace_id,
             bypass_watermark=bypass_watermark,
+            expected_clear_generation=expected_clear_generation,
         )
 
     def _apply_updates(

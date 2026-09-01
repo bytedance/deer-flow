@@ -68,6 +68,11 @@ class ConversationContext:
     # so a flush cannot drop a pending normal update's un-extracted tail. See
     # ``_enqueue_locked``'s match-key + backpressure handling.
     bypass_watermark: bool = False
+    # Scope clear-generation captured when this conversation became pending
+    # work. Commit must use this token, not a later snapshot: a clear that
+    # lands during debounce would otherwise look current and restore facts.
+    # Same-key merges keep the earlier value and never re-read storage.
+    clear_generation: tuple[int, int] | None = None
 
 
 class MemoryUpdateQueue:
@@ -189,6 +194,13 @@ class MemoryUpdateQueue:
 
         # Merge by signal union: a signal seen on any update for this key stays.
         merged_signals = signals | (existing.signals if existing is not None else frozenset())
+        # First enqueue captures the fence; a later same-key merge must keep
+        # that earlier token even when it is None. Re-reading storage here
+        # after a clear would refresh the token and restore pre-clear facts.
+        if existing is not None:
+            enqueued_clear_generation = existing.clear_generation
+        else:
+            enqueued_clear_generation = self._capture_clear_generation(agent_name, user_id)
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -197,11 +209,33 @@ class MemoryUpdateQueue:
             trace_id=trace_id,
             signals=merged_signals,
             bypass_watermark=bypass_watermark,
+            clear_generation=enqueued_clear_generation,
         )
         if existing is not None:
             self._items = [c for c in self._items if not (queue_key(c.thread_id, c.user_id, c.agent_name) == key and c.bypass_watermark == bypass_watermark)]
         self._items.append(context)
         return context
+
+    def _capture_clear_generation(self, agent_name: str | None, user_id: str | None) -> tuple[int, int]:
+        """Read the current scope fence without loading fact files.
+
+        Missing or invalid updater peeks default to ``(0, 0)`` so a later
+        clear still looks newer and the write is dropped.
+        """
+        peek = getattr(self._updater, "peek_clear_generation", None)
+        if not callable(peek):
+            return (0, 0)
+        try:
+            value = peek(agent_name, user_id=user_id)
+        except Exception:
+            logger.warning("Failed to capture clear generation at enqueue; defaulting to (0, 0)", exc_info=True)
+            return (0, 0)
+        if not isinstance(value, tuple) or len(value) != 2:
+            return (0, 0)
+        user_gen, agent_gen = value
+        if isinstance(user_gen, bool) or isinstance(agent_gen, bool) or not isinstance(user_gen, int) or not isinstance(agent_gen, int) or user_gen < 0 or agent_gen < 0:
+            return (0, 0)
+        return user_gen, agent_gen
 
     def _reset_timer(self) -> None:
         """Reset the debounce timer."""
@@ -267,6 +301,7 @@ class MemoryUpdateQueue:
                         user_id=context.user_id,
                         trace_id=context.trace_id,
                         bypass_watermark=context.bypass_watermark,
+                        expected_clear_generation=context.clear_generation,
                     )
                     if success:
                         succeeded += 1

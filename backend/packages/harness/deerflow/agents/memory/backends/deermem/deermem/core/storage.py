@@ -103,6 +103,11 @@ def scope_clear_generation(memory: dict[str, Any] | None, agent_name: str | None
     return user_gen, agent_gens.get(agent_name, 0) if agent_name else 0
 
 
+def is_stale_clear_generation(expected: tuple[int, int], current: tuple[int, int]) -> bool:
+    """Return True when ``current`` includes a clear that ``expected`` has not seen."""
+    return current[0] > expected[0] or current[1] > expected[1]
+
+
 def _clear_generation_fields(user_gen: int, agent_gens: dict[str, int]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if user_gen > 0:
@@ -517,6 +522,14 @@ class MemoryStorage(abc.ABC):
         fact_ids: list[str] | None = None,
     ) -> None:
         """Remove sidecar data for selected facts, or the whole scope."""
+
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        """Return the scope clear-generation fence.
+
+        The default implementation loads the complete document. File storage
+        overrides this to read only the shared JSON counters.
+        """
+        return scope_clear_generation(self.load(agent_name, user_id=user_id), agent_name)
 
     def close(self) -> None:
         """Release optional storage resources."""
@@ -1328,6 +1341,11 @@ class FileMemoryStorage(MemoryStorage):
             result["facts"] = self._load_agent_facts(path, agent_name, user_id=user_id)
             return result
         return self._document_from_memory_file(memory_file, path, agent_name, user_id=user_id)
+
+    def peek_clear_generation(self, agent_name: str | None = None, *, user_id: str | None = None) -> tuple[int, int]:
+        """Read ``clearGeneration`` / ``agentClearGenerations`` from the shared JSON only."""
+        path = self._get_memory_file_path(agent_name, user_id=user_id)
+        return scope_clear_generation(self._load_memory_file(path), agent_name)
 
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         path = self._get_memory_file_path(agent_name, user_id=user_id)

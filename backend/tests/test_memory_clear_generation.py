@@ -5,9 +5,10 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
@@ -16,6 +17,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     MemoryClearGenerationConflict,
     MemoryManifestRevisionConflict,
     create_empty_memory,
+    is_stale_clear_generation,
     scope_clear_generation,
 )
 from deerflow.agents.memory.backends.deermem.deermem.core.updater import MemoryUpdater
@@ -74,10 +76,34 @@ def _conversation() -> list[MagicMock]:
     return [human, ai]
 
 
+def _queue_conversation(*, human: str = "Remember that I like Python.", ai: str = "I'll keep that preference in mind.") -> list:
+    return [HumanMessage(content=human), AIMessage(content=ai)]
+
+
 def _updater(storage: FileMemoryStorage, invoke) -> MemoryUpdater:
     model = MagicMock()
     model.invoke = MagicMock(side_effect=invoke)
     return MemoryUpdater(storage._config, storage, model)
+
+
+def _manager(tmp_path: Path, host_llm: MagicMock | None = None) -> DeerMem:
+    return DeerMem(
+        backend_config={
+            "storage_path": str(tmp_path),
+            "fact_confidence_threshold": 0.7,
+            "max_facts": 100,
+            "debounce_seconds": 30,
+            "token_counting": "char",
+            "host_llm": host_llm if host_llm is not None else MagicMock(),
+        }
+    )
+
+
+def _stop_debounce(manager: DeerMem) -> None:
+    timer = manager._queue._timer
+    if timer is not None:
+        timer.cancel()
+        manager._queue._timer = None
 
 
 def test_stale_clear_generation_is_raised_instead_of_revision_conflict(tmp_path: Path) -> None:
@@ -273,3 +299,79 @@ def test_concurrent_update_still_rebases_extracted_facts(tmp_path: Path) -> None
     assert result is True
     assert "User also likes Rust" in facts
     assert "User prefers concise updates" in facts
+
+
+def test_is_stale_clear_generation_is_componentwise() -> None:
+    assert is_stale_clear_generation((0, 0), (1, 0)) is True
+    assert is_stale_clear_generation((0, 0), (0, 1)) is True
+    assert is_stale_clear_generation((1, 1), (1, 1)) is False
+    assert is_stale_clear_generation((2, 1), (1, 1)) is False
+
+
+def test_peek_clear_generation_reads_json_without_loading_facts(tmp_path: Path) -> None:
+    storage = FileMemoryStorage(DeerMemConfig(storage_path=str(tmp_path)))
+    assert storage.save(_memory_with_fact(), "agent-a", user_id="alice")
+    with patch.object(storage, "_load_agent_facts", side_effect=AssertionError("facts loaded")):
+        assert storage.peek_clear_generation("agent-a", user_id="alice") == (0, 0)
+
+    loaded = storage.load("agent-a", user_id="alice")
+    storage.apply_changes(
+        {"deletes": [_FACT_ID], "deleteRevisions": {_FACT_ID: 1}},
+        agent_name="agent-a",
+        user_id="alice",
+        expected_manifest_revision=int(loaded["revision"] or 0),
+        bump_clear_generation="agent",
+    )
+    with patch.object(storage, "_load_agent_facts", side_effect=AssertionError("facts loaded")):
+        assert storage.peek_clear_generation("agent-a", user_id="alice") == (0, 1)
+
+
+def test_queued_before_clear_extraction_does_not_restore_facts_after_cross_manager_clear(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=AssertionError("queued extraction must not call the LLM after a newer clear"))
+    manager_a = _manager(tmp_path, host_llm)
+    manager_a.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    manager_a.add(thread_id="thread-1", messages=_queue_conversation(), agent_name="researcher", user_id="alice")
+    assert manager_a._queue.pending_count == 1
+    assert manager_a._queue._items[0].clear_generation == (0, 0)
+    _stop_debounce(manager_a)
+
+    manager_b = _manager(tmp_path)
+    manager_b.clear_memory(agent_name="researcher", user_id="alice")
+    assert manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+    manager_a._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    fresh = manager_b.get_memory(agent_name="researcher", user_id="alice")
+    assert fresh["facts"] == []
+
+
+def test_queued_coalesce_after_clear_keeps_pre_clear_fence(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=AssertionError("coalesced extraction must not call the LLM after a newer clear"))
+    manager_a = _manager(tmp_path, host_llm)
+    manager_a.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    manager_a.add(thread_id="thread-1", messages=_queue_conversation(), agent_name="researcher", user_id="alice")
+    assert manager_a._queue._items[0].clear_generation == (0, 0)
+    _stop_debounce(manager_a)
+
+    manager_b = _manager(tmp_path)
+    manager_b.clear_memory(agent_name="researcher", user_id="alice")
+
+    manager_a.add(
+        thread_id="thread-1",
+        messages=_queue_conversation(human="Also remember that I prefer typed Python.", ai="Noted, I will keep that preference."),
+        agent_name="researcher",
+        user_id="alice",
+    )
+    assert manager_a._queue.pending_count == 1
+    assert manager_a._queue._items[0].clear_generation == (0, 0)
+    _stop_debounce(manager_a)
+
+    manager_a._queue.flush()
+
+    host_llm.invoke.assert_not_called()
+    assert manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
