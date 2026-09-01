@@ -651,15 +651,23 @@ export function restoreLocalTurnMessageOrder(
   confirmedHistoryIdentities: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
   currentTurnRunIds: ReadonlySet<string> = EMPTY_MESSAGE_IDENTITIES_SET,
 ): Message[] {
-  const pendingHumanIndex = messages.findIndex((message) => {
+  // Context compaction can omit an older human from the checkpoint while the
+  // REST history page still supplies it. Anchor on the latest non-baseline
+  // visible human so an old history-only turn cannot claim the current stream.
+  let pendingHumanIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]!;
     const identity = messageIdentity(message);
-    return (
+    if (
       message.type === "human" &&
       !isHiddenFromUIMessage(message) &&
       identity !== undefined &&
       !baselineMessageIdentities.has(identity)
-    );
-  });
+    ) {
+      pendingHumanIndex = index;
+      break;
+    }
+  }
   if (pendingHumanIndex < 0) {
     return messages;
   }

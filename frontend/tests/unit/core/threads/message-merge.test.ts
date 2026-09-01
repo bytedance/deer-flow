@@ -1848,6 +1848,64 @@ test("local turn order repairs a displaced suffix when the human is first", () =
   ).toEqual([oldHistoryCard, currentHuman]);
 });
 
+test("local turn order anchors on the latest non-baseline human after compaction", () => {
+  // A summarized checkpoint may omit an older human that remains in canonical
+  // history. The latest non-baseline human is the submitted turn; choosing the
+  // first one would move established intervening turns around the old human.
+  const oldHistoryHuman = {
+    id: "old-history-human",
+    type: "human",
+    content: "An earlier request omitted by the checkpoint",
+  } as Message;
+  const oldHistoryAnswer = {
+    id: "old-history-answer",
+    type: "ai",
+    content: "An earlier answer",
+  } as Message;
+  const previousHuman = {
+    id: "previous-human",
+    type: "human",
+    content: "The immediately previous request",
+  } as Message;
+  const previousAnswer = {
+    id: "previous-answer",
+    type: "ai",
+    content: "The immediately previous answer",
+  } as Message;
+  const currentHuman = {
+    id: "current-human",
+    type: "human",
+    content: "The newly submitted request",
+  } as Message;
+  const currentStep = {
+    id: "current-step",
+    type: "ai",
+    content: "Current streamed progress",
+  } as Message;
+
+  expect(
+    restoreLocalTurnMessageOrder(
+      [
+        oldHistoryHuman,
+        oldHistoryAnswer,
+        previousHuman,
+        previousAnswer,
+        currentHuman,
+        currentStep,
+      ],
+      new Set(["message:previous-human", "message:previous-answer"]),
+      new Set(["message:old-history-answer"]),
+    ),
+  ).toEqual([
+    oldHistoryHuman,
+    oldHistoryAnswer,
+    previousHuman,
+    previousAnswer,
+    currentHuman,
+    currentStep,
+  ]);
+});
+
 test("history-confirmed current steps still move behind their human", () => {
   const previousHuman = {
     id: "previous-human",
