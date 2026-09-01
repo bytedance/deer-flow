@@ -36,7 +36,7 @@ from deerflow.subagents.status_contract import (
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
-def test_parent_loop_run_journal_proxy_delivers_on_owner_loop():
+def test_parent_loop_middleware_recorder_proxy_delivers_on_owner_loop():
     """Subagent middleware events must never call RunJournal from the child loop."""
     calls: list[tuple[object, dict]] = []
     delivered = threading.Event()
@@ -54,7 +54,7 @@ def test_parent_loop_run_journal_proxy_delivers_on_owner_loop():
     )
     parent_thread.start()
     try:
-        proxy = task_tool_module._ParentLoopRunJournalProxy(
+        proxy = task_tool_module._ParentLoopMiddlewareRecorderProxy(
             LoopPinnedJournal(),
             parent_loop,
         )
@@ -72,10 +72,30 @@ def test_parent_loop_run_journal_proxy_delivers_on_owner_loop():
         assert observed_loop is parent_loop
         assert kwargs["tag"] == "loop_detection"
         assert kwargs["action"] == "warn"
+
+        asyncio.run_coroutine_threadsafe(proxy.aclose(), parent_loop).result(timeout=5)
+        proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="hard_stop", changes={})
+        time.sleep(0.05)
+        assert len(calls) == 1, "events emitted after the parent task boundary must be dropped"
     finally:
         parent_loop.call_soon_threadsafe(parent_loop.stop)
         parent_thread.join(timeout=5)
         parent_loop.close()
+
+
+def test_parent_loop_middleware_recorder_proxy_drops_after_loop_closed():
+    """A child event after asyncio.run teardown is a quiet no-op."""
+    loop = asyncio.new_event_loop()
+    loop.close()
+    proxy = task_tool_module._ParentLoopMiddlewareRecorderProxy(MagicMock(), loop)
+
+    proxy.record_middleware(
+        tag="loop_detection",
+        name="LoopDetectionMiddleware",
+        hook="after_model",
+        action="warn",
+        changes={},
+    )
 
 
 class FakeSubagentStatus(Enum):
@@ -391,6 +411,40 @@ def test_task_tool_forwards_the_run_extension_snapshot_to_executor(monkeypatch):
     _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-ext")
 
     assert captured["executor_kwargs"]["extensions"] is loaded
+
+
+def test_task_tool_installs_and_closes_narrow_loop_detection_recorder(monkeypatch):
+    journal = MagicMock()
+    runtime = _make_runtime()
+    runtime.context["__run_journal"] = journal
+    captured = {}
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["executor_kwargs"] = kwargs
+
+        def execute_async(self, prompt, task_id=None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(task_tool_module, "SubagentStatus", FakeSubagentStatus)
+    monkeypatch.setattr(task_tool_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(task_tool_module, "get_subagent_config", lambda _: _make_subagent_config())
+    monkeypatch.setattr(
+        task_tool_module,
+        "get_background_task_result",
+        lambda _: _make_result(FakeSubagentStatus.COMPLETED, result="done"),
+    )
+    monkeypatch.setattr(task_tool_module, "get_stream_writer", lambda: lambda _event: None)
+    monkeypatch.setattr(task_tool_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
+
+    _run_task_tool(runtime=runtime, description="test", prompt="p", subagent_type="general-purpose", tool_call_id="tc-journal")
+
+    kwargs = captured["executor_kwargs"]
+    proxy = kwargs["loop_detection_recorder"]
+    assert "run_journal_recorder" not in kwargs
+    proxy.record_middleware(tag="loop_detection", name="LoopDetectionMiddleware", hook="after_model", action="warn", changes={})
+    journal.record_middleware.assert_not_called()
 
 
 def test_task_tool_omits_extensions_without_a_run_snapshot(monkeypatch):

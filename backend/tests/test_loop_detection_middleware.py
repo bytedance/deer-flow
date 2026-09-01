@@ -695,6 +695,25 @@ class TestLoopDetectionRunEvents:
         assert "SUPER_SECRET_COMMAND" not in repr(recorded)
         assert "args" not in recorded.kwargs["changes"]
 
+    def test_narrow_subagent_recorder_key_records_without_shared_journal(self):
+        recorder = MagicMock()
+        runtime = _make_runtime()
+        runtime.context["__run_loop_detection_recorder"] = recorder
+        assert "__run_journal" not in runtime.context
+        mw = LoopDetectionMiddleware(
+            warn_threshold=2,
+            hard_limit=10,
+            tool_freq_warn=100,
+            tool_freq_hard_limit=200,
+        )
+        call = [_bash_call("ls")]
+
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+        assert mw._apply(_make_state(tool_calls=call), runtime) is None
+
+        recorder.record_middleware.assert_called_once()
+        assert recorder.record_middleware.call_args.kwargs["action"] == "warn"
+
     def test_identical_call_hard_stop_records_event(self):
         journal = MagicMock()
         runtime = self._runtime_with_journal(journal)
