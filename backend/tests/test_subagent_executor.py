@@ -2158,6 +2158,32 @@ class TestThreadSafety:
 
         return _patch_default_get_app_config(importlib.reload(executor))
 
+    def test_run_on_isolated_subagent_loop_survives_caller_loop_teardown(self, executor_module):
+        """Pinning work to the process-owned persistent subagent loop must keep
+        it runnable after the short-lived caller loop is torn down.
+
+        Deferred registry cleanup scheduled from a failing task-tool poller
+        relies on this: ``asyncio.run()`` cancels caller-loop tasks on exit,
+        so a cleanup submitted with ``asyncio.create_task`` on the caller's
+        loop dies at teardown, while one submitted through
+        ``run_on_isolated_subagent_loop`` still runs to completion."""
+        completed = threading.Event()
+        handles = []
+
+        async def deferred_work() -> None:
+            completed.set()
+
+        async def schedule_from_caller() -> None:
+            handles.append(executor_module.run_on_isolated_subagent_loop(deferred_work()))
+
+        # asyncio.run() creates the caller loop, runs the scheduling, then
+        # closes the loop — cancelling anything still pending on it.
+        asyncio.run(schedule_from_caller())
+
+        assert completed.wait(timeout=10), "work pinned to the persistent subagent loop must run after caller-loop teardown"
+        assert handles[0].done()
+        assert handles[0].result(timeout=10) is None
+
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -3042,6 +3068,33 @@ class TestCooperativeCancellation:
         executor_module.cleanup_background_task(task_id)
 
         assert task_id not in executor_module._background_tasks
+
+    def test_force_cleanup_removes_unreadable_running_task(self, executor_module, classes):
+        """Force cleanup removes a RUNNING entry unconditionally.
+
+        Last resort for interrupted unwinds where the status object can no
+        longer be read (persistent accessor failure), so the terminality
+        check inside cleanup_background_task cannot be trusted: cooperative
+        cancellation was already requested by the caller.
+        """
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-force-cleanup-running"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.force_cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+
+    def test_force_cleanup_handles_unknown_task_gracefully(self, executor_module):
+        """Force cleanup doesn't raise for unknown task IDs."""
+        executor_module.force_cleanup_background_task("nonexistent-task")
 
 
 # -----------------------------------------------------------------------------
