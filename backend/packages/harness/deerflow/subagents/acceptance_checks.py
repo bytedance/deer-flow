@@ -856,7 +856,9 @@ _EXTRA_TOKEN_SAFE_RE = re.compile(
 def _normalize_executable(token: str) -> str:
     """Canonical spelling of an executable token: forward slashes, no ``.`` or
     duplicate-separator noise — ``./venv/bin/pytest`` and ``venv/bin/pytest``
-    are the same invocation."""
+    are the same invocation. Lexical only: callers must reject ``..``
+    components BEFORE comparing (normpath collapses them textually, but the
+    OS resolves them after following symlinks)."""
     return os.path.normpath(token.replace("\\", "/"))
 
 
@@ -868,7 +870,10 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
     name, while an explicitly path-spelled criterion
     (``/opt/project/.venv/bin/pytest``, and also ``./pytest`` — spelling is
     judged on the raw token because normpath collapses ``./``) requires a
-    path-spelled execution of the same normalized path —
+    path-spelled execution of the same normalized path, and a ``..``
+    component on either side is unprovable outright (``link/../pytest``
+    normalizes to ``pytest`` textually, but the OS follows ``link`` first —
+    it may be a different binary) —
     the criterion's arguments appear in order among the executed ones
     (tokens consumed by a negating option — ``--ignore tests/security`` —
     are ineligible evidence, they name what did NOT run), and every extra
@@ -909,6 +914,18 @@ def _segment_matches(expected: list[str], actual: list[str]) -> str:
         # unknown targets (``pytest $T``).
         return "unprovable"
     if expected[0] != actual[0]:
+        # A ``..`` component makes the executable's identity lexically
+        # unprovable: ``os.path.normpath`` collapses ``link/../pytest`` to
+        # ``pytest`` TEXTUALLY, but the OS resolves ``..`` AFTER following
+        # symlinks — with ``link`` → ``/tmp/attacker/subdir`` the executed
+        # binary is ``/tmp/attacker/pytest``, not the project-local
+        # ``./pytest`` the normalized form claims. Two tokens that normalize
+        # alike can name different binaries, so any parent-traversal
+        # component on either side fails closed. (An identical token on
+        # both sides skips this branch entirely — the criterion and the
+        # execution then name the same odd path, which is fine.)
+        if ".." in expected[0].replace("\\", "/").split("/") or ".." in actual[0].replace("\\", "/").split("/"):
+            return "unprovable"
         # Path-spelling is judged on the RAW token, not the normalized form:
         # ``./pytest`` names the project-local file, but normpath collapses
         # it to bare ``pytest`` — deciding on the normalized form would let a

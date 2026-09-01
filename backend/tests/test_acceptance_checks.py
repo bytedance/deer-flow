@@ -932,6 +932,37 @@ class TestTestsPassedLeaf:
 
         assert verdict["leaves"][0]["holds"] is True
 
+    @pytest.mark.parametrize(
+        "criterion, executed",
+        (
+            # PR review: normpath collapses ``link/../pytest`` to ``pytest``
+            # textually, but the OS resolves ``..`` AFTER following symlinks
+            # (``link`` → ``/tmp/attacker/subdir`` runs
+            # ``/tmp/attacker/pytest``) — lexical normalization cannot prove
+            # executable identity, so any ``..`` component fails closed.
+            ("tests_passed:./pytest tests/security", "link/../pytest tests/security"),
+            ("tests_passed:venv/bin/pytest tests/", "x/../venv/bin/pytest tests/"),
+            ("tests_passed:pytest tests/", "link/../pytest tests/"),
+            ("tests_passed:link/../pytest tests/", "pytest tests/"),
+        ),
+    )
+    def test_parent_traversal_executable_is_unprovable(self, criterion, executed):
+        executions = [_bash_execution(executed, output_tail="7 passed")]
+        verdict = check_acceptance_criteria([criterion], bash_executions=executions)
+
+        leaf = verdict["leaves"][0]
+        assert leaf["checked"] is False
+        assert leaf["holds"] is False
+
+    def test_identical_traversal_spelling_still_matches(self):
+        """Criterion and execution naming the SAME odd path token agree
+        textually and semantically — the ``..`` rejection only fires when
+        the tokens differ."""
+        executions = [_bash_execution("./pytest tests/", output_tail="3 passed")]
+        verdict = check_acceptance_criteria(["tests_passed:./pytest tests/"], bash_executions=executions)
+
+        assert verdict["leaves"][0]["holds"] is True
+
     def test_continuation_line_or_operator_cannot_launder_a_skipped_run(self):
         """Self-audit: ``cd backend\\n|| pytest tests/`` — a continuation
         ``||`` after a successful command skips the runner entirely while
