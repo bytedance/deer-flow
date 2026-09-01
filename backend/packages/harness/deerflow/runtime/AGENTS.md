@@ -146,12 +146,18 @@ outcome cannot leak through to local callbacks.
 Only a verified terminal row permits removal from `_runs` and `_runs_by_thread`.
 An active, incomplete, unreadable, or unsuccessfully repaired row retains the
 local record, emits a retry-attempt debug record, and retries with capped
-exponential backoff plus clipped jitter. The
+exponential backoff plus clipped jitter. The third consecutive failed
+convergence attempt is promoted to a one-time warning for that supervisor;
+later retries return to debug logging and remain unbounded for data safety. The
 `finalizing` barrier applies to every terminal status, including `timeout` and
 `interrupted`, and the final prune rechecks the captured local status after all
-store I/O. Shutdown fences new eviction schedules and boundedly cancels existing
-timers with a small dedicated budget before draining workers, then reissues
-cancellation for any task still unwinding while retaining its strong reference.
+store I/O. A late rollback fence failure is deferred until the worker clears
+`finalizing`, attempts to publish END, and schedules both terminal eviction and
+stream cleanup; lost durable authority still suppresses authority-gated durable
+finalization, metadata/title updates, and the completion callback. Shutdown
+fences new eviction schedules and boundedly cancels existing timers with a small
+dedicated budget before draining workers, then reissues cancellation for any
+task still unwinding while retaining its strong reference.
 While a terminal result lacks confirmed durable authority, that supervised
 eviction task continues to own lease renewal after the worker task returns; the
 five-minute retention delay therefore cannot let an active durable row expire

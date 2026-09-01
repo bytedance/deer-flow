@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
 
@@ -11,6 +13,7 @@ import pytest
 from deerflow.config.run_ownership_config import RunOwnershipConfig
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import (
+    TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT,
     CancelOutcome,
     PersistenceRetryPolicy,
     RunManager,
@@ -157,6 +160,15 @@ class FailingReadRunStore(MemoryRunStore):
 class ProgressWriteFailingRunStore(MemoryRunStore):
     async def update_run_progress(self, run_id, **kwargs):
         raise RuntimeError("simulated finalizing progress outage")
+
+
+class CheckpointMutationFenceFailingRunStore(MemoryRunStore):
+    """Store whose rollback ownership fence fails before it can yield."""
+
+    @asynccontextmanager
+    async def checkpoint_mutation_fence(self, *_args, **_kwargs):
+        raise RuntimeError("simulated checkpoint mutation fence outage")
+        yield  # pragma: no cover
 
 
 class CancellationStatusWriteFailingRunStore(MemoryRunStore):
@@ -2192,6 +2204,45 @@ async def test_terminal_eviction_retry_uses_capped_exponential_backoff_with_jitt
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_attempts", "expected_warning_count"),
+    [
+        (TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT - 1, 0),
+        (TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT + 2, 1),
+    ],
+)
+async def test_terminal_eviction_warns_once_after_repeated_non_convergence(
+    caplog,
+    failed_attempts,
+    expected_warning_count,
+):
+    caplog.set_level(logging.DEBUG, logger="deerflow.runtime.runs.manager")
+    manager = RunManager(store=MemoryRunStore())
+    manager._evict_if_durable_terminal = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[False] * failed_attempts + [True]
+    )
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    await manager._evict_terminal_when_safe(
+        "run-non-convergent",
+        delay=0,
+        retry_delay=60,
+        sleep=fake_sleep,
+        jitter=lambda low, high: (low + high) / 2,
+    )
+
+    retry_logs = [entry for entry in caplog.records if "retained pending durable terminal state" in entry.getMessage()]
+    warnings = [entry for entry in retry_logs if entry.levelno == logging.WARNING]
+    assert len(retry_logs) == failed_attempts
+    assert len(warnings) == expected_warning_count
+    if warnings:
+        assert f"retry={TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT}" in warnings[0].getMessage()
+    assert manager._evict_if_durable_terminal.await_count == failed_attempts + 1
+
+
+@pytest.mark.asyncio
 async def test_terminal_eviction_initial_retry_is_capped():
     manager = RunManager(store=MemoryRunStore())
     manager._evict_if_durable_terminal = AsyncMock(side_effect=[False, True])  # type: ignore[method-assign]
@@ -2679,6 +2730,94 @@ async def test_worker_handles_cancel_that_wins_during_terminal_finally(agent_rai
         bridge.publish_end.assert_awaited_once_with(record.run_id)
         on_run_completed.assert_awaited_once_with(record)
         assert record.run_id in manager._terminal_eviction_tasks
+    finally:
+        await manager.shutdown(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_late_rollback_fence_failure_still_releases_finalizing_and_schedules_cleanup(
+    caplog,
+):
+    class SuccessfulAgent:
+        metadata: dict = {}
+        checkpointer = None
+        store = None
+        interrupt_before_nodes: list[str] = []
+        interrupt_after_nodes: list[str] = []
+
+        async def astream(self, *_args, **_kwargs):
+            return
+            yield  # pragma: no cover
+
+    class CancelOnReceiptStore(MemoryRunEventStore):
+        async def put_if_absent(self, *args, **kwargs):
+            if kwargs.get("event_type") == "run.delivery":
+                assert await manager.cancel(record.run_id, action="rollback") == CancelOutcome.cancelled
+            return await super().put_if_absent(*args, **kwargs)
+
+    caplog.set_level(logging.WARNING, logger="deerflow.runtime.runs.worker")
+    store = CheckpointMutationFenceFailingRunStore()
+    manager = RunManager(
+        store=store,
+        worker_id="worker-local",
+        run_ownership_config=RunOwnershipConfig(
+            lease_seconds=30,
+            grace_seconds=10,
+            heartbeat_enabled=True,
+        ),
+        persistence_retry_policy=PersistenceRetryPolicy(
+            max_attempts=1,
+            initial_delay=0,
+        ),
+    )
+    record = await manager.create("thread-late-rollback-fence-outage")
+    manager.schedule_terminal_eviction = MagicMock(return_value=None)  # type: ignore[method-assign]
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    on_run_completed = AsyncMock()
+
+    worker_task = asyncio.create_task(
+        run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(
+                checkpointer=None,
+                event_store=CancelOnReceiptStore(),
+                on_run_completed=on_run_completed,
+            ),
+            agent_factory=lambda **_kwargs: SuccessfulAgent(),
+            graph_input={"messages": []},
+            config={},
+        )
+    )
+    record.task = worker_task
+
+    try:
+        with pytest.raises(
+            RuntimeError,
+            match="simulated checkpoint mutation fence outage",
+        ):
+            await asyncio.wait_for(worker_task, timeout=5)
+
+        assert record.status == RunStatus.error
+        assert record.ownership_lost is True
+        assert record.finalizing is False
+        assert record.checkpoint_mutation_fence_active is False
+        assert record.error == "Durable checkpoint mutation authority failed while held."
+        assert "Failed to finish late cancellation" in caplog.text
+        stored = await store.get(record.run_id)
+        assert stored is not None
+        assert stored["status"] == RunStatus.running.value
+        assert stored["cancel_action"] == "rollback"
+        on_run_completed.assert_not_awaited()
+        manager.schedule_terminal_eviction.assert_called_once_with(record.run_id)
+        bridge.publish_end.assert_awaited_once_with(record.run_id)
+        await asyncio.sleep(0)
+        bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
     finally:
         await manager.shutdown(timeout=1)
 

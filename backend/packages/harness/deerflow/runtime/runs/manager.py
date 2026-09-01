@@ -39,6 +39,7 @@ TERMINAL_RUN_EVICTION_DELAY_SECONDS = 300.0
 TERMINAL_RUN_EVICTION_RETRY_SECONDS = 60.0
 TERMINAL_RUN_EVICTION_MAX_RETRY_SECONDS = 600.0
 TERMINAL_RUN_EVICTION_RETRY_JITTER_RATIO = 0.2
+TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT = 3
 TERMINAL_RUN_EVICTION_SHUTDOWN_TIMEOUT_SECONDS = 0.5
 RUN_SHUTDOWN_CANCEL_RESOLUTION_TIMEOUT_SECONDS = 0.5
 _TERMINAL_RUN_STATUSES = frozenset(
@@ -3414,8 +3415,9 @@ class RunManager:
                     ),
                 ),
             )
-            logger.debug(
-                "Terminal run %s retained pending durable terminal state; retry=%d nominal_retry_seconds=%.1f next_retry_seconds=%.1f",
+            log_retry = logger.warning if retry_count == TERMINAL_RUN_EVICTION_WARNING_RETRY_COUNT else logger.debug
+            log_retry(
+                "Terminal run %s retained pending durable terminal state; retry=%d nominal_retry_seconds=%.1f next_retry_seconds=%.1f; eviction retries will continue",
                 run_id,
                 retry_count,
                 nominal_retry_delay,

@@ -627,6 +627,7 @@ async def run_agent(
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
     deferred_stop_interrupt: BaseException | None = None
+    deferred_terminalization_error: Exception | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -1327,7 +1328,19 @@ async def run_agent(
                 "rollback": RunStatus.error,
             }.get(record.abort_action)
             if expected_cancel_status is not None and finalized_cancel_action != record.abort_action:
-                await _finish_cancellation(record.abort_action)
+                try:
+                    await _finish_cancellation(record.abort_action)
+                except Exception as exc:
+                    # A late rollback can lose its durable checkpoint fence.
+                    # Keep unwinding so finalizing, END, eviction, and stream
+                    # cleanup cannot be stranded. Absent a later cleanup
+                    # failure, re-raise this error after cleanup.
+                    deferred_terminalization_error = exc
+                    logger.warning(
+                        "Failed to finish late cancellation for run %s; completing terminal cleanup",
+                        run_id,
+                        exc_info=True,
+                    )
 
         if not record.ownership_lost and event_store is not None:
             try:
@@ -1456,6 +1469,8 @@ async def run_agent(
 
         if deferred_stop_interrupt is not None:
             raise deferred_stop_interrupt
+        if deferred_terminalization_error is not None:
+            raise deferred_terminalization_error
 
 
 # ---------------------------------------------------------------------------
