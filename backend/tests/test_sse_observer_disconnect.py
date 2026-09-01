@@ -104,7 +104,7 @@ def test_join_routes_wire_sse_consumer_as_observers():
     from app.gateway.routers import thread_runs
 
     thread_runs_source = inspect.getsource(thread_runs)
-    # join_run + stream_existing_run (GET and POST share one handler)
+    # join_run + the shared existing-run stream implementation
     assert thread_runs_source.count("sse_consumer(bridge, record, request, run_mgr, apply_on_disconnect=False)") == 2
     # stream_run — the creator's create-and-stream endpoint
     assert thread_runs_source.count("sse_consumer(bridge, record, request, run_mgr),") == 1

@@ -365,7 +365,7 @@ def test_prepare_regenerate_payload_returns_clean_input_and_base_checkpoint():
 
     human = HumanMessage(
         id="human-1",
-        content="<uploaded_files>injected</uploaded_files>\n\n/data-analysis analyze data.csv",
+        content="<current_uploads>injected</current_uploads>\n\n/data-analysis analyze data.csv",
         additional_kwargs={
             ORIGINAL_USER_CONTENT_KEY: "/data-analysis analyze data.csv",
             "files": [{"filename": "data.csv", "path": "/mnt/user-data/uploads/data.csv"}],
@@ -649,7 +649,7 @@ def test_prepare_edit_regenerate_payload_returns_new_human_and_edit_metadata():
 
     human = HumanMessage(
         id="human-1",
-        content="<uploaded_files>injected</uploaded_files>\n\noriginal question",
+        content="<current_uploads>injected</current_uploads>\n\noriginal question",
         name="researcher",
         additional_kwargs={
             ORIGINAL_USER_CONTENT_KEY: "original question",

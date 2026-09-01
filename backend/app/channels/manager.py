@@ -48,6 +48,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
 from deerflow.skills.storage import get_or_new_skill_storage
 from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 logger = logging.getLogger(__name__)
@@ -1702,50 +1703,56 @@ class ChannelManager:
             except asyncio.CancelledError:
                 raise
 
-            dedupe_recorded = False
-            try:
-                # Dedupe before logging "received" so a provider retrying an
-                # event N times does not log N accepts. Provider ack side
-                # effects may still happen before this manager-level dedupe.
-                if await self._is_duplicate_inbound(msg):
-                    continue
-                dedupe_recorded = self._inbound_dedupe_key(msg) is not None
-                logger.info(
-                    "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
-                    msg.channel_name,
-                    msg.chat_id,
-                    msg.msg_type.value,
-                    len(msg.text or ""),
-                    len(msg.files),
-                )
-                # Deliberately awaited inline: never create a task per message.
-                await self._handle_message(msg)
-            except asyncio.CancelledError:
-                # A cancellation after dedupe admission must make provider
-                # redelivery retryable rather than retaining a TTL-long key for
-                # work that never completed.
-                if dedupe_recorded:
-                    try:
-                        await self._release_inbound_dedupe_key(msg)
-                    except Exception:
-                        logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
-                raise
-            except Exception:
-                logger.exception(
-                    "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
-                    worker_index,
-                    msg.channel_name,
-                    msg.chat_id,
-                )
-                if dedupe_recorded:
-                    try:
-                        await self._release_inbound_dedupe_key(msg)
-                    except Exception:
-                        # A dedupe backend outage must not shrink the fixed
-                        # worker pool by letting cleanup escape this loop.
-                        logger.exception("[Manager] failed to release inbound dedupe key after worker error")
-            finally:
-                self.bus.inbound_task_done()
+            # Inbound IM messages are a non-HTTP entry point: channels hold
+            # long-lived provider connections, so no ASGI middleware ever runs
+            # for them. Scope one trace id per message here -- the worker task
+            # is long-lived and reused, so the scope must close with the
+            # message rather than leak into the next one.
+            with ensure_trace_context():
+                dedupe_recorded = False
+                try:
+                    # Dedupe before logging "received" so a provider retrying an
+                    # event N times does not log N accepts. Provider ack side
+                    # effects may still happen before this manager-level dedupe.
+                    if await self._is_duplicate_inbound(msg):
+                        continue
+                    dedupe_recorded = self._inbound_dedupe_key(msg) is not None
+                    logger.info(
+                        "[Manager] received inbound: channel=%s, chat_id=%s, type=%s, text_len=%d, files=%d",
+                        msg.channel_name,
+                        msg.chat_id,
+                        msg.msg_type.value,
+                        len(msg.text or ""),
+                        len(msg.files),
+                    )
+                    # Deliberately awaited inline: never create a task per message.
+                    await self._handle_message(msg)
+                except asyncio.CancelledError:
+                    # A cancellation after dedupe admission must make provider
+                    # redelivery retryable rather than retaining a TTL-long key for
+                    # work that never completed.
+                    if dedupe_recorded:
+                        try:
+                            await self._release_inbound_dedupe_key(msg)
+                        except Exception:
+                            logger.exception("[Manager] failed to release inbound dedupe key during worker cancellation")
+                    raise
+                except Exception:
+                    logger.exception(
+                        "[Manager] inbound worker %d failed handling channel=%s chat_id=%s",
+                        worker_index,
+                        msg.channel_name,
+                        msg.chat_id,
+                    )
+                    if dedupe_recorded:
+                        try:
+                            await self._release_inbound_dedupe_key(msg)
+                        except Exception:
+                            # A dedupe backend outage must not shrink the fixed
+                            # worker pool by letting cleanup escape this loop.
+                            logger.exception("[Manager] failed to release inbound dedupe key after worker error")
+                finally:
+                    self.bus.inbound_task_done()
 
     @staticmethod
     def _inbound_dedupe_key(msg: InboundMessage) -> tuple[str, str, str, str] | None:

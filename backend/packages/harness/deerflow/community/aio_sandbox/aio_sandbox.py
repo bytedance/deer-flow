@@ -43,6 +43,11 @@ class AioSandbox(Sandbox):
     from corrupting the container's single persistent session (see #1433).
     """
 
+    #: The legacy exec path reuses one persistent shell session across calls,
+    #: so shell state (exports, cwd, functions) carries from one command into
+    #: the next — recorded bash evidence cannot prove a clean environment.
+    persistent_shell_sessions = True
+
     def __init__(self, id: str, base_url: str, home_dir: str | None = None):
         """Initialize the AIO sandbox.
 
@@ -192,6 +197,7 @@ class AioSandbox(Sandbox):
             try:
                 result = self._client.shell.exec_command(command=command, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
                 output = result.data.output if result.data else ""
+                exit_code = getattr(result.data, "exit_code", None) if result.data else None
 
                 if output and _ERROR_OBSERVATION_SIGNATURE in output:
                     logger.warning("ErrorObservation detected in sandbox output, retrying on a fresh session")
@@ -203,6 +209,7 @@ class AioSandbox(Sandbox):
                     try:
                         result = self._client.shell.exec_command(command=command, id=fresh_id, no_change_timeout=self._DEFAULT_NO_CHANGE_TIMEOUT)
                         output = result.data.output if result.data else ""
+                        exit_code = getattr(result.data, "exit_code", None) if result.data else None
                     finally:
                         # Release the one-shot recovery session, best-effort, so
                         # repeated corruption can't accumulate sessions.
@@ -211,6 +218,10 @@ class AioSandbox(Sandbox):
                         except Exception as cleanup_error:
                             logger.warning(f"Failed to release recovery session {fresh_id}: {cleanup_error}")
 
+                if exit_code not in (0, None):
+                    # Mirror LocalSandbox: keep the actual shell status in the
+                    # output text (acceptance-checklist evidence).
+                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
             except Exception as e:
                 logger.error(f"Failed to execute command in sandbox: {e}")
@@ -266,9 +277,14 @@ class AioSandbox(Sandbox):
                 data = result.data if result else None
                 stdout = (data.stdout or "") if data else ""
                 stderr = (data.stderr or "") if data else ""
+                exit_code = getattr(data, "exit_code", None) if data else None
                 output = stdout
                 if stderr:
                     output += f"\nStd Error:\n{stderr}" if output else stderr
+                if exit_code not in (0, None):
+                    # Mirror LocalSandbox: keep the actual shell status in the
+                    # output text (acceptance-checklist evidence).
+                    output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                 return output if output else "(no output)"
             except ApiError as e:
                 if e.status_code == 404:
