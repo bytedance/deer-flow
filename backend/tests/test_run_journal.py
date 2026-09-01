@@ -584,6 +584,58 @@ class TestBufferFlush:
         assert any(e["event_type"] == "llm.ai.response" for e in events)
 
 
+class TestFeedGeneration:
+    """The counter that tells a cached feed lookup when to re-ask.
+
+    A message this run produces is not in the feed while it is only buffered,
+    so a reader looking it up legitimately misses. Bumping this on every write
+    lets that reader retry exactly when retrying could answer differently,
+    rather than either polling the store or caching the miss for the whole run
+    (#4696 review).
+    """
+
+    @pytest.mark.anyio
+    async def test_buffering_alone_does_not_advance_it(self, journal_setup):
+        j, _store = journal_setup
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        assert len(j._buffer) == 1
+        assert j.feed_generation == 0
+
+    @pytest.mark.anyio
+    async def test_a_threshold_flush_advances_it(self, journal_setup):
+        j, _store = journal_setup
+        j._flush_threshold = 1
+
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j.feed_generation == 1
+
+    @pytest.mark.anyio
+    async def test_a_terminal_flush_advances_it(self, journal_setup):
+        j, _store = journal_setup
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        await j.flush()
+
+        assert j.feed_generation == 1
+
+    @pytest.mark.anyio
+    async def test_a_failed_write_leaves_it_alone(self):
+        """Nothing became readable, so a cached miss must not be re-asked."""
+
+        class FailingStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                raise RuntimeError("store unavailable")
+
+        j = RunJournal("r-gen", "t-gen", FailingStore(), flush_threshold=1)
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j.feed_generation == 0
+
+
 class TestIdentifyCaller:
     def test_lead_agent_tag(self, journal_setup):
         j, _ = journal_setup

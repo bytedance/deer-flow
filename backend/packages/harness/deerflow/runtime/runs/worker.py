@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Coroutine, Mapping
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass, field
@@ -1128,7 +1128,7 @@ async def run_agent(
 
         # Built once per run, not per _stream_once call: goal continuations
         # re-enter the stream and would otherwise discard the resolved seqs.
-        seq_stamper = _MessageSeqStamper(event_store, thread_id) if "values" in requested_modes else None
+        seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
@@ -2710,6 +2710,16 @@ def _compose_sse_event(sse_event: str, namespace: tuple[str, ...]) -> str:
     return "|".join((sse_event, *namespace))
 
 
+#: Sentinel generation for an identity no lookup has missed at yet. Below every
+#: real generation, so it never reads as "already asked at this generation".
+_NEVER_LOOKED_UP = -1
+
+
+def _NO_FEED_WRITES() -> int:  # noqa: N802 — a callable constant, not a class
+    """Generation source for a path with no journal: the feed never moves."""
+    return 0
+
+
 class _MessageSeqStamper:
     """Attach each already-persisted message's feed seq to a ``values`` frame.
 
@@ -2721,18 +2731,32 @@ class _MessageSeqStamper:
     checkpoint.
 
     Cost is bounded to frames that introduce identities it has not resolved
-    yet. Messages produced by this run are not in the feed while streaming, so
-    they are looked up once, recorded as misses, and never retried — in a real
-    run the only frame that pays for a query is the one where compaction brings
-    older messages back into view. An unstamped message needs no seq: appending
-    it at the tail is already its correct position.
+    yet: a resolved seq is final (the feed's earliest-seq-wins rule), so it is
+    never looked up twice, and in a real run the only frame that pays for a
+    query is the one where compaction brings older messages back into view.
+
+    A miss, unlike a hit, is only provisional. A message this run produces
+    reaches a frame before ``RunJournal`` flushes it, so it legitimately misses
+    and would stay unstamped for the whole run if that answer were kept — the
+    long run that then rolls past the history page and compacts is exactly the
+    case this stamper exists for. Misses are therefore re-asked, but only once
+    the feed has actually gained rows, which *feed_generation* reports; frames
+    alone never trigger a retry. A failed lookup is a miss under the same rule,
+    so a transient store error costs one generation, not the run.
+
+    An unstamped message needs no seq while it is still streaming: appending it
+    at the tail is already its correct position.
     """
 
-    __slots__ = ("_store", "_thread_id", "_user_id", "_seqs", "_missing")
+    __slots__ = ("_store", "_thread_id", "_user_id", "_seqs", "_missing", "_feed_generation")
 
-    def __init__(self, event_store: Any, thread_id: str) -> None:
+    def __init__(self, event_store: Any, thread_id: str, *, feed_generation: Callable[[], int] | None = None) -> None:
         self._store = event_store
         self._thread_id = thread_id
+        # Without a generation source (no journal on this path) nothing can
+        # report a feed write, so a miss stays cached rather than being re-asked
+        # on every frame: a constant reads as "the feed has not moved".
+        self._feed_generation = feed_generation if feed_generation is not None else _NO_FEED_WRITES
         # Soft-resolved once at build time, like the worker's write paths: a
         # launch path that never inherits the auth contextvar (e.g. a
         # null-owner scheduled task) writes rows with no user_id, so the
@@ -2741,7 +2765,8 @@ class _MessageSeqStamper:
         user = get_current_user()
         self._user_id: str | None = str(user.id) if user is not None else None
         self._seqs: dict[str, int] = {}
-        self._missing: set[str] = set()
+        # identity -> the feed generation its last lookup missed at.
+        self._missing: dict[str, int] = {}
 
     async def stamp(self, payload: Any) -> Any:
         if self._store is None or not isinstance(payload, Mapping):
@@ -2751,7 +2776,11 @@ class _MessageSeqStamper:
             return payload
 
         identities = [message_identity(m) if isinstance(m, Mapping) else None for m in messages]
-        unresolved = {i for i in identities if i is not None and i not in self._seqs and i not in self._missing}
+        # Read before the lookup, never after: a write landing mid-query then
+        # advances past the generation the miss is recorded under, so the next
+        # frame re-asks. The reverse order could bury such a write.
+        generation = self._feed_generation()
+        unresolved = {i for i in identities if i is not None and i not in self._seqs and self._missing.get(i, _NEVER_LOOKED_UP) != generation}
         if unresolved:
             try:
                 found = await self._store.get_message_seqs(self._thread_id, sorted(unresolved), user_id=self._user_id)
@@ -2761,10 +2790,25 @@ class _MessageSeqStamper:
                 logger.warning("Failed to resolve message seqs for thread %s", self._thread_id, exc_info=True)
                 found = {}
             self._seqs.update(found)
-            self._missing.update(unresolved - found.keys())
+            self._missing.update(dict.fromkeys(unresolved - found.keys(), generation))
 
         stamped = [attach_message_seq(message, seq) if identity is not None and (seq := self._seqs.get(identity)) is not None else message for message, identity in zip(messages, identities, strict=True)]
         return {**payload, "messages": stamped}
+
+
+def _build_seq_stamper(event_store: Any, thread_id: str, journal: Any) -> _MessageSeqStamper:
+    """Build the run's stamper, reading feed writes from *journal*.
+
+    The journal owns the writes that turn a lookup miss into a hit, so it is
+    also what can tell the stamper that a cached miss is worth re-asking. A run
+    without one has no writer to report, and the stamper falls back to keeping
+    its misses.
+    """
+    return _MessageSeqStamper(
+        event_store,
+        thread_id,
+        feed_generation=(lambda: journal.feed_generation) if journal is not None else None,
+    )
 
 
 async def _publish_stream_item(

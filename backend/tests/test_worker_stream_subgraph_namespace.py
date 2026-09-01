@@ -700,6 +700,166 @@ class TestMessageSeqStamping:
         assert len(calls) == 1
 
     @pytest.mark.asyncio
+    async def test_a_miss_is_retried_once_the_feed_advances(self):
+        """A miss is provisional: the same message can be persisted later in the run.
+
+        A message this run produces reaches a ``values`` frame before
+        ``RunJournal`` flushes it, so its first lookup misses. The journal then
+        writes it and it does have a feed seq. Caching that miss permanently
+        would leave it unstamped for the rest of the run — and a long run that
+        afterwards rolls past the history page and compacts is exactly the
+        misplacement this stamper exists to prevent (#4696 review).
+        """
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        store = await self._seeded_store()
+        generation = 0
+        stamper = _MessageSeqStamper(store, "t1", feed_generation=lambda: generation)
+        frame = {"messages": [{"type": "ai", "id": "a1", "content": "…"}]}
+
+        first = await stamper.stamp(dict(frame))
+        assert "deerflow_seq" not in (first["messages"][0].get("additional_kwargs") or {})
+
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.ai.output",
+            category="message",
+            content={"type": "ai", "id": "a1", "content": "…"},
+        )
+        generation += 1
+
+        second = await stamper.stamp(dict(frame))
+        assert second["messages"][0]["additional_kwargs"]["deerflow_seq"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_miss_is_not_retried_while_the_feed_is_unchanged(self):
+        """Retrying is bounded by feed writes, not by frames.
+
+        Without the generation gate the retry would run on every frame that
+        carries a streaming message — a query per frame on exactly the long
+        threads this stamper is careful to cost one query in.
+        """
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        store = await self._seeded_store()
+        calls: list[list[str]] = []
+        original = store.get_message_seqs
+
+        async def counting(thread_id, identities, **kwargs):
+            calls.append(list(identities))
+            return await original(thread_id, identities, **kwargs)
+
+        store.get_message_seqs = counting  # type: ignore[method-assign]
+        stamper = _MessageSeqStamper(store, "t1", feed_generation=lambda: 7)
+        frame = {"messages": [{"type": "ai", "id": "never-persisted", "content": "…"}]}
+
+        for _ in range(3):
+            await stamper.stamp(dict(frame))
+
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_a_failed_lookup_is_retried_once_the_feed_advances(self):
+        """A transient store error must not disable stamping for the whole run.
+
+        The except clause degrades the frame to "no seq"; treating that answer
+        as final would make one failed query as permanent as a real miss.
+        """
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        store = await self._seeded_store()
+        generation = 0
+        original = store.get_message_seqs
+        failed = False
+
+        async def failing_once(thread_id, identities, **kwargs):
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise RuntimeError("transient store failure")
+            return await original(thread_id, identities, **kwargs)
+
+        store.get_message_seqs = failing_once  # type: ignore[method-assign]
+        stamper = _MessageSeqStamper(store, "t1", feed_generation=lambda: generation)
+        frame = {"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]}
+
+        first = await stamper.stamp(dict(frame))
+        assert "deerflow_seq" not in (first["messages"][0].get("additional_kwargs") or {})
+
+        generation += 1
+        second = await stamper.stamp(dict(frame))
+        assert second["messages"][0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_a_resolved_identity_survives_a_feed_advance(self):
+        """Only misses are provisional — a resolved seq is never looked up again.
+
+        The feed's earliest-seq-wins rule makes a resolved answer final, so an
+        advancing feed must not turn the positive cache into a per-write query.
+        """
+        from deerflow.runtime.runs.worker import _MessageSeqStamper
+
+        store = await self._seeded_store()
+        calls: list[list[str]] = []
+        original = store.get_message_seqs
+
+        async def counting(thread_id, identities, **kwargs):
+            calls.append(list(identities))
+            return await original(thread_id, identities, **kwargs)
+
+        store.get_message_seqs = counting  # type: ignore[method-assign]
+        generation = 0
+        stamper = _MessageSeqStamper(store, "t1", feed_generation=lambda: generation)
+        frame = {"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]}
+
+        await stamper.stamp(dict(frame))
+        generation += 1
+        stamped = await stamper.stamp(dict(frame))
+
+        assert len(calls) == 1
+        assert stamped["messages"][0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_the_run_stamper_re_asks_after_the_journal_writes(self):
+        """The wiring itself: the run's stamper reads the journal's feed writes.
+
+        Miss-retrying is only reachable if the stamper the worker builds is the
+        one connected to the journal, and a lambda pointing at the wrong object
+        fails silently — the stamper simply keeps every miss.
+        """
+        from deerflow.runtime.journal import RunJournal
+        from deerflow.runtime.runs.worker import _build_seq_stamper
+
+        store = await self._seeded_store()
+        journal = RunJournal("r1", "t1", store, flush_threshold=100)
+        stamper = _build_seq_stamper(store, "t1", journal)
+        frame = {"messages": [{"type": "ai", "id": "a1", "content": "…"}]}
+
+        first = await stamper.stamp(dict(frame))
+        assert "deerflow_seq" not in (first["messages"][0].get("additional_kwargs") or {})
+
+        journal._put(
+            event_type="llm.ai.response",
+            category="message",
+            content={"type": "ai", "id": "a1", "content": "…"},
+        )
+        await journal.flush()
+
+        second = await stamper.stamp(dict(frame))
+        assert second["messages"][0]["additional_kwargs"]["deerflow_seq"] == 2
+
+    @pytest.mark.asyncio
+    async def test_a_run_without_a_journal_still_builds_a_stamper(self):
+        """No writer to report feed growth is not a reason to stop stamping."""
+        from deerflow.runtime.runs.worker import _build_seq_stamper
+
+        stamper = _build_seq_stamper(await self._seeded_store(), "t1", None)
+
+        stamped = await stamper.stamp({"messages": [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}]})
+        assert stamped["messages"][0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    @pytest.mark.asyncio
     @pytest.mark.no_auto_user
     async def test_stamping_survives_a_launch_path_without_user_context(self, tmp_path):
         """A launch path that never inherits the auth contextvar (e.g. a

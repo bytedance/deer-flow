@@ -284,6 +284,12 @@ class RunJournal(BaseCallbackHandler):
         self._current_run_tool_call_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
 
+        # Bumped once per successful event-store write. A reader that cached a
+        # "the feed does not hold this message" answer compares this between
+        # reads to learn whether retrying could produce a different one,
+        # without polling the store (#4696 review).
+        self._feed_generation = 0
+
         # Artifact-production tracking for the terminal run.delivery event
         # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
         self._produced_artifacts: list[tuple[str, str | None]] = []
@@ -693,6 +699,7 @@ class RunJournal(BaseCallbackHandler):
             if store is None:
                 return
             await store.put_batch(batch)
+            self._feed_generation += 1
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -932,6 +939,7 @@ class RunJournal(BaseCallbackHandler):
                 if store is None:
                     return
                 await store.put_batch(batch)
+                self._feed_generation += 1
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
@@ -1058,6 +1066,18 @@ class RunJournal(BaseCallbackHandler):
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
         }
+
+    @property
+    def feed_generation(self) -> int:
+        """Monotonic count of successful writes to the thread feed.
+
+        Buffered events are not in the feed yet, so a lookup for a message this
+        run just produced legitimately misses. This counter is what tells such
+        a reader that its cached miss is worth re-asking — it changes exactly
+        when the feed gained rows, and never while the buffer is merely
+        filling. A failed write leaves it alone: nothing became readable.
+        """
+        return self._feed_generation
 
     @property
     def had_llm_error_fallback(self) -> bool:

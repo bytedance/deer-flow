@@ -41,7 +41,14 @@ written back to the checkpoint. The run-scoped cache makes the compaction frame
 the only one that costs a lookup, and the stamper soft-resolves the user id
 once at build time — like the worker's write paths beside it — so a launch path
 that never inherits the auth contextvar (a null-owner scheduled task) still
-stamps instead of the db store's strict `AUTO` default raising per frame. REST
+stamps instead of the db store's strict `AUTO` default raising per frame. A
+resolved seq is cached for the run (earliest-seq-wins makes it final), but a
+miss is not: a message this run produces reaches a frame before `RunJournal`
+flushes it, so it misses and is persisted moments later. Misses are re-asked
+when `RunJournal.feed_generation` — bumped once per successful event-store
+write, never while the buffer merely fills — shows the feed gained rows, which
+keeps the retry bounded by writes rather than by frames and makes a failed
+lookup cost one generation instead of the run. REST
 reads (`GET /threads/{id}/state`, `POST /threads/{id}/history`) stamp through
 `events/message_seq.py::stamp_messages_with_seq`, the request-scoped
 counterpart: everything a checkpoint still holds is already persisted, so one
