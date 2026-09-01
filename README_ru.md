@@ -445,7 +445,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 - `user_id` = эффективный пользователь из `get_effective_user_id()` (возвращается к `default` в режиме без аутентификации)
 - `trace_name` = assistant id (по умолчанию `lead-agent`)
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (опускается, если не заданы)
-- `metadata.deerflow_trace_id` = идентификатор корреляции запросов DeerFlow, совпадающий с `X-Trace-Id`, когда корреляция трассировки запросов включена
+- `metadata.deerflow_trace_id` = идентификатор корреляции запросов DeerFlow, всегда совпадающий с заголовком ответа `X-Trace-Id` того же запроса (`logging.enhance.enabled` управляет только тем, выводится ли этот идентификатор в логи)
 
 Эти поля внедряются в `RunnableConfig.metadata` в корне вызова графа как для gateway-пути (`runtime/runs/worker.py::run_agent`), так и для встроенного пути (`client.py::DeerFlowClient.stream`), поэтому любой LangChain-совместимый callback может их прочитать. Установите `DEER_FLOW_ENV` (или `ENVIRONMENT`) для тегирования трасс по среде развёртывания.
 

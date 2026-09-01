@@ -172,6 +172,8 @@ DeerFlow 新近集成了 BytePlus 自研的智能搜索与抓取工具集——[
 
    如果要让 OpenAI 模型走 `/v1/responses`，继续使用 `langchain_openai:ChatOpenAI`，并设置 `use_responses_api: true` 和 `output_version: responses/v1`。
 
+   Setup Wizard 已内置 Z.AI GLM-5.3-Flash 配置。由于该模型强制开启 thinking，且只接受自身限定的 effort 档位，当前兼容配置会在前台和后台调用中始终保持 thinking 开启，并暂时屏蔽 DeerFlow 的通用 effort 选择器。等价的手动配置见 `config.example.yaml`。
+
    对于 vLLM 0.19.0，请使用 `deerflow.models.vllm_provider:VllmChatModel`。对于 Qwen 风格的推理模型，DeerFlow 通过 `extra_body.chat_template_kwargs.enable_thinking` 开关推理，并在多轮 tool-call 对话中保留 vLLM 非标准的 `reasoning` 字段。旧版 `thinking` 配置会自动规范化以保持向后兼容。推理模型可能还需要在启动 vLLM 服务时加上 `--reasoning-parser ...` 参数。如果你的本地 vLLM 部署接受任意非空 API key，可以把 `VLLM_API_KEY` 设为一个占位值。
 
    CLI-backed provider 配置示例：
@@ -536,7 +538,7 @@ LANGFUSE_BASE_URL=https://cloud.langfuse.com
 - `user_id` = 来自 `get_effective_user_id()` 的有效用户（在无鉴权模式下回退为 `default`）
 - `trace_name` = assistant id（默认为 `lead-agent`）
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]`（未设置时省略）
-- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，当启用请求链路关联（request trace correlation）时与 `X-Trace-Id` 一致
+- `metadata.deerflow_trace_id` = DeerFlow 的请求关联 id，始终与同一请求返回的 `X-Trace-Id` 响应头一致（`logging.enhance.enabled` 只控制该 id 是否打印到日志中）
 
 这些字段会在图（graph）调用的根部注入到 `RunnableConfig.metadata`，同时覆盖 gateway 路径（`runtime/runs/worker.py::run_agent`）和内嵌路径（`client.py::DeerFlowClient.stream`），因此任何兼容 LangChain 的 callback 都能读取到它们。设置 `DEER_FLOW_ENV`（或 `ENVIRONMENT`）可按部署环境为 trace 打标签。
 
@@ -730,6 +732,7 @@ DeerFlow 现在在 workspace 里内置了一个一等的定时任务（scheduled
 
 - 在 `/workspace/scheduled-tasks` 管理任务
 - 每个定时任务可以选择复用同一个 thread 及其历史对话，也可以选择每次运行新建一个 thread
+- 将现有任务复制到创建表单中作为可编辑草稿，不复制运行历史
 - 支持 `once` 和 `cron` 两种调度方式
 - 后台定时执行以非交互式 DeerFlow run 运行（那里不会暴露 `ask_clarification`）
 - 当所复用的 thread 或全局执行配额正忙时，到期执行会持久化为 `queued`，并在可用后启动；队列项在 Gateway 重启后保留，超过 `scheduler.queue_timeout_seconds` 后标记为失败
@@ -781,6 +784,16 @@ DeerFlow 具备**系统指令执行、资源操作、业务逻辑调用**等关�
 
 - **未授权的非法调用**：agent 功能被未授权的第三方、公网恶意扫描程序探测到，进而发起批量非法调用请求，执行系统命令、文件读写等高危操作，可能导致安全后果。
 - **合规与法律风险**：若 agent 被非法调用用于实施网络攻击、信息窃取等违法违规行为，可能产生法律责任与合规风险。
+
+### Gateway 管理员权限等同于代码执行
+
+管理员可以注册 stdio 类型的 MCP server，其命令会在 Gateway 容器内执行。API 会把可执行命令限制在一个允许清单内（默认为 `npx`、`uvx`，可通过 `DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST` 扩展），并拒绝会导致任意代码求值的参数与环境变量。这属于纵深防御，而不是安全边界：这类启动器本身的用途就是拉取并运行远程包，因此请**将 Gateway 管理员权限视为等同于在宿主机上执行代码**，并据此谨慎授权。
+
+### 部署默认值
+
+Docker 部署栈默认只把入口端口发布在 `127.0.0.1` 上，与上文所述的本地可信环境模型一致。若需要从其他机器访问，请在 `.env` 中设置 `BIND_HOST`（例如 `BIND_HOST=0.0.0.0`），并且必须在落实下方的安全措施之后再这样做。
+
+**请在主机变为可访问之前完成首次初始化设置。** 全新实例尚未创建任何账号，因此对于任何非仅回环访问的部署，请在启动后立即通过 `/setup` 创建管理员账号。
 
 ### 安全使用建议
 

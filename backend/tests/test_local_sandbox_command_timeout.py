@@ -5,9 +5,8 @@ a backgrounded long-lived process must not keep the bash tool blocked until
 the timeout, and a genuinely blocking foreground command must be terminated
 (process group and all) once it exceeds the timeout.
 
-The POSIX cases exercise real subprocess/process-group semantics, so they are
-skipped on Windows. Windows keeps the ``subprocess.run`` path, but timeout
-errors still use the same user-facing notice.
+The platform-specific cases exercise real subprocess and process-tree/group
+semantics, while the shared tests pin the user-facing timeout notice.
 """
 
 import os
@@ -77,19 +76,34 @@ def test_foreground_blocking_command_times_out_with_notice():
 
 def test_timeout_notice_formats_fractional_and_singular_timeouts(monkeypatch):
     monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
-    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: ("", "", 0, True)))
+    runner = "_run_windows_command" if os.name == "nt" else "_run_posix_command"
+    monkeypatch.setattr(LocalSandbox, runner, staticmethod(lambda args, timeout, env=None: ("", "", 0, True)))
 
     assert "after 1.5 seconds" in LocalSandbox("t").execute_command("wait", timeout=1.5)
     assert "after 1 second" in LocalSandbox("t").execute_command("wait", timeout=1)
 
 
-def test_windows_timeout_expired_returns_notice(monkeypatch):
-    def fake_run(*args, **kwargs):
-        raise local_sandbox.subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs["timeout"], output="partial out", stderr="partial err")
+def test_timeout_output_carries_authoritative_failure_marker(monkeypatch):
+    """A timed-out command is a failed execution: the output must carry an
+    exit marker so exit-status evidence (acceptance checklist) cannot read a
+    partial passing summary as success."""
+    monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "/bin/sh")
+    monkeypatch.setattr(LocalSandbox, "_run_posix_command", staticmethod(lambda args, timeout, env=None: ("12 passed\n", "", 0, True)))
 
+    output = LocalSandbox("t").execute_command("make test", timeout=1)
+
+    assert "timed out" in output.lower()
+    assert output.endswith("Exit Code: 124")
+
+
+def test_windows_timeout_returns_notice(monkeypatch):
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
     monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: "cmd.exe")
-    monkeypatch.setattr(local_sandbox.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        LocalSandbox,
+        "_run_windows_command",
+        staticmethod(lambda args, timeout, env: ("partial out", "partial err", 0, True)),
+    )
 
     output = LocalSandbox("t").execute_command("wait", timeout=1.5)
 
@@ -98,6 +112,34 @@ def test_windows_timeout_expired_returns_notice(monkeypatch):
     assert "partial err" in output
     assert "after 1.5 seconds" in output
     assert "Unexpected error" not in output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows process-tree semantics")
+def test_windows_foreground_timeout_is_wall_clock_bound(monkeypatch):
+    monkeypatch.setattr(LocalSandbox, "_get_shell", lambda self: r"C:\Windows\System32\cmd.exe")
+    sandbox = LocalSandbox("t")
+
+    start = time.monotonic()
+    output = sandbox.execute_command("ping -n 5 127.0.0.1", timeout=0.2)
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 2, f"timeout not enforced for process tree, took {elapsed:.1f}s"
+    assert "after 0.2 seconds" in output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows bounded-capture semantics")
+def test_windows_command_output_is_bounded(monkeypatch):
+    monkeypatch.setattr(
+        LocalSandbox,
+        "_get_shell",
+        lambda self: r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+    )
+    emitted_chars = local_sandbox._COMMAND_CAPTURE_LIMIT_BYTES + 1024
+
+    output = LocalSandbox("t").execute_command(f"[Console]::Out.Write('x' * {emitted_chars})", timeout=20)
+
+    assert len(output) < emitted_chars
+    assert "output truncated after 10485760 of 10486784 bytes" in output
 
 
 @posix_only

@@ -57,6 +57,10 @@ class BoxliteBox(Sandbox):
             per-call ``env`` (request-scoped secrets).
     """
 
+    #: Every call is a fresh ``sh -lc`` exec in the box — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     TERMINAL_ERROR_MARKERS = (
         "vsock",
         "disconnected",
@@ -199,8 +203,10 @@ class BoxliteBox(Sandbox):
             output = f"{stdout}\n{stderr}"
         else:
             output = stdout or stderr
-        if result.exit_code not in (0, None) and not output:
-            output = f"Command exited with code {result.exit_code}"
+        if result.exit_code not in (0, None):
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {result.exit_code}" if output else f"Command exited with code {result.exit_code}"
         return output if output else "(no output)"
 
     # ── file operations ─────────────────────────────────────────────────

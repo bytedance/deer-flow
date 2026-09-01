@@ -1484,8 +1484,8 @@ def _replace_lark_app_credentials_locked(user_id: str, *, app_id: str, app_secre
     ensure_lark_cli_credential_tree(user_id)
     root = _lark_cli_credential_root(user_id)
     with _lark_credential_transaction(user_id, root) as snapshot:
-        _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=brand)
         _clear_directory_contents(lark_cli_data_dir(user_id))
+        _save_lark_app_config_with_cli(user_id, app_id=app_id, app_secret=app_secret, brand=brand)
         _revoke_lark_auth_from_snapshot(snapshot)
 
 

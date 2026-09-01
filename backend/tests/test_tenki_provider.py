@@ -1,6 +1,6 @@
 """Unit tests for the Tenki community sandbox provider.
 
-These run in CI without ``tenki-sandbox`` installed: they cover the lazy-import
+These run in CI without ``tenki`` installed: they cover the lazy-import
 error path, provider lifecycle, path-safety guards, the native ``fs`` file
 round-trip, warm-pool mechanics, and scope resolution — none of which need a live
 sandbox. A single opt-in integration test (``test_integration_real_sandbox``)
@@ -10,6 +10,7 @@ exercises a real Tenki microVM end to end when ``TENKI_API_KEY`` is set.
 from __future__ import annotations
 
 import errno
+import logging
 import os
 import shlex
 import sys
@@ -149,6 +150,8 @@ class _FakeSandbox:
     def _run_script(self, script: str) -> _FakeResult:
         if script == "echo ok":
             return _FakeResult(stdout=b"ok\n")
+        if script == "failing-tests":
+            return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
         if script.startswith("find "):
@@ -175,17 +178,12 @@ class _FakeSandbox:
             raise self.close_error
 
 
-class _FakeProject:
+class _FakeWorkspace:
+    """Mirrors tenki 1.0.2 ``IdentityWorkspace``: id and name, no ``projects``."""
+
     def __init__(self, id: str, name: str) -> None:
         self.id = id
         self.name = name
-
-
-class _FakeWorkspace:
-    def __init__(self, id: str, name: str, projects: list[_FakeProject]) -> None:
-        self.id = id
-        self.name = name
-        self.projects = projects
 
 
 class _FakeIdentity:
@@ -200,12 +198,44 @@ class _FakeClient:
         self._sandbox_factory = sandbox_factory or (lambda: _FakeSandbox())
         self.last_sandbox: _FakeSandbox | None = None
         self._by_id: dict[str, _FakeSandbox] = {}
-        self._workspaces = workspaces if workspaces is not None else [_FakeWorkspace("ws1", "Workspace", [_FakeProject("proj1", "Project")])]
+        self._workspaces = workspaces if workspaces is not None else [_FakeWorkspace("ws1", "Workspace")]
 
     def who_am_i(self):
         return _FakeIdentity(self._workspaces)
 
-    def create(self, **kwargs):
+    # Keyword-only and deliberately WITHOUT **kwargs, mirroring tenki 1.0.2's
+    # Client.create. The 0.4.0-era double accepted **kwargs, so it swallowed the
+    # project_id the real 1.x rejects and the suite passed against a provider
+    # that could not create a sandbox. An unexpected kwarg must be a TypeError
+    # here exactly as it is against the real SDK.
+    def create(
+        self,
+        *,
+        name=None,
+        workspace_id=None,
+        sticky=False,
+        wait=True,
+        max_duration=None,
+        image=None,
+        cpu_cores=None,
+        memory_mb=None,
+        env=None,
+    ):
+        kwargs = {
+            "name": name,
+            "workspace_id": workspace_id,
+            "sticky": sticky,
+            "wait": wait,
+        }
+        for key, value in (
+            ("max_duration", max_duration),
+            ("image", image),
+            ("cpu_cores", cpu_cores),
+            ("memory_mb", memory_mb),
+            ("env", env),
+        ):
+            if value is not None:
+                kwargs[key] = value
         self.create_count += 1
         self.create_kwargs.append(kwargs)
         sandbox = self._sandbox_factory()
@@ -314,6 +344,14 @@ def test_execute_command_formats_stdout_and_forwards_env_timeout() -> None:
     assert call["env"] == {"BASE": "1", "EXTRA": "2"}
     assert call["timeout"] == 5
     assert call["cwd"] is None  # no forced cwd; runs in sandbox default dir
+
+
+def test_execute_command_appends_exit_marker_when_failure_has_output() -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    assert box.execute_command("failing-tests") == "5 passed, 1 error\n\nExit Code: 1"
 
 
 def test_execute_command_returns_error_as_text() -> None:
@@ -648,8 +686,9 @@ def test_create_passes_prefixed_name_and_scope(monkeypatch):
     assert sid in provider._sandboxes
     kwargs = client.create_kwargs[0]
     assert kwargs["name"].startswith("deer-flow-tenki-")
-    assert kwargs["project_id"] == "proj1"
     assert kwargs["workspace_id"] == "ws1"
+    # Tenki 1.x has no project layer; passing one is a TypeError against the SDK.
+    assert "project_id" not in kwargs
     provider.shutdown()
 
 
@@ -897,29 +936,57 @@ def test_shutdown_destroys_all_and_stops_reaper(monkeypatch):
 # ── Provider: scope resolution ─────────────────────────────────────────
 
 
-def test_scope_auto_resolves_single(monkeypatch):
+def test_scope_auto_resolves_single_workspace(monkeypatch):
     client = _FakeClient()
     provider = _install(monkeypatch, client=client)
     provider.acquire("thread-1", user_id="u1")
-    assert client.create_kwargs[0]["project_id"] == "proj1"
     assert client.create_kwargs[0]["workspace_id"] == "ws1"
     provider.shutdown()
 
 
-def test_explicit_project_id_skips_lookup(monkeypatch):
+def test_explicit_workspace_id_skips_lookup(monkeypatch):
     client = _FakeClient()
-    provider = _install(monkeypatch, client=client, config_attrs={"project_id": "explicit"})
+    provider = _install(monkeypatch, client=client, config_attrs={"workspace_id": "explicit"})
     provider.acquire("thread-1", user_id="u1")
-    assert client.create_kwargs[0]["project_id"] == "explicit"
+    assert client.create_kwargs[0]["workspace_id"] == "explicit"
     provider.shutdown()
 
 
-def test_ambiguous_project_raises(monkeypatch):
-    client = _FakeClient(workspaces=[_FakeWorkspace("ws1", "W", [_FakeProject("p1", "A"), _FakeProject("p2", "B")])])
+def test_ambiguous_workspace_raises(monkeypatch):
+    client = _FakeClient(workspaces=[_FakeWorkspace("ws1", "A"), _FakeWorkspace("ws2", "B")])
     provider = _install(monkeypatch, client=client)
-    with pytest.raises(ValueError, match="project_id"):
+    with pytest.raises(ValueError, match="workspace_id"):
         provider.acquire("thread-1", user_id="u1")
     provider.shutdown()
+
+
+def test_stale_project_id_is_ignored_with_a_warning(monkeypatch, caplog):
+    """A 0.4.0-era config keeps booting; the dead key says so instead of going quiet.
+
+    SandboxConfig is ``extra="allow"``, so an unread project_id would sit in
+    config.yaml scoping nothing. It also used to short-circuit the identity
+    lookup, so silently dropping it changes how scope resolves.
+    """
+    client = _FakeClient()
+    with caplog.at_level(logging.WARNING, logger="deerflow.community.tenki.provider"):
+        provider = _install(monkeypatch, client=client, config_attrs={"project_id": "proj_legacy"})
+    assert "sandbox.project_id is ignored" in caplog.text
+    provider.acquire("thread-1", user_id="u1")
+    assert "project_id" not in client.create_kwargs[0]
+    assert client.create_kwargs[0]["workspace_id"] == "ws1"
+    provider.shutdown()
+
+
+def test_create_rejects_project_id_like_the_real_sdk(monkeypatch):
+    """Guards the hole that let the 1.x break through: the old double took **kwargs.
+
+    tenki 1.0.2's Client.create is keyword-only with no **kwargs, so a stray
+    project_id raises TypeError. The double must do the same or a provider that
+    cannot create a sandbox goes on passing its tests.
+    """
+    client = _FakeClient()
+    with pytest.raises(TypeError, match="project_id"):
+        client.create(name="n", workspace_id="ws1", project_id="proj1")
 
 
 # ── Live integration (opt-in) ──────────────────────────────────────────
@@ -941,3 +1008,10 @@ def test_integration_real_sandbox(monkeypatch):
         assert box.read_file("/mnt/user-data/workspace/it.txt") == "tenki-e2e"
     finally:
         provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert TenkiSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    assert TenkiSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")

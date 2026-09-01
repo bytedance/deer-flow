@@ -8,6 +8,7 @@ transport, search parsing, path guards, and terminal-session eviction.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import logging
 import re
@@ -463,7 +464,9 @@ def test_shutdown_stops_idle_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_execute_forwards_env_timeout_and_combines_streams() -> None:
     remote = _FakeRemote("remote")
     box = _box(remote, default_env={"BASE": "1"})
-    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1"
+    # A nonzero exit with non-empty output keeps the authoritative marker
+    # (LocalSandbox parity) instead of losing the failure.
+    assert box.execute_command("mixed-output", env={"EXTRA": "2"}, timeout=5) == "out-1\nout-2\nerr-1\nExit Code: 7"
     _, opts = remote.commands.calls[-1]
     assert opts is not None
     assert opts.envs == {"BASE": "1", "EXTRA": "2"}
@@ -711,3 +714,46 @@ def test_concurrent_same_scope_acquire_creates_once(monkeypatch: pytest.MonkeyPa
     assert len(results) == 2 and results[0] == results[1]
     assert len(sdk.create_calls) == 1
     provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_acquire_async_serializes_retry_behind_abandoned_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cancelled acquire_async abandons the body thread, not the lock.
+
+    Regression test (#4741): the serializer hold must follow the abandoned
+    body to completion, so a retry for the same scope serializes behind it
+    instead of overlapping it and creating a duplicate, untracked remote.
+    """
+    provider, sdk = _install(monkeypatch)
+    started = threading.Event()
+    release = threading.Event()
+    original_create = sdk.create
+
+    def blocking_create(image: str, **kwargs: Any) -> _FakeRemote:
+        started.set()
+        assert release.wait(timeout=10)
+        return original_create(image, **kwargs)
+
+    sdk.create = blocking_create  # type: ignore[method-assign]
+
+    first = asyncio.create_task(provider.acquire_async("thread", user_id="user"))
+    assert await asyncio.to_thread(started.wait, 10)  # body is blocked inside create()
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    release.set()  # abandoned body runs to completion and registers
+    second = await provider.acquire_async("thread", user_id="user")
+
+    expected_id = provider._sandbox_id("thread", "user")
+    assert len(sdk.create_calls) == 1  # no duplicate remote sandbox
+    assert second == expected_id
+    assert provider._thread_sandboxes[provider._thread_key("thread", "user")] == expected_id
+    provider.shutdown()
+
+
+def test_sandbox_id_matches_shared_identity():
+    from deerflow.sandbox.identity import derive_sandbox_scope_token
+
+    assert OpenSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
+    assert OpenSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")

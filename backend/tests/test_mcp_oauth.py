@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 from typing import Any
 
@@ -613,3 +614,127 @@ def test_get_authorization_header_cancelled_while_waiting_does_not_leak_lock(mon
     # Exactly one real token fetch: the cancelled waiter must never reach
     # _fetch_token, so the third call is the only one that performs it.
     assert len(post_calls) == 1
+
+
+# --- Illegal header values ---------------------------------------------------
+#
+# What the token endpoint returns is not this process's to control. An
+# access_token or token_type carrying a newline reaches h11, which raises with
+# the full value in the message, and ToolErrorHandlingMiddleware copies that
+# message into a model-visible ToolMessage. Every one of these asserts the
+# token never appears in what the caller sees.
+
+
+def _oauth_server_config() -> ExtensionsConfig:
+    return ExtensionsConfig.model_validate(
+        {
+            "mcpServers": {
+                "secure-http": {
+                    "enabled": True,
+                    "type": "http",
+                    "url": "https://api.example.com/mcp",
+                    "oauth": {
+                        "enabled": True,
+                        "token_url": "https://auth.example.com/oauth/token",
+                        "grant_type": "client_credentials",
+                        "client_id": "client-id",
+                        "client_secret": "client-secret",
+                    },
+                }
+            }
+        }
+    )
+
+
+def _token_endpoint_returns(monkeypatch, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    post_calls: list[dict[str, Any]] = []
+
+    def _client_factory(*args, **kwargs):
+        return _MockAsyncClient(payload=payload, post_calls=post_calls, **kwargs)
+
+    monkeypatch.setattr("httpx.AsyncClient", _client_factory)
+    return post_calls
+
+
+@pytest.mark.parametrize(
+    ("payload", "secret"),
+    [
+        (
+            {"access_token": "oauth-secret-123\n", "token_type": "Bearer", "expires_in": 3600},
+            "oauth-secret-123",
+        ),
+        (
+            {"access_token": "oauth-secret-456", "token_type": "Bearer\r", "expires_in": 3600},
+            "oauth-secret-456",
+        ),
+        (
+            {"access_token": "oauth-secret-caf\u00e9", "token_type": "Bearer", "expires_in": 3600},
+            "oauth-secret-caf\u00e9",
+        ),
+        (
+            {"access_token": "oauth-secret-789 ", "token_type": "Bearer", "expires_in": 3600},
+            "oauth-secret-789",
+        ),
+    ],
+    ids=["trailing-newline", "cr-in-token-type", "non-ascii", "trailing-space"],
+)
+def test_illegal_oauth_token_is_denied_without_leaking(monkeypatch, payload, secret):
+    _token_endpoint_returns(monkeypatch, payload)
+    manager = OAuthTokenManager.from_extensions_config(_oauth_server_config())
+
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(manager.get_authorization_header("secure-http"))
+
+    message = str(excinfo.value)
+    assert secret not in message
+    assert "secure-http" in message
+
+
+def test_oauth_token_kept_legal_by_the_space_after_token_type_is_accepted(monkeypatch):
+    # The rendered value is the boundary, not the two fields on their own: this
+    # access_token carries leading whitespace, which the transport tolerates
+    # once it follows "Bearer ". Denying it would refuse a token the server
+    # would have accepted.
+    _token_endpoint_returns(monkeypatch, {"access_token": " leading-space-token", "token_type": "Bearer", "expires_in": 3600})
+    manager = OAuthTokenManager.from_extensions_config(_oauth_server_config())
+
+    assert asyncio.run(manager.get_authorization_header("secure-http")) == "Bearer  leading-space-token"
+
+
+def test_oauth_interceptor_denies_illegal_token_without_calling_the_handler(monkeypatch):
+    _token_endpoint_returns(monkeypatch, {"access_token": "oauth-secret-abc\n", "token_type": "Bearer", "expires_in": 3600})
+    config = _oauth_server_config()
+    interceptor = build_oauth_tool_interceptor(config)
+    assert interceptor is not None
+
+    class _Request:
+        server_name = "secure-http"
+        headers: dict[str, str] = {}
+
+        def override(self, **kwargs):  # pragma: no cover - denied before reached
+            raise AssertionError("the request must never be forwarded with an illegal token")
+
+    handler_calls: list[Any] = []
+
+    async def _handler(request):  # pragma: no cover - denied before reached
+        handler_calls.append(request)
+        return "ok"
+
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(interceptor(_Request(), _handler))
+
+    assert "oauth-secret-abc" not in str(excinfo.value)
+    assert handler_calls == []
+
+
+def test_initial_oauth_headers_skips_server_with_illegal_token(monkeypatch, caplog):
+    _token_endpoint_returns(monkeypatch, {"access_token": "oauth-secret-xyz\n", "token_type": "Bearer", "expires_in": 3600})
+    config = _oauth_server_config()
+
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.oauth"):
+        headers = asyncio.run(get_initial_oauth_headers(config))
+
+    # No header at all rather than a broken one: the connection then fails
+    # authentication at the server, which says nothing about the token.
+    assert headers == {}
+    assert "oauth-secret-xyz" not in caplog.text
