@@ -30,12 +30,23 @@ test-blocking-io:
 
 # Run the backend unit-test suite as one shard of a parallel CI split.
 #   SPLITS = total number of shards; GROUP = 1-based shard index.
+# Duration-aware: `least_duration` balances the shards by real wall-clock cost
+# read from .test_durations. Shards only READ that file (no --store-durations),
+# so concurrent CI jobs cannot race writes on it. Refresh it with
+# `make test-shard-durations` after a meaningful change to the test set.
 # `make test-shard SPLITS=4 GROUP=2` runs shard 2 of 4; a bare `make test-shard`
 # runs the whole (non-live) suite as a single split, matching `make test`.
 SPLITS ?= 1
 GROUP ?= 1
+DURATIONS_FILE ?= .test_durations
 test-shard:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits=$(SPLITS) --group=$(GROUP) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
+
+# Regenerate .test_durations from the full offline (non-live, non-blocking-I/O)
+# suite so duration-aware sharding reflects real wall-clock cost. Run locally or
+# in a periodic job, then commit the refreshed file.
+test-shard-durations:
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --durations-path=.test_durations tests/ -q
 
 lint:
 	uv run ruff check .

@@ -50,10 +50,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
-      # Deterministic split without a committed .test_durations file: each shard
-      # collects the whole non-live, non-blocking suite and pytest-split
-      # partitions it so every test runs on exactly one shard. Fail-fast is off
-      # so a failing shard reports its own tests without cancelling its peers.
+      # Duration-aware split: `make test-shard` balances the shards by real
+      # wall-clock cost from backend/.test_durations (read-only for shards, so
+      # concurrent jobs never race writes on it). Every test runs exactly once.
+      # Fail-fast is off so a failing shard reports its tests without cancelling
+      # its peers.
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
