@@ -486,7 +486,20 @@ class ScheduledTaskRepository:
         bypasses the session identity map so a concurrently committed status is
         read back fresh.
         """
-        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id).order_by(ScheduledTaskRunRow.scheduled_for.desc()).limit(1).execution_options(populate_existing=True)
+        stmt = (
+            select(ScheduledTaskRunRow)
+            .where(ScheduledTaskRunRow.task_id == task_id)
+            .order_by(
+                ScheduledTaskRunRow.created_at.desc(),
+                ScheduledTaskRunRow.scheduled_for.desc(),
+                # ``id`` is an opaque caller-supplied string. Use it only as a
+                # deterministic final tie-break when both timestamps match; it
+                # must not be treated as a recency signal.
+                ScheduledTaskRunRow.id.desc(),
+            )
+            .limit(1)
+            .execution_options(populate_existing=True)
+        )
         result = await session.execute(stmt)
         return result.scalars().first()
 
