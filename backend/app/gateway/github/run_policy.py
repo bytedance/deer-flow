@@ -99,11 +99,13 @@ def register_policy() -> None:
     Idempotent — registering twice just overwrites the same row.
     """
     from app.channels.run_policy import CHANNEL_RUN_POLICY, ChannelRunPolicy
+    from deerflow.agents.run_interaction_policy import WEBHOOK_MODE
 
     CHANNEL_RUN_POLICY["github"] = ChannelRunPolicy(
         # GitHub webhooks have no synchronous human — ask_clarification
         # would dead-end the run.
         is_interactive=False,
+        interaction_mode=WEBHOOK_MODE,
         # Autonomous coder runs (clone -> edit -> test -> push -> PR)
         # routinely need more than the 100 super-step interactive ceiling.
         # Per-agent overrides via GitHubAgentConfig.recursion_limit still

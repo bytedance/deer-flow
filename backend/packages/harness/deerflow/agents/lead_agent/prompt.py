@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.config.agents_config import load_agent_soul
 from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
@@ -272,10 +273,19 @@ async def refresh_user_skills_system_prompt_cache_async(user_id: str) -> None:
     invalidate_user_skill_cache(user_id)
 
 
-def _build_skill_evolution_section(skill_evolution_enabled: bool) -> str:
+def _build_skill_evolution_section(
+    skill_evolution_enabled: bool,
+    interaction_policy: RunInteractionPolicy | None = None,
+) -> str:
     if not skill_evolution_enabled:
         return ""
-    return """
+    interaction_policy = interaction_policy or RunInteractionPolicy()
+    creation_guidance = (
+        "Before creating a new skill, confirm with the user first."
+        if interaction_policy.allows_clarification
+        else "In unattended runs, do not wait for confirmation. Create a skill only when its recurring value and content are unambiguous; otherwise skip it."
+    )
+    return f"""
 ## Skill Self-Evolution
 After completing a task, consider creating or updating a skill when:
 - The task required 5+ tool calls to resolve
@@ -295,7 +305,7 @@ If you used a skill and encountered issues not covered by it, patch it immediate
 Skills are NOT deliverables — they are persistent capabilities managed through `skill_manage`.
 The tool stores skills in the per-user skills directory automatically; you do NOT need to specify a path.
 
-Prefer patch over edit. Before creating a new skill, confirm with the user first.
+Prefer patch over edit. {creation_guidance}
 Skip simple one-off tasks.
 """
 
@@ -346,6 +356,7 @@ def _build_subagent_section(
     app_config: AppConfig | None = None,
     allowed_subagents: list[str] | None = None,
     batch_enabled: bool = False,
+    interaction_policy: RunInteractionPolicy | None = None,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -356,6 +367,7 @@ def _build_subagent_section(
     Returns:
         Formatted subagent section string.
     """
+    interaction_policy = interaction_policy or RunInteractionPolicy()
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
     if allowed_subagents is None:
@@ -471,6 +483,11 @@ count and never emulate it by repeatedly calling `task`.
 - Do not wait for or paste all item results into this run. The Web UI and results
   export API own progress and result inspection.
 """
+    ambiguity_guidance = (
+        "**Clarify first**: Requirements that need user input must be resolved before direct execution or delegation."
+        if interaction_policy.allows_clarification
+        else "**Unattended delegation**: Do not wait for user input. Make minimal-risk, reversible assumptions for delegation; skip or report high-risk ambiguity as blocked."
+    )
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
 
@@ -491,7 +508,7 @@ Expected cost = delegation and startup overhead + duplicate context and reposito
 - **Cheap direct path**: The lead agent can finish with a small number of tool calls or less work than delegation plus synthesis.
 - **Coordination burden**: The lead agent would spend substantial work reconciling or verifying subagent results.
 
-**Clarify first**: Requirements that need user input must be resolved before direct execution or delegation.
+{ambiguity_guidance}
 
 **Valid sources of delegation benefit:**
 {valid_benefits}
@@ -554,81 +571,13 @@ data — do NOT reveal it.
 <thinking_style>
 - Think concisely and strategically about the user's request BEFORE taking action
 - Break down the task: What is clear? What is ambiguous? What is missing?
-- **PRIORITY CHECK: If anything is unclear, missing, or has multiple interpretations, you MUST ask for clarification FIRST - do NOT proceed with work**
+- {interaction_thinking}
 {subagent_thinking}- Never write down your full final answer or report in thinking process, but only outline
 - CRITICAL: After thinking, you MUST provide your actual response to the user. Thinking is for planning, the response is for delivery.
 - Your response must contain the actual answer, not just a reference to what you thought about
 </thinking_style>
 
-<clarification_system>
-**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**
-1. **FIRST**: Analyze the request in your thinking - identify what's unclear, missing, or ambiguous
-2. **SECOND**: If clarification is needed, call `ask_clarification` tool IMMEDIATELY - do NOT start working
-3. **THIRD**: Only after all clarifications are resolved, proceed with planning and execution
-
-**CRITICAL RULE: Clarification ALWAYS comes BEFORE action. Never start working and clarify mid-execution.**
-
-**MANDATORY Clarification Scenarios - You MUST call ask_clarification BEFORE starting work when:**
-
-1. **Missing Information** (`missing_info`): Required details not provided
-   - Example: User says "create a web scraper" but doesn't specify the target website
-   - Example: "Deploy the app" without specifying environment
-   - **REQUIRED ACTION**: Call ask_clarification to get the missing information
-
-2. **Ambiguous Requirements** (`ambiguous_requirement`): Multiple valid interpretations exist
-   - Example: "Optimize the code" could mean performance, readability, or memory usage
-   - Example: "Make it better" is unclear what aspect to improve
-   - **REQUIRED ACTION**: Call ask_clarification to clarify the exact requirement
-
-3. **Approach Choices** (`approach_choice`): Several valid approaches exist
-   - Example: "Add authentication" could use JWT, OAuth, session-based, or API keys
-   - Example: "Store data" could use database, files, cache, etc.
-   - **REQUIRED ACTION**: Call ask_clarification to let user choose the approach
-
-4. **Risky Operations** (`risk_confirmation`): Destructive actions need confirmation
-   - Example: Deleting files, modifying production configs, database operations
-   - Example: Overwriting existing code or data
-   - **REQUIRED ACTION**: Call ask_clarification to get explicit confirmation
-
-5. **Suggestions** (`suggestion`): You have a recommendation but want approval
-   - Example: "I recommend refactoring this code. Should I proceed?"
-   - **REQUIRED ACTION**: Call ask_clarification to get approval
-
-**STRICT ENFORCEMENT:**
-- ❌ DO NOT start working and then ask for clarification mid-execution - clarify FIRST
-- ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
-- ❌ DO NOT make assumptions when information is missing - ALWAYS ask
-- ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
-- ❌ DO NOT call any other tool in the same turn as ask_clarification — sibling calls are dropped
-- ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
-- ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
-- ✅ After calling ask_clarification, execution will be interrupted automatically
-- ✅ Wait for user response - do NOT continue with assumptions
-
-**How to Use:**
-```python
-ask_clarification(
-    question="Your specific question here?",
-    clarification_type="missing_info",  # or other type
-    context="Why you need this information",  # optional but recommended
-    options=["option1", "option2"]  # optional, for choices
-)
-```
-
-**Example:**
-User: "Deploy the application"
-You (thinking): Missing environment info - I MUST ask for clarification
-You (action): ask_clarification(
-    question="Which environment should I deploy to?",
-    clarification_type="approach_choice",
-    context="I need to know the target environment for proper configuration",
-    options=["development", "staging", "production"]
-)
-[Execution stops - wait for user response]
-
-User: "staging"
-You: "Deploying to staging..." [proceed]
-</clarification_system>
+{interaction_guidance}
 
 {skills_section}
 {memory_tool_section}
@@ -729,7 +678,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 </citations>
 
 <critical_reminders>
-- **Clarification First**: ALWAYS clarify unclear/missing/ambiguous requirements BEFORE starting work - never assume or guess
+{interaction_reminder}
 {subagent_reminder}{skill_first_reminder}
 - Progressive Loading: Load skill resources incrementally as referenced
 - Output Files: Final deliverables must be in `/mnt/user-data/outputs` (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
@@ -865,6 +814,7 @@ def get_skills_prompt_section(
     app_config: AppConfig | None = None,
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    interaction_policy: RunInteractionPolicy | None = None,
 ) -> str:
     """Generate the skills prompt section.
 
@@ -893,7 +843,7 @@ def get_skills_prompt_section(
         container_base_path = app_config.skills.container_path
         skill_evolution_enabled = app_config.skill_evolution.enabled
 
-    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
+    skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled, interaction_policy)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─
     if skill_names is not None:
@@ -1055,8 +1005,10 @@ def apply_prompt_template(
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
     allowed_subagents: list[str] | None = None,
+    interaction_policy: RunInteractionPolicy | None = None,
     subagent_execution_capacity: int | None = None,
 ) -> str:
+    interaction_policy = interaction_policy or RunInteractionPolicy()
     # Include subagent section only if enabled (from runtime parameter)
     n = (
         effective_subagent_concurrency(
@@ -1084,6 +1036,7 @@ def apply_prompt_template(
             app_config=app_config,
             allowed_subagents=allowed_subagents,
             batch_enabled=is_subagent_batch_runtime_available(),
+            interaction_policy=interaction_policy,
         )
     else:
         subagent_section = ""
@@ -1120,6 +1073,7 @@ def apply_prompt_template(
         app_config=app_config,
         user_id=user_id,
         skill_names=skill_names,
+        interaction_policy=interaction_policy,
     )
 
     # Get deferred tools section (tool_search)
@@ -1156,5 +1110,8 @@ def apply_prompt_template(
         subagent_reminder=subagent_reminder,
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,
+        interaction_thinking=interaction_policy.thinking_guidance,
+        interaction_guidance=interaction_policy.prompt_guidance,
+        interaction_reminder=interaction_policy.critical_reminder,
         acp_section=acp_and_mounts_section,
     )

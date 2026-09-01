@@ -388,10 +388,12 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Keys honored only for internally-authenticated callers (the scheduler path).
-# ``non_interactive`` strips ``ask_clarification`` from the lead-agent toolset;
-# arbitrary HTTP/IM clients must not be able to force autonomous execution.
-_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
+# Keys honored only for internally-authenticated callers. They select
+# unattended interaction behavior and arbitrary HTTP/IM clients must not be
+# able to force autonomous execution. The interaction-policy flags are
+# runtime-only and are deliberately excluded from persisted ``configurable``
+# data below.
+_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive", "disable_clarification", "run_interaction_mode"})
 
 # Server-owned authorization identity fields. These must never be accepted from
 # client-supplied ``body.config.context`` or ``body.config.configurable``. They
@@ -423,10 +425,11 @@ _SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
 #                              channel; the bash tool exposes it as
 #                              ``GH_TOKEN``/``GITHUB_TOKEN`` so ``gh`` and
 #                              ``git`` push as the bot, not the host user.
-#   ``disable_clarification`` — set for non-interactive channels (GitHub
-#                              webhooks) so ClarificationMiddleware proceeds
-#                              instead of dead-ending the run.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+#   ``disable_clarification`` — legacy middleware defense for non-interactive
+#                              channels (GitHub webhooks).
+#   ``non_interactive``        — legacy scheduled-task policy selector.
+#   ``run_interaction_mode`` — the authoritative tool/prompt policy selector.
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "run_interaction_mode", "non_interactive"})
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -456,21 +459,26 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     ``setdefault`` so a server-authenticated id stamped by
     :func:`inject_authenticated_user_context` always wins over the client-supplied one.
 
-    :data:`_CONTEXT_INTERNAL_CALLER_KEYS` are also forwarded when ``internal``
-    is True; for non-internal callers those keys are dropped from client requests
-    by :func:`strip_internal_context_keys`.
+    :data:`_CONTEXT_INTERNAL_CALLER_KEYS` are forwarded only to runtime context
+    when ``internal`` is True; for non-internal callers those keys are dropped
+    from client requests by :func:`strip_internal_context_keys`.
 
-    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is forwarded into ``config['context']`` only, never
-    ``configurable``. These are secrets / runtime flags read by tools and middlewares
-    from ``runtime.context``; keeping them out of ``configurable`` avoids persisting a
-    short-lived token in the checkpoint store.
+    A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``
+    and the interaction-policy flags) is forwarded into ``config['context']``
+    only, never ``configurable``. These are secrets / runtime flags read by tools
+    and middlewares from ``runtime.context``; keeping them out of
+    ``configurable`` avoids persisting a short-lived token or policy selector in
+    the checkpoint store. Interaction-policy flags are accepted here only for
+    trusted internal callers; the legacy ``github_token`` runtime value retains
+    its existing merge behavior.
     """
     if not context:
         return
     configurable = config.setdefault("configurable", {})
     runtime_context = config.setdefault("context", {})
-    keys = _CONTEXT_CONFIGURABLE_KEYS | _CONTEXT_INTERNAL_CALLER_KEYS if internal else _CONTEXT_CONFIGURABLE_KEYS
+    # Interaction-policy flags are runtime-only and must never be persisted in
+    # ``configurable`` checkpoint data.
+    keys = _CONTEXT_CONFIGURABLE_KEYS
     for key in keys:
         if key in context:
             if isinstance(configurable, dict):
@@ -480,7 +488,7 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
     # only — never ``configurable`` (which is persisted in checkpoints).
     for key in _CONTEXT_RUNTIME_ONLY_KEYS:
-        if key in context and isinstance(runtime_context, dict):
+        if key in context and (internal or key not in _CONTEXT_INTERNAL_CALLER_KEYS) and isinstance(runtime_context, dict):
             runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
@@ -1503,7 +1511,7 @@ async def launch_scheduled_thread_run(
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
         # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
+        context=({"run_interaction_mode": "scheduled", "non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"run_interaction_mode": "scheduled", "non_interactive": True}),
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,

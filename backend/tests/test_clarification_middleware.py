@@ -701,8 +701,9 @@ class TestClarificationCommandIdempotency:
 
 class TestClarificationDisabled:
     """When ``disable_clarification`` is set in runtime context, a clarification
-    must NOT interrupt the run — it returns a ToolMessage nudging the agent to
-    proceed, so non-interactive channels (GitHub) don't dead-end."""
+    must NOT interrupt the run — it returns a ToolMessage that applies the
+    unattended minimal-risk/blocked-outcome policy, so non-interactive channels
+    (GitHub) don't dead-end or push risky ambiguity forward."""
 
     def _request(self, *, runtime_context):
         return SimpleNamespace(
@@ -724,11 +725,25 @@ class TestClarificationDisabled:
         assert result.tool_call_id == "call-clarify-1"
         assert result.artifact is None
 
-    def test_disabled_message_tells_agent_to_proceed(self, middleware):
+    def test_disabled_message_applies_unattended_safety_policy(self, middleware):
         request = self._request(runtime_context={"disable_clarification": True})
         result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
-        assert "disabled" in result.content.lower()
-        assert "proceed" in result.content.lower()
+        content = result.content.lower()
+        assert "disabled" in content
+        assert "minimal-risk, reversible assumptions" in content
+        assert "do not perform" in content
+        assert "structured blocked outcome" in content
+        assert "carry out the requested action" not in content
+
+    @pytest.mark.parametrize("mode", ["scheduled", "webhook", "autonomous"])
+    def test_explicit_unattended_modes_use_safe_fallback(self, middleware, mode):
+        request = self._request(runtime_context={"run_interaction_mode": mode})
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        content = result.content.lower()
+        assert "minimal-risk, reversible assumptions" in content
+        assert "do not perform" in content
+        assert "structured blocked outcome" in content
 
     def test_disabled_async_path(self, middleware):
         request = self._request(runtime_context={"disable_clarification": True})
@@ -749,6 +764,26 @@ class TestClarificationDisabled:
 
         request = self._request(runtime_context={})  # no disable_clarification
         result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+        assert isinstance(result, Command)
+        assert result.goto == "__end__"
+
+    def test_explicit_unattended_mode_overrides_legacy_flag(self, middleware):
+        """The authoritative mode must suppress clarification despite a stale legacy false."""
+        from langchain_core.messages import ToolMessage
+
+        request = self._request(runtime_context={"run_interaction_mode": "scheduled", "disable_clarification": False})
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
+        assert isinstance(result, ToolMessage)
+        assert "proceed" in result.content.lower()
+
+    def test_explicit_interactive_mode_overrides_legacy_disable(self, middleware):
+        """A stale legacy flag must not suppress an explicitly interactive run."""
+        from langgraph.types import Command
+
+        request = self._request(runtime_context={"run_interaction_mode": "interactive", "disable_clarification": True})
+        result = middleware.wrap_tool_call(request, lambda _req: pytest.fail("handler should not be called"))
+
         assert isinstance(result, Command)
         assert result.goto == "__end__"
 
@@ -866,6 +901,22 @@ class TestDropParallelSiblingTools:
             ]
         )
         assert middleware.after_model({"messages": [msg]}, self._runtime(disable_clarification=True)) is None
+
+    def test_explicit_interactive_mode_drops_siblings_despite_legacy_disable(self, middleware):
+        msg = self._ai(
+            [
+                {"id": "c1", "name": "ask_clarification", "args": {"question": "q?"}},
+                {"id": "b1", "name": "bash", "args": {"command": "echo hi"}},
+            ]
+        )
+
+        update = middleware.after_model(
+            {"messages": [msg]},
+            self._runtime(run_interaction_mode="interactive", disable_clarification=True),
+        )
+
+        assert update is not None
+        assert [call["name"] for call in update["messages"][0].tool_calls] == ["ask_clarification"]
 
     def test_drops_siblings_when_clarification_args_fail_json_parse(self, middleware):
         """default_tool_parser splits raw OpenAI payloads per call."""

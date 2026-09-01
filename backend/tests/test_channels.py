@@ -3880,6 +3880,13 @@ class TestGithubFireAndForget:
         assert ChannelRunPolicy().fire_and_forget is False
         assert ChannelRunPolicy().serialize_thread_runs is False
 
+    def test_channel_run_policy_rejects_unknown_interaction_mode(self):
+        """A typo in a channel registration must not silently enable interaction."""
+        from app.channels.run_policy import ChannelRunPolicy
+
+        with pytest.raises(ValueError, match="Unknown channel interaction mode"):
+            ChannelRunPolicy(interaction_mode="webhhook")
+
     def test_feishu_channel_policy_opts_into_serialized_thread_runs(self):
         """Feishu's queue-same-thread behavior should be policy-driven."""
         import app.channels.feishu_run_policy  # noqa: F401

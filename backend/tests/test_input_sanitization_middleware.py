@@ -183,6 +183,7 @@ _FRAMEWORK_STRUCTURED_TAGS = [
     "self_update",
     "thinking_style",
     "clarification_system",
+    "interaction_system",
     "critical_reminders",
     "response_style",
     "citations",

@@ -49,6 +49,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.run_interaction_policy import RunInteractionPolicy
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthzDecision, AuthzRequest
@@ -897,7 +898,8 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     )
     max_total_subagents = cfg.get("max_total_subagents", _default_max_total_subagents(resolved_app_config))
     is_bootstrap = cfg.get("is_bootstrap", False)
-    non_interactive = bool(cfg.get("non_interactive", False))
+    interaction_policy = RunInteractionPolicy.resolve(cfg)
+    non_interactive = not interaction_policy.allows_clarification
     agent_name = validate_agent_name(cfg.get("agent_name"))
 
     agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
@@ -1051,6 +1053,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             user_id=resolved_user_id,
             skill_names=skill_setup.skill_names or None,
             allowed_subagents=allowed_subagents,
+            interaction_policy=interaction_policy,
             subagent_execution_capacity=subagent_execution_capacity,
         )
         graph = create_agent(
@@ -1078,6 +1081,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             effective_policies={
                 "bootstrap": True,
                 "non_interactive": non_interactive,
+                "interaction_mode": interaction_policy.mode,
                 "plan_mode": is_plan_mode,
                 "subagents": _subagent_release_policy(
                     resolved_app_config,
@@ -1169,6 +1173,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         user_id=resolved_user_id,
         skill_names=skill_setup.skill_names or None,
         allowed_subagents=allowed_subagents,
+        interaction_policy=interaction_policy,
         subagent_execution_capacity=subagent_execution_capacity,
     )
     graph = create_agent(
@@ -1197,6 +1202,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         effective_policies={
             "bootstrap": False,
             "non_interactive": non_interactive,
+            "interaction_mode": interaction_policy.mode,
             "plan_mode": is_plan_mode,
             "subagents": _subagent_release_policy(
                 resolved_app_config,
