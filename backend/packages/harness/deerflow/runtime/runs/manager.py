@@ -1576,8 +1576,15 @@ class RunManager:
                     raise RuntimeError("Run idempotency key resolved to a different thread or user") from conflict
                 current = self._runs.get(existing.run_id)
                 if current is None:
-                    self._runs[existing.run_id] = existing
-                    self._index_run_locked(existing)
+                    # Only re-index ACTIVE records. Terminal histories stay
+                    # store-only: the Gateway returns immediately for an
+                    # idempotent reuse, so no worker finalization will ever
+                    # schedule cleanup for the re-hydrated record — indexing
+                    # a terminal record here would retain it for the process
+                    # lifetime (the #5009 leak, one stable-key retry at a time).
+                    if existing.status in (RunStatus.pending, RunStatus.running) or existing.finalizing:
+                        self._runs[existing.run_id] = existing
+                        self._index_run_locked(existing)
                     current = existing
                 current.idempotency_reused = True
                 return current

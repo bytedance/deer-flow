@@ -728,6 +728,51 @@ async def test_shutdown_cancels_pending_cleanup_tasks(manager_with_store: RunMan
 
 
 @pytest.mark.anyio
+async def test_idempotent_reuse_after_cleanup_keeps_terminal_record_store_only(manager_with_store: RunManager):
+    """A stable-key retry after eviction must not re-index a terminal record.
+
+    The Gateway returns immediately for an idempotent reuse, so no worker
+    finalization would ever schedule cleanup for the re-hydrated record —
+    indexing a terminal record here would retain it for the process lifetime
+    (the #5009 leak, one stable-key retry at a time).
+    """
+    mgr = manager_with_store
+    record = await mgr.create_or_reject("thread-1", idempotency_key="stable-key")
+    await mgr.set_status(record.run_id, RunStatus.success)
+    await mgr.cleanup(record.run_id, delay=0)  # the PR's delayed eviction
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+
+    reused = await mgr.create_or_reject("thread-1", idempotency_key="stable-key")
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.success
+    # Terminal history stays store-only: no re-entry into the in-memory indexes.
+    assert record.run_id not in mgr._runs
+    assert "thread-1" not in mgr._runs_by_thread
+    # History remains readable through the store fallback.
+    assert (await mgr.get(record.run_id)) is not None
+
+
+@pytest.mark.anyio
+async def test_idempotent_reuse_still_indexes_active_records(manager_with_store: RunManager):
+    """Active (pending/running) records must remain trackable on reuse."""
+    mgr = manager_with_store
+    record = await mgr.create_or_reject("thread-1", idempotency_key="active-key")
+    # Simulate losing the in-memory registry while the store row is pending.
+    mgr._runs.clear()
+    mgr._runs_by_thread.clear()
+
+    reused = await mgr.create_or_reject("thread-1", idempotency_key="active-key")
+    assert reused.run_id == record.run_id
+    assert reused.idempotency_reused is True
+    assert reused.status == RunStatus.pending
+    # Active records are re-indexed so cancel()/has_inflight() can see them.
+    assert reused.run_id in mgr._runs
+    assert "thread-1" in mgr._runs_by_thread
+
+
+@pytest.mark.anyio
 async def test_fail_start_if_pending_schedules_cleanup_only_with_store():
     """Spawn-failure terminalization schedules eviction only when store-backed."""
     store_mgr = RunManager(store=MemoryRunStore())
