@@ -29,9 +29,11 @@ from .prompt import (
     load_prompt_messages,
 )
 from .storage import (
+    MemoryClearGenerationConflict,
     MemoryManifestRevisionConflict,
     MemoryStorage,
     create_empty_memory,
+    scope_clear_generation,
     utc_now_iso_z,
 )
 
@@ -988,6 +990,7 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(current.get("revision") or 0),
+                        bump_clear_generation="agent",
                     )
                     self._storage.clear_fact_metadata(
                         agent_name=agent_name,
@@ -1066,8 +1069,11 @@ class MemoryUpdater:
             "source": "manual",
         }
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
+            captured_clear_generation: tuple[int, int] | None = None
             for attempt in range(3):
                 memory_data = self.get_memory_data(agent_name, user_id=user_id) if attempt == 0 else self.reload_memory_data(agent_name, user_id=user_id)
+                if captured_clear_generation is None:
+                    captured_clear_generation = scope_clear_generation(memory_data, agent_name)
                 # Duplicate rejection lives inside the conflict-retry loop so
                 # it is re-evaluated against the fresh snapshot after every
                 # revision conflict: two concurrent creators of the same
@@ -1093,6 +1099,7 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(memory_data.get("revision") or 0),
+                        expected_clear_generation=captured_clear_generation,
                     )
                     self._record_capacity_decision(
                         capacity_decision,
@@ -1198,6 +1205,7 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(global_memory.get("revision") or 0),
+                expected_clear_generation=scope_clear_generation(global_memory, agent_name),
                 allow_manifest_rebase=True,
             )
             return self.get_memory_data(agent_name, user_id=user_id)
@@ -1230,6 +1238,7 @@ class MemoryUpdater:
                 agent_name=agent_name,
                 user_id=user_id,
                 expected_manifest_revision=int(memory_data.get("revision") or 0),
+                expected_clear_generation=scope_clear_generation(memory_data, agent_name),
                 allow_manifest_rebase=True,
             )
             return self.get_memory_data(agent_name, user_id=user_id)
@@ -1388,6 +1397,7 @@ class MemoryUpdater:
             # facts_passed_confidence / rejected_low_confidence are populated
             # inside _apply_updates at the real confidence-filter site, so the
             # metric tracks the actual filter rather than a re-derived copy here.
+        captured_clear_generation = scope_clear_generation(current_memory, agent_name)
         if getattr(type(self._storage), "apply_changes", None) is not MemoryStorage.apply_changes:
             for attempt in range(3):
                 capacity_decisions: list[tuple[FactEvictionDecision, FactEvictionDecision | None]] = []
@@ -1395,7 +1405,9 @@ class MemoryUpdater:
                 # corrupt the cached snapshot. On a manifest conflict the
                 # complete extraction result is reapplied to a fresh document;
                 # its trim/consolidation/delete decisions are snapshot-wide and
-                # must never be replayed as disjoint point writes.
+                # must never be replayed as disjoint point writes. A newer clear
+                # generation is not a rebaseable conflict: retrying would restore
+                # facts the user just deleted.
                 updated_memory = self._apply_updates(
                     copy.deepcopy(current_memory),
                     update_data,
@@ -1427,6 +1439,7 @@ class MemoryUpdater:
                         agent_name=agent_name,
                         user_id=user_id,
                         expected_manifest_revision=int(current_memory.get("revision") or 0),
+                        expected_clear_generation=captured_clear_generation,
                     )
                     for decision, shadow_decision in capacity_decisions:
                         self._record_capacity_decision(
@@ -1436,6 +1449,13 @@ class MemoryUpdater:
                             user_id=user_id,
                         )
                     return True
+                except MemoryClearGenerationConflict:
+                    logger.info(
+                        "Dropping extracted memory update because a newer clear completed (user_id=%s agent_name=%s)",
+                        user_id,
+                        agent_name,
+                    )
+                    return False
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
                         raise

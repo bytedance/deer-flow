@@ -71,6 +71,54 @@ class MemoryFactRevisionConflict(MemoryRevisionConflict):
     """A fact no longer satisfies its expected absence or revision."""
 
 
+class MemoryClearGenerationConflict(MemoryRevisionConflict):
+    """A writer started before a newer clear and must not commit."""
+
+
+def _as_clear_generation_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
+def read_clear_generations(memory: dict[str, Any] | None) -> tuple[int, dict[str, int]]:
+    """Return ``(user_clear_generation, agent_clear_generations)`` from a document."""
+    data = memory or {}
+    user_gen = _as_clear_generation_int(data.get("clearGeneration", 0))
+    raw_agents = data.get("agentClearGenerations")
+    agent_gens: dict[str, int] = {}
+    if isinstance(raw_agents, dict):
+        for name, value in raw_agents.items():
+            if not isinstance(name, str) or not name:
+                continue
+            generation = _as_clear_generation_int(value)
+            if generation > 0:
+                agent_gens[name] = generation
+    return user_gen, agent_gens
+
+
+def scope_clear_generation(memory: dict[str, Any] | None, agent_name: str | None) -> tuple[int, int]:
+    """Return ``(user_generation, agent_generation)`` for one write scope."""
+    user_gen, agent_gens = read_clear_generations(memory)
+    return user_gen, agent_gens.get(agent_name, 0) if agent_name else 0
+
+
+def _clear_generation_fields(user_gen: int, agent_gens: dict[str, int]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    if user_gen > 0:
+        payload["clearGeneration"] = user_gen
+    trimmed = {name: value for name, value in agent_gens.items() if value > 0}
+    if trimmed:
+        payload["agentClearGenerations"] = trimmed
+    return payload
+
+
+def _normalize_expected_clear_generation(value: Any) -> tuple[int, int]:
+    if not isinstance(value, tuple) or len(value) != 2 or isinstance(value[0], bool) or isinstance(value[1], bool) or not isinstance(value[0], int) or not isinstance(value[1], int) or value[0] < 0 or value[1] < 0:
+        raise ValueError("expected_clear_generation must be a pair of non-negative integers")
+    return value[0], value[1]
+
+
 class RetrievalPort(Protocol):
     """Storage-facing adapter implemented by the independent retrieval module."""
 
@@ -1001,6 +1049,8 @@ class FileMemoryStorage(MemoryStorage):
         expected_revision: int | None,
         delete_revisions: dict[str, int] | None = None,
         upsert_revisions: dict[str, int | None] | None = None,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
     ) -> tuple[dict[str, Any], list[RetrievalNotification]]:
         """Commit only the addressed fact files plus the shared summary JSON.
 
@@ -1010,6 +1060,12 @@ class FileMemoryStorage(MemoryStorage):
         """
         current_memory = self._load_memory_file(path)
         current_revision = int((current_memory or {}).get("revision") or 0)
+        user_gen, agent_gens = read_clear_generations(current_memory)
+        agent_gen = agent_gens.get(agent_name, 0) if agent_name else 0
+        if expected_clear_generation is not None:
+            expected_user, expected_agent = _normalize_expected_clear_generation(expected_clear_generation)
+            if user_gen > expected_user or agent_gen > expected_agent:
+                raise MemoryClearGenerationConflict(f"Expected clear generation {(expected_user, expected_agent)}, found {(user_gen, agent_gen)}")
         if expected_revision is not None and expected_revision != current_revision:
             raise MemoryManifestRevisionConflict(f"Expected user-memory revision {expected_revision}, found {current_revision}")
         if (upserts or deletes) and agent_name is None:
@@ -1072,7 +1128,15 @@ class FileMemoryStorage(MemoryStorage):
                 history_section.update(copy.deepcopy(summaries["history"]))
         summaries_changed = user_section != base.get("user", {}) or history_section != base.get("history", {})
         needs_manifest_cleanup = current_memory is None or current_memory.get("version") != DOCUMENT_VERSION or "facts" in current_memory
-        if not prepared and not removals and not summaries_changed and not needs_manifest_cleanup:
+        if bump_clear_generation == "user":
+            user_gen += 1
+        elif bump_clear_generation == "agent":
+            if agent_name is None:
+                raise ValueError("agent_name is required to bump agent clear generation")
+            agent_gens[agent_name] = agent_gens.get(agent_name, 0) + 1
+        elif bump_clear_generation is not None:
+            raise ValueError("bump_clear_generation must be 'user', 'agent', or None")
+        if not prepared and not removals and not summaries_changed and not needs_manifest_cleanup and bump_clear_generation is None:
             memory_file = current_memory or {
                 "version": DOCUMENT_VERSION,
                 "revision": 0,
@@ -1124,6 +1188,7 @@ class FileMemoryStorage(MemoryStorage):
             "lastUpdated": utc_now_iso_z(),
             "user": user_section,
             "history": history_section,
+            **_clear_generation_fields(user_gen, agent_gens),
         }
         _atomic_write(path, json.dumps(memory_file, ensure_ascii=False, indent=2).encode("utf-8"))
         journal["state"] = "committed"
@@ -1467,6 +1532,7 @@ class FileMemoryStorage(MemoryStorage):
                 deletes=[],
                 summaries={"user": empty["user"], "history": empty["history"]},
                 expected_revision=int((current_memory or {}).get("revision") or 0),
+                bump_clear_generation="user",
             )
 
         for agent_name, notifications in notifications_by_agent:
@@ -1529,6 +1595,8 @@ class FileMemoryStorage(MemoryStorage):
         agent_name: str | None = None,
         expected_manifest_revision: int | None = None,
         allow_manifest_rebase: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
     ) -> dict[str, Any]:
         """Commit an incremental change set and return only the applied delta.
 
@@ -1587,6 +1655,8 @@ class FileMemoryStorage(MemoryStorage):
                         expected_revision=expected,
                         delete_revisions=copy.deepcopy(delete_revisions),
                         upsert_revisions=normalized_upsert_revisions,
+                        expected_clear_generation=expected_clear_generation,
+                        bump_clear_generation=bump_clear_generation,
                     )
                 break
             except MemoryManifestRevisionConflict as exc:
