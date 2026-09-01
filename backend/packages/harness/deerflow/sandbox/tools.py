@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import ntpath
 import os
 import posixpath
 import re
@@ -32,7 +33,7 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.overwrite import unwrap_sandbox
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
@@ -429,20 +430,17 @@ def _get_custom_mount_for_path(path: str):
 def _extract_thread_id_from_thread_data(thread_data: "ThreadDataState | None") -> str | None:
     """Extract thread_id from thread_data by inspecting workspace_path.
 
-    The workspace_path has the form
-    ``{base_dir}/threads/{thread_id}/user-data/workspace``, so
-    ``Path(workspace_path).parent.parent.name`` yields the thread_id.
+    The workspace path ends with
+    ``threads/{thread_id}/user-data/workspace``.
     """
     if thread_data is None:
         return None
     workspace_path = thread_data.get("workspace_path")
     if not workspace_path:
         return None
-    try:
-        # {base_dir}/threads/{thread_id}/user-data/workspace → parent.parent = threads/{thread_id}
-        return Path(workspace_path).parent.parent.name
-    except Exception:
-        return None
+    normalized = workspace_path.replace("\\", "/").rstrip("/")
+    parts = normalized.rsplit("/", 3)
+    return parts[-3] if len(parts) == 4 and parts[-3] else None
 
 
 def _get_acp_workspace_host_path(thread_id: str | None = None) -> str | None:
@@ -640,6 +638,13 @@ def _join_path_preserving_style(base: str, relative: str) -> str:
     return f"{stripped_base}{separator}{normalized_relative}"
 
 
+def _path_parent(path: str) -> str:
+    """Return a lexical parent without interning high-cardinality path parts."""
+    if "\\" in path and "/" not in path:
+        return ntpath.dirname(path)
+    return posixpath.dirname(path)
+
+
 def _sanitize_error(error: Exception, runtime: Runtime | None = None) -> str:
     """Sanitize an error message to avoid leaking host filesystem paths.
 
@@ -742,10 +747,10 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
 
     # Also map the virtual root when all known dirs share the same parent.
-    actual_dirs = [Path(p) for p in (workspace, uploads, outputs) if p]
+    actual_dirs = [p for p in (workspace, uploads, outputs) if p]
     if actual_dirs:
-        common_parent = str(Path(actual_dirs[0]).parent)
-        if all(str(path.parent) == common_parent for path in actual_dirs):
+        common_parent = _path_parent(actual_dirs[0])
+        if all(_path_parent(path) == common_parent for path in actual_dirs):
             mappings[VIRTUAL_PATH_PREFIX] = common_parent
 
     return mappings
@@ -756,37 +761,38 @@ def _thread_actual_to_virtual_mappings(thread_data: ThreadDataState) -> dict[str
     return {actual: virtual for virtual, actual in _thread_virtual_to_actual_mappings(thread_data).items()}
 
 
-@lru_cache(maxsize=512)
-def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
-    """Compile the host→virtual masking patterns once per source set.
+@lru_cache(maxsize=256)
+def _mask_source_roots(host_base: str) -> tuple[str, ...]:
+    """Return lexical and filesystem-resolved spellings without ``pathlib``.
 
-    ``sources`` is an ordered tuple of ``(host_base, virtual_base)`` pairs
-    (skills, then ACP workspace, then per-thread user-data mappings sorted by
-    host-path length, longest first). The patterns derive only from
-    config-stable + per-thread inputs, so they're cached and reused instead of
-    being rebuilt — ``re.escape`` + ``re.compile`` + ``Path.resolve`` (a
-    syscall) — on every call. ``mask_local_paths_in_output`` runs once per
-    glob/grep match, so without this the same patterns are recompiled per
-    match.
+    ``PurePath`` interns every path component. That is useful for long-lived
+    paths but wasteful for one-off thread IDs, because evicting DeerFlow's LRU
+    does not shrink the interpreter's intern/allocator high-water mark. The
+    bounded cache avoids repeating ``realpath`` walks for every glob/grep match
+    without retaining an unbounded set of thread roots.
     """
-    # The segment boundary and path tail are shared with
-    # ``LocalSandbox._reverse_output_patterns`` — see
-    # ``deerflow.sandbox.path_patterns``, which owns that rule so the two copies
-    # cannot drift again (#4035 fixed one and missed the other; #4053 fixed the
-    # other).
+    raw = os.path.normpath(host_base)
+    resolved = os.path.realpath(host_base)
+    return (raw,) if resolved == raw else (raw, resolved)
+
+
+@lru_cache(maxsize=16)
+def _compiled_mask_patterns(sources: tuple[tuple[str, str], ...]) -> tuple[tuple[re.Pattern[str], str, str], ...]:
+    """Compile patterns for the small, process-stable source set.
+
+    Per-user and per-thread sources must never be passed here; they are handled
+    by the non-retaining scanner in ``replace_output_path_matches``.
+    """
+    # The segment boundary and path tail are owned by
+    # ``deerflow.sandbox.path_patterns`` so the static regex path and dynamic
+    # scanner cannot drift.
     #
     # ``separator_agnostic=True`` is the one thing this site does differently:
-    # its bases come from ``_path_variants``, which yields Windows-style
-    # spellings, and they are matched against output whose separators this layer
-    # does not control.
+    # output separators are outside this layer's control.
     compiled: list[tuple[re.Pattern[str], str, str]] = []
     for host_base, virtual_base in sources:
         seen: set[str] = set()
-        # Same base set as ``_path_variants(raw) | _path_variants(resolved)``;
-        # ordered deterministically so the cached tuple is stable (variants of
-        # one host map to the same virtual and don't overlap after substitution,
-        # so order within a source is irrelevant to the result).
-        for root in (str(Path(host_base)), str(Path(host_base).resolve())):
+        for root in _mask_source_roots(host_base):
             for variant in sorted(_path_variants(root)):
                 if variant in seen:
                     continue
@@ -806,11 +812,12 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
     # custom/integration skills, then ACP workspace, then user-data mappings (longest
     # host path first). Custom mount host paths are masked by
     # LocalSandbox._reverse_resolve_paths_in_output().
-    sources: list[tuple[str, str]] = []
+    stable_sources: list[tuple[str, str]] = []
+    dynamic_sources: list[tuple[str, str]] = []
 
     skills_host = _get_skills_host_path()
     if skills_host:
-        sources.append((skills_host, _get_skills_container_path()))
+        stable_sources.append((skills_host, _get_skills_container_path()))
 
     # Per-user custom skills: mask host paths under the user's custom
     # skills directory back to /mnt/skills/custom. The sandbox's
@@ -826,27 +833,28 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
         integrations_dir = get_paths().integration_skills_dir()
         if user_custom_dir.exists():
             skills_container = _get_skills_container_path()
-            sources.append((str(user_custom_dir), f"{skills_container}/custom"))
+            dynamic_sources.append((str(user_custom_dir), f"{skills_container}/custom"))
         if integrations_dir.exists():
             skills_container = _get_skills_container_path()
-            sources.append((str(integrations_dir), f"{skills_container}/integrations"))
+            stable_sources.append((str(integrations_dir), f"{skills_container}/integrations"))
     except Exception:
         pass
 
     acp_host = _get_acp_workspace_host_path(_extract_thread_id_from_thread_data(thread_data))
     if acp_host:
-        sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
+        dynamic_sources.append((acp_host, _ACP_WORKSPACE_VIRTUAL_PATH))
 
     if thread_data is not None:
         mappings = _thread_actual_to_virtual_mappings(thread_data)
         for actual_base, virtual_base in sorted(mappings.items(), key=lambda item: len(item[0]), reverse=True):
-            sources.append((actual_base, virtual_base))
+            dynamic_sources.append((actual_base, virtual_base))
 
-    if not sources:
+    if not stable_sources and not dynamic_sources:
         return output
 
     result = output
-    for pattern, base, virtual in _compiled_mask_patterns(tuple(sources)):
+    static_patterns = _compiled_mask_patterns(tuple(stable_sources)) if stable_sources else ()
+    for pattern, base, virtual in static_patterns:
 
         def replace_match(match: re.Match, _base: str = base, _virtual: str = virtual) -> str:
             matched_path = match.group(0)
@@ -856,6 +864,15 @@ def mask_local_paths_in_output(output: str, thread_data: ThreadDataState | None)
             return f"{_virtual}/{relative}" if relative else _virtual
 
         result = pattern.sub(replace_match, result)
+
+    for host_base, virtual_base in dynamic_sources:
+        for root in _mask_source_roots(host_base):
+            result = replace_output_path_matches(
+                result,
+                root,
+                virtual_base,
+                separator_agnostic=True,
+            )
 
     return result
 
