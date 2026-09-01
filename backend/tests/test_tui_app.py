@@ -8,6 +8,7 @@ import asyncio
 import threading
 
 import pytest
+from textual.containers import VerticalScroll
 
 from deerflow.client import StreamEvent
 from deerflow.tui.app import DeerFlowTUI
@@ -49,6 +50,16 @@ async def _wait_until(predicate, pilot, *, timeout=3.0):
         await asyncio.sleep(0.02)
         deadline += 0.02
     return predicate()
+
+
+async def _fill_scrollable_transcript(app: DeerFlowTUI, pilot) -> VerticalScroll:
+    for index in range(80):
+        app._dispatch(SystemMessage(f"row {index}: " + "content " * 12))
+    await pilot.pause()
+    scroll = app.query_one("#scroll", VerticalScroll)
+    assert scroll.max_scroll_y > 0
+    assert scroll.is_vertical_scroll_end
+    return scroll
 
 
 @pytest.mark.asyncio
@@ -305,6 +316,91 @@ async def test_tab_keeps_focus_on_composer_when_palette_closed():
         await pilot.pause()
         # Tab must not move focus off the composer to the scroll region.
         assert app.focused is composer
+
+
+@pytest.mark.asyncio
+async def test_page_keys_scroll_transcript_without_moving_composer_focus():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        composer = app.query_one("#composer")
+        scroll = await _fill_scrollable_transcript(app, pilot)
+        bottom = scroll.scroll_y
+
+        await pilot.press("pageup")
+        await pilot.pause()
+        assert scroll.scroll_y < bottom
+        assert app.focused is composer
+
+        for _ in range(3):
+            if scroll.is_vertical_scroll_end:
+                break
+            await pilot.press("pagedown")
+            await pilot.pause()
+        assert scroll.is_vertical_scroll_end
+        assert app.focused is composer
+
+
+@pytest.mark.asyncio
+async def test_transcript_update_does_not_cancel_pending_page_scroll():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        scroll = await _fill_scrollable_transcript(app, pilot)
+        bottom = scroll.scroll_y
+
+        app.action_transcript_page_up()
+        app._dispatch(SystemMessage("output before the queued scroll is applied"))
+        await pilot.pause()
+
+        assert scroll.scroll_y < bottom
+        assert not scroll.is_vertical_scroll_end
+
+
+@pytest.mark.asyncio
+async def test_transcript_refresh_preserves_manual_scroll_until_returning_to_end():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        scroll = await _fill_scrollable_transcript(app, pilot)
+
+        await pilot.press("pageup")
+        await pilot.pause()
+        reading_position = scroll.scroll_y
+        assert not scroll.is_vertical_scroll_end
+
+        app._dispatch(SystemMessage("new streamed output"))
+        await pilot.pause()
+        assert scroll.scroll_y == reading_position
+        assert not scroll.is_vertical_scroll_end
+
+        for _ in range(3):
+            if scroll.is_vertical_scroll_end:
+                break
+            await pilot.press("pagedown")
+            await pilot.pause()
+        assert scroll.is_vertical_scroll_end
+
+        app._dispatch(SystemMessage("new output after returning to the end"))
+        await pilot.pause()
+        assert scroll.is_vertical_scroll_end
+
+
+@pytest.mark.asyncio
+async def test_transcript_refresh_preserves_non_key_scroll_position():
+    app = DeerFlowTUI(_FakeSession(), LaunchPlan(mode="tui"))
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        scroll = await _fill_scrollable_transcript(app, pilot)
+
+        scroll.scroll_page_up(animate=False)
+        await pilot.pause()
+        reading_position = scroll.scroll_y
+        assert not scroll.is_vertical_scroll_end
+
+        app._dispatch(SystemMessage("new output after external scrolling"))
+        await pilot.pause()
+        assert scroll.scroll_y == reading_position
 
 
 @pytest.mark.asyncio

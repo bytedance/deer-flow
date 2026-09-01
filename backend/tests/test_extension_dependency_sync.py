@@ -29,6 +29,31 @@ def test_extensions_dependency_group_is_part_of_the_default_sync() -> None:
     assert set(project["tool"]["uv"]["default-groups"]) == {"dev", "extensions"}
 
 
+def test_the_app_layer_declares_the_contract_package_it_imports_directly() -> None:
+    """The app imports ``deerflow_extension_api`` itself, so it declares it.
+
+    Only ``deerflow-harness`` guarantees the package transitively. That is the
+    harness's own dependency to change, and the app's imports would break with
+    it — the same argument the ``starlette`` entry in ``pyproject.toml`` spells
+    out for a package FastAPI happens to pull in.
+    """
+    import ast
+
+    importers = sorted(
+        str(path.relative_to(BACKEND_ROOT))
+        for path in (BACKEND_ROOT / "app").rglob("*.py")
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if (isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "deerflow_extension_api") or (isinstance(node, ast.Import) and any(alias.name.split(".")[0] == "deerflow_extension_api" for alias in node.names))
+    )
+    if not importers:
+        pytest.skip("app no longer imports the contract package directly")
+
+    project = tomllib.loads((BACKEND_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    declared = {re.split(r"[<>=!\[ ]", entry, maxsplit=1)[0] for entry in project["project"]["dependencies"]}
+
+    assert "deerflow-extension-api" in declared, f"imported directly by {importers} but only guaranteed transitively"
+
+
 def test_backend_make_targets_never_mutate_the_extension_lock() -> None:
     makefile = BACKEND_ROOT / "Makefile"
 

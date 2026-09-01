@@ -16,11 +16,12 @@ from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
-from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
+from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
 from deerflow.mcp.client import build_servers_config
-from deerflow.mcp.interceptors import build_mcp_tool_interceptors
+from deerflow.mcp.headers import apply_header_overrides
+from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import get_session_pool
+from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
 from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
@@ -45,13 +46,6 @@ logger = logging.getLogger(__name__)
 # both bound and deferred names to the same safe identifier charset, mirroring
 # the load-time validation skill names get (skills/storage/skill_storage.py).
 _VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
-
-# Subdirectory under the thread's workspace used as the temp dir for stdio MCP
-# subprocesses. Pinning the process temp dir here (alongside its cwd) makes
-# tools that write to ``os.tmpdir()`` / ``tempfile.gettempdir()`` land inside
-# the mounted user-data tree, where their output is resolvable by the
-# sandbox/artifact API — instead of on an unreachable host temp path.
-_MCP_TMP_SUBDIR = ".mcp/tmp"
 
 # Matches local-file references embedded in free text returned by an MCP server.
 # Some servers (notably Playwright's ``browser_take_screenshot``) report saved
@@ -184,7 +178,7 @@ def _prepare_stdio_workspace(paths: Paths, *, thread_id: str, user_id: str) -> t
     """
     paths.ensure_thread_dirs(thread_id, user_id=user_id)
     source_base_dir = paths.sandbox_work_dir(thread_id, user_id=user_id)
-    tmp_dir = source_base_dir / _MCP_TMP_SUBDIR
+    tmp_dir = source_base_dir / MCP_TMP_SUBDIR
     try:
         tmp_dir.mkdir(parents=True, exist_ok=True)
         tmp_dir.chmod(0o700)
@@ -563,20 +557,17 @@ def _make_session_pool_tool(
                         kwargs["meta"] = {"headers": dict(request.headers)}
                     else:
                         logger.warning("Ignoring MCP interceptor headers with unsupported type: %s", type(request.headers).__name__)
-                return await session.call_tool(
-                    request.name,
-                    request.args,
-                    **kwargs,
+                return await call_pooled_session_tool(
+                    session,
+                    pool,
+                    server_name=server_name,
+                    scope_key=scope_key,
+                    tool_name=request.name,
+                    arguments=request.args,
+                    call_kwargs=kwargs,
                 )
 
-            handler = base_handler
-            for interceptor in reversed(tool_interceptors):
-                outer = handler
-
-                async def wrapped(req: Any, _i: Any = interceptor, _h: Any = outer) -> Any:
-                    return await _i(req, _h)
-
-                handler = wrapped
+            handler = compose_tool_interceptors(tool_interceptors, base_handler)
 
             request = MCPToolCallRequest(
                 name=original_name,
@@ -586,10 +577,14 @@ def _make_session_pool_tool(
             )
             call_tool_result = await handler(request)
         else:
-            call_tool_result = await session.call_tool(
-                original_name,
-                arguments,
-                **call_kwargs,
+            call_tool_result = await call_pooled_session_tool(
+                session,
+                pool,
+                server_name=server_name,
+                scope_key=scope_key,
+                tool_name=original_name,
+                arguments=arguments,
+                call_kwargs=call_kwargs,
             )
 
         # The after-call snapshot diff only feeds bare-filename correlation in
@@ -785,9 +780,12 @@ async def get_mcp_tools() -> list[BaseTool]:
             if server_name not in servers_config:
                 continue
             if servers_config[server_name].get("transport") in ("sse", "http"):
-                existing_headers = dict(servers_config[server_name].get("headers", {}))
-                existing_headers["Authorization"] = auth_header
-                servers_config[server_name]["headers"] = existing_headers
+                # Case-insensitive write: a static header spelled 'authorization'
+                # must be replaced, not joined on the wire by a second field.
+                servers_config[server_name]["headers"] = apply_header_overrides(
+                    servers_config[server_name].get("headers", {}),
+                    {"Authorization": auth_header},
+                )
 
         tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
@@ -888,7 +886,7 @@ async def get_mcp_tools() -> list[BaseTool]:
                         _VALID_MCP_TOOL_NAME.pattern,
                     )
                     continue
-                tag_mcp_tool(tool)
+                tag_mcp_tool(tool, server_name=source_name, transport=transport)
                 prefix = f"{source_name}_"
                 original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)

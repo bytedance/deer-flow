@@ -26,6 +26,7 @@ from deerflow.client import DeerFlowClient
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
 from deerflow.config.paths import Paths
+from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.skills.types import SkillCategory
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.uploads.manager import PathTraversalError
@@ -121,6 +122,16 @@ class TestClientInit:
         ):
             DeerFlowClient(config_path="/tmp/custom.yaml")
             mock_reload.assert_called_once_with("/tmp/custom.yaml")
+
+    def test_installs_process_subagent_capacity_from_frozen_config(self, mock_app_config):
+        runtime_config = SubagentRuntimeConfig(max_running=7)
+        mock_app_config.subagent_runtime = runtime_config
+        with (
+            patch("deerflow.client.get_app_config", return_value=mock_app_config),
+            patch("deerflow.client.configure_subagent_execution_capacity") as configure,
+        ):
+            DeerFlowClient()
+        configure.assert_called_once_with(runtime_config)
 
     def test_checkpointer_stored(self, mock_app_config):
         cp = MagicMock()

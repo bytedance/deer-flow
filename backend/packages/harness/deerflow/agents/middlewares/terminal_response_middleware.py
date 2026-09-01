@@ -80,6 +80,15 @@ class TerminalResponseMiddleware(AgentMiddleware[AgentState]):
         self._retry_counts: BoundedDict[tuple[str, str], int] = BoundedDict(1000)
         self._pending_prompts: BoundedDict[tuple[str, str], bool] = BoundedDict(1000)
 
+    def release_policy_parameters(self) -> dict[str, object]:
+        from deerflow_extension_api import canonical_hash
+
+        return {
+            "post_tool_empty_retry_limit": 1,
+            "recovery_prompt_hash": canonical_hash(_RECOVERY_PROMPT),
+            "fallback_content_hash": canonical_hash(_FALLBACK_CONTENT),
+        }
+
     @staticmethod
     def _key(runtime: Runtime) -> tuple[str, str]:
         context = getattr(runtime, "context", None)

@@ -36,12 +36,14 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, override
 
+from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.utils.messages import INJECTED_USER_MESSAGE_ID_SUFFIX, strip_injected_user_message_id_suffix
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -61,9 +63,17 @@ _DYNAMIC_CONTEXT_REMINDER_KEY = "dynamic_context_reminder"
 # so it is never exposed to user-influenceable memory content.
 _REMINDER_DATE_KEY = "reminder_date"
 _SUMMARY_MESSAGE_NAME = "summary"
-# Suffix the ID-swap gives the real user message; the reminder SystemMessage
-# takes the original id so ``add_messages`` can replace it in place.
-INJECTED_USER_MESSAGE_ID_SUFFIX = "__user"
+
+# ``INJECTED_USER_MESSAGE_ID_SUFFIX`` / ``strip_injected_user_message_id_suffix``
+# are defined in ``deerflow.utils.messages`` and re-exported here, where the
+# ID-swap they describe actually happens. Existing importers keep working.
+__all__ = [
+    "INJECTED_USER_MESSAGE_ID_SUFFIX",
+    "DynamicContextMiddleware",
+    "SubagentDateContextMiddleware",
+    "is_dynamic_context_reminder",
+    "strip_injected_user_message_id_suffix",
+]
 
 
 def _format_current_date() -> str:
@@ -78,20 +88,6 @@ def _format_current_date_reminder(current_date: str) -> str:
             "</system-reminder>",
         ]
     )
-
-
-def strip_injected_user_message_id_suffix(message_id: str | None) -> str | None:
-    """Return the id *message_id* had before the reminder ID-swap.
-
-    Replaying a persisted user turn must feed the graph the id the client
-    originally sent: a ``{id}__user`` message is skipped as an injection target,
-    so replaying one into a state that has no reminder yet silently drops the
-    date and memory block for that turn.
-    """
-
-    if isinstance(message_id, str) and message_id.endswith(INJECTED_USER_MESSAGE_ID_SUFFIX):
-        return message_id[: -len(INJECTED_USER_MESSAGE_ID_SUFFIX)] or message_id
-    return message_id
 
 
 def _extract_date(content: str) -> str | None:
@@ -281,7 +277,11 @@ class DynamicContextMiddleware(AgentMiddleware):
         stable_id = original.id or str(uuid.uuid4())
         messages: list[SystemMessage | HumanMessage] = []
 
-        reminder_kwargs = {"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True}
+        reminder_kwargs = {
+            "hide_from_ui": True,
+            _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+            **provenance_kwargs(ContentKind.MIDDLEWARE_INJECTION, "dynamic_context"),
+        }
         if reminder_date is not None:
             reminder_kwargs[_REMINDER_DATE_KEY] = reminder_date
         messages.append(
@@ -297,7 +297,11 @@ class DynamicContextMiddleware(AgentMiddleware):
                 HumanMessage(
                     content=memory_content,
                     id=f"{stable_id}__memory",
-                    additional_kwargs={"hide_from_ui": True, _DYNAMIC_CONTEXT_REMINDER_KEY: True},
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        _DYNAMIC_CONTEXT_REMINDER_KEY: True,
+                        **provenance_kwargs(ContentKind.MEMORY, "dynamic_context_memory"),
+                    },
                 )
             )
 

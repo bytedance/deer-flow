@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
-_RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
 
@@ -234,7 +233,8 @@ class RunJournal(BaseCallbackHandler):
         super().__init__()
         self.run_id = run_id
         self.thread_id = thread_id
-        self._store = event_store
+        self._store: RunEventStore | None = event_store
+        self._closed = False
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
@@ -282,7 +282,14 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._active_tool_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
+
+        # Bumped once per successful event-store write. A reader that cached a
+        # "the feed does not hold this message" answer compares this between
+        # reads to learn whether retrying could produce a different one,
+        # without polling the store (#4696 review).
+        self._feed_generation = 0
 
         # Artifact-production tracking for the terminal run.delivery event
         # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
@@ -523,12 +530,16 @@ class RunJournal(BaseCallbackHandler):
         )
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
-        """Handle tool start event, cache tool call ID for later correlation"""
-        tool_call_id = str(run_id)
-        logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
+        """Cache the executing tool name for artifact attribution."""
+        tool_run_id = str(run_id)
+        tool_name = serialized.get("name") if isinstance(serialized, Mapping) else None
+        if isinstance(tool_name, str) and tool_name:
+            self._active_tool_names[tool_run_id] = tool_name
+        logger.debug("Tool start for node %s, tool_run_id=%s, tags=%s", run_id, tool_run_id, tags)
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
+        active_tool_name = self._active_tool_names.pop(str(run_id), None)
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
@@ -554,7 +565,9 @@ class RunJournal(BaseCallbackHandler):
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
                 if artifacts:
-                    artifact_tool_name = next(iter(artifact_tool_names)) if len(artifact_tool_names) == 1 else None
+                    artifact_tool_name = active_tool_name
+                    if artifact_tool_name is None and len(artifact_tool_names) == 1:
+                        artifact_tool_name = next(iter(artifact_tool_names))
                     self._record_produced_artifacts(artifacts, artifact_tool_name)
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
@@ -613,16 +626,27 @@ class RunJournal(BaseCallbackHandler):
         return []
 
     def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
+        """Whether a final-output ToolMessage still needs persisting.
+
+        A middleware can answer a tool call itself and short-circuit execution,
+        so LangChain never emits ``on_tool_end`` and the result never reaches
+        the event store. The user saw that result during the run, and it
+        disappeared on reload (#4666). Any such result is reconciled here; the
+        scope is bounded by three independent conditions rather than a tool-name
+        allowlist: it must be user-visible, the call must belong to this run's
+        lead agent (``_remember_current_run_tool_calls`` records lead-agent
+        calls only, so subagent results stay in their own step feed), and it
+        must not already be persisted.
+        """
         if message.additional_kwargs.get("hide_from_ui") is True:
             return False
         tool_call_id = getattr(message, "tool_call_id", None)
         if not isinstance(tool_call_id, str) or not tool_call_id:
             return False
-        tool_call_name = self._current_run_tool_call_names.get(tool_call_id)
-        if tool_call_name is None:
-            return False
-        message_name = getattr(message, "name", None)
-        if message_name not in _RECONCILED_TOOL_MESSAGE_NAMES and tool_call_name not in _RECONCILED_TOOL_MESSAGE_NAMES:
+        # The call must belong to this run: a retained ToolMessage from an
+        # earlier run is already persisted under its own run and must not be
+        # re-attributed here.
+        if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
@@ -635,6 +659,8 @@ class RunJournal(BaseCallbackHandler):
                 self._persist_tool_result_message(message)
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
+        if self._closed:
+            return
         self._buffer.append(
             {
                 "thread_id": self.thread_id,
@@ -676,7 +702,11 @@ class RunJournal(BaseCallbackHandler):
 
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
-            await self._store.put_batch(batch)
+            store = self._store
+            if store is None:
+                return
+            await store.put_batch(batch)
+            self._feed_generation += 1
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -886,25 +916,96 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        if self._closed:
+            return
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-        while self._pending_progress_task is not None and not self._pending_progress_task.done():
+        while self._pending_progress_task is not None:
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task.done():
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
+                break
             if self._pending_progress_delayed:
-                self._pending_progress_task.cancel()
-                await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
                 self._progress_dirty = False
                 self._pending_progress_delayed = False
                 break
-            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+            await asyncio.gather(pending_progress_task, return_exceptions=True)
+            if self._pending_progress_task is pending_progress_task:
+                self._pending_progress_task = None
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]
             del self._buffer[: self._flush_threshold]
             try:
-                await self._store.put_batch(batch)
+                store = self._store
+                if store is None:
+                    return
+                await store.put_batch(batch)
+                self._feed_generation += 1
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
+
+    def _detach_runtime_dependencies(self) -> None:
+        """Drop every external or potentially cyclic run-scoped reference."""
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        self._buffer.clear()
+        self._pending_flush_tasks.clear()
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._tokens_by_model.clear()
+        self._counted_llm_run_ids.clear()
+        self._counted_external_source_ids.clear()
+        self._counted_message_llm_run_ids.clear()
+        self._llm_start_times.clear()
+        self._seen_llm_starts.clear()
+        self._current_run_tool_call_names.clear()
+        self._persisted_tool_message_identities.clear()
+        self._produced_artifacts.clear()
+        self._produced_artifact_keys.clear()
+        self._last_ai_msg = None
+        self._first_human_msg = None
+        self._llm_error_fallback_message = None
+
+    async def close(self, *, flush: bool = True) -> None:
+        """Release run-scoped references, optionally flushing buffered events."""
+        if self._closed:
+            return
+        if flush:
+            # A failed terminal write returns its batch to ``_buffer``. Keep the
+            # store and all buffered state attached so a later close/flush can retry
+            # instead of silently discarding the tail of the run event stream.
+            await self.flush()
+            self._detach_runtime_dependencies()
+            return
+
+        # A worker that lost its lease must detach without starting another
+        # durable write. Drop dependencies before cancelling already-scheduled
+        # work so tasks that have not begun observe the detached state. The
+        # final detach must survive a second cancellation while those tasks stop.
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        try:
+            pending_flush_tasks = tuple(self._pending_flush_tasks)
+            for task in pending_flush_tasks:
+                task.cancel()
+            if pending_flush_tasks:
+                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task is not None:
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+        finally:
+            self._detach_runtime_dependencies()
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""
@@ -972,6 +1073,18 @@ class RunJournal(BaseCallbackHandler):
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
         }
+
+    @property
+    def feed_generation(self) -> int:
+        """Monotonic count of successful writes to the thread feed.
+
+        Buffered events are not in the feed yet, so a lookup for a message this
+        run just produced legitimately misses. This counter is what tells such
+        a reader that its cached miss is worth re-asking — it changes exactly
+        when the feed gained rows, and never while the buffer is merely
+        filling. A failed write leaves it alone: nothing became readable.
+        """
+        return self._feed_generation
 
     @property
     def had_llm_error_fallback(self) -> bool:
