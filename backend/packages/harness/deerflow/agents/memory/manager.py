@@ -831,12 +831,12 @@ def _collect_host_hooks() -> dict[str, Any]:
     of its own) -- building an unused default on every startup would waste
     time. The others are direct values (cheap function refs).
     """
-    from deerflow.trace_context import request_trace_context
+    from deerflow.trace_context import ensure_trace_context
 
     return {
         "callbacks": LangfuseMemoryCallbacks(),
         "should_keep_hidden_message": _host_default_should_keep_hidden_message,
-        "trace_context_manager": request_trace_context,
+        "trace_context_manager": ensure_trace_context,
         "host_llm_factory": _host_default_llm,
         "extraction_callback": _host_default_extraction_callback,
     }

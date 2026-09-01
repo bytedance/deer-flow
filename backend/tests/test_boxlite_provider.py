@@ -166,6 +166,19 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+    monkeypatch.setattr(
+        box,
+        "_exec",
+        lambda *argv, **kwargs: types.SimpleNamespace(exit_code=1, stdout="5 passed, 1 error\n", stderr=""),
+    )
+
+    assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 

@@ -13,6 +13,7 @@ Implementations:
 from __future__ import annotations
 
 import abc
+from collections.abc import Sequence
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -238,6 +239,32 @@ class RunEventStore(abc.ABC):
     @abc.abstractmethod
     async def count_messages(self, thread_id: str) -> int:
         """Count displayable messages (category=message) in a thread."""
+
+    @abc.abstractmethod
+    async def get_message_seqs(
+        self,
+        thread_id: str,
+        identities: Sequence[str],
+        *,
+        user_id: str | None | _AutoSentinel = AUTO,
+    ) -> dict[str, int]:
+        """Return ``{identity: seq}`` for messages already persisted in this thread.
+
+        A checkpoint carries no seq of its own and loses messages to
+        summarization, so a client merging a checkpoint frame with this
+        seq-ordered feed cannot place a surviving old message once the feed's
+        loaded page window no longer reaches back to it (#4666). The seq already
+        exists here; this exposes it without paging the whole feed.
+
+        *identities* are the values produced by
+        ``deerflow.runtime.events.message_identity.message_identity`` — the same
+        rule the frontend applies — so both sides agree on what "same message"
+        means. Identities that are not persisted (or not `category="message"`)
+        are simply absent from the result: callers degrade to their own
+        placement rule rather than treating a miss as an error. When one
+        identity resolves to several rows, the earliest seq wins, so a message
+        re-persisted later keeps the position it first occupied.
+        """
 
     @abc.abstractmethod
     async def delete_by_thread(self, thread_id: str) -> int:
