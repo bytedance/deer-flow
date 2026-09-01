@@ -342,6 +342,9 @@ class _IntegrationRunManager:
     async def set_finalizing(self, *_args, **_kwargs):
         return None
 
+    async def cleanup(self, *_args, **_kwargs):
+        return None
+
 
 def _collect_ids(payload: object) -> set[str]:
     """All string ``id`` values anywhere in a serialized stream payload."""
