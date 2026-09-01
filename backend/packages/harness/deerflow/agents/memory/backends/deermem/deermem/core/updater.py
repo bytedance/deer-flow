@@ -4,6 +4,7 @@ import asyncio
 import atexit
 import concurrent.futures
 import copy
+import enum
 import html
 import json
 import logging
@@ -39,6 +40,18 @@ from .storage import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _CommitOutcome(enum.Enum):
+    """Internal result of ``_finalize_update``.
+
+    ``CONSUMED`` means a newer clear fenced the write: the conversation feed
+    must not be retried, but the caller must not report a persisted update.
+    """
+
+    PERSISTED = "persisted"
+    FAILED = "failed"
+    CONSUMED = "consumed"
 
 
 # Thread pool for offloading sync memory updates when called from an async
@@ -830,6 +843,26 @@ class MemoryUpdater:
         """Read the scope clear-generation fence without loading fact files."""
         return self._storage.peek_clear_generation(agent_name, user_id=user_id)
 
+    def mark_feed_consumed(
+        self,
+        messages: list[Any],
+        *,
+        thread_id: str | None = None,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        bypass_watermark: bool = False,
+    ) -> None:
+        """Advance the conversation watermark without claiming a persisted write.
+
+        Used when a newer clear makes a pending pre-clear snapshot obsolete so
+        the next extract does not restore those turns against the new generation.
+        """
+        self._mark_feed_consumed(
+            (thread_id, user_id, agent_name),
+            messages,
+            bypass_watermark=bypass_watermark,
+        )
+
     def reload_memory_data(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]:
         """Reload memory data via the injected storage."""
         return self._storage.reload(agent_name, user_id=user_id)
@@ -1393,7 +1426,7 @@ class MemoryUpdater:
         metrics: dict[str, Any] | None = None,
         signals: frozenset[str] = frozenset(),
         expected_clear_generation: tuple[int, int] | None = None,
-    ) -> bool:
+    ) -> _CommitOutcome:
         """Parse the model response, apply updates, and persist memory."""
         update_data = _parse_memory_update_response(response_content)
         if metrics is not None:
@@ -1454,14 +1487,14 @@ class MemoryUpdater:
                             agent_name=agent_name,
                             user_id=user_id,
                         )
-                    return True
+                    return _CommitOutcome.PERSISTED
                 except MemoryClearGenerationConflict:
                     logger.info(
                         "Dropping extracted memory update because a newer clear completed (user_id=%s agent_name=%s)",
                         user_id,
                         agent_name,
                     )
-                    return False
+                    return _CommitOutcome.CONSUMED
                 except MemoryManifestRevisionConflict:
                     if attempt == 2:
                         raise
@@ -1496,7 +1529,7 @@ class MemoryUpdater:
                     agent_name=agent_name,
                     user_id=user_id,
                 )
-        return saved
+        return _CommitOutcome.PERSISTED if saved else _CommitOutcome.FAILED
 
     async def aupdate_memory(
         self,
@@ -1587,6 +1620,23 @@ class MemoryUpdater:
             return None
         self._watermarks.move_to_end(key)
         return self._watermarks[key]
+
+    def _mark_feed_consumed(
+        self,
+        watermark_key: tuple[str | None, str | None, str | None],
+        messages: list[Any],
+        *,
+        bypass_watermark: bool,
+    ) -> None:
+        """Advance the conversation watermark without claiming a persisted write.
+
+        Used when a newer clear drops extracted facts. The feed is consumed so
+        the next turn does not re-extract the same pre-clear messages against
+        the post-clear generation.
+        """
+        if bypass_watermark or not messages:
+            return
+        self._watermark_set(watermark_key, _message_identity(messages[-1]))
 
     def _watermark_set(
         self,
@@ -1685,6 +1735,7 @@ class MemoryUpdater:
                         expected_clear_generation,
                         current_generation,
                     )
+                    self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
                     return False
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
@@ -1749,7 +1800,7 @@ class MemoryUpdater:
                 started=started,
                 model_name=model_name,
             )
-            success = self._finalize_update(
+            outcome = self._finalize_update(
                 current_memory=current_memory,
                 response_content=response.content,
                 thread_id=thread_id,
@@ -1759,12 +1810,14 @@ class MemoryUpdater:
                 signals=frozenset(feed_signals),
                 expected_clear_generation=expected_clear_generation,
             )
-            if success and not bypass_watermark:
-                # Advance the watermark to the last message fed (the feed is a
-                # suffix, so this is messages[-1]). Skipped on the emergency
-                # path -- the subset's last message is older than the
-                # conversation's latest, so advancing from it would regress.
-                self._watermark_set(watermark_key, _message_identity(messages[-1]))
+            if outcome is _CommitOutcome.PERSISTED:
+                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                success = True
+            elif outcome is _CommitOutcome.CONSUMED:
+                self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
+                success = False
+            else:
+                success = False
             return success
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)

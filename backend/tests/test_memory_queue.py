@@ -422,7 +422,22 @@ def test_queue_add_captures_clear_generation_from_updater_peek() -> None:
     assert queue._items[0].clear_generation == (2, 5)
 
 
-def test_queue_coalesce_keeps_earlier_clear_generation_and_does_not_reread() -> None:
+def test_queue_coalesce_keeps_earlier_clear_generation_when_unchanged() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (0, 0)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["second"]
+    assert queue._items[0].clear_generation == (0, 0)
+    assert mock_updater.peek_clear_generation.call_count == 2
+    mock_updater.mark_feed_consumed.assert_not_called()
+
+
+def test_queue_coalesce_after_newer_clear_starts_fresh_generation() -> None:
     mock_updater = MagicMock()
     mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
     queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
@@ -432,8 +447,40 @@ def test_queue_coalesce_keeps_earlier_clear_generation_and_does_not_reread() -> 
 
     assert queue.pending_count == 1
     assert queue._items[0].messages == ["second"]
+    assert queue._items[0].clear_generation == (1, 0)
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["first"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+    )
+
+
+def test_queue_coalesce_keeps_stale_fence_when_pre_clear_consume_fails() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
     assert queue._items[0].clear_generation == (0, 0)
+
+
+def test_queue_coalesce_does_not_refresh_emergency_snapshot_after_clear() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.side_effect = [(0, 0), (1, 0)]
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add_nowait(thread_id="thread-1", messages=["first"], agent_name="researcher", user_id="alice")
+        queue.add_nowait(thread_id="thread-1", messages=["second"], agent_name="researcher", user_id="alice")
+
+    assert queue._items[0].clear_generation == (0, 0)
+    assert queue._items[0].messages == ["second"]
     assert mock_updater.peek_clear_generation.call_count == 1
+    mock_updater.mark_feed_consumed.assert_not_called()
 
 
 def test_queue_coalesce_does_not_refresh_missing_generation_from_storage() -> None:

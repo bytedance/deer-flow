@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from ..config import DeerMemConfig
+from .storage import is_stale_clear_generation
 
 if TYPE_CHECKING:
     from .updater import MemoryUpdater
@@ -71,7 +72,10 @@ class ConversationContext:
     # Scope clear-generation captured when this conversation became pending
     # work. Commit must use this token, not a later snapshot: a clear that
     # lands during debounce would otherwise look current and restore facts.
-    # Same-key merges keep the earlier value and never re-read storage.
+    # Same-key merges keep the earlier value unless a newer clear is already
+    # visible; then the queue consumes the pre-clear snapshot and starts a
+    # fresh fence. A missing token and emergency (bypass) snapshots are never
+    # refreshed.
     clear_generation: tuple[int, int] | None = None
 
 
@@ -194,13 +198,22 @@ class MemoryUpdateQueue:
 
         # Merge by signal union: a signal seen on any update for this key stays.
         merged_signals = signals | (existing.signals if existing is not None else frozenset())
-        # First enqueue captures the fence; a later same-key merge must keep
-        # that earlier token even when it is None. Re-reading storage here
-        # after a clear would refresh the token and restore pre-clear facts.
-        if existing is not None:
+        # First enqueue captures the fence. A later same-key merge keeps that
+        # token when the generation is unchanged, missing, or this is an
+        # emergency snapshot. Re-reading after a clear and blindly refreshing
+        # would restore pre-clear facts; a visible newer clear instead consumes
+        # the pre-clear snapshot and starts a fresh fence so post-clear turns
+        # are extracted on this flush.
+        if existing is None:
+            enqueued_clear_generation = self._capture_clear_generation(agent_name, user_id)
+        elif existing.bypass_watermark or existing.clear_generation is None:
             enqueued_clear_generation = existing.clear_generation
         else:
-            enqueued_clear_generation = self._capture_clear_generation(agent_name, user_id)
+            current = self._capture_clear_generation(agent_name, user_id)
+            if is_stale_clear_generation(existing.clear_generation, current) and self._consume_pre_clear_feed(existing):
+                enqueued_clear_generation = current
+            else:
+                enqueued_clear_generation = existing.clear_generation
         context = ConversationContext(
             thread_id=thread_id,
             messages=messages,
@@ -236,6 +249,28 @@ class MemoryUpdateQueue:
         if isinstance(user_gen, bool) or isinstance(agent_gen, bool) or not isinstance(user_gen, int) or not isinstance(agent_gen, int) or user_gen < 0 or agent_gen < 0:
             return (0, 0)
         return user_gen, agent_gen
+
+    def _consume_pre_clear_feed(self, existing: ConversationContext) -> bool:
+        """Mark the stale job's snapshot consumed so it cannot restore after a clear.
+
+        Returns False when the updater cannot advance the watermark. The caller
+        must then keep the earlier fence rather than refresh the token.
+        """
+        mark = getattr(self._updater, "mark_feed_consumed", None)
+        if not callable(mark):
+            return False
+        try:
+            mark(
+                existing.messages,
+                thread_id=existing.thread_id,
+                user_id=existing.user_id,
+                agent_name=existing.agent_name,
+                bypass_watermark=existing.bypass_watermark,
+            )
+        except Exception:
+            logger.warning("Failed to consume the pre-clear snapshot after a newer clear; keeping the stale fence", exc_info=True)
+            return False
+        return True
 
     def _reset_timer(self) -> None:
         """Reset the debounce timer."""

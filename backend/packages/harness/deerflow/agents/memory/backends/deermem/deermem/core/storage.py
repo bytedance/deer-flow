@@ -14,6 +14,7 @@ import abc
 import copy
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import math
@@ -458,6 +459,38 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
         handle.close()
 
 
+CLEAR_GENERATION_CAPABILITY = "clear-generation"
+
+
+def declares_clear_generation_fence(storage_cls: type) -> bool:
+    """Return True when ``storage_cls`` declares the atomic clear-generation contract.
+
+    Custom ``storage_class`` providers must override ``apply_changes`` and
+    ``clear_all`` and name ``expected_clear_generation`` / ``bump_clear_generation``
+    as explicit parameters. A ``**scope`` sink is not enough: those values can
+    be accepted and ignored, leaving the restore-after-clear race.
+    """
+    apply_changes = getattr(storage_cls, "apply_changes", None)
+    clear_all = getattr(storage_cls, "clear_all", None)
+    if apply_changes is None or apply_changes is MemoryStorage.apply_changes:
+        return False
+    if clear_all is None or clear_all is MemoryStorage.clear_all:
+        return False
+    try:
+        params = inspect.signature(apply_changes).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(name in params and params[name].kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY) for name in ("expected_clear_generation", "bump_clear_generation"))
+
+
+def _validate_clear_generation_contract(storage: MemoryStorage, *, label: str) -> None:
+    if not declares_clear_generation_fence(type(storage)):
+        raise TypeError(f"Configured memory storage {label} does not implement the atomic clear-generation fence (apply_changes must declare expected_clear_generation/bump_clear_generation; clear_all must be overridden)")
+    capabilities = getattr(storage, "capabilities", None)
+    if callable(capabilities) and CLEAR_GENERATION_CAPABILITY not in capabilities():
+        raise TypeError(f"Configured memory storage {label} capabilities() omit {CLEAR_GENERATION_CAPABILITY!r}")
+
+
 class MemoryStorage(abc.ABC):
     @abc.abstractmethod
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]: ...
@@ -475,12 +508,33 @@ class MemoryStorage(abc.ABC):
         expected_revision: int | None = None,
     ) -> bool: ...
 
-    def apply_changes(self, change_set: dict[str, Any], **scope: Any) -> dict[str, Any]:
-        """Apply one repository change set; providers may override atomically."""
+    def apply_changes(
+        self,
+        change_set: dict[str, Any],
+        *,
+        user_id: str | None = None,
+        agent_name: str | None = None,
+        expected_manifest_revision: int | None = None,
+        allow_manifest_rebase: bool = False,
+        expected_clear_generation: tuple[int, int] | None = None,
+        bump_clear_generation: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one repository change set atomically with the clear-generation fence.
+
+        Providers must honor ``expected_clear_generation`` (raise
+        ``MemoryClearGenerationConflict`` when a newer clear exists) and bump
+        the matching counter when ``bump_clear_generation`` is ``user`` or
+        ``agent``. A ``**scope`` sink that ignores these values is not a valid
+        implementation.
+        """
         raise NotImplementedError
 
     def clear_all(self, *, user_id: str | None = None) -> dict[str, Any]:
-        """Clear global summaries and every agent fact bucket for one user."""
+        """Clear global summaries and every agent fact bucket for one user.
+
+        Implementations must bump the user-wide clear generation in the same
+        atomic commit as the clear so in-flight writers cannot restore facts.
+        """
         raise NotImplementedError
 
     def get_fact_usage(
@@ -1909,7 +1963,7 @@ class FileMemoryStorage(MemoryStorage):
         }
 
     def capabilities(self) -> set[str]:
-        capabilities = {"file", "markdown-facts", "global-summary-json", "revision", "journal", "fact-repository", "substring-fallback"}
+        capabilities = {"file", "markdown-facts", "global-summary-json", "revision", "journal", "fact-repository", "substring-fallback", CLEAR_GENERATION_CAPABILITY}
         if self._retrieval is not None:
             capabilities.add("retrieval")
         return capabilities
@@ -1930,12 +1984,16 @@ def create_storage(config: DeerMemConfig, retrieval: RetrievalPort | None = None
             raise ValueError(f"backend_config.retrieval_adapter={config.retrieval_adapter!r} failed to load: {exc}") from exc
     storage_class_path = config.storage_class
     if not storage_class_path or storage_class_path == "file":
-        return FileMemoryStorage(config, retrieval=retrieval)
+        storage = FileMemoryStorage(config, retrieval=retrieval)
+        _validate_clear_generation_contract(storage, label="file")
+        return storage
     try:
         module_path, class_name = storage_class_path.rsplit(".", 1)
         storage_class = getattr(importlib.import_module(module_path), class_name)
         if not isinstance(storage_class, type) or not issubclass(storage_class, MemoryStorage):
             raise TypeError(f"Configured memory storage '{storage_class_path}' is not a MemoryStorage class")
-        return storage_class(config)
+        storage = storage_class(config)
+        _validate_clear_generation_contract(storage, label=repr(storage_class_path))
+        return storage
     except Exception as exc:
         raise ValueError(f"backend_config.storage_class={storage_class_path!r} failed to load: {exc}. Refusing to silently fall back because memory is persistent state.") from exc
