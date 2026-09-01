@@ -270,6 +270,7 @@ def _advance_lark_flow(user_id: str = "alice") -> str:
 
 
 def _assert_posix_mode(path: Path, expected: int) -> None:
+    # POSIX mode bits are not the Windows contract (NTFS uses ACLs; see #5141).
     if os.name == "nt":
         return
     assert stat.S_IMODE(path.stat().st_mode) == expected

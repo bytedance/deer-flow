@@ -1260,11 +1260,12 @@ def _validate_lark_cli_sandbox_runtime(root: Path) -> None:
         candidate = root / relative
         if not candidate.is_file():
             raise ValueError(f"Managed Lark CLI sandbox runtime is missing a regular file: {relative.as_posix()}")
-        # NTFS cannot represent POSIX executable bits. The Windows→Linux bind mount
-        # is expected to present these files as executable (Docker Desktop
-        # gRPC-FUSE/virtiofs typically synthesizes 0755); this check is skipped on
-        # Windows because the host mode is unrepresentable, not because anything
-        # later chmods the read-only sandbox mount.
+        # There is no in-sandbox chmod: the runtime is bind-mounted read-only and
+        # the launcher just execs linux-$arch/lark-cli. NTFS cannot represent
+        # POSIX exec bits. Docker Desktop (gRPC-FUSE/virtiofs) typically
+        # synthesizes ~0755 for Windows-shared files, which is why this check is
+        # skipped on Windows. A mount that faithfully preserved host modes would
+        # fail at exec.
         if os.name != "nt" and candidate.stat().st_mode & 0o111 == 0:
             raise ValueError(f"Managed Lark CLI sandbox runtime file is not executable: {relative.as_posix()}")
 
