@@ -66,6 +66,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.runs.naming import resolve_root_run_name
@@ -76,7 +77,8 @@ from deerflow.runtime.secret_context import (
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
-from deerflow.subagents.status_contract import SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -119,8 +121,13 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
+            # Attached when a values frame is serialized, for display ordering only.
+            # A replayed message carrying it back would write a thread-scoped seq
+            # into the checkpoint, which a fork then re-seeds and reassigns (#4380).
+            MESSAGE_SEQ_KEY,
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
+            SUBAGENT_ACCEPTANCE_VERDICT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -196,7 +203,10 @@ async def _ensure_thread_metadata(
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
-            metadata=record.metadata,
+            # Seeded from the run that created the thread, minus the run-scoped
+            # trace id: a thread spans many runs and as many trace ids, so
+            # pinning the first one here would be misleading rather than useful.
+            metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
         )
 
 
@@ -272,18 +282,23 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     return item
 
 
-def _strip_external_delegation_verdict(entry: Any) -> Any:
-    """Remove the runtime-stamped receipt verdict from a caller-supplied
-    delegation-ledger entry.
+#: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped
+#: execution evidence (citation verdict PR2, acceptance checklist PR4) that a
+#: caller must never supply.
+_SERVER_OWNED_DELEGATION_VERDICT_KEYS = frozenset({"receipt_verdict", "acceptance_verdict"})
 
-    ``receipt_verdict`` is server-owned execution evidence stamped at task
-    write-back. Ledger entries are plain dicts, not messages, so the
-    message-metadata stripper never sees them; without this a caller can
-    persist a forged verdict that ``render_delegation_ledger`` would present
-    as fact.
+
+def _strip_external_delegation_verdict(entry: Any) -> Any:
+    """Remove runtime-stamped verdicts from a caller-supplied ledger entry.
+
+    ``receipt_verdict``/``acceptance_verdict`` are server-owned execution
+    evidence stamped at task write-back. Ledger entries are plain dicts, not
+    messages, so the message-metadata stripper never sees them; without this
+    a caller can persist a forged verdict that ``render_delegation_ledger``
+    would present as fact.
     """
-    if isinstance(entry, dict) and "receipt_verdict" in entry:
-        return {key: value for key, value in entry.items() if key != "receipt_verdict"}
+    if isinstance(entry, dict) and _SERVER_OWNED_DELEGATION_VERDICT_KEYS & entry.keys():
+        return {key: value for key, value in entry.items() if key not in _SERVER_OWNED_DELEGATION_VERDICT_KEYS}
     return entry
 
 
@@ -789,7 +804,15 @@ def build_run_config(
             external_values.pop(INTERNAL_CHECKPOINT_MODE_KEY, None)
 
     if metadata:
-        config.setdefault("metadata", {}).update(metadata)
+        # Merged onto a copy: config["metadata"] is the same dict object as the
+        # caller's body.config["metadata"] (the passthrough above copies
+        # references), and an in-place update would write server-stamped keys
+        # -- the trace id -- through into the request body that is persisted
+        # and echoed as the run's kwargs.
+        existing_metadata = config.get("metadata")
+        merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+        merged_metadata.update(metadata)
+        config["metadata"] = merged_metadata
     return config
 
 
@@ -1309,7 +1332,18 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        # deerflow_trace_id is server-issued, so the caller's value is replaced
+        # here at the trust boundary. body.metadata forks two ways -- through
+        # build_run_config into config["metadata"], which the run worker
+        # restamps, and through create_or_reject into the run record, which the
+        # runs API echoes verbatim. Only the first is covered downstream, so
+        # without this the run record is the one surface that persists a forged
+        # id, disagreeing with the response header, the logs, and the
+        # checkpoint. The caller's own metadata keys are preserved.
+        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
+
+        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -1426,7 +1460,7 @@ async def start_run(
                     thread_id,
                     body.assistant_id,
                     on_disconnect=disconnect,
-                    metadata=body.metadata or {},
+                    metadata=run_metadata,
                     # Persist a secret-redacted copy of the config: the run record is
                     # written to runs.kwargs_json and echoed by the run API, so a
                     # request-scoped secret (#3861) must not ride along. The live
@@ -1521,12 +1555,19 @@ async def launch_scheduled_thread_run(
     )
     scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
     idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
-    record = await start_run(
-        body,
-        thread_id,
-        request,
-        idempotency_key=idempotency_key,
-    )
+    # Non-HTTP entry point: the lifespan scheduler calls this with a synthetic
+    # request, so TraceMiddleware never runs. The scope is opened per launch,
+    # never around the poller loop, or every scheduled run would collapse onto
+    # one id. Reached from inside an HTTP request -- a manual trigger, or the
+    # scheduler service's own per-occurrence scope -- ensure_trace_context
+    # keeps that trace instead of minting a competing one.
+    with ensure_trace_context():
+        record = await start_run(
+            body,
+            thread_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
@@ -1598,14 +1639,18 @@ async def launch_mcp_task_notification_run(
         feedback_keys=None,
     )
     idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    # Non-HTTP entry point, same as launch_scheduled_thread_run above: the MCP
+    # task service drives this from its own background loop, so one scope per
+    # notification keeps every delivery attempt separately correlatable.
     try:
-        record = await start_run(
-            body,
-            thread_id,
-            request,
-            idempotency_key=idempotency_key,
-            require_existing_thread=True,
-        )
+        with ensure_trace_context():
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                idempotency_key=idempotency_key,
+                require_existing_thread=True,
+            )
     except HTTPException as exc:
         if exc.status_code == 409:
             raise ConflictError(str(exc.detail)) from exc

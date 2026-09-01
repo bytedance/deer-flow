@@ -59,8 +59,8 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
     ),
     "logging": (
         "configure_logging() runs only during app.py startup; it installs/removes the trace-context filter and the enhanced formatter on root handlers, "
-        "and TraceMiddleware captures logging.enhance.enabled once at startup so response X-Trace-Id headers, log trace_id fields, and Langfuse "
-        "deerflow_trace_id stay coherent. A freshly reloaded AppConfig does not retrigger any of this."
+        "and a freshly reloaded AppConfig does not retrigger it, so a runtime edit to logging.enhance.* needs a Gateway restart. Only log output is "
+        "affected: trace ids are issued unconditionally and always returned in the X-Trace-Id response header, whatever this setting says."
     ),
     # Not part of the AppConfig Pydantic schema — channel credentials are
     # consumed directly by ``start_channel_service()`` once at lifespan

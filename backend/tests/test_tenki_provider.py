@@ -150,6 +150,8 @@ class _FakeSandbox:
     def _run_script(self, script: str) -> _FakeResult:
         if script == "echo ok":
             return _FakeResult(stdout=b"ok\n")
+        if script == "failing-tests":
+            return _FakeResult(exit_code=1, stdout=b"5 passed, 1 error\n")
         if "BOOTSTRAP_OK" in script:  # provider create-time bootstrap script
             return _FakeResult(stdout=b"BOOTSTRAP_OK\n")
         if script.startswith("find "):
@@ -342,6 +344,14 @@ def test_execute_command_formats_stdout_and_forwards_env_timeout() -> None:
     assert call["env"] == {"BASE": "1", "EXTRA": "2"}
     assert call["timeout"] == 5
     assert call["cwd"] is None  # no forced cwd; runs in sandbox default dir
+
+
+def test_execute_command_appends_exit_marker_when_failure_has_output() -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    fake = _FakeSandbox()
+    box = TenkiSandbox("sb", fake)
+    assert box.execute_command("failing-tests") == "5 passed, 1 error\n\nExit Code: 1"
 
 
 def test_execute_command_returns_error_as_text() -> None:
