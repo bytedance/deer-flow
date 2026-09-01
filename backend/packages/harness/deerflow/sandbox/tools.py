@@ -1652,32 +1652,65 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     return output
 
 
+#: Providers append the shell's authoritative exit marker at the very end of
+#: failing output (local ``Exit Code: N`` incl. timeout 124; remote
+#: ``Command exited with code N`` when output was empty). Truncation must
+#: never cut it away — evidence consumers (acceptance checklist) parse the
+#: marker to recover the actual shell status.
+_BASH_EXIT_MARKER_TAIL_RE = re.compile(r"(?:\nExit Code: -?\d+|\n?Command exited with code -?\d+)\s*$")
+
+#: Floor for the bash output limit: the longest exit marker
+#: (``Command exited with code -128``) is 30 chars, so any smaller configured
+#: limit is raised to keep a failing command's marker preservable. The config
+#: accepts any nonnegative value; below this floor truncation would destroy
+#: the failure evidence it exists to measure.
+_BASH_OUTPUT_MIN_LIMIT_CHARS = 32
+
+
 def _truncate_bash_output(output: str, max_chars: int) -> str:
     """Middle-truncate bash output, preserving head and tail (50/50 split).
 
     bash output may have errors at either end (stderr/stdout ordering is
-    non-deterministic), so both ends are preserved equally.
+    non-deterministic), so both ends are preserved equally. A trailing
+    shell exit marker is always preserved (see
+    ``_BASH_EXIT_MARKER_TAIL_RE``): its budget comes out of the tail, not
+    out of the status evidence.
 
-    The returned string (including the truncation marker) is guaranteed to be
-    no longer than max_chars characters. Pass max_chars=0 to disable truncation
-    and return the full output unchanged.
+    The returned string (including the truncation marker) is no longer than
+    the EFFECTIVE limit, ``max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)`` —
+    the 32-char floor is applied before anything else (even when the output
+    carries no exit marker) so a trailing marker always stays preservable,
+    meaning a configured limit in 1..31 yields up to 32 chars. Pass
+    max_chars=0 to disable truncation and return the full output unchanged.
     """
     if max_chars == 0:
         return output
+    # Clamp the effective limit to the marker-preserving floor (see
+    # ``_BASH_OUTPUT_MIN_LIMIT_CHARS``): a configured limit smaller than the
+    # exit marker would silently discard failure status.
+    max_chars = max(max_chars, _BASH_OUTPUT_MIN_LIMIT_CHARS)
     if len(output) <= max_chars:
         return output
+    preserved = ""
+    marker_match = _BASH_EXIT_MARKER_TAIL_RE.search(output)
+    if marker_match is not None and len(marker_match.group(0)) < max_chars:
+        preserved = marker_match.group(0)
+        output = output[: marker_match.start()]
+        max_chars -= len(preserved)
+        if len(output) <= max_chars:
+            return output + preserved
     total_len = len(output)
     # Compute the exact worst-case marker length: skipped chars is at most
     # total_len, so this is a tight upper bound.
     marker_max_len = len(f"\n... [middle truncated: {total_len} chars skipped] ...\n")
     kept = max(0, max_chars - marker_max_len)
     if kept == 0:
-        return output[:max_chars]
+        return output[:max_chars] + preserved
     head_len = kept // 2
     tail_len = kept - head_len
     skipped = total_len - kept
     marker = f"\n... [middle truncated: {skipped} chars skipped] ...\n"
-    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}"
+    return f"{output[:head_len]}{marker}{output[-tail_len:] if tail_len > 0 else ''}" + preserved
 
 
 def _truncate_read_file_output(output: str, max_chars: int) -> str:

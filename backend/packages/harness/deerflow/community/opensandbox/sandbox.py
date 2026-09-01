@@ -91,6 +91,10 @@ def format_execution(execution: Any) -> str:
 class OpenSandboxSandbox(Sandbox):
     """Wrap one live ``opensandbox.sync.SandboxSync`` instance."""
 
+    #: Every call is a fresh ``run_command`` execution — no shell state
+    #: survives into the next command.
+    persistent_shell_sessions = False
+
     def __init__(
         self,
         id: str,
@@ -250,8 +254,10 @@ class OpenSandboxSandbox(Sandbox):
         if exit_code is None:
             detail = output or "no completion or error event"
             return f"Error: OpenSandbox command completed without an exit code: {detail}"
-        if exit_code != 0 and not output:
-            output = f"Command exited with code {exit_code}"
+        if exit_code != 0:
+            # Mirror LocalSandbox: preserve a nonzero exit in the output text
+            # even when the command produced output (see e2b_sandbox).
+            output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
         return output if output else "(no output)"
 
     def read_file(self, path: str, start_line: int | None = None, end_line: int | None = None) -> str:
