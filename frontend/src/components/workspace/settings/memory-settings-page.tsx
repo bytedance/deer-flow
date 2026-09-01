@@ -74,6 +74,9 @@ type MemorySectionGroup = {
 type PendingImport = {
   fileName: string;
   memory: UserMemory;
+  // Fact bucket frozen at file-selection time (see pendingClear for why the
+  // live selection must not be re-read when the confirmation is confirmed).
+  agentName: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -309,9 +312,21 @@ export function MemorySettingsPage() {
   const importMemoryMutation = useImportMemory();
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const updateMemoryFact = useUpdateMemoryFact();
-  const [clearDialogOpen, setClearDialogOpen] = useState(false);
-  const [factToDelete, setFactToDelete] = useState<MemoryFact | null>(null);
+  // Scope-bound dialogs freeze the fact bucket they will act on at open time:
+  // the agent-list effect can reset `selectedAgent` to null while a dialog is
+  // open (e.g. a window-focus refetch discovers the selected agent was deleted
+  // in another tab), and re-reading the live selection on confirm would turn
+  // an agent-scoped destructive action into the unscoped operation -- for the
+  // clear dialog that means deleting every bucket plus the shared summaries.
+  const [pendingClear, setPendingClear] = useState<{
+    agentName: string | null;
+  } | null>(null);
+  const [pendingFactDelete, setPendingFactDelete] = useState<{
+    fact: MemoryFact;
+    agentName: string | null;
+  } | null>(null);
   const [factToEdit, setFactToEdit] = useState<MemoryFact | null>(null);
+  const [factEditorAgent, setFactEditorAgent] = useState<string | null>(null);
   const [factEditorOpen, setFactEditorOpen] = useState(false);
   const [factForm, setFactForm] = useState<FactFormState>(
     DEFAULT_FACT_FORM_STATE,
@@ -402,27 +417,38 @@ export function MemorySettingsPage() {
   const importSuccess = t.settings.memory.importSuccess ?? "Memory imported";
   // An agent-scoped import still replaces the user-global summaries (only
   // facts are bucketed), so the confirmation must say so explicitly instead
-  // of the generic "overwrite your current memory" copy.
-  const importConfirmTitle = isAgentScoped
+  // of the generic "overwrite your current memory" copy. Derived from the
+  // scope frozen in pendingImport, not the live selection.
+  const pendingImportIsAgentScoped =
+    pendingImport !== null && pendingImport.agentName !== null;
+  const importConfirmTitle = pendingImportIsAgentScoped
     ? t.settings.memory.importAgentConfirmTitle
     : t.settings.memory.importConfirmTitle;
-  const importConfirmDescription = isAgentScoped
+  const importConfirmDescription = pendingImportIsAgentScoped
     ? t.settings.memory.importAgentConfirmDescription
     : t.settings.memory.importConfirmDescription;
   const agentScopeLabel = t.settings.memory.agentScopeLabel;
   const agentScopeDefault = t.settings.memory.agentScopeDefault;
+  // Label for the opener button, which follows the live selection.
   const clearLabel = isAgentScoped
     ? t.settings.memory.clearAgent
     : clearAllLabel;
-  const clearConfirmTitle = isAgentScoped
+  // Clear-dialog copy follows the scope frozen in pendingClear so the
+  // confirmation always describes the operation that will actually run.
+  const pendingClearIsAgentScoped =
+    pendingClear !== null && pendingClear.agentName !== null;
+  const clearConfirmTitle = pendingClearIsAgentScoped
     ? t.settings.memory.clearAgentConfirmTitle
     : clearAllConfirmTitle;
-  const clearConfirmDescription = isAgentScoped
+  const clearConfirmDescription = pendingClearIsAgentScoped
     ? t.settings.memory.clearAgentConfirmDescription
     : clearAllConfirmDescription;
-  const clearSuccess = isAgentScoped
+  const clearSuccess = pendingClearIsAgentScoped
     ? t.settings.memory.clearAgentSuccess
     : clearAllSuccess;
+  const clearConfirmLabel = pendingClearIsAgentScoped
+    ? t.settings.memory.clearAgent
+    : clearAllLabel;
 
   const sectionGroups = memory ? buildMemorySectionGroups(memory, t) : [];
   const filteredSectionGroups = sectionGroups
@@ -502,6 +528,7 @@ export function MemorySettingsPage() {
       setPendingImport({
         fileName: file.name,
         memory: parsed,
+        agentName: selectedAgent,
       });
     } catch {
       toast.error(t.settings.memory.importInvalidFile);
@@ -516,7 +543,7 @@ export function MemorySettingsPage() {
     try {
       await importMemoryMutation.mutateAsync({
         memory: pendingImport.memory,
-        agentName: selectedAgent,
+        agentName: pendingImport.agentName,
       });
       toast.success(importSuccess);
       setPendingImport(null);
@@ -526,25 +553,29 @@ export function MemorySettingsPage() {
   }
 
   async function handleClearMemory() {
+    if (!pendingClear) {
+      return;
+    }
+
     try {
-      await clearMemory.mutateAsync(selectedAgent);
+      await clearMemory.mutateAsync(pendingClear.agentName);
       toast.success(clearSuccess);
-      setClearDialogOpen(false);
+      setPendingClear(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
   }
 
   async function handleDeleteFact() {
-    if (!factToDelete) return;
+    if (!pendingFactDelete) return;
 
     try {
       await deleteMemoryFact.mutateAsync({
-        factId: factToDelete.id,
-        agentName: selectedAgent,
+        factId: pendingFactDelete.fact.id,
+        agentName: pendingFactDelete.agentName,
       });
       toast.success(factDeleteSuccess);
-      setFactToDelete(null);
+      setPendingFactDelete(null);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
     }
@@ -552,12 +583,14 @@ export function MemorySettingsPage() {
 
   function openCreateFactDialog() {
     setFactToEdit(null);
+    setFactEditorAgent(selectedAgent);
     setFactForm(DEFAULT_FACT_FORM_STATE);
     setFactEditorOpen(true);
   }
 
   function openEditFactDialog(fact: MemoryFact) {
     setFactToEdit(fact);
+    setFactEditorAgent(selectedAgent);
     setFactForm({
       content: fact.content,
       category: fact.category,
@@ -595,18 +628,19 @@ export function MemorySettingsPage() {
         await updateMemoryFact.mutateAsync({
           factId: factToEdit.id,
           input: patchInput,
-          agentName: selectedAgent,
+          agentName: factEditorAgent,
         });
         toast.success(editFactSuccess);
       } else {
         await createMemoryFact.mutateAsync({
           input,
-          agentName: selectedAgent,
+          agentName: factEditorAgent,
         });
         toast.success(addFactSuccess);
       }
       setFactEditorOpen(false);
       setFactToEdit(null);
+      setFactEditorAgent(null);
       setFactForm(DEFAULT_FACT_FORM_STATE);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : String(err));
@@ -732,7 +766,7 @@ export function MemorySettingsPage() {
                 <Button
                   variant="destructive"
                   className="ml-auto"
-                  onClick={() => setClearDialogOpen(true)}
+                  onClick={() => setPendingClear({ agentName: selectedAgent })}
                   disabled={clearMemory.isPending}
                 >
                   {clearMemory.isPending ? t.common.loading : clearLabel}
@@ -849,7 +883,12 @@ export function MemorySettingsPage() {
                               variant="ghost"
                               size="icon"
                               className="text-destructive hover:text-destructive shrink-0"
-                              onClick={() => setFactToDelete(fact)}
+                              onClick={() =>
+                                setPendingFactDelete({
+                                  fact,
+                                  agentName: selectedAgent,
+                                })
+                              }
                               disabled={deleteMemoryFact.isPending}
                               title={t.common.delete}
                               aria-label={t.common.delete}
@@ -868,7 +907,14 @@ export function MemorySettingsPage() {
         )}
       </SettingsSection>
 
-      <Dialog open={clearDialogOpen} onOpenChange={setClearDialogOpen}>
+      <Dialog
+        open={pendingClear !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setPendingClear(null);
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>{clearConfirmTitle}</DialogTitle>
@@ -877,7 +923,7 @@ export function MemorySettingsPage() {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setClearDialogOpen(false)}
+              onClick={() => setPendingClear(null)}
               disabled={clearMemory.isPending}
             >
               {t.common.cancel}
@@ -887,7 +933,7 @@ export function MemorySettingsPage() {
               onClick={() => void handleClearMemory()}
               disabled={clearMemory.isPending}
             >
-              {clearMemory.isPending ? t.common.loading : clearLabel}
+              {clearMemory.isPending ? t.common.loading : clearConfirmLabel}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -899,6 +945,7 @@ export function MemorySettingsPage() {
           setFactEditorOpen(open);
           if (!open) {
             setFactToEdit(null);
+            setFactEditorAgent(null);
             setFactForm(DEFAULT_FACT_FORM_STATE);
           }
         }}
@@ -1006,10 +1053,10 @@ export function MemorySettingsPage() {
       </Dialog>
 
       <Dialog
-        open={factToDelete !== null}
+        open={pendingFactDelete !== null}
         onOpenChange={(open) => {
           if (!open) {
-            setFactToDelete(null);
+            setPendingFactDelete(null);
           }
         }}
       >
@@ -1020,20 +1067,20 @@ export function MemorySettingsPage() {
               {factDeleteConfirmDescription}
             </DialogDescription>
           </DialogHeader>
-          {factToDelete ? (
+          {pendingFactDelete ? (
             <div className="bg-muted rounded-md border p-3 text-sm">
               <div className="text-muted-foreground mb-1 font-medium">
                 {factPreviewLabel}
               </div>
               <p className="break-words">
-                {truncateFactPreview(factToDelete.content)}
+                {truncateFactPreview(pendingFactDelete.fact.content)}
               </p>
             </div>
           ) : null}
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setFactToDelete(null)}
+              onClick={() => setPendingFactDelete(null)}
               disabled={deleteMemoryFact.isPending}
             >
               {t.common.cancel}
