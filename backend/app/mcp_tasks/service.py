@@ -1130,8 +1130,16 @@ class McpTaskService:
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
                 return
+            # The claim's durable outcome is now known. Release the phase owner
+            # immediately: per-claim token fencing already rejects a stale release
+            # against a newer claim, so the phase no longer needs this owner to
+            # guard the ambiguous claim. Returned rows are released as bounded,
+            # service-owned background work, so a stuck release cannot lock the
+            # whole phase until process restart.
+            if self._claim_owners.get(phase) is owner:
+                self._claim_owners.pop(phase, None)
             if records:
-                await self._release_claimed_records(records, release=release, settle=True)
+                await self._release_claimed_records(records, release=release)
         finally:
             if self._claim_owners.get(phase) is owner:
                 self._claim_owners.pop(phase, None)
