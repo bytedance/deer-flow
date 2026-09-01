@@ -16,7 +16,7 @@ from typing import NamedTuple
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
-from deerflow.sandbox.path_patterns import build_output_mask_pattern
+from deerflow.sandbox.path_patterns import replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox, _validate_extra_env
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
@@ -224,9 +224,9 @@ class LocalSandbox(Sandbox):
         self._agent_written_paths: set[str] = set()
 
     # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
-    # sorted views and compiled path-rewrite patterns below are stable for the
-    # sandbox's lifetime. Caching them avoids re-sorting and re-compiling these
-    # regexes on every bash/read_file/write_file call (the agent's hot path).
+    # sorted views and resolved roots below are stable for the sandbox's
+    # lifetime. Caching them avoids repeated filesystem resolution and sorting
+    # on every bash/read_file/write_file call (the agent's hot path).
 
     @cached_property
     def _command_pattern(self) -> re.Pattern[str] | None:
@@ -249,30 +249,9 @@ class LocalSandbox(Sandbox):
         return re.compile("|".join(f"({p})" for p in patterns))
 
     @cached_property
-    def _reverse_output_patterns(self) -> list[re.Pattern[str]]:
-        """Compiled matchers for local paths in command output (longest local path first)."""
-        # The rule — segment boundary plus path tail — is owned by
-        # ``deerflow.sandbox.path_patterns`` and shared with
-        # ``sandbox.tools._compiled_mask_patterns``, the other site that rewrites host
-        # paths back to virtual ones. Its rationale (why the boundary class is
-        # text-oriented rather than shell-oriented like ``_command_pattern``, why ``$``
-        # is load-bearing) lives with the owner rather than in a second copy here, which
-        # is what let the two drift before (#4035 added the boundary here and missed
-        # that site; #4053 added it there).
-        #
-        # What is specific to this site: without the boundary the regex yields the bare
-        # root, which then *equals* the mount root and so satisfies
-        # ``_reverse_resolve_path``'s own ``+ "/"`` guard — the sibling is rewritten to a
-        # container path that forward resolution refuses to map back. And bases stay
-        # separator-*sensitive*: they come from ``Path.resolve()`` and already carry the
-        # platform's separator, so relaxing them would widen what this masks.
-        return [build_output_mask_pattern(self._resolved_local_paths[m]) for m in self._mappings_by_local_specificity]
-
-    @cached_property
     def _resolved_local_paths(self) -> dict[PathMapping, str]:
-        """Filesystem-resolved local root per mapping. ``Path.resolve()`` hits the
-        disk, and the mounted directories don't move, so resolve once and reuse."""
-        return {m: str(Path(m.local_path).resolve()) for m in self.path_mappings}
+        """Filesystem-resolved local root per mapping, computed once."""
+        return {m: os.path.realpath(m.local_path) for m in self.path_mappings}
 
     @cached_property
     def _mappings_by_container_specificity(self) -> list[PathMapping]:
@@ -291,7 +270,7 @@ class LocalSandbox(Sandbox):
         mapping (i.e. the one whose local_path is the longest prefix of the
         resolved path), similar to how ``_resolve_path`` handles container paths.
         """
-        resolved = str(Path(resolved_path).resolve())
+        resolved = os.path.realpath(resolved_path)
 
         best_mapping: PathMapping | None = None
         best_prefix_len = -1
@@ -342,15 +321,16 @@ class LocalSandbox(Sandbox):
             return ResolvedPath(path_str, None)
 
         mapping, relative = mapping_match
-        local_root = Path(self._resolved_local_paths[mapping])
-        resolved_path = (local_root / relative).resolve() if relative else local_root
-
+        local_root = self._resolved_local_paths[mapping]
+        resolved_path = os.path.realpath(os.path.join(local_root, relative)) if relative else local_root
         try:
-            resolved_path.relative_to(local_root)
-        except ValueError as exc:
-            raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directory", path_str) from exc
+            inside_root = os.path.normcase(os.path.commonpath([local_root, resolved_path])) == os.path.normcase(local_root)
+        except ValueError:
+            inside_root = False
+        if not inside_root:
+            raise PermissionError(errno.EACCES, "Access denied: path escapes mounted directory", path_str)
 
-        return ResolvedPath(str(resolved_path), mapping)
+        return ResolvedPath(resolved_path, mapping)
 
     def _resolve_path(self, path: str) -> str:
         return self._resolve_path_with_mapping(path).path
@@ -369,7 +349,7 @@ class LocalSandbox(Sandbox):
             Container path if mapping exists, otherwise original path
         """
         normalized_path = path.replace("\\", "/")
-        path_str = str(Path(normalized_path).resolve())
+        path_str = os.path.realpath(normalized_path)
 
         # Try each mapping (longest local path first for more specific matches)
         for mapping in self._mappings_by_local_specificity:
@@ -404,16 +384,16 @@ class LocalSandbox(Sandbox):
         Returns:
             Output with local paths resolved to container paths
         """
-        # Patterns are compiled once per sandbox (longest local path first for
-        # correct prefix matching) and reused across calls.
+        # Scan directly instead of compiling one regex per thread root. Python's
+        # global regex caches outlive an evicted LocalSandbox and otherwise keep
+        # high-cardinality thread paths resident.
         result = output
-        for pattern in self._reverse_output_patterns:
-
-            def replace_match(match: re.Match) -> str:
-                matched_path = match.group(0)
-                return self._reverse_resolve_path(matched_path)
-
-            result = pattern.sub(replace_match, result)
+        for mapping in self._mappings_by_local_specificity:
+            result = replace_output_path_matches(
+                result,
+                self._resolved_local_paths[mapping],
+                self._reverse_resolve_path,
+            )
 
         return result
 
@@ -786,7 +766,7 @@ class LocalSandbox(Sandbox):
                 if "/" not in child_rel and mapping.container_path.rstrip("/") not in existing_dirs:
                     # Verify the host path exists so we don't add phantom entries
                     try:
-                        if Path(mapping.local_path).resolve().is_dir():
+                        if os.path.isdir(os.path.realpath(mapping.local_path)):
                             result.append(f"{mapping.container_path}/")
                     except OSError:
                         pass

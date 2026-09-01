@@ -330,6 +330,8 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > [!IMPORTANT]
 > The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
 >
+> After a run publishes its terminal stream marker, its process-local `RunRecord` remains available for the existing five-minute grace period before cleanup; durable run history remains available through `RunStore`, while the stream bridge retains its delivery tail on its separate cleanup schedule.
+>
 > Run cancellation may land on any Gateway worker. A non-owning worker now persists the interrupt or rollback request for the live owner, which observes it during lease renewal and performs the normal cancellation flow; load-balancer routing alone no longer produces a 409. The first accepted action wins even if a retry lands on the owner, and accepted cancellation competes atomically with owner completion. Dead owners still follow lease takeover and orphan recovery. Cancellation latency is therefore bounded by the lease heartbeat interval.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
@@ -797,6 +799,14 @@ LangSmith and Langfuse attach as LangChain callbacks, so you can enable both and
 
 For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 
+#### Existing-Run Stream Actions
+
+Existing-run SSE joins are observation-only on `GET`: supplying
+`action=interrupt|rollback` returns `405`. Cancellation on this stream route is
+`POST`-only and requires the `runs:cancel` permission. Accordingly, the OpenAPI
+contract exposes `action` and `wait` only on `POST`; the `GET` operation exposes
+only its path parameters.
+
 #### Personal Access Tokens
 
 Non-interactive clients (CI pipelines, scripts, server-to-server integrations)
@@ -884,6 +894,8 @@ is per-user (it never touches another user's credentials), validates the new
 credentials through the official CLI's live tenant-token probe before replacing
 the active app, and revokes/removes the previous app's OAuth tokens. A rejected
 credential change does not supersede an in-progress setup or authorization flow.
+The previous OAuth data is cleared before the CLI stores the replacement app,
+so the new file-backed keychain secret remains available during reconnection.
 DeerFlow then immediately opens browser authorization for the newly bound app so
 the switch ends in a usable connection.
 

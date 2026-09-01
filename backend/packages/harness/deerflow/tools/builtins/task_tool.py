@@ -568,12 +568,12 @@ def _task_result_command(
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: Runtime,
-    description: str,
     prompt: str,
     subagent_type: str,
     tool_call_id: Annotated[str, InjectedToolCallId],
     *,
     acceptance_criteria: list[str] | None = None,
+    description: str = "",
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -631,9 +631,8 @@ async def task_tool(
       on a load-bearing claim, spot-check its verifiable handle yourself.
 
     Args:
-        description: A short (3-5 word) description of the task for logging/display. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        prompt: The task description for the subagent. Be specific and clear about what needs to be done. ALWAYS PROVIDE THIS PARAMETER SECOND.
-        subagent_type: The type of subagent to use. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        prompt: The task description for the subagent. Be specific and clear about what needs to be done.
+        subagent_type: The type of subagent to use.
         acceptance_criteria: Optional list of completion requirements, handed to
             the subagent as untrusted data appended to its task input (never as
             system-prompt authority) and addressed one by one in its final
@@ -644,6 +643,7 @@ async def task_tool(
             decidable. Example for a report-writing delegation:
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
+        description: Optional short (3-5 word) description of the task for logging/display.
     """
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
@@ -827,7 +827,7 @@ async def task_tool(
             {
                 "type": "task_started",
                 "task_id": tool_call_id,
-                "description": description,
+                "description": description or prompt,
                 "model_name": effective_model,
             },
             writer=writer,

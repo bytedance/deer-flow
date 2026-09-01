@@ -234,7 +234,8 @@ class RunJournal(BaseCallbackHandler):
         super().__init__()
         self.run_id = run_id
         self.thread_id = thread_id
-        self._store = event_store
+        self._store: RunEventStore | None = event_store
+        self._closed = False
         self._track_tokens = track_token_usage
         self._flush_threshold = flush_threshold
         self._progress_reporter = progress_reporter
@@ -635,6 +636,8 @@ class RunJournal(BaseCallbackHandler):
                 self._persist_tool_result_message(message)
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
+        if self._closed:
+            return
         self._buffer.append(
             {
                 "thread_id": self.thread_id,
@@ -676,7 +679,10 @@ class RunJournal(BaseCallbackHandler):
 
     async def _flush_async(self, batch: list[dict]) -> None:
         try:
-            await self._store.put_batch(batch)
+            store = self._store
+            if store is None:
+                return
+            await store.put_batch(batch)
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -886,25 +892,95 @@ class RunJournal(BaseCallbackHandler):
 
     async def flush(self) -> None:
         """Force flush remaining buffer. Called in worker's finally block."""
+        if self._closed:
+            return
         if self._pending_flush_tasks:
             await asyncio.gather(*tuple(self._pending_flush_tasks), return_exceptions=True)
-        while self._pending_progress_task is not None and not self._pending_progress_task.done():
+        while self._pending_progress_task is not None:
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task.done():
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
+                break
             if self._pending_progress_delayed:
-                self._pending_progress_task.cancel()
-                await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+                if self._pending_progress_task is pending_progress_task:
+                    self._pending_progress_task = None
                 self._progress_dirty = False
                 self._pending_progress_delayed = False
                 break
-            await asyncio.gather(self._pending_progress_task, return_exceptions=True)
+            await asyncio.gather(pending_progress_task, return_exceptions=True)
+            if self._pending_progress_task is pending_progress_task:
+                self._pending_progress_task = None
 
         while self._buffer:
             batch = self._buffer[: self._flush_threshold]
             del self._buffer[: self._flush_threshold]
             try:
-                await self._store.put_batch(batch)
+                store = self._store
+                if store is None:
+                    return
+                await store.put_batch(batch)
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
+
+    def _detach_runtime_dependencies(self) -> None:
+        """Drop every external or potentially cyclic run-scoped reference."""
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        self._buffer.clear()
+        self._pending_flush_tasks.clear()
+        self._pending_progress_task = None
+        self._pending_progress_delayed = False
+        self._progress_dirty = False
+        self._tokens_by_model.clear()
+        self._counted_llm_run_ids.clear()
+        self._counted_external_source_ids.clear()
+        self._counted_message_llm_run_ids.clear()
+        self._llm_start_times.clear()
+        self._seen_llm_starts.clear()
+        self._current_run_tool_call_names.clear()
+        self._persisted_tool_message_identities.clear()
+        self._produced_artifacts.clear()
+        self._produced_artifact_keys.clear()
+        self._last_ai_msg = None
+        self._first_human_msg = None
+        self._llm_error_fallback_message = None
+
+    async def close(self, *, flush: bool = True) -> None:
+        """Release run-scoped references, optionally flushing buffered events."""
+        if self._closed:
+            return
+        if flush:
+            # A failed terminal write returns its batch to ``_buffer``. Keep the
+            # store and all buffered state attached so a later close/flush can retry
+            # instead of silently discarding the tail of the run event stream.
+            await self.flush()
+            self._detach_runtime_dependencies()
+            return
+
+        # A worker that lost its lease must detach without starting another
+        # durable write. Drop dependencies before cancelling already-scheduled
+        # work so tasks that have not begun observe the detached state. The
+        # final detach must survive a second cancellation while those tasks stop.
+        self._closed = True
+        self._store = None
+        self._progress_reporter = None
+        try:
+            pending_flush_tasks = tuple(self._pending_flush_tasks)
+            for task in pending_flush_tasks:
+                task.cancel()
+            if pending_flush_tasks:
+                await asyncio.gather(*pending_flush_tasks, return_exceptions=True)
+            pending_progress_task = self._pending_progress_task
+            if pending_progress_task is not None:
+                pending_progress_task.cancel()
+                await asyncio.gather(pending_progress_task, return_exceptions=True)
+        finally:
+            self._detach_runtime_dependencies()
 
     def _schedule_progress_flush(self) -> None:
         """Best-effort throttled progress snapshot for active run visibility."""

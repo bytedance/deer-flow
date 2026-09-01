@@ -715,7 +715,6 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
 
     output = _run_task_tool(
         runtime=runtime,
-        description="运行子任务",
         prompt="collect diagnostics",
         subagent_type="general-purpose",
         tool_call_id="tc-123",
@@ -741,6 +740,7 @@ def test_task_tool_emits_running_and_completed_events(monkeypatch):
     assert polled_execution_ids == ["execution-456", "execution-456"]
     assert cleaned_execution_ids == ["execution-456"]
     assert {event["task_id"] for event in events} == {"tc-123"}
+    assert events[0]["description"] == "collect diagnostics"
     assert events[0]["model_name"] == "ark-model"
     assert events[-1]["result"] == "all done"
 
