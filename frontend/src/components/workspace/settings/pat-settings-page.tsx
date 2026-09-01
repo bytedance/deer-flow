@@ -384,7 +384,16 @@ function InteractivePatSettingsPage() {
           // in flight (the response carries the only copy of the token) --
           // the dialog must not be dismissed by an accidental overlay click
           // or Escape; only the explicit button closes it.
-          if (!open && (created !== null || create.isPending)) return;
+          // The synchronous latch is a third signal for the same reason it
+          // guards the submit handler: isPending lands one re-render too
+          // late, and Escape in that window would close the dialog with the
+          // response about to arrive — the show-once token would never be
+          // seen.
+          if (
+            !open &&
+            (created !== null || create.isPending || createLatchedRef.current)
+          )
+            return;
           if (!open) {
             closeCreateDialog();
           } else {
@@ -393,7 +402,9 @@ function InteractivePatSettingsPage() {
         }}
       >
         <DialogContent
-          showCloseButton={created === null && !create.isPending}
+          showCloseButton={
+            created === null && !create.isPending && !createLatchedRef.current
+          }
           className="max-h-[85vh] overflow-y-auto"
         >
           {created === null ? (

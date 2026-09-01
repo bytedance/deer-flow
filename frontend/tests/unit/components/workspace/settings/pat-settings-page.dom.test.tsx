@@ -271,6 +271,21 @@ describe("PatSettingsPage", () => {
     fireEvent.click(submit);
 
     expect(mutate).toHaveBeenCalledTimes(1);
+
+    // Same window, Escape: the dialog must survive while the latch is held,
+    // or the arriving show-once token would land in a closed dialog.
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.getByRole("dialog")).toBeDefined();
+
+    // The built-in close button may still be in the DOM until the pending
+    // re-render lands (the latch is a ref and renders nothing), so pin the
+    // functional guarantee instead: clicking it routes through the same
+    // guarded onOpenChange and must not close the dialog either.
+    const staleClose = screen.queryByText("Close");
+    if (staleClose) {
+      fireEvent.click(staleClose.closest("button")!);
+      expect(screen.getByRole("dialog")).toBeDefined();
+    }
   });
 
   it("latches revoke the same way", () => {
