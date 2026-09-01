@@ -14,8 +14,10 @@ logger = logging.getLogger(__name__)
 
 _mcp_tools_cache: list[BaseTool] | None = None
 _cache_initialized = False
-_init_lock = threading.RLock()  # Guards the sync fast-path in get_cached_mcp_tools()
-_async_init_lock = asyncio.Lock()  # Serializes concurrent initialize_mcp_tools() calls
+_init_lock = threading.RLock()  # Guards cache state transitions.
+_init_condition = threading.Condition(_init_lock)
+_initializing_generation: int | None = None
+_cache_generation = 0
 
 # Cache-invalidation key for the resolved extensions config file. We track the
 # resolved path *and* a ``(mtime, size, sha256)`` content signature — via the
@@ -115,6 +117,12 @@ def _is_cache_stale() -> bool:
     return False
 
 
+def _wait_for_initialization(generation: int | None) -> None:
+    """Wait for an in-flight initialization without binding to any event loop."""
+    with _init_condition:
+        _init_condition.wait_for(lambda: _cache_initialized or _initializing_generation != generation)
+
+
 async def initialize_mcp_tools() -> list[BaseTool]:
     """Initialize and cache MCP tools.
 
@@ -124,40 +132,61 @@ async def initialize_mcp_tools() -> list[BaseTool]:
         List of LangChain tools from all enabled MCP servers.
     """
     global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
+    global _initializing_generation, _cache_generation
 
-    # Module-level Lock serializes concurrent direct callers (e.g. two
-    # coroutines in the same event loop calling gather(initialize_mcp_tools(),
-    # initialize_mcp_tools())). In Python 3.12+ the Lock safely rebinds to
-    # a new event loop after the previous one closes, so the same instance
-    # works across asyncio.run() calls from different threads (#5060).
-    async with _async_init_lock:
-        if _cache_initialized:
-            logger.info("MCP tools already initialized")
-            return _mcp_tools_cache or []
-        from deerflow.mcp.tools import get_mcp_tools
+    while True:
+        with _init_condition:
+            if _cache_initialized:
+                logger.info("MCP tools already initialized")
+                return _mcp_tools_cache or []
 
-        # Snapshot config state before loading tools
-        # If another Gateway worker changes the shared config during the
-        # await in get_mcp_tools(), we must NOT publish old tools with a new
-        # signature — that would make _is_cache_stale() permanently return False.
-        pre_path, pre_sig = _config_path, _config_signature
+            if _initializing_generation is None:
+                pre_path, pre_sig = _current_config_state()
+                claim_generation = _cache_generation
+                _initializing_generation = claim_generation
+                break
+
+            waiting_generation = _initializing_generation
+
+        await asyncio.to_thread(_wait_for_initialization, waiting_generation)
+
+    from deerflow.mcp.tools import get_mcp_tools
+
+    try:
         logger.info("Initializing MCP tools...")
-        _mcp_tools_cache = await get_mcp_tools()
-        # Compare config state after loading; discard if changed
+        loaded_tools = await get_mcp_tools()
         post_path, post_sig = _current_config_state()
-        if pre_sig is not None and post_sig is not None and (pre_path != post_path or pre_sig != post_sig):
-            logger.warning("MCP tools changed during initialization; discarding stale result")
-            _cache_initialized = False
-            _mcp_tools_cache = None
-            _config_path, _config_signature = None, None
-            return []
-        _cache_initialized = True
-        _config_path, _config_signature = post_path, post_sig
-        return _mcp_tools_cache
-        return _mcp_tools_cache
-        logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
-        return _mcp_tools_cache
-        return _mcp_tools_cache
+    except Exception:
+        with _init_condition:
+            if _initializing_generation == claim_generation:
+                _initializing_generation = None
+            _init_condition.notify_all()
+        raise
+
+    with _init_condition:
+        try:
+            if _cache_generation != claim_generation:
+                logger.info("MCP cache was reset during initialization; discarding stale result")
+                return []
+
+            if (pre_path, pre_sig) != (post_path, post_sig):
+                logger.warning("MCP config changed during initialization; discarding stale result")
+                _cache_generation += 1
+                _mcp_tools_cache = None
+                _cache_initialized = False
+                _config_path = None
+                _config_signature = None
+                return []
+
+            _mcp_tools_cache = loaded_tools
+            _cache_initialized = True
+            _config_path, _config_signature = post_path, post_sig
+            logger.info("MCP tools initialized: %d tool(s) loaded (config path: %s)", len(_mcp_tools_cache), _config_path)
+            return _mcp_tools_cache
+        finally:
+            if _initializing_generation == claim_generation:
+                _initializing_generation = None
+            _init_condition.notify_all()
 
 
 def get_cached_mcp_tools() -> list[BaseTool]:
@@ -173,26 +202,18 @@ def get_cached_mcp_tools() -> list[BaseTool]:
     Returns:
         List of cached MCP tools.
     """
-    global _cache_initialized
+    while True:
+        with _init_lock:
+            if _is_cache_stale():
+                logger.info("MCP cache is stale, resetting for re-initialization...")
+                _reset_mcp_tools_cache_state()
 
-    # Check staleness FIRST, then fast-path.  The staleness check must run
-    # before the ``_cache_initialized`` return so that cross-worker or
-    # external-file config changes are picked up without a restart (#5060 P1).
-    #
-    # The entire slow-path (staleness + initialization) runs under a
-    # ``threading.Lock`` to prevent multiple Gateway worker threads from
-    # concurrently spawning ``asyncio.run()`` in thread pools and racing on
-    # the ``_cache_initialized`` flag.  An ``asyncio.Lock`` cannot serve this
-    # role because Python 3.12+ clears the loop binding on close, allowing
-    # the same Lock instance to be acquired concurrently from different
-    # threads' event loops.
-    with _init_lock:
-        if _is_cache_stale():
-            logger.info("MCP cache is stale, resetting for re-initialization...")
-            reset_mcp_tools_cache()
+            if _cache_initialized:
+                return _mcp_tools_cache or []
 
-        if _cache_initialized:
-            return _mcp_tools_cache or []
+            if _initializing_generation is not None:
+                _init_condition.wait_for(lambda: _initializing_generation is None or _cache_initialized)
+                continue
 
         logger.info("MCP tools not initialized, performing lazy initialization...")
         try:
@@ -215,17 +236,22 @@ def get_cached_mcp_tools() -> list[BaseTool]:
             logger.exception("Failed to lazy-initialize MCP tools")
             return []
 
-        # If a concurrent reset_mcp_tools_cache() call invalidated the cache
-        # while we were loading tools in the thread pool, discard the stale
-        # result and retry.  This prevents publishing old tools with a new
-        # config signature (which would make _is_cache_stale() permanently
-        # return False).
-        if not _cache_initialized:
-            logger.info("MCP cache was reset during async init, retrying")
-            reset_mcp_tools_cache()
-            return get_cached_mcp_tools()
+        with _init_lock:
+            if _cache_initialized:
+                return _mcp_tools_cache or []
 
-    return _mcp_tools_cache or []
+
+def _reset_mcp_tools_cache_state() -> None:
+    """Reset cache state under ``_init_condition`` / ``_init_lock``."""
+    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
+    global _cache_generation
+
+    _mcp_tools_cache = None
+    _cache_initialized = False
+    _config_path = None
+    _config_signature = None
+    _cache_generation += 1
+    _init_condition.notify_all()
 
 
 def reset_mcp_tools_cache() -> None:
@@ -235,33 +261,29 @@ def reset_mcp_tools_cache() -> None:
     Also closes all persistent MCP sessions so they are recreated on
     the next tool load.
     """
-    global _mcp_tools_cache, _cache_initialized, _config_path, _config_signature
-    with _init_lock:
-        _mcp_tools_cache = None
-        _cache_initialized = False
-        _config_path = None
-        _config_signature = None
+    with _init_condition:
+        _reset_mcp_tools_cache_state()
 
-        # Close persistent sessions – they will be recreated by the next
-        # get_mcp_tools() call with the (possibly updated) connection config.
-        #
-        # close_all_sync() already picks the correct strategy per owning loop:
-        #   * sessions owned by the *current* running loop are only *signalled*
-        #     (their owner task runs __aexit__ once the loop regains control –
-        #     this is correct and leak-free, since the loop keeps the task alive),
-        #   * sessions on other threads' loops are torn down deterministically,
-        #   * idle/closed loops are handled or skipped.
-        # We deliberately do NOT try to synchronously wait for the current running
-        # loop to finish teardown here: that is a self-deadlock (the loop can only
-        # run the teardown after this synchronous call returns control to it).
-        try:
-            from deerflow.mcp.session_pool import get_session_pool
+    # Close persistent sessions – they will be recreated by the next
+    # get_mcp_tools() call with the (possibly updated) connection config.
+    #
+    # close_all_sync() already picks the correct strategy per owning loop:
+    #   * sessions owned by the *current* running loop are only *signalled*
+    #     (their owner task runs __aexit__ once the loop regains control –
+    #     this is correct and leak-free, since the loop keeps the task alive),
+    #   * sessions on other threads' loops are torn down deterministically,
+    #   * idle/closed loops are handled or skipped.
+    # We deliberately do NOT try to synchronously wait for the current running
+    # loop to finish teardown here: that is a self-deadlock (the loop can only
+    # run the teardown after this synchronous call returns control to it).
+    try:
+        from deerflow.mcp.session_pool import get_session_pool
 
-            get_session_pool().close_all_sync()
-        except Exception:
-            logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
+        get_session_pool().close_all_sync()
+    except Exception:
+        logger.debug("Could not close MCP session pool on cache reset", exc_info=True)
 
-        from deerflow.mcp.session_pool import reset_session_pool
+    from deerflow.mcp.session_pool import reset_session_pool
 
-        reset_session_pool()
-        logger.info("MCP tools cache reset")
+    reset_session_pool()
+    logger.info("MCP tools cache reset")
