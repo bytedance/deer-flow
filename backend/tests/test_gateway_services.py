@@ -3319,6 +3319,33 @@ async def test_start_run_rejects_invalid_thread_id_before_resolving_dependencies
     assert "Invalid thread_id" in exc_info.value.detail
 
 
+def test_normalize_input_strips_the_server_owned_message_seq():
+    """`deerflow_seq` is display metadata the Gateway attaches on the way out.
+
+    A client replaying messages (regenerate / edit-and-rerun) would otherwise
+    write it into the checkpoint, where it becomes wrong the moment the thread
+    is forked — a branch re-seeds its feed and reassigns seq (#4380).
+    """
+    from app.gateway.services import normalize_input
+    from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
+
+    result = normalize_input(
+        {
+            "messages": [
+                {
+                    "role": "human",
+                    "content": "replayed turn",
+                    "additional_kwargs": {MESSAGE_SEQ_KEY: 2, "keep_me": True},
+                }
+            ]
+        }
+    )
+
+    kwargs = result["messages"][0].additional_kwargs
+    assert MESSAGE_SEQ_KEY not in kwargs
+    assert kwargs["keep_me"] is True
+
+
 def test_client_forged_user_id_is_scrubbed_for_external_callers():
     """user_id now selects which credential user-scoped MCP auth injects, so a
     client-forged value must never survive merge + inject on any external path

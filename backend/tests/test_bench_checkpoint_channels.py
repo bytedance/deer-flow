@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -159,6 +162,17 @@ def test_case_rejects_non_positive_snapshot_frequency() -> None:
         )
 
 
+def test_shared_backend_thread_ids_are_case_scoped_and_stable() -> None:
+    full = bench.BenchmarkCase(mode="full", backend="postgres", update_count=4, payload_bytes=64, repetition=0, seed=1)
+    delta = bench.BenchmarkCase(mode="delta", backend="postgres", update_count=4, payload_bytes=64, repetition=0, seed=1)
+
+    full_thread_id = bench._config(full)["configurable"]["thread_id"]
+
+    assert full_thread_id == bench._config(full)["configurable"]["thread_id"]
+    assert full_thread_id != bench._config(delta)["configurable"]["thread_id"]
+    assert full_thread_id.startswith("checkpoint-bench-")
+
+
 def test_memory_smoke_case_materializes_at_low_snapshot_frequency(tmp_path: Path) -> None:
     case = bench.BenchmarkCase(
         mode="delta",
@@ -233,6 +247,9 @@ def test_memory_smoke_case_materializes_expected_state(mode: str, tmp_path: Path
     assert len(row["content_sha256"]) == 64
     assert row["db_bytes"] is None
     assert row["logical_checkpoint_bytes"] is not None
+    assert row["logical_checkpoint_bytes"] == row["checkpoint_bytes"] + row["blob_bytes"]
+    assert row["logical_write_bytes"] == row["write_bytes"]
+    assert row["blob_rows"] > 0
 
 
 def test_memory_case_keeps_timings_when_private_storage_stats_change(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -255,8 +272,12 @@ def test_memory_case_keeps_timings_when_private_storage_stats_change(monkeypatch
     assert row["success"] is True
     assert row["write_total_ms"] >= 0
     assert row["logical_checkpoint_bytes"] is None
+    assert row["checkpoint_bytes"] is None
+    assert row["blob_bytes"] is None
     assert row["logical_write_bytes"] is None
+    assert row["write_bytes"] is None
     assert row["checkpoint_rows"] is None
+    assert row["blob_rows"] is None
     assert row["write_rows"] is None
     assert "private saver layout changed" in row["storage_stats_error"]
 
@@ -280,7 +301,113 @@ def test_sqlite_smoke_case_reports_durable_and_logical_storage(mode: str, tmp_pa
     assert row["logical_checkpoint_bytes"] > 0
     assert row["logical_write_bytes"] > 0
     assert row["checkpoint_rows"] > 0
+    assert row["checkpoint_bytes"] > 0
+    assert row["blob_rows"] == 0
+    assert row["blob_bytes"] == 0
     assert row["write_rows"] > 0
+    assert row["write_bytes"] > 0
+    assert row["logical_checkpoint_bytes"] == row["checkpoint_bytes"] + row["blob_bytes"]
+    assert row["logical_write_bytes"] == row["write_bytes"]
+
+
+class _FakePostgresCursor:
+    def __init__(self, rows: list[dict[str, int]]) -> None:
+        self._rows = iter(rows)
+        self.executed: list[tuple[str, tuple[str, ...]]] = []
+
+    async def execute(self, query: str, params: tuple[str, ...]) -> None:
+        self.executed.append((query, params))
+
+    async def fetchone(self) -> dict[str, int]:
+        return next(self._rows)
+
+
+class _FakePostgresSaver:
+    def __init__(self, cursor: _FakePostgresCursor) -> None:
+        self.cursor = cursor
+
+    @asynccontextmanager
+    async def _cursor(self) -> Any:
+        yield self.cursor
+
+
+@pytest.mark.anyio
+async def test_postgres_storage_stats_normalize_checkpoint_tables() -> None:
+    cursor = _FakePostgresCursor(
+        [
+            {"rows": 4, "bytes": 100},
+            {"rows": 7, "bytes": 250},
+            {"rows": 9, "bytes": 400},
+        ]
+    )
+
+    stats = await bench._postgres_storage_stats(_FakePostgresSaver(cursor), "thread-1")
+
+    assert stats == {
+        "checkpoint_rows": 4,
+        "checkpoint_bytes": 100,
+        "blob_rows": 7,
+        "blob_bytes": 250,
+        "write_rows": 9,
+        "write_bytes": 400,
+        "logical_checkpoint_bytes": 350,
+        "logical_write_bytes": 400,
+    }
+    assert [params for _query, params in cursor.executed] == [("thread-1",)] * 3
+    assert "FROM checkpoints" in cursor.executed[0][0]
+    assert "FROM checkpoint_blobs" in cursor.executed[1][0]
+    assert "FROM checkpoint_writes" in cursor.executed[2][0]
+
+
+def test_postgres_backend_requires_explicit_connection_uri(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.delenv("TEST_POSTGRES_URI", raising=False)
+
+    with pytest.raises(SystemExit, match="2"):
+        bench.main(["--backends", "postgres", "--output", str(tmp_path / "results.jsonl")])
+
+    assert "TEST_POSTGRES_URI" in capsys.readouterr().err
+
+
+def test_postgres_failure_does_not_expose_connection_uri(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    uri = "postgresql://benchmark-user:secret@example.invalid/checkpoints"
+    monkeypatch.setenv("TEST_POSTGRES_URI", uri)
+
+    async def fail_case(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError(f"could not connect to {uri}")
+
+    monkeypatch.setattr(bench, "_run_postgres_case", fail_case)
+    case = bench.BenchmarkCase(mode="delta", backend="postgres", update_count=1, payload_bytes=32, repetition=0, seed=1)
+
+    row = bench._run_case(case, work_dir=tmp_path)
+
+    assert row["success"] is False
+    assert uri not in row["error"]
+    assert "<TEST_POSTGRES_URI>" in row["error"]
+
+
+@pytest.mark.anyio
+async def test_postgres_smoke_case_reports_normalized_storage() -> None:
+    uri = os.environ.get("TEST_POSTGRES_URI")
+    if not uri:
+        pytest.skip("TEST_POSTGRES_URI is not set")
+
+    case = bench.BenchmarkCase(
+        mode="delta",
+        backend="postgres",
+        update_count=3,
+        payload_bytes=64,
+        repetition=0,
+        seed=4,
+    )
+    row = await bench._run_postgres_case(case, [bench._message_for_update(index, case.payload_bytes) for index in range(case.update_count)], uri)
+
+    assert row["actual_message_count"] == 3
+    assert row["checkpoint_rows"] > 0
+    assert row["checkpoint_bytes"] > 0
+    assert row["blob_rows"] > 0
+    assert row["blob_bytes"] > 0
+    assert row["write_rows"] > 0
+    assert row["write_bytes"] > 0
 
 
 def test_controller_writes_versioned_jsonl_without_sensitive_case_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -290,8 +417,8 @@ def test_controller_writes_versioned_jsonl_without_sensitive_case_paths(monkeypa
     def fake_run_child(case, *, timeout_seconds, git_sha, profile_dir=None):
         child_git_shas.append(git_sha)
         return {
-            "schema_version": 1,
-            "benchmark_version": 1,
+            "schema_version": bench.SCHEMA_VERSION,
+            "benchmark_version": bench.BENCHMARK_VERSION,
             "success": True,
             "error": None,
             "mode": case.mode,
@@ -328,7 +455,7 @@ def test_controller_writes_versioned_jsonl_without_sensitive_case_paths(monkeypa
     assert rc == 0
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     assert [row["mode"] for row in rows] == ["full", "delta"]
-    assert all(row["schema_version"] == 1 for row in rows)
+    assert all(row["schema_version"] == bench.SCHEMA_VERSION for row in rows)
     assert all("work_dir" not in row and "database_path" not in row for row in rows)
     assert child_git_shas == ["controller-sha", "controller-sha"]
 

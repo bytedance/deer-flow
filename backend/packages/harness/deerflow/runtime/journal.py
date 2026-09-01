@@ -49,7 +49,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _LEGACY_SUMMARY_MESSAGE_NAME = "summary"
-_RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 
 
@@ -283,7 +282,14 @@ class RunJournal(BaseCallbackHandler):
         self._llm_call_index = 0
         self._seen_llm_starts: set[str] = set()  # langchain run_ids that fired on_chat_model_start
         self._current_run_tool_call_names: dict[str, str] = {}
+        self._active_tool_names: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
+
+        # Bumped once per successful event-store write. A reader that cached a
+        # "the feed does not hold this message" answer compares this between
+        # reads to learn whether retrying could produce a different one,
+        # without polling the store (#4696 review).
+        self._feed_generation = 0
 
         # Artifact-production tracking for the terminal run.delivery event
         # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
@@ -524,12 +530,16 @@ class RunJournal(BaseCallbackHandler):
         )
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
-        """Handle tool start event, cache tool call ID for later correlation"""
-        tool_call_id = str(run_id)
-        logger.debug("Tool start for node %s, tool_call_id=%s, tags=%s", run_id, tool_call_id, tags)
+        """Cache the executing tool name for artifact attribution."""
+        tool_run_id = str(run_id)
+        tool_name = serialized.get("name") if isinstance(serialized, Mapping) else None
+        if isinstance(tool_name, str) and tool_name:
+            self._active_tool_names[tool_run_id] = tool_name
+        logger.debug("Tool start for node %s, tool_run_id=%s, tags=%s", run_id, tool_run_id, tags)
 
     def on_tool_end(self, output, *, run_id, parent_run_id=None, **kwargs):
         """Handle tool end event, append message and clear node data"""
+        active_tool_name = self._active_tool_names.pop(str(run_id), None)
         try:
             if isinstance(output, ToolMessage):
                 msg = cast(ToolMessage, output)
@@ -555,7 +565,9 @@ class RunJournal(BaseCallbackHandler):
                     else:
                         logger.warning(f"on_tool_end {run_id}: command update message is not BaseMessage: {type(message)}")
                 if artifacts:
-                    artifact_tool_name = next(iter(artifact_tool_names)) if len(artifact_tool_names) == 1 else None
+                    artifact_tool_name = active_tool_name
+                    if artifact_tool_name is None and len(artifact_tool_names) == 1:
+                        artifact_tool_name = next(iter(artifact_tool_names))
                     self._record_produced_artifacts(artifacts, artifact_tool_name)
             else:
                 logger.warning(f"on_tool_end {run_id}: output is not ToolMessage: {type(output)}")
@@ -614,16 +626,27 @@ class RunJournal(BaseCallbackHandler):
         return []
 
     def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
+        """Whether a final-output ToolMessage still needs persisting.
+
+        A middleware can answer a tool call itself and short-circuit execution,
+        so LangChain never emits ``on_tool_end`` and the result never reaches
+        the event store. The user saw that result during the run, and it
+        disappeared on reload (#4666). Any such result is reconciled here; the
+        scope is bounded by three independent conditions rather than a tool-name
+        allowlist: it must be user-visible, the call must belong to this run's
+        lead agent (``_remember_current_run_tool_calls`` records lead-agent
+        calls only, so subagent results stay in their own step feed), and it
+        must not already be persisted.
+        """
         if message.additional_kwargs.get("hide_from_ui") is True:
             return False
         tool_call_id = getattr(message, "tool_call_id", None)
         if not isinstance(tool_call_id, str) or not tool_call_id:
             return False
-        tool_call_name = self._current_run_tool_call_names.get(tool_call_id)
-        if tool_call_name is None:
-            return False
-        message_name = getattr(message, "name", None)
-        if message_name not in _RECONCILED_TOOL_MESSAGE_NAMES and tool_call_name not in _RECONCILED_TOOL_MESSAGE_NAMES:
+        # The call must belong to this run: a retained ToolMessage from an
+        # earlier run is already persisted under its own run and must not be
+        # re-attributed here.
+        if self._current_run_tool_call_names.get(tool_call_id) is None:
             return False
         identity = self._message_identity(message)
         return identity is not None and identity not in self._persisted_tool_message_identities
@@ -683,6 +706,7 @@ class RunJournal(BaseCallbackHandler):
             if store is None:
                 return
             await store.put_batch(batch)
+            self._feed_generation += 1
         except Exception:
             logger.warning(
                 "Failed to flush %d events for run %s — returning to buffer",
@@ -922,6 +946,7 @@ class RunJournal(BaseCallbackHandler):
                 if store is None:
                     return
                 await store.put_batch(batch)
+                self._feed_generation += 1
             except Exception:
                 self._buffer = batch + self._buffer
                 raise
@@ -1048,6 +1073,18 @@ class RunJournal(BaseCallbackHandler):
             "last_ai_message": self._last_ai_msg,
             "first_human_message": self._first_human_msg,
         }
+
+    @property
+    def feed_generation(self) -> int:
+        """Monotonic count of successful writes to the thread feed.
+
+        Buffered events are not in the feed yet, so a lookup for a message this
+        run just produced legitimately misses. This counter is what tells such
+        a reader that its cached miss is worth re-asking — it changes exactly
+        when the feed gained rows, and never while the buffer is merely
+        filling. A failed write leaves it alone: nothing became readable.
+        """
+        return self._feed_generation
 
     @property
     def had_llm_error_fallback(self) -> bool:
