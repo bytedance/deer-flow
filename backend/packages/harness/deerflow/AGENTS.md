@@ -4,7 +4,7 @@ DeerFlow's request-level correlation id — the `X-Trace-Id` header and the `dee
 
 **The ContextVar is the only source.** Every path that reaches a run binds one first; downstream treats the id as a plain `str`, no `if trace_id:` guards.
 
-The same ContextVar value is injected into enhanced log records as `trace_id` and into Langfuse metadata as `deerflow_trace_id`. "Valid" includes the security normalization in `trace_context.normalize_trace_id`: printable/header-safe values are accepted, but any value containing the canonical `dfs_` conversation-share bearer pattern is rejected and replaced/fallen back before it can reach logs, response headers, or tracing metadata. The canonical pattern and mask live in `deerflow.redaction`; `ShareTokenRedactionFilter` also masks message arguments, exception text, structured trace fields, root handlers, and current Uvicorn handlers while preserving Uvicorn's five-value access-log tuple. See `app/gateway/shares/AGENTS.md` for the end-to-end token-in-URL contract and remaining Nginx boundary.
+`dfs_` share bearer patterns are rejected as trace ids and masked in logs — see `app/gateway/shares/AGENTS.md` for the contract.
 
 Entry points and binders: Gateway HTTP — `TraceMiddleware`; scheduled occurrence — `ScheduledTaskService._attempt_queued_run` → `launch_scheduled_thread_run`; MCP task notification — `launch_mcp_task_notification_run`; IM inbound — `ChannelManager._worker_loop`; embedded / TUI / CLI turn — `DeerFlowClient.stream()`.
 
