@@ -490,8 +490,8 @@ class ScheduledTaskRepository:
             select(ScheduledTaskRunRow)
             .where(ScheduledTaskRunRow.task_id == task_id)
             .order_by(
-                ScheduledTaskRunRow.scheduled_for.desc(),
                 ScheduledTaskRunRow.created_at.desc(),
+                ScheduledTaskRunRow.scheduled_for.desc(),
                 ScheduledTaskRunRow.id.desc(),
             )
             .limit(1)
