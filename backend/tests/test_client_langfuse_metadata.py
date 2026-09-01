@@ -300,3 +300,43 @@ def test_stream_abandoned_generator_close_does_not_raise_cross_context(monkeypat
     # Tokens (if any) cannot be reset from here. Reaching this line without
     # a ``ValueError`` is the assertion.
     isolated_ctx.run(gen.close)
+
+
+def test_stream_abandoned_generator_cleanup_stays_inside_trace_binding(monkeypatch):
+    """Abandoning a stream runs the inner generator's ``finally`` path via
+    ``GeneratorExit``, and that cleanup still logs and fires callbacks. The
+    per-step binding has already been reset by then, so without a binding
+    around ``inner.close()`` the cleanup would observe no trace id (or an
+    unrelated ambient one) and its records would not correlate with the turn
+    they belong to.
+    """
+    monkeypatch.setattr("deerflow.client.build_tracing_callbacks", lambda: [])
+
+    from deerflow.trace_context import get_current_trace_id
+
+    observed: dict[str, str | None] = {}
+
+    class _RecordingAgent:
+        def __init__(self) -> None:
+            self.checkpointer = None
+            self.store = None
+
+        def stream(self, state, *, config, context, stream_mode):
+            observed["body"] = get_current_trace_id()
+            try:
+                while True:
+                    yield ("values", {"messages": [], "artifacts": []})
+            finally:
+                observed["cleanup"] = get_current_trace_id()
+
+    _stub_agent_creation(monkeypatch, _RecordingAgent())
+    client = _make_client(monkeypatch)
+
+    gen = client.stream("hi", thread_id="thread-abandoned-cleanup")
+    next(gen)
+    gen.close()
+
+    assert observed["body"] is not None
+    assert observed["cleanup"] == observed["body"]
+    # The close-time binding is local set/reset: nothing leaks to the caller.
+    assert get_current_trace_id() is None

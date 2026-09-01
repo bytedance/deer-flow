@@ -748,7 +748,17 @@ class DeerFlowClient:
                     break
                 yield event
         finally:
-            inner.close()
+            # close() drives the inner generator's finally path (GeneratorExit
+            # on an abandoned stream), which still logs and fires callbacks --
+            # bind the turn's id around it so that cleanup correlates with the
+            # turn it belongs to. Set and reset in this same frame, never
+            # across a yield, so the per-step cross-context safety holds even
+            # when GC closes the generator from another Context.
+            token = bind_trace_id(trace_id)
+            try:
+                inner.close()
+            finally:
+                reset_trace_id(token)
 
     def _stream_turn(
         self,
