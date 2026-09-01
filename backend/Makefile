@@ -40,7 +40,7 @@ SPLITS ?= 1
 GROUP ?= 1
 DURATIONS_FILE ?= .test_durations
 test-shard:
-	@test -f $(DURATIONS_FILE) || \
+	@test -f "$(DURATIONS_FILE)" || \
 		(echo "error: $(DURATIONS_FILE) is missing; run 'make test-shard-durations' to regenerate the duration baseline" >&2; exit 1)
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --splits $(SPLITS) --group $(GROUP) --splitting-algorithm least_duration --durations-path=$(DURATIONS_FILE) tests/ -q
 
@@ -48,7 +48,7 @@ test-shard:
 # suite so duration-aware sharding reflects real wall-clock cost. Run locally or
 # in a periodic job, then commit the refreshed file.
 test-shard-durations:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --durations-path=.test_durations tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --durations-path=$(DURATIONS_FILE) tests/ -q
 
 lint:
 	uv run ruff check .
