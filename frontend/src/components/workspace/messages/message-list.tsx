@@ -28,6 +28,10 @@ import { Button } from "@/components/ui/button";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  buildConversationChapters,
+  CONVERSATION_OUTLINE_MIN_TURNS,
+} from "@/core/messages/conversation-outline";
+import {
   deriveAssistantTurnUsageState,
   deriveStableMessageGroups,
   type AssistantTurnUsageState,
@@ -70,6 +74,7 @@ import {
 } from "@/core/sidecar";
 import type { Subtask } from "@/core/tasks";
 import { useUpdateSubtask } from "@/core/tasks/context";
+import { resolveSubtaskDescription } from "@/core/tasks/presentation";
 import {
   derivePendingSubtaskStatus,
   parseSubtaskResult,
@@ -83,6 +88,7 @@ import { CopyButton } from "../copy-button";
 import { useMaybeSidecar } from "../sidecar/context";
 import { Tooltip } from "../tooltip";
 
+import { ConversationOutline } from "./conversation-outline";
 import {
   HumanInputCard,
   type HumanInputSubmitResult,
@@ -97,7 +103,10 @@ import {
 import { RunActivity, RunDuration } from "./run-duration";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
-import { VirtualMessageList } from "./virtual-message-list";
+import {
+  VirtualMessageList,
+  type VirtualMessageListHandle,
+} from "./virtual-message-list";
 
 const EMPTY_TOKEN_DEBUG_STEPS: TokenDebugStep[] = [];
 const EMPTY_ARTIFACT_PATHS: readonly string[] = [];
@@ -287,6 +296,7 @@ export function MessageList({
   canEdit = false,
   canBranch = false,
   enableSidecarActions = true,
+  enableConversationOutline = false,
   sidecarSurface = false,
   initialScroll = "smooth",
   resizeScroll = "smooth",
@@ -320,6 +330,7 @@ export function MessageList({
   canEdit?: boolean;
   canBranch?: boolean;
   enableSidecarActions?: boolean;
+  enableConversationOutline?: boolean;
   sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
@@ -330,6 +341,60 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  const chapters = useMemo(
+    () =>
+      buildConversationChapters(
+        groupedMessages,
+        t.conversation.outlineAttachmentFallback,
+      ),
+    [groupedMessages, t.conversation.outlineAttachmentFallback],
+  );
+  const conversationOutlineEnabled =
+    enableConversationOutline &&
+    chapters.length >= CONVERSATION_OUTLINE_MIN_TURNS;
+  const virtualMessageListRef = useRef<VirtualMessageListHandle | null>(null);
+  const [activeChapter, setActiveChapter] = useState<{
+    threadId: string;
+    chapterId: string;
+  } | null>(null);
+  const activeChapterId =
+    activeChapter?.threadId === threadId &&
+    chapters.some((chapter) => chapter.id === activeChapter.chapterId)
+      ? activeChapter.chapterId
+      : (chapters.at(-1)?.id ?? null);
+  const handleActiveGroupChange = useCallback(
+    (groupIndex: number) => {
+      let chapterId: string | undefined;
+      for (const chapter of chapters) {
+        if (chapter.groupIndex > groupIndex) {
+          break;
+        }
+        chapterId = chapter.id;
+      }
+      if (chapterId) {
+        setActiveChapter((current) =>
+          current?.threadId === threadId && current.chapterId === chapterId
+            ? current
+            : { threadId, chapterId },
+        );
+      }
+    },
+    [chapters, threadId],
+  );
+  const handleChapterSelect = useCallback(
+    (chapterId: string) => {
+      const chapter = chapters.find((candidate) => candidate.id === chapterId);
+      if (!chapter) {
+        return;
+      }
+      setActiveChapter({ threadId, chapterId });
+      virtualMessageListRef.current?.scrollToGroup(chapter.groupIndex, {
+        align: "start",
+        behavior: "auto",
+      });
+    },
+    [chapters, threadId],
+  );
   const browserView = useMaybeBrowserView();
   const pushBrowserFrame = browserView?.pushFrame;
   const messageCount = messages.length;
@@ -1020,8 +1085,12 @@ export function MessageList({
             loadMore={loadMoreHistory}
           />
           <VirtualMessageList
+            ref={virtualMessageListRef}
             groups={groupedMessages}
             isLoading={thread.isLoading}
+            onActiveGroupChange={
+              conversationOutlineEnabled ? handleActiveGroupChange : undefined
+            }
             renderGroup={(group, groupIndex) => {
               const turnUsageMessages =
                 turnUsageMessagesByGroupIndex[groupIndex];
@@ -1244,7 +1313,11 @@ export function MessageList({
                         const task: Subtask = {
                           id: taskId,
                           subagent_type: toolCall.args.subagent_type,
-                          description: toolCall.args.description,
+                          description: resolveSubtaskDescription(
+                            toolCall.args.description,
+                            toolCall.args.prompt,
+                            t.subtasks.subtask,
+                          ),
                           prompt: toolCall.args.prompt,
                           status,
                           ...(status === "failed"
@@ -1359,6 +1432,13 @@ export function MessageList({
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
       </Conversation>
+      {conversationOutlineEnabled && (
+        <ConversationOutline
+          chapters={chapters}
+          activeChapterId={activeChapterId}
+          onChapterSelect={handleChapterSelect}
+        />
+      )}
       {selectionToolbar && sidecar && (
         <div
           className={cn(
