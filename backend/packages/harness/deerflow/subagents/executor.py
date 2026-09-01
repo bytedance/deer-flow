@@ -575,6 +575,7 @@ class SubagentExecutor:
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
+        run_journal_recorder: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -613,6 +614,10 @@ class SubagentExecutor:
                 ``HumanMessage`` (the channel ``InputSanitizationMiddleware``
                 sanitizes and boundary-frames); the subagent's ``SystemMessage``
                 carries only the framework-owned pointer note.
+            run_journal_recorder: Optional loop-safe recorder supplied by the
+                parent task tool. Native subagents execute on a separate event
+                loop, so this must be a proxy rather than the parent
+                ``RunJournal`` itself.
         """
         self.config = config
         self.app_config = app_config
@@ -656,6 +661,7 @@ class SubagentExecutor:
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
+        self.run_journal_recorder = run_journal_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1238,6 +1244,8 @@ class SubagentExecutor:
             if self.deerflow_trace_id:
                 context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
+            if self.run_journal_recorder is not None:
+                context["__run_journal"] = self.run_journal_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 

@@ -675,8 +675,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         if decision is None:
             return None
 
-        # Event storage may block, so never call it while holding the shared
-        # loop-detection lock used by concurrent Gateway threads.
+        # Keep the shared loop-detection lock's critical section bounded; the
+        # journal append is cheap and non-blocking but does not belong under it.
         self._record_audit_event(decision, runtime)
         warning = decision.message
 

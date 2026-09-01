@@ -3596,6 +3596,7 @@ class TestSubagentGuardrailAttribution:
         oauth_provider=None,
         oauth_id=None,
         run_id=None,
+        run_journal_recorder=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3619,6 +3620,7 @@ class TestSubagentGuardrailAttribution:
             oauth_provider=oauth_provider,
             oauth_id=oauth_id,
             run_id=run_id,
+            run_journal_recorder=run_journal_recorder,
         )
 
     @pytest.mark.anyio
@@ -3654,6 +3656,30 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_loop_safe_run_journal_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The child context receives the loop-safe proxy, never the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            run_journal_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_journal") is recorder
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(

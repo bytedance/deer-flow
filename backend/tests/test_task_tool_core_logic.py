@@ -36,6 +36,48 @@ from deerflow.subagents.status_contract import (
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 
+def test_parent_loop_run_journal_proxy_delivers_on_owner_loop():
+    """Subagent middleware events must never call RunJournal from the child loop."""
+    calls: list[tuple[object, dict]] = []
+    delivered = threading.Event()
+
+    class LoopPinnedJournal:
+        def record_middleware(self, **kwargs):
+            calls.append((asyncio.get_running_loop(), dict(kwargs)))
+            delivered.set()
+
+    parent_loop = asyncio.new_event_loop()
+    parent_thread = threading.Thread(
+        target=parent_loop.run_forever,
+        name="test-middleware-journal-parent-loop",
+        daemon=True,
+    )
+    parent_thread.start()
+    try:
+        proxy = task_tool_module._ParentLoopRunJournalProxy(
+            LoopPinnedJournal(),
+            parent_loop,
+        )
+        proxy.record_middleware(
+            tag="loop_detection",
+            name="LoopDetectionMiddleware",
+            hook="after_model",
+            action="warn",
+            changes={"detection_layer": "identical_call_set"},
+        )
+
+        assert delivered.wait(timeout=5)
+        assert len(calls) == 1
+        observed_loop, kwargs = calls[0]
+        assert observed_loop is parent_loop
+        assert kwargs["tag"] == "loop_detection"
+        assert kwargs["action"] == "warn"
+    finally:
+        parent_loop.call_soon_threadsafe(parent_loop.stop)
+        parent_thread.join(timeout=5)
+        parent_loop.close()
+
+
 class FakeSubagentStatus(Enum):
     # Match production enum values so branch comparisons behave identically.
     PENDING = "pending"

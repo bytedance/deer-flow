@@ -82,8 +82,11 @@ intentionally open so new middleware tags are additive. Because the full event
 type is limited to 32 characters and `middleware:` uses 11, a tag must contain
 1-21 characters.
 
-`middleware:loop_detection` records the first warning transition and each hard
-stop produced by `LoopDetectionMiddleware`. Its `action` is `warn` or
+`middleware:loop_detection` records transitions into the warned state (first
+per call hash or per tool-frequency burst) and each hard stop produced by
+`LoopDetectionMiddleware` in lead-agent and native-subagent runs. Subagents
+forward the append to the parent loop because `RunJournal` and its event store
+must not cross the isolated-loop boundary. The event's `action` is `warn` or
 `hard_stop`. The `changes` object identifies the detection layer, affected tool
 names, observed count, and effective threshold. Tool arguments, prompts,
 message content, tool results, and argument-derived hashes are not persisted in
