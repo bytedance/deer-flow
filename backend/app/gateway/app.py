@@ -41,7 +41,7 @@ from app.gateway.routers import (
     threads,
     uploads,
 )
-from app.gateway.trace_middleware import TraceMiddleware, resolve_trace_enabled
+from app.gateway.trace_middleware import TraceMiddleware
 from deerflow.config import app_config as deerflow_app_config
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT, configure_logging
 from deerflow.tracing.monocle import setup_monocle_tracing_if_enabled
@@ -737,13 +737,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             expose_headers=list(CORS_EXPOSED_HEADERS),
         )
 
-    # Request trace correlation: when logging.enhance.enabled=true, bind one
-    # trace id per Gateway HTTP request and write it to response start headers.
-    # `logging` is registered as restart-required (see reload_boundary.py) so we
-    # snapshot the flag from the startup AppConfig instead of reading live; a
-    # runtime toggle would otherwise leave the log formatter (installed once by
-    # configure_logging() at lifespan startup) out of sync with the middleware.
-    app.add_middleware(TraceMiddleware, enabled=_resolve_trace_enabled_for_app_construction())
+    # Request trace correlation: bind one trace id per Gateway HTTP request
+    # and write it to the response start headers. Ungated, so it works without
+    # a config.yaml and needs no restart; logging.enhance.enabled only decides
+    # whether that id is printed into log records.
+    app.add_middleware(TraceMiddleware)
 
     # Python extensions load once while the Gateway app is constructed. Agent
     # middleware builders consume the same immutable set through the process
@@ -761,10 +759,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # fail-open guard below: a config.yaml that exists but cannot be parsed or
     # validated is a configuration failure, not an extension failure. Reporting
     # it as the latter would silently drop a `required: true` extension instead
-    # of failing the boot. Only an absent config.yaml is tolerated, mirroring
-    # _resolve_trace_enabled_for_app_construction() — create_app() runs at
-    # import time, and lifespan still performs strict config loading before
-    # serving.
+    # of failing the boot. Only an absent config.yaml is tolerated — create_app()
+    # runs at import time, and lifespan still performs strict config loading
+    # before serving.
     try:
         configured_plugins = get_app_config().plugins
     except FileNotFoundError:
@@ -894,16 +891,6 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     record_runtime_diagnostics(include_contributed_routers(app, loaded_extensions))
 
     return app
-
-
-def _resolve_trace_enabled_for_app_construction() -> bool:
-    """Resolve the trace middleware flag without making imports require config.yaml."""
-    try:
-        return resolve_trace_enabled(get_app_config())
-    except FileNotFoundError:
-        # Startup lifespan still performs strict config loading before serving.
-        logger.debug("config.yaml not found while constructing Gateway app; TraceMiddleware disabled for this app instance")
-        return False
 
 
 # Create app instance for uvicorn

@@ -166,6 +166,19 @@ def test_execute_command_forwards_timeout_to_sdk_and_loop_runner() -> None:
     assert run_timeouts == [5]
 
 
+def test_execute_command_appends_exit_marker_when_failure_has_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LocalSandbox parity: a nonzero exit survives in the output text even
+    when the command produced output (acceptance-checklist evidence)."""
+    box = BoxliteBox("box-id", box=object(), run=_fake_run)
+    monkeypatch.setattr(
+        box,
+        "_exec",
+        lambda *argv, **kwargs: types.SimpleNamespace(exit_code=1, stdout="5 passed, 1 error\n", stderr=""),
+    )
+
+    assert box.execute_command("make test") == "5 passed, 1 error\n\nExit Code: 1"
+
+
 def test_read_file_supports_optional_line_ranges(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, ...]] = []
 
@@ -1289,3 +1302,19 @@ def test_sandbox_id_none_user_quirk_pinned():
     from deerflow.sandbox.identity import derive_sandbox_scope_token
 
     assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace/notes.txt \n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False

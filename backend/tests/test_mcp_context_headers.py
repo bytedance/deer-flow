@@ -344,6 +344,89 @@ def test_passthrough_still_injects_the_secrets_that_are_present():
 
 
 # ---------------------------------------------------------------------------
+# Illegal header values
+#
+# A secret that cannot travel as an HTTP header value (trailing newline from
+# reading a token file, CR/LF, characters outside ASCII) must be rejected
+# here, before it reaches the HTTP client. On the line break and whitespace
+# cases h11 renders the full value into its LocalProtocolError message,
+# ToolErrorHandlingMiddleware copies that message into a model-visible
+# ToolMessage, and the secret lands in the prompt, the checkpoint, and traces —
+# everywhere this module promises it never goes. Non-ASCII fails earlier,
+# inside httpx, with only the offending character in the message.
+# ---------------------------------------------------------------------------
+
+
+def test_secret_with_trailing_newline_is_denied_without_calling_handler():
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException, match="tenant_token"):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=TENANT_TOKEN + "\n")), handler))
+    handler.assert_not_awaited()
+
+
+def test_illegal_value_deny_message_does_not_contain_the_value():
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    with pytest.raises(ToolException) as excinfo:
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="sk-secret-value\n")), AsyncMock()))
+    assert "sk-secret-value" not in str(excinfo.value)
+
+
+def test_illegal_value_warning_log_does_not_contain_the_value(caplog):
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    with caplog.at_level(logging.WARNING, logger="deerflow.mcp.context_headers"), pytest.raises(ToolException):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="sk-secret-value\n")), AsyncMock()))
+    assert "sk-secret-value" not in caplog.text
+    assert "tenant_token" in caplog.text
+
+
+def test_embedded_crlf_is_denied():
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    with pytest.raises(ToolException, match="tenant_token"):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="a\r\nX-Injected: b")), AsyncMock()))
+
+
+def test_non_ascii_value_is_denied():
+    """httpx encodes str header values as ASCII and raises UnicodeEncodeError otherwise."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    for value in ("пароль", "Bearer caf\xe9"):
+        with pytest.raises(ToolException, match="tenant_token"):
+            asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=value)), AsyncMock()))
+
+
+def test_leading_or_trailing_whitespace_is_denied():
+    """h11 rejects field values with leading/trailing SP or HTAB."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    for value in ("Bearer x ", " Bearer x", "Bearer x\t"):
+        with pytest.raises(ToolException, match="tenant_token"):
+            asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=value)), AsyncMock()))
+
+
+def test_illegal_value_is_denied_even_with_on_missing_passthrough():
+    """passthrough covers an *absent* key; a present-but-broken value must not
+    silently fall back to the shared discovery credential."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}, on_missing="passthrough"))
+    with pytest.raises(ToolException, match="tenant_token"):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token=TENANT_TOKEN + "\n")), AsyncMock()))
+
+
+def test_values_with_embedded_spaces_and_tabs_are_not_rejected():
+    """h11 allows SP/HTAB between visible characters — 'Bearer <token>' must pass."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Token": "tenant_token"}))
+    result = asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_token="Bearer abc\tdef ghi")), _echo_handler))
+    assert result.headers["X-Tenant-Token"] == "Bearer abc\tdef ghi"
+
+
+def test_one_illegal_mapping_denies_the_whole_call():
+    """One broken credential denies the call; it must not partially inject."""
+    interceptor = build_context_headers_interceptor(_config(headers={"X-Tenant-Id": "tenant_id", "X-Org": "org"}))
+    handler = AsyncMock()
+    with pytest.raises(ToolException, match="org"):
+        asyncio.run(interceptor(_request(runtime=_runtime_with_secrets(tenant_id="acme", org="bad\n")), handler))
+    handler.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
 # Config model
 # ---------------------------------------------------------------------------
 
@@ -870,6 +953,46 @@ def test_gateway_keeps_block_extras_a_put_does_not_mention():
     merged = _merge_preserving_secrets(incoming, existing)
     assert merged.headers_from_context.headers == {"X-Org": "org"}
     assert merged.headers_from_context.model_extra["vendor_note"] == "keep-me"
+
+
+def test_gateway_complete_replacement_resets_omitted_block_fields_and_extras():
+    """Targeted PUT keeps only explicitly masked secrets from the stored block."""
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(
+            headers={"X-Tenant-Token": "tenant_token"},
+            on_missing="passthrough",
+            api_key="real-secret",
+            vendor_note="remove-me",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(
+            enabled=False,
+            api_key="***",
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        incoming,
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.headers_from_context is not None
+    assert merged.headers_from_context.enabled is False
+    assert merged.headers_from_context.headers == {}
+    assert merged.headers_from_context.on_missing == "deny"
+    assert merged.headers_from_context.model_extra == {"api_key": "real-secret"}
 
 
 def test_gateway_rejects_a_masked_value_for_an_unknown_block_extra():
