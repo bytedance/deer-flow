@@ -451,6 +451,29 @@ async def test_neutralize_dots_after_phrase_do_not_erase_it():
     assert neutralize("/api//../threads/th1/u") == "[private artifact omitted]"
 
 
+async def test_neutralize_pchar_segments_cancel_whole():
+    """A cancelled segment may contain any legal path character — sub-delims
+    like ``,``/``;``/``:`` and the unreserved ``_``/``~`` — so cancellation
+    is segment-bounded (pop to the previous separator), never stopped
+    mid-segment by a character class. Dual-shadow classification: the
+    phrase is cut if it appears in the resolved OR the as-written form, so
+    aggressive resolution can never erase it."""
+    neutralize = _neutralize_private_references
+    assert neutralize("/api/x,y/../threads/t1/u") == "[private artifact omitted]"
+    assert neutralize("/api/_/../threads/t1/u") == "[private artifact omitted]"
+    assert neutralize("/mnt/a_b/../user-data") == "[private artifact omitted]"
+    assert neutralize("http://h:8080/api/a:b/../threads/t1/u") == "http://h:8080/[private artifact omitted]"
+    assert neutralize(",/api/x_y/../threads/t1/u") == ",[private artifact omitted]"
+    assert neutralize("[x](/api/x,y/../threads/t1/u)") == "x [private artifact omitted]"
+    assert neutralize("/api/x&#44;y/../threads/t1/u") == "[private artifact omitted]"
+    assert neutralize("\\/api\\/x,y\\/..\\/threads/t1/u") == "[private artifact omitted]"
+    # a literal-space segment cancels as one (browsers percent-encode it)
+    assert neutralize("[x](</api/x y/../threads/t1/u>)") == "x [private artifact omitted]"
+    # ``..`` cancelling the phrase's own final segment still publishes no
+    # bytes: the as-written shadow carries the phrase
+    assert neutralize("see /api/threads/t1/u/.. end") == "see [private artifact omitted].. end"
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted

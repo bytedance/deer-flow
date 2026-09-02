@@ -352,12 +352,13 @@ def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[
     shadow exactly like the dot that cancelled them; ``%2E`` variants are
     recognized because the shadow does not percent-decode.
 
-    Resolution never crosses non-path structure: a ``?`` or ``#`` starts an
-    opaque query/fragment tail (reset at whitespace — a new path may follow
-    in prose), and a cancellation never pops past whitespace or a joining
-    terminator — ``/mnt/user-data?/..``, ``…user-data,/../..`` and
-    ``…f.csv and /../../..`` keep their phrase intact because browsers and
-    nginx treat those dots as opaque or as a separate item."""
+    Resolution never crosses a query or fragment: a ``?`` or ``#`` starts
+    an opaque tail (reset at whitespace, where a new path may follow in
+    prose). Cancellation itself is segment-bounded and character-blind —
+    a cancelled segment may contain any legal path character, spaces
+    included — because classification runs against both the resolved and
+    the as-written shadow: aggressive popping can never erase a phrase the
+    unresolved view still carries."""
     out: list[str] = []
     out_spans: list[tuple[int, int]] = []
     opaque = False
@@ -378,10 +379,10 @@ def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[
                 i = j
                 continue
             if segment in ("..", "%2e%2e", ".%2e", "%2e."):
-                while out and out[-1] != "/" and not out[-1].isspace() and out[-1] not in _REFERENCE_CUT_TERMINATORS:
+                while out and out[-1] != "/":
                     out.pop()
                     out_spans.pop()
-                if out and out[-1] == "/":
+                if out:
                     out.pop()
                     out_spans.pop()
                 i = j
@@ -392,7 +393,7 @@ def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[
     return "".join(out), out_spans
 
 
-def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, int]]]:
+def _collapse_separators_with_offsets(text: str, *, resolve_dots: bool = True) -> tuple[str, list[tuple[int, int]]]:
     """Normalize escape and backslash separators for classification.
 
     Returns the normalized text plus, for every normalized character, the
@@ -412,19 +413,23 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
     allows); spans are composed across passes so every cut still lands on
     original bytes. Each round also resolves dot segments away, so decodes
     that reveal ``.``/``..`` compositions (``&#46;&#46;``, ``%2E``) are
-    normalized like their resolved forms.
+    normalized like their resolved forms; ``resolve_dots=False`` yields the
+    as-written view for the dual-shadow classification.
     """
-    normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
+    if resolve_dots:
+        normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
+    else:
+        normalized, spans = text, [(index, index) for index in range(len(text))]
     for _ in range(_COLLAPSE_MAX_PASSES):
         collapsed, collapsed_spans = _collapse_separators_once(normalized)
-        resolved, resolved_spans = _remove_dot_segments_once(collapsed, collapsed_spans)
-        if resolved == normalized:
+        if resolve_dots:
+            collapsed, collapsed_spans = _remove_dot_segments_once(collapsed, collapsed_spans)
+        if collapsed == normalized:
             break
-        normalized = resolved
-        # resolved_spans entries are (first, last) pairs in prior-normalized
-        # coordinates (the dot pass appends the collapsed spans it read),
-        # so one indirection through ``spans`` reaches original bytes.
-        spans = [(spans[first][0], spans[last][1]) for first, last in resolved_spans]
+        normalized = collapsed
+        # The dot pass appends the collapsed spans it read, so one
+        # indirection through ``spans`` reaches original bytes either way.
+        spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
     return normalized, spans
 
 
@@ -542,7 +547,7 @@ _PROBE_SLASH_RUN_RE = re.compile(r"(?<!:)/{2,}")
 _SEGMENT_PROBE_WINDOW = 1024
 
 
-def _private_reference_segments(value: str) -> list[tuple[int, int]]:
+def _private_reference_segments(value: str, *, conservative_gaps: bool = True) -> list[tuple[int, int]]:
     """Shadow-coordinate ``[start, end)`` spans of every private phrase in
     one matched token. Public head/middle/tail bytes between the segments
     are part of no span and survive the cut; the joining terminators stay
@@ -553,7 +558,11 @@ def _private_reference_segments(value: str) -> list[tuple[int, int]]:
     ways: an anchored probe at the terminator run that directly follows a
     cut, and — because junk items can shield a later encoded tail from the
     anchored probe — classification of every unconsumed gap, cut
-    conservatively when its decoded form carries a private phrase."""
+    conservatively when its decoded form carries a private phrase. The
+    gap backstop belongs to the resolved shadow; ``conservative_gaps=False``
+    (the as-written shadow) limits itself to precisely positioned segments
+    so its cuts cannot swallow public heads the resolved view already cut
+    precisely."""
     segments: list[tuple[int, int]] = []
     # Both match streams are computed once: re-searching per iteration
     # rescans the token tail every time and is quadratic on joined lists.
@@ -605,7 +614,8 @@ def _private_reference_segments(value: str) -> list[tuple[int, int]]:
         # cuts the separator with the phrase (`,/mnt/…` → `,` + marker).
         if candidate is not None and (not probed or candidate[0] < probe):
             start, walk_from = candidate
-            cut_gap(pos, start)
+            if conservative_gaps:
+                cut_gap(pos, start)
             if start == 1 and value[0] == "/":
                 # A standalone reference's own leading separator belongs to
                 # the cut; a separator deeper in the token is public
@@ -622,7 +632,8 @@ def _private_reference_segments(value: str) -> list[tuple[int, int]]:
             end = _phrase_end(value, probe)
             segments.append((probe, end))
             pos = end
-    cut_gap(pos, n)
+    if conservative_gaps:
+        cut_gap(pos, n)
     return segments
 
 
@@ -650,14 +661,16 @@ def _neutralize_private_references(text: str) -> str:
     return text
 
 
-def _neutralize_private_references_once(text: str) -> str:
-    """One classification-and-cut pass over ``text`` (see the wrapper)."""
-    normalized, spans = _collapse_separators_with_offsets(text)
+def _collect_edits(text: str, normalized: str, spans: list[tuple[int, int]], edits: list[tuple[int, int, str]], *, conservative_gaps: bool = True) -> None:
+    """Collect private-reference cuts for one shadow of ``text`` into
+    ``edits`` (original-text coordinates). The conservative backstops
+    (whole-gap and whole-token cuts for phrases the shadow cannot position)
+    belong to the resolved shadow only — the as-written shadow is there for
+    precise segments the resolution erased, and its wider cuts would
+    swallow public heads the resolved view already cut precisely."""
 
     def original_span(start: int, end: int) -> tuple[int, int]:
         return spans[start][0], spans[end - 1][1] + 1
-
-    edits: list[tuple[int, int, str]] = []
 
     def replace_markdown(match: re.Match[str]) -> None:
         target = match.group("target").strip()
@@ -691,9 +704,9 @@ def _neutralize_private_references_once(text: str) -> str:
         # whole-token fallback still covers phrases the shadow cannot
         # position at all — percent-encoding decodes for classification, not
         # in the shadow, and a probe window may have missed the shape.
-        segments = _private_reference_segments(value)
+        segments = _private_reference_segments(value, conservative_gaps=conservative_gaps)
         if not segments:
-            if not _is_private_reference(value):
+            if not conservative_gaps or not _is_private_reference(value):
                 return
             segments = [(0, _phrase_end(value, 0))]
         for start, end in segments:
@@ -710,6 +723,25 @@ def _neutralize_private_references_once(text: str) -> str:
         replace_markdown(match)
     for match in _REFERENCE_RE.finditer(normalized):
         replace_raw(match)
+
+
+def _neutralize_private_references_once(text: str) -> str:
+    """One classification-and-cut pass over ``text`` (see the wrapper).
+
+    Dual shadow: cuts are collected against both the dot-resolved view
+    (catching references that only reach the owner-scoped surface through
+    ``.``/``..`` cancellation) and the as-written view (guaranteeing that
+    aggressive resolution can never erase a phrase — a ``..`` cancelling
+    the phrase's own final segment, or popping through prose). A phrase in
+    either shadow is cut; the as-written pass carries no conservative
+    backstops, so its segments can never swallow public heads the resolved
+    view already cut precisely."""
+    edits: list[tuple[int, int, str]] = []
+    for normalized, spans, conservative_gaps in (
+        (*_collapse_separators_with_offsets(text), True),
+        (*_collapse_separators_with_offsets(text, resolve_dots=False), False),
+    ):
+        _collect_edits(text, normalized, spans, edits, conservative_gaps=conservative_gaps)
 
     # Markdown links take precedence over raw references overlapping them,
     # matching the sequential regex passes this replaced.
