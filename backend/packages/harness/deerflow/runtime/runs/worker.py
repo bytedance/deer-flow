@@ -25,13 +25,13 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import AsyncIterator, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Mapping
 from contextlib import asynccontextmanager
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
 from functools import lru_cache
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
@@ -53,6 +53,7 @@ from deerflow.runtime.checkpoint_state import (
     graph_writable_channels,
 )
 from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -75,12 +76,8 @@ from deerflow.runtime.goal import (
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
-from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
-from deerflow.trace_context import (
-    DEERFLOW_TRACE_METADATA_KEY,
-    is_trace_id_from_request_header,
-    resolve_deerflow_trace_id,
-)
+from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
@@ -517,6 +514,19 @@ class _LargeFileToolChunkBatcher:
         return chunks
 
 
+# Runtime-context keys the worker owns outright. A same-named key in the
+# caller's ``config['context']`` is dropped rather than merged: the Gateway
+# strips ``__``-prefixed keys in build_run_config, but embedded harness callers
+# have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
+# by it anyway.
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        DEERFLOW_TRACE_METADATA_KEY,
+    }
+)
+
+
 def _build_runtime_context(
     thread_id: str,
     run_id: str,
@@ -529,9 +539,9 @@ def _build_runtime_context(
 
     Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
     ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue #2677)
-    are merged in but never override ``thread_id``/``run_id``. The resolved
-    ``AppConfig`` is added by the worker so tools can consume it without ambient
-    global lookups.
+    are merged in but never override ``thread_id``/``run_id`` or the server-owned
+    keys in ``_SERVER_OWNED_RUNTIME_CONTEXT_KEYS``. The resolved ``AppConfig`` is
+    added by the worker so tools can consume it without ambient global lookups.
 
     langgraph 1.1+ surfaces this as ``runtime.context`` via the parent runtime stored
     under ``config['configurable']['__pregel_runtime']`` — see
@@ -540,7 +550,7 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
-            if key == CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY:
+            if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
@@ -592,8 +602,13 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
+        # Assigned, not setdefault: this is a server-owned key, the same rule
+        # _bind_trace_id applies to the runtime context and the run metadata. A
+        # deerflow_trace_id the caller put in body.config.context is an echo of
+        # a past output, not an input, and leaving it would make this one dict
+        # disagree with the response header and the logs.
         if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
-            existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
+            existing_context[DEERFLOW_TRACE_METADATA_KEY] = runtime_context[DEERFLOW_TRACE_METADATA_KEY]
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
         if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
@@ -694,6 +709,32 @@ class _SubagentEventBuffer:
             # transient store error does not silently drop subagent step events.
             self._pending = batch + self._pending
             logger.warning("Run %s: failed to persist %d subagent step event(s)", self._run_id, len(batch), exc_info=True)
+
+
+def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
+    """Record the current request trace id on the runtime context and metadata.
+
+    The ContextVar is the only source. A ``deerflow_trace_id`` the caller sent
+    in ``config["metadata"]`` is overwritten rather than read: honouring it
+    would let the persisted run disagree with the ``X-Trace-Id`` and the log
+    lines the same request already produced, which is the correlation the id
+    exists to provide in the first place.
+
+    The two destinations serve different purposes. ``runtime_ctx`` is the
+    carrier across boundaries the ContextVar does not cross -- subagent
+    delegation, the memory update running on a Timer/executor thread -- while
+    ``config["metadata"]`` is persisted with the checkpoint and is what makes a
+    finished run traceable after the fact.
+    """
+    trace_id = ensure_trace_id()
+    runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    incoming_metadata = config.get("metadata")
+    # Replaced rather than mutated through: this mapping can be shared with the
+    # caller's request body.
+    merged_metadata = dict(incoming_metadata) if isinstance(incoming_metadata, dict) else {}
+    merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = trace_id
+    config["metadata"] = merged_metadata
+    return trace_id
 
 
 async def run_agent(
@@ -972,14 +1013,7 @@ async def run_agent(
             task_store,
             extensions,
         )
-        incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
-        deerflow_trace_id = resolve_deerflow_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY))
-        if deerflow_trace_id:
-            runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
-            if is_trace_id_from_request_header():
-                merged_metadata = dict(incoming_metadata)
-                merged_metadata[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
-                config["metadata"] = merged_metadata
+        deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
@@ -1125,6 +1159,10 @@ async def run_agent(
                 )
             return goal_evaluator_model
 
+        # Built once per run, not per _stream_once call: goal continuations
+        # re-enter the stream and would otherwise discard the resolved seqs.
+        seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
+
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
@@ -1143,7 +1181,10 @@ async def run_agent(
                                     break
                                 llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
                                 sse_event = _lg_mode_to_sse_event(single_mode)
-                                await bridge.publish(run_id, sse_event, serialize(chunk, mode=single_mode))
+                                single_payload = serialize(chunk, mode=single_mode)
+                                if single_mode == "values" and seq_stamper is not None:
+                                    single_payload = await seq_stamper.stamp(single_payload)
+                                await bridge.publish(run_id, sse_event, single_payload)
                                 if single_mode == "custom":
                                     await subagent_events.add(chunk)
                         finally:
@@ -1191,6 +1232,7 @@ async def run_agent(
                                 namespace=namespace,
                                 file_tool_chunk_batcher=file_tool_chunk_batcher,
                                 subagent_events=subagent_events,
+                                seq_stamper=seq_stamper,
                             )
                     finally:
                         close_error = sys.exception()
@@ -2701,6 +2743,107 @@ def _compose_sse_event(sse_event: str, namespace: tuple[str, ...]) -> str:
     return "|".join((sse_event, *namespace))
 
 
+#: Sentinel generation for an identity no lookup has missed at yet. Below every
+#: real generation, so it never reads as "already asked at this generation".
+_NEVER_LOOKED_UP = -1
+
+
+def _NO_FEED_WRITES() -> int:  # noqa: N802 — a callable constant, not a class
+    """Generation source for a path with no journal: the feed never moves."""
+    return 0
+
+
+class _MessageSeqStamper:
+    """Attach each already-persisted message's feed seq to a ``values`` frame.
+
+    A checkpoint carries no seq of its own and loses messages to summarization,
+    so a client merging it with the seq-ordered thread feed cannot place a
+    surviving old message once the feed's loaded page window no longer reaches
+    back to it (#4666). The seq exists in the event store keyed by message
+    identity; this carries it to the client and writes nothing back to the
+    checkpoint.
+
+    Cost is bounded to frames that introduce identities it has not resolved
+    yet: a resolved seq is final (the feed's earliest-seq-wins rule), so it is
+    never looked up twice, and in a real run the only frame that pays for a
+    query is the one where compaction brings older messages back into view.
+
+    A miss, unlike a hit, is only provisional. A message this run produces
+    reaches a frame before ``RunJournal`` flushes it, so it legitimately misses
+    and would stay unstamped for the whole run if that answer were kept — the
+    long run that then rolls past the history page and compacts is exactly the
+    case this stamper exists for. Misses are therefore re-asked, but only once
+    the feed has actually gained rows, which *feed_generation* reports; frames
+    alone never trigger a retry. A failed lookup is a miss under the same rule,
+    so a transient store error costs one generation, not the run.
+
+    An unstamped message needs no seq while it is still streaming: appending it
+    at the tail is already its correct position.
+    """
+
+    __slots__ = ("_store", "_thread_id", "_user_id", "_seqs", "_missing", "_feed_generation")
+
+    def __init__(self, event_store: Any, thread_id: str, *, feed_generation: Callable[[], int] | None = None) -> None:
+        self._store = event_store
+        self._thread_id = thread_id
+        # Without a generation source (no journal on this path) nothing can
+        # report a feed write, so a miss stays cached rather than being re-asked
+        # on every frame: a constant reads as "the feed has not moved".
+        self._feed_generation = feed_generation if feed_generation is not None else _NO_FEED_WRITES
+        # Soft-resolved once at build time, like the worker's write paths: a
+        # launch path that never inherits the auth contextvar (e.g. a
+        # null-owner scheduled task) writes rows with no user_id, so the
+        # lookup filters by the same id the writes stamped — or not at all —
+        # instead of the db store's strict AUTO default raising per frame.
+        user = get_current_user()
+        self._user_id: str | None = str(user.id) if user is not None else None
+        self._seqs: dict[str, int] = {}
+        # identity -> the feed generation its last lookup missed at.
+        self._missing: dict[str, int] = {}
+
+    async def stamp(self, payload: Any) -> Any:
+        if self._store is None or not isinstance(payload, Mapping):
+            return payload
+        messages = payload.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return payload
+
+        identities = [message_identity(m) if isinstance(m, Mapping) else None for m in messages]
+        # Read before the lookup, never after: a write landing mid-query then
+        # advances past the generation the miss is recorded under, so the next
+        # frame re-asks. The reverse order could bury such a write.
+        generation = self._feed_generation()
+        unresolved = {i for i in identities if i is not None and i not in self._seqs and self._missing.get(i, _NEVER_LOOKED_UP) != generation}
+        if unresolved:
+            try:
+                found = await self._store.get_message_seqs(self._thread_id, sorted(unresolved), user_id=self._user_id)
+            except Exception:
+                # Placement is an enhancement: a client without seq falls back
+                # to its own ordering rule. Never fail the frame over it.
+                logger.warning("Failed to resolve message seqs for thread %s", self._thread_id, exc_info=True)
+                found = {}
+            self._seqs.update(found)
+            self._missing.update(dict.fromkeys(unresolved - found.keys(), generation))
+
+        stamped = [attach_message_seq(message, seq) if identity is not None and (seq := self._seqs.get(identity)) is not None else message for message, identity in zip(messages, identities, strict=True)]
+        return {**payload, "messages": stamped}
+
+
+def _build_seq_stamper(event_store: Any, thread_id: str, journal: Any) -> _MessageSeqStamper:
+    """Build the run's stamper, reading feed writes from *journal*.
+
+    The journal owns the writes that turn a lookup miss into a hit, so it is
+    also what can tell the stamper that a cached miss is worth re-asking. A run
+    without one has no writer to report, and the stamper falls back to keeping
+    its misses.
+    """
+    return _MessageSeqStamper(
+        event_store,
+        thread_id,
+        feed_generation=(lambda: journal.feed_generation) if journal is not None else None,
+    )
+
+
 async def _publish_stream_item(
     *,
     bridge: Any,
@@ -2710,6 +2853,7 @@ async def _publish_stream_item(
     namespace: tuple[str, ...],
     file_tool_chunk_batcher: Any,
     subagent_events: Any,
+    seq_stamper: Any = None,
 ) -> None:
     """Publish one stream frame, preserving the subgraph namespace.
 
@@ -2730,6 +2874,11 @@ async def _publish_stream_item(
             await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
     chunks_to_publish = file_tool_chunk_batcher.push(chunk) if mode == "messages" and file_tool_chunk_batcher is not None else [chunk]
     for publish_chunk in chunks_to_publish:
-        await bridge.publish(run_id, sse_event, serialize(publish_chunk, mode=mode))
+        payload = serialize(publish_chunk, mode=mode)
+        if mode == "values" and seq_stamper is not None:
+            # Root frames only: a subagent's snapshot is not part of this
+            # thread's feed ordering (the namespaced branch returned above).
+            payload = await seq_stamper.stamp(payload)
+        await bridge.publish(run_id, sse_event, payload)
     if mode == "custom":
         await subagent_events.add(chunk)

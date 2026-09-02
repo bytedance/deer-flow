@@ -955,6 +955,46 @@ def test_gateway_keeps_block_extras_a_put_does_not_mention():
     assert merged.headers_from_context.model_extra["vendor_note"] == "keep-me"
 
 
+def test_gateway_complete_replacement_resets_omitted_block_fields_and_extras():
+    """Targeted PUT keeps only explicitly masked secrets from the stored block."""
+    from app.gateway.routers.mcp import (
+        McpContextHeadersConfigResponse,
+        McpServerConfigResponse,
+        _merge_preserving_secrets,
+    )
+
+    existing = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(
+            headers={"X-Tenant-Token": "tenant_token"},
+            on_missing="passthrough",
+            api_key="real-secret",
+            vendor_note="remove-me",
+        ),
+    )
+    incoming = McpServerConfigResponse(
+        type="http",
+        url="https://mcp.example.com/mcp",
+        headers_from_context=McpContextHeadersConfigResponse(
+            enabled=False,
+            api_key="***",
+        ),
+    )
+
+    merged = _merge_preserving_secrets(
+        incoming,
+        existing,
+        preserve_omitted_fields=False,
+    )
+
+    assert merged.headers_from_context is not None
+    assert merged.headers_from_context.enabled is False
+    assert merged.headers_from_context.headers == {}
+    assert merged.headers_from_context.on_missing == "deny"
+    assert merged.headers_from_context.model_extra == {"api_key": "real-secret"}
+
+
 def test_gateway_rejects_a_masked_value_for_an_unknown_block_extra():
     """A sentinel with nothing stored behind it must not be written to disk."""
     from fastapi import HTTPException

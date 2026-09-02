@@ -488,7 +488,7 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
-Settings > Tools updates one MCP server at a time: an invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
+Settings > Tools adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
@@ -717,16 +717,38 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 #### Request Trace Correlation
 
-Gateway request trace correlation is disabled by default so existing HTTP responses and log formats stay unchanged. To enable it, set:
+Every Gateway HTTP response carries an `X-Trace-Id` header. The id is inherited
+from an inbound `X-Trace-Id` when the caller sends one and generated otherwise, so
+a proxy or an upstream service can pin one id across services. It needs no
+configuration and cannot be turned off.
+
+The same id stays attached to work that outlives the HTTP response: the detached
+run task, any subagents it delegates to, and the background memory-update threads.
+It is recorded as `deerflow_trace_id` on the run record (visible in the runs API),
+in the thread's checkpoint metadata, and in Langfuse traces. Scheduled tasks, MCP
+task notification runs, and IM channel messages start outside HTTP and mint their
+own id per occurrence.
+
+Log records carry that id only when enhanced logging is on:
 
 ```yaml
 logging:
   enhance:
-    enabled: true
-    format: text
+    enabled: true   # print trace_id into log records
+    format: text    # or json
 ```
 
-When enabled, every Gateway HTTP response includes `X-Trace-Id`, logs include `trace_id`, and Langfuse traces created by that request include `metadata.deerflow_trace_id` with the same value.
+This is off by default because turning it on changes the log format. `logging` is
+restart-required, so edit `config.yaml` and restart the Gateway. The setting
+affects log output only — the id, the response header, and the run metadata are
+unaffected.
+
+`deerflow_trace_id` is a DeerFlow correlation id: it is not a run id, and it is not
+a provider's native trace id. It is not a lookup key either — nothing resolves a
+thread or a run from it; use it to correlate log lines. A `deerflow_trace_id` sent
+in a run request's `metadata` or `config.context` is ignored and overwritten, so
+the response header, the logs, and the persisted run can never disagree. To pin a
+correlation id, send the `X-Trace-Id` header.
 
 Gateway run history also records one terminal `run.delivery` receipt per run,
 including zero-output and crash-recovered runs. The receipt is persisted before
@@ -1252,7 +1274,7 @@ Image bytes loaded for a vision-model call are transient: DeerFlow removes the h
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for

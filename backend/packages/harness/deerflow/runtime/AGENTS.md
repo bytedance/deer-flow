@@ -24,6 +24,87 @@ Checkpointer storage runs in one of two channel modes, selected by `checkpoint_c
 
 **Run rollback flow** (`runtime/runs/worker.py`): `_capture_rollback_point` materializes the complete pre-run state via the accessor and captures raw `pending_writes` via `aget_tuple` into an immutable `RollbackPoint` before the run starts — capture failure disables rollback (fail-closed), never restores partial state. In `full` mode, cancel-with-rollback forks from the pre-run checkpoint via the mutation graph and inherits non-message channels from that parent. In `delta` mode, forking is unsafe once the cancelled path has attached sibling writes to the pre-run checkpoint, so rollback replaces every captured channel on the current head, using `Overwrite` for reducers and schema defaults for current-head-only channels. Both modes reattach only the captured pre-run pending writes to the restored checkpoint. Edit replay runs (`metadata.replay_kind="edit"`) also restore the pre-run checkpoint on failed, timed-out, or interrupted completion and publish the restored `values` snapshot to the stream before `end`, so clients do not remain on a transient edited branch when the replay did not produce a successful replacement.
 
+**Message feed seq stamping** (#4666): a checkpoint carries no position of its
+own and loses messages to summarization, so a client merging a `values` frame
+with the seq-ordered `run_events` feed cannot place a checkpoint-kept message
+once the feed's loaded page window no longer reaches back to it.
+`RunEventStore.get_message_seqs(thread_id, identities)` resolves the seq the
+store already assigned, keyed by
+`runtime/events/message_identity.py::message_identity` — the backend half of
+the identity rule `frontend/src/core/threads/hooks.ts::messageIdentity` applies
+(tool messages by `tool_call_id`; `X` / `X__user` human copies collapse to
+one). The two halves must stay in sync: a mismatch is silent, degrading
+placement rather than raising. `runs/worker.py::_MessageSeqStamper` attaches
+the result as `additional_kwargs.deerflow_seq` on root `values` frames only —
+subgraph frames are not part of the thread feed's ordering, and nothing is
+written back to the checkpoint. The run-scoped cache makes the compaction frame
+the only one that costs a lookup, and the stamper soft-resolves the user id
+once at build time — like the worker's write paths beside it — so a launch path
+that never inherits the auth contextvar (a null-owner scheduled task) still
+stamps instead of the db store's strict `AUTO` default raising per frame. A
+resolved seq is cached for the run (earliest-seq-wins makes it final), but a
+miss is not: a message this run produces reaches a frame before `RunJournal`
+flushes it, so it misses and is persisted moments later. Misses are re-asked
+when `RunJournal.feed_generation` — bumped once per successful event-store
+write, never while the buffer merely fills — shows the feed gained rows, which
+keeps the retry bounded by writes rather than by frames and makes a failed
+lookup cost one generation instead of the run. REST
+reads (`GET /threads/{id}/state`, `POST /threads/{id}/history`) stamp through
+`events/message_seq.py::stamp_messages_with_seq`, the request-scoped
+counterpart: everything a checkpoint still holds is already persisted, so one
+batched lookup resolves the whole list. The db store prefilters candidate rows
+in SQL (a LIKE clause per wanted raw id, wildcards escaped; an id `json.dumps`
+would escape falls the set back to the full scan) so a wanted identity absent
+from the feed — a message still streaming — does not force a full
+fetch-and-decode of every message row's tool outputs on long threads.
+`deerflow_seq` is server-owned display metadata: the gateway strips it from
+client input, because a welded-in seq goes stale when a fork re-seeds the feed
+(#4380).
+
+**Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
+`RunJournal` records each non-empty artifact update once per tool `Command` for
+the terminal `run.delivery` event. When a command contains multiple messages, a
+unique tool name resolved from matching `ToolMessage` entries supplies
+attribution; additional command messages do not duplicate artifact paths or
+counts. If multiple different tool names resolve for one flat artifact update,
+the paths remain counted but unattributed because the command does not carry a
+per-path mapping. `RunJournal` callbacks set `run_inline=True`: they do only
+in-memory bookkeeping or schedule async writes, and staying on the run's
+event-loop thread serializes parallel tool callbacks before terminal delivery
+recording and flushing. Each worker creates a separate journal per run before
+cancellable/fallible preflight work, so checkpoint compatibility failures and
+cancellation while waiting for prior finalization still emit a zero-delivery
+receipt. The worker flushes ordinary journal events, idempotently persists the
+run-scoped receipt, and only then persists the staged terminal run status. A
+receipt failure is retried on a short bounded schedule while the owning worker
+still knows the real outcome and holds the lease. Delivery candidates are every
+regular file created or modified under `/mnt/user-data/outputs`; internal
+process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
+the configured `tool_output.storage_subdir`), so a run that only externalized
+oversized tool outputs does not fail delivery. At least one candidate must be
+covered by a path attributed by the journal to `present_files`; presenting only
+an unrelated pre-existing path does not satisfy delivery. Receipts for such
+runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
+`stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching
+presentation becomes a run error; a successful presentation is also downgraded
+to error if its receipt cannot be durably verified. Runs without changed
+outputs preserve ordinary chat behavior and the original receipt shape. Orphan
+recovery first atomically claims an expired lease, then uses the same singleton
+write to backfill a zero-delivery receipt — a stale recovery scan cannot
+overwrite a live run's later detailed receipt, an event-store outage does not
+undo the terminal takeover, and an existing detailed receipt is preserved when
+a worker crashed after writing it. Event stores serialize `put_if_absent` with
+ordinary thread writers: memory and JSONL provide the documented
+single-process guarantee, while the DB store adds per-thread in-process locks
+and PostgreSQL advisory locks for cross-process writers. Moving journal
+construction ahead of preflight is receipt-only on early failure paths: a
+separate boundary flag preserves the previous completion-data semantics, so
+checkpoint incompatibility or cancellation while waiting for an older
+finalizing run does not persist an empty completion snapshot. Worker tests pin
+one accumulated receipt across multiple goal-continuation `_stream_once` calls;
+journal tests drive LangChain's real async callback dispatcher against a single
+journal to pin serialized, deduplicated parallel tool callbacks.
+
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
 contract. Its default implementation walks `list_messages()` backward in
@@ -71,10 +152,18 @@ the number of required IDs, whichever is larger; missing exact runs use targeted
 **Checkpoint channel benchmark**: `scripts/benchmark/checkpoint/bench_channels.py`
 runs paired `full`/`delta` message-only StateGraphs in a fresh child process per
 case, using sync `InMemorySaver` or `SqliteSaver` so reducer, serialization, and
-saver costs stay separate from Gateway/async scheduling. It reports deterministic
+saver costs stay separate from Gateway/async scheduling. Optional
+`AsyncPostgresSaver` cases are enabled only when `TEST_POSTGRES_URI` is set.
+Postgres cases use a unique thread and remove only that benchmark thread through
+the saver's public `adelete_thread` API after measurement. It reports deterministic
 correctness digests, write windows/percentiles, warm and graph-rebuilt cold reads,
-logical checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time,
-and peak RSS as versioned JSONL. The controller alternates mode order and rejects
+backend-neutral checkpoint/blob/write row and byte fields, aggregate logical
+checkpoint/write bytes, SQLite DB/WAL/SHM footprint, reducer replay time, and
+peak RSS as versioned JSONL. SQLite embeds channel blobs in its checkpoint
+payload, so its separate blob metrics are zero; Postgres reports its
+`checkpoint_blobs` table separately. Byte fields describe each saver's serialized
+representation and should not be treated as identical encodings across backends.
+The controller alternates mode order and rejects
 performance data when paired modes materialize different state. Its default 1 GiB
 estimated cumulative full-payload cap skips both modes of an oversized pair when
 `full` is selected, including every delta cadence in a `--snapshot-frequencies`
@@ -96,6 +185,10 @@ cd backend
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
   --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
   --repetitions 7 --output /tmp/checkpoint-bench.jsonl
+TEST_POSTGRES_URI=postgresql://... \
+PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
+  --backends sqlite,postgres --updates 100 --payload-bytes 128 \
+  --output /tmp/checkpoint-cross-backend.jsonl
 PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
   /tmp/checkpoint-bench.jsonl
 ```

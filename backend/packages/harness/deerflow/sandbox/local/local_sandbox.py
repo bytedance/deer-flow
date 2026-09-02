@@ -93,6 +93,10 @@ class ResolvedPath(NamedTuple):
 
 
 class LocalSandbox(Sandbox):
+    #: Every call is a fresh ``subprocess.run([shell, "-c", ...])`` process —
+    #: no shell state survives into the next command.
+    persistent_shell_sessions = False
+
     @staticmethod
     def _shell_name(shell: str) -> str:
         """Return the executable name for a shell path or command."""
@@ -524,6 +528,10 @@ class LocalSandbox(Sandbox):
         if timed_out:
             notice = self._format_timeout_notice(timeout)
             output += f"\n{notice}" if output else notice
+            # A timeout is a failed execution: mark it authoritatively (the
+            # coreutils ``timeout`` convention) so exit-status evidence
+            # consumers cannot read partial output as success.
+            output += "\nExit Code: 124"
         elif returncode != 0:
             output += f"\nExit Code: {returncode}"
 
