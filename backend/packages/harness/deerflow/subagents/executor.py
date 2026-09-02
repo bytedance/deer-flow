@@ -2,8 +2,10 @@
 
 import asyncio
 import atexit
+import json
 import logging
 import os
+import re
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -18,11 +20,12 @@ from typing import TYPE_CHECKING, Any
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
+from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
 from deerflow.config import get_app_config
@@ -43,7 +46,7 @@ from deerflow.subagents.report_contract import (
 )
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.utils.messages import message_content_to_text
 
@@ -112,6 +115,21 @@ class SubagentResult:
             streaming produced a state (e.g. pre-stream cancellation), when
             receipts are disabled, or when harvesting failed; an empty list
             means the stream carried no stamped receipts (zero tool calls).
+        bash_executions: Bounded bash command/output evidence accumulated from
+            every streamed chunk (RFC #4651 PR4), letting the parent anchor a
+            ``tests_passed:<command>`` acceptance leaf to a specific recorded
+            execution. Each entry also carries ``status_marker`` — the exit
+            marker text the recorded status was derived from, when one was
+            seen — so the leaf detail can report what was actually observed
+            — and ``shell_persistent``, the producing sandbox's
+            ``persistent_shell_sessions`` flag resolved from the state that
+            carried the evidence (``None`` when unidentifiable — the matcher
+            fails closed on it).
+            Accumulated per chunk (merged by ``tool_call_id``) so
+            summarization compacting earlier messages cannot erase a recorded
+            execution. ``None`` when the delegation carried no acceptance
+            criteria, the run ended before streaming, or harvesting failed;
+            an empty list means the stream carried no bash-family tool calls.
     """
 
     task_id: str
@@ -128,6 +146,7 @@ class SubagentResult:
     usage_reported: bool = False
     admission_failure: bool = False
     tool_receipts: list[dict[str, Any]] | None = field(default=None, kw_only=True)
+    bash_executions: list[dict[str, Any]] | None = field(default=None, kw_only=True)
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     _state_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
@@ -149,6 +168,28 @@ class SubagentResult:
         with self._state_lock:
             if not self.status.is_terminal:
                 self.tool_receipts = [dict(receipt) for receipt in receipts]
+
+    def update_bash_executions(self, executions: list[dict[str, Any]] | None) -> None:
+        """Merge bash evidence from the latest yielded state while still running.
+
+        Entries merge by ``tool_call_id`` in first-seen order and are capped to
+        the newest ``_BASH_EVIDENCE_MAX_ENTRIES`` — unlike a terminal
+        ``final_state`` scan, accumulation survives summarization compacting
+        earlier AI/ToolMessages out of the streamed history. ``None`` leaves
+        the field untouched (no evidence this chunk); an empty list still
+        publishes, keeping "the stream carried no bash-family tool calls"
+        distinguishable from "no evidence was collected" (mirrors
+        ``update_tool_receipts``).
+        """
+        if executions is None:
+            return
+        with self._state_lock:
+            if self.status.is_terminal:
+                return
+            merged = {str(entry.get("tool_call_id")): entry for entry in (self.bash_executions or [])}
+            for execution in executions:
+                merged[str(execution.get("tool_call_id"))] = dict(execution)
+            self.bash_executions = list(merged.values())[-_BASH_EVIDENCE_MAX_ENTRIES:]
 
     def snapshot_tool_receipts(self) -> list[dict[str, Any]] | None:
         """Copy the latest published receipts for a racing terminal writer."""
@@ -346,6 +387,165 @@ def _harvest_tool_receipts(
         return None
 
 
+#: Bash-family tool names whose calls count as recorded command executions.
+_BASH_EVIDENCE_TOOL_NAMES = frozenset({"bash", "bash_tool"})
+#: Bounds for the harvested evidence: only the newest few executions travel,
+#: with command/output text capped (test summaries print at the tail).
+_BASH_EVIDENCE_MAX_ENTRIES = 20
+_BASH_EVIDENCE_COMMAND_CHARS = 500
+_BASH_EVIDENCE_OUTPUT_TAIL_CHARS = 1000
+
+#: Exit-status markers in bash *output text*: a nonzero exit does not raise —
+#: local sandboxes append ``Exit Code: N``; e2b/opensandbox emit
+#: ``Command exited with code N`` when the command produced no output.
+_BASH_EXIT_CODE_MARKER_RE = re.compile(r"Exit Code: (-?\d+)\s*$")
+#: Remote providers emit ``Command exited with code N`` ONLY as the complete
+#: output of a silent command — anchor it to the whole (trimmed) content so
+#: a successful command that merely prints the phrase while exercising an
+#: error path is not misrecorded as failed.
+_BASH_EXITED_WITH_CODE_RE = re.compile(r"Command exited with code (-?\d+)")
+
+
+def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | None]:
+    """Derive the recorded status from the shell exit marker when present.
+
+    Returns ``(status, marker)``: the marker text actually seen (e.g. ``Exit
+    Code: 5``), so consumers can report it instead of asserting a failure the
+    harness cannot distinguish from the command's own trailing text. The
+    explicit marker is authoritative: ``deerflow_tool_meta`` reports the
+    generic ToolMessage status, which stays ``success`` for a nonzero exit
+    rendered as ordinary output text.
+    """
+    match = _BASH_EXIT_CODE_MARKER_RE.search(content) or _BASH_EXITED_WITH_CODE_RE.fullmatch(content.strip())
+    if match is None:
+        return meta_status, None
+    # Signal-killed local subprocesses report signed codes (Exit Code: -9);
+    # only an exact zero is a success.
+    return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
+
+
+def _harvest_shell_persistence(final_state: Any) -> bool | None:
+    """Whether the sandbox that produced this state's bash evidence reuses one
+    persistent shell session (``Sandbox.persistent_shell_sessions`` — AIO's
+    legacy exec path).
+
+    Read from the state that CARRIED the evidence — the subagent's own graph
+    state, whose ``sandbox`` channel is seeded from the parent or written by
+    the subagent's own lazy acquisition — so the producing sandbox is the one
+    resolved. Resolving against the parent task runtime instead would
+    mis-adjudicate the common path where the parent never touched a sandbox:
+    its state has no ``sandbox`` key, the lookup would report "no persistent
+    session", and persistent-session evidence would pass as trusted. ``None``
+    when the producing sandbox cannot be identified — and also when it never
+    declared its session semantics: a custom provider's silence is not
+    fresh-shell proof. Consumers must fail closed (UNVERIFIED) on ``None``.
+    """
+    try:
+        from deerflow.sandbox.overwrite import unwrap_sandbox
+        from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+        sandbox_state, _ = unwrap_sandbox(final_state.get("sandbox")) if isinstance(final_state, dict) else (None, False)
+        sandbox_id = sandbox_state.get("sandbox_id") if isinstance(sandbox_state, dict) else None
+        if not isinstance(sandbox_id, str):
+            return None
+        sandbox = get_sandbox_provider().get(sandbox_id)
+        if sandbox is None:
+            return None
+        # Tri-state: an implementation that never declared its session
+        # semantics (custom provider loaded by class path) stays ``None`` —
+        # unknown — and the matcher fails closed on it exactly as on True.
+        declared = getattr(sandbox, "persistent_shell_sessions", None)
+        return None if declared is None else bool(declared)
+    except Exception:
+        return None
+
+
+def _harvest_bash_executions(
+    final_state: Any,
+) -> list[dict[str, Any]] | None:
+    """Harvest bounded bash command/output evidence from one streamed state.
+
+    RFC #4651 PR4: a ``tests_passed:<command>`` acceptance leaf must anchor to
+    a specific recorded execution — the command text lets the parent match the
+    criterion against the call that actually ran, and the bounded output tail
+    carries the test-summary shape. The recorded status is the **actual shell
+    exit status**: a nonzero bash exit comes back as ordinary output text
+    (local: a trailing ``Exit Code: N``; e2b/opensandbox with empty output:
+    ``Command exited with code N``), which ``deerflow_tool_meta`` still reports
+    as success — so an explicit exit marker wins, and the meta status is only
+    the fallback when no marker exists. Every entry is stamped with
+    ``shell_persistent`` — the producing sandbox's
+    ``persistent_shell_sessions`` flag, resolved against the sandbox recorded
+    in THIS state (the subagent's own graph state), so provenance survives
+    even when the parent never touched a sandbox. Failure-isolated like the
+    receipt harvest: an error returns ``None`` and the leaves degrade to
+    UNVERIFIED.
+    """
+    if not final_state:
+        return None
+    messages = final_state.get("messages") if isinstance(final_state, dict) else None
+    if not messages:
+        return None
+    try:
+        from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+        commands: dict[str, tuple[str, str, bool]] = {}
+        for message in messages:
+            if not isinstance(message, AIMessage):
+                continue
+            for tool_call in message.tool_calls or []:
+                name = str(tool_call.get("name") or "")
+                if name not in _BASH_EVIDENCE_TOOL_NAMES:
+                    continue
+                tool_call_id = str(tool_call.get("id") or "")
+                args = tool_call.get("args")
+                command = args.get("command") if isinstance(args, dict) else None
+                command = command if isinstance(command, str) else ""
+                # A truncated command loses its suffix; the matcher must not
+                # treat shell-structure analysis of the prefix as proof (a
+                # selection-changing suffix like ``-k smoke`` could be cut).
+                commands[tool_call_id] = (name, command[:_BASH_EVIDENCE_COMMAND_CHARS], len(command) > _BASH_EVIDENCE_COMMAND_CHARS)
+        if not commands:
+            return []
+        executions: list[dict[str, Any]] = []
+        for message in messages:
+            if not isinstance(message, ToolMessage):
+                continue
+            tool_call_id = str(message.tool_call_id or "")
+            entry = commands.get(tool_call_id)
+            if entry is None:
+                continue
+            name, command, command_truncated = entry
+            meta = (message.additional_kwargs or {}).get(TOOL_META_KEY) or {}
+            meta_status = str(meta.get("status") or getattr(message, "status", "success") or "success")
+            content = message.content if isinstance(message.content, str) else json.dumps(message.content, sort_keys=True, default=str)
+            status, status_marker = _bash_evidence_status(content, meta_status)
+            executions.append(
+                {
+                    "tool_call_id": tool_call_id,
+                    "tool_name": name,
+                    "command": command,
+                    "command_truncated": command_truncated,
+                    "output_tail": content[-_BASH_EVIDENCE_OUTPUT_TAIL_CHARS:],
+                    "status": status,
+                    "status_marker": status_marker,
+                }
+            )
+        # Provenance stamp: whether the producing sandbox reuses one
+        # persistent shell session. Captured here — while the state that
+        # carried the evidence is at hand — because the parent-side checker
+        # cannot derive it (its runtime has no ``sandbox`` key when the
+        # parent delegated before touching one). ``None`` (unknown) fails
+        # closed in the acceptance matcher.
+        shell_persistent = _harvest_shell_persistence(final_state)
+        for execution in executions:
+            execution["shell_persistent"] = shell_persistent
+        return executions[-_BASH_EVIDENCE_MAX_ENTRIES:]
+    except Exception:
+        logger.warning("Failed to harvest subagent bash execution evidence", exc_info=True)
+        return None
+
+
 # Persistent event loop for isolated subagent executions triggered from an
 # already-running parent loop. Reusing one long-lived loop avoids creating a
 # fresh loop per execution and then closing async resources bound to it.
@@ -470,6 +670,18 @@ def _submit_to_isolated_loop_in_context(
     return context.run(_submit)
 
 
+def run_on_isolated_subagent_loop[T](coro: Coroutine[Any, Any, T]) -> Future[T]:
+    """Schedule a coroutine on the process-owned persistent subagent loop.
+
+    Unlike ``asyncio.create_task`` on the caller's loop, work submitted here
+    survives teardown of a short-lived caller loop — e.g. the ``asyncio.run()``
+    used by the synchronous tool wrapper cancels caller-loop tasks on exit —
+    so registry cleanup scheduled from a failing poller still runs after the
+    caller loop is gone.
+    """
+    return asyncio.run_coroutine_threadsafe(coro, _get_isolated_subagent_loop())
+
+
 def _copy_isolated_subagent_context() -> Context:
     """Copy ambient context without loop-bound parent graph callbacks.
 
@@ -563,6 +775,7 @@ class SubagentExecutor:
         extensions: Any | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         acceptance_criteria: list[str] | None = None,
+        loop_detection_recorder: Any | None = None,
     ):
         """Initialize the executor.
 
@@ -586,7 +799,9 @@ class SubagentExecutor:
             run_id: Parent run id, so delegated guardrail decisions attribute to
                 the same run as the lead agent.
             deerflow_trace_id: DeerFlow request-level correlation id propagated
-                from the parent run for Langfuse metadata correlation.
+                from the parent run for Langfuse metadata correlation. Falls
+                back to the ambient trace so the attribute is always a real
+                id, never ``None``.
             extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
@@ -601,6 +816,10 @@ class SubagentExecutor:
                 ``HumanMessage`` (the channel ``InputSanitizationMiddleware``
                 sanitizes and boundary-frames); the subagent's ``SystemMessage``
                 carries only the framework-owned pointer note.
+            loop_detection_recorder: Optional loop-safe recorder supplied by the
+                parent task tool. Native subagents execute on a separate event
+                loop, so this must be a proxy rather than the parent
+                ``RunJournal`` itself.
         """
         self.config = config
         self.app_config = app_config
@@ -633,7 +852,10 @@ class SubagentExecutor:
         # subagent's GuardrailMiddleware sees the same provenance as the lead.
         self.is_internal = is_internal
         self.authz_attributes = normalize_authz_attributes(authz_attributes)
-        self.deerflow_trace_id = deerflow_trace_id
+        # Resolved, not stored raw: the attribute is part of the non-nullable
+        # trace contract, and ``_aexecute`` rebinds it because a subagent runs
+        # on the isolated loop thread where the parent ContextVar may be gone.
+        self.deerflow_trace_id = resolve_trace_id(deerflow_trace_id)
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
         # extension generation: a concurrent ``set_loaded_extensions()`` between
@@ -644,6 +866,7 @@ class SubagentExecutor:
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
+        self.loop_detection_recorder = loop_detection_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1031,7 +1254,14 @@ class SubagentExecutor:
         return state, final_tools, deferred_setup
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
-        """Execute after acquiring the process-wide native-subagent slot."""
+        """Execute after acquiring the process-wide native-subagent slot.
+
+        Rebinds the parent's request trace id for the whole execution. Sync
+        callers reach here on the persistent isolated loop thread, which is
+        entered through a copied ``Context`` -- so the binding is usually
+        still intact and this is a no-op -- but the id also travels as data
+        precisely because that copy is not guaranteed on every path.
+        """
         result = result_holder
         if result is None:
             result = SubagentResult(
@@ -1039,21 +1269,22 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
-        try:
-            capacity = self.execution_capacity or get_subagent_execution_capacity()
-            async with capacity.slot():
-                with result._state_lock:
-                    if not result.status.is_terminal:
-                        result.status = SubagentStatus.RUNNING
-                        result.started_at = datetime.now()
-                return await self._aexecute_admitted(task, result)
-        except SubagentCapacityError as exc:
-            result.try_set_terminal(
-                SubagentStatus.FAILED,
-                error=str(exc),
-                admission_failure=True,
-            )
-            return result
+        with ensure_trace_context(self.deerflow_trace_id):
+            try:
+                capacity = self.execution_capacity or get_subagent_execution_capacity()
+                async with capacity.slot():
+                    with result._state_lock:
+                        if not result.status.is_terminal:
+                            result.status = SubagentStatus.RUNNING
+                            result.started_at = datetime.now()
+                    return await self._aexecute_admitted(task, result)
+            except SubagentCapacityError as exc:
+                result.try_set_terminal(
+                    SubagentStatus.FAILED,
+                    error=str(exc),
+                    admission_failure=True,
+                )
+                return result
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -1130,6 +1361,15 @@ class SubagentExecutor:
             if not getattr(verification_cfg, "receipts_enabled", True):
                 return None
             return _harvest_tool_receipts(final_state, prefer_citing_turn=prefer_citing_turn)
+
+        def current_bash_executions() -> list[dict[str, Any]] | None:
+            # RFC #4651 PR4: evidence for tests_passed acceptance leaves.
+            # Accumulated from every chunk (not harvested once at terminal) so
+            # summarization compacting earlier messages cannot erase a recorded
+            # execution. Criteria-free runs pay nothing.
+            if not self.acceptance_criteria:
+                return None
+            return _harvest_bash_executions(final_state)
 
         try:
             if task_info is not None and task_store is not None:
@@ -1223,9 +1463,11 @@ class SubagentExecutor:
             # (including False); attributes copied again on write-back.
             context["is_internal"] = self.is_internal
             context["authz_attributes"] = dict(self.authz_attributes)
-            if self.deerflow_trace_id:
-                context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
+            context["agent_id"] = self.config.name
+            if self.loop_detection_recorder is not None:
+                context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1250,6 +1492,7 @@ class SubagentExecutor:
                 # cancellation request was in flight.
                 final_state = chunk
                 result.update_tool_receipts(terminal_receipts())
+                result.update_bash_executions(current_bash_executions())
 
                 # Cooperative cancellation: check if parent requested stop.
                 # Note: cancellation is only detected at astream iteration boundaries,
@@ -1639,3 +1882,24 @@ def cleanup_background_task(execution_id: str) -> None:
                 execution_id,
                 result.status.value if hasattr(result.status, "value") else result.status,
             )
+
+
+def force_cleanup_background_task(execution_id: str) -> None:
+    """Remove a background task entry unconditionally.
+
+    Last resort for interrupted unwind paths where the registry entry exists
+    but its result object can no longer be read (persistent status-lookup /
+    status-object failure), so :func:`cleanup_background_task` — which reads
+    the entry to check terminality — cannot succeed. Cooperative cancellation
+    has already been requested by then; leaking the entry forever is worse
+    than dropping it. The subagent thread keeps its own reference to the
+    result object, so a later ``try_set_terminal`` on the removed object is
+    harmless.
+
+    Args:
+        execution_id: The execution ID to remove.
+    """
+    with _background_tasks_lock:
+        _background_tasks.pop(execution_id, None)
+        _background_futures.pop(execution_id, None)
+    logger.warning("Force-cleaned background execution %s after unreadable status", execution_id)

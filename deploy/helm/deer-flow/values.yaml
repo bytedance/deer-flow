@@ -234,7 +234,13 @@ ingress:
   enabled: true
   className: "nginx"
   host: "deer-flow.example.com"
-  annotations: {}
+  annotations:
+    # Allows a 100 MiB .skill archive plus multipart framing at the outer ingress.
+    nginx.ingress.kubernetes.io/proxy-body-size: "101m"
+    # Streams request bodies to nginx instead of spooling them at the outer ingress.
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # Skill validation may perform multiple sequential LLM calls.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
   tls:
     enabled: false
     secretName: ""

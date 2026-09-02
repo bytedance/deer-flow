@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.middlewares.receipt_verification import render_citation_verdict, validate_receipt_verdict
 from deerflow.agents.thread_state import DelegationEntry
+from deerflow.subagents.acceptance_checks import render_acceptance_segment, validate_acceptance_verdict
 from deerflow.subagents.status_contract import (
     read_subagent_result_metadata,
 )
@@ -139,6 +140,9 @@ def extract_delegations(messages: list[AnyMessage]) -> list[DelegationEntry]:
         receipt_verdict = structured.get("receipt_verdict")
         if receipt_verdict:
             entry["receipt_verdict"] = receipt_verdict
+        acceptance_verdict = structured.get("acceptance_verdict")
+        if acceptance_verdict:
+            entry["acceptance_verdict"] = acceptance_verdict
         result_text = structured.get("result_brief") or structured.get("error") or _STATUS_ONLY_RESULT_BRIEFS.get(structured["status"])
         if result_text:
             result_sha256 = structured.get("result_sha256") or hashlib.sha256(result_text.encode("utf-8")).hexdigest()
@@ -168,6 +172,11 @@ def _render_entry_line(entry: DelegationEntry) -> str:
     receipt_verdict = validate_receipt_verdict(entry.get("receipt_verdict"))
     if receipt_verdict is not None:
         segment = render_citation_verdict(receipt_verdict)
+        if segment:
+            line += f" · {segment}"
+    acceptance_verdict = validate_acceptance_verdict(entry.get("acceptance_verdict"))
+    if acceptance_verdict is not None:
+        segment = render_acceptance_segment(acceptance_verdict)
         if segment:
             line += f" · {segment}"
     return line

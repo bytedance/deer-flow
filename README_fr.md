@@ -501,7 +501,7 @@ Si vous utilisez une instance Langfuse auto-hébergée, définissez `LANGFUSE_BA
 - `user_id` = utilisateur effectif issu de `get_effective_user_id()` (revient à `default` en mode sans authentification)
 - `trace_name` = assistant id (par défaut `lead-agent`)
 - `tags` = `[env:<DEER_FLOW_ENV>, model:<model_name>]` (omis lorsqu'ils ne sont pas définis)
-- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, identique à `X-Trace-Id` lorsque la corrélation de trace des requêtes est activée
+- `metadata.deerflow_trace_id` = id de corrélation de requête DeerFlow, toujours identique à l'en-tête de réponse `X-Trace-Id` renvoyé par la même requête (`logging.enhance.enabled` contrôle uniquement si cet id est écrit dans les logs)
 
 Ces champs sont injectés dans `RunnableConfig.metadata` à la racine de l'invocation du graphe, à la fois pour le chemin gateway (`runtime/runs/worker.py::run_agent`) et le chemin embarqué (`client.py::DeerFlowClient.stream`), de sorte que tout callback compatible LangChain puisse les lire. Définissez `DEER_FLOW_ENV` (ou `ENVIRONMENT`) pour étiqueter les traces par environnement de déploiement.
 

@@ -1,29 +1,41 @@
 ### Request Trace Context (`packages/harness/deerflow/trace_context.py`)
 
-Request trace correlation is controlled by `logging.enhance.enabled` at **both** entry points, gated through the shared helper `deerflow.config.app_config.is_trace_correlation_enabled` so the Gateway and embedded paths cannot drift:
+DeerFlow's request-level correlation id — the `X-Trace-Id` header and the `deerflow_trace_id` key. Not Langfuse's trace id, not `run_id`, not the short subagent `trace_id` log label.
 
-- **Gateway HTTP**: `app.gateway.trace_middleware.TraceMiddleware` binds one request-level trace id per HTTP request, inheriting inbound `X-Trace-Id` when present or generating a new id otherwise. A **valid** inbound header also marks the request so `runtime/runs/worker.py` prefers that id over `config.metadata.deerflow_trace_id`, keeping logs, response headers, Langfuse, and runtime context aligned when callers send both. The middleware writes the final value to every HTTP response at `http.response.start`, which covers SSE / streaming responses without consuming the body.
-- **Embedded / TUI / CLI**: `DeerFlowClient.stream()` mints (or inherits) a request-level trace id per turn only when the flag is on. When it is off, no fresh id is minted — a caller that explicitly wraps `stream()` in `request_trace_context(...)` still opts in, because the downstream `get_current_trace_id()` read propagates that value into Langfuse metadata regardless of the flag. Because `stream()` is a sync generator (which shares the caller's context), the id binding is set/reset around each `next()` step rather than around `yield from`: this keeps LangGraph node execution and its log records inside the binding, while returning control to the caller with the ContextVar restored — avoids cross-request leak between yields and `ValueError: <Token> was created in a different Context` on GC-driven close of an abandoned generator (regression pinned by `tests/test_client_langfuse_metadata.py::test_stream_does_not_leak_trace_id_to_caller_context_between_yields` and `::test_stream_abandoned_generator_close_does_not_raise_cross_context`).
+**The ContextVar is the only source.** Every path that reaches a run binds one first; downstream treats the id as a plain `str`, no `if trace_id:` guards.
 
-The same ContextVar value is injected into enhanced log records as `trace_id` and into Langfuse metadata as `deerflow_trace_id`.
+Entry points and binders: Gateway HTTP — `TraceMiddleware`; scheduled occurrence — `ScheduledTaskService._attempt_queued_run` → `launch_scheduled_thread_run`; MCP task notification — `launch_mcp_task_notification_run`; IM inbound — `ChannelManager._worker_loop`; embedded / TUI / CLI turn — `DeerFlowClient.stream()`.
 
-`logging` is registered as a **restart-required** field
-(`STARTUP_ONLY_FIELDS["logging"]`): `configure_logging()` installs the trace-context
-filter and enhanced formatter on root handlers only during app.py lifespan startup,
-and `TraceMiddleware` captures `logging.enhance.enabled` once when the FastAPI app
-is constructed (via `resolve_trace_enabled(get_app_config())` in `create_app()`,
-itself a thin alias for `is_trace_correlation_enabled`). This keeps the response
-`X-Trace-Id` header, log `trace_id` fields, and Langfuse `deerflow_trace_id`
-coherent — a runtime `config.yaml` edit to `logging.enhance.*` needs a Gateway
-restart to take effect. The `deerflow_trace_id` chain inherits this guarantee
-transitively because every injection point ultimately reads the same
-`trace_context` ContextVar that the middleware alone populates. `DeerFlowClient`
-reads its own `self._app_config` snapshot (captured at `__init__`) through the
-same helper for the embedded gate.
+Only the first is HTTP; the rest run outside ASGI, so the binding cannot live in middleware alone. Each scopes **one unit of work**, never a poller loop — a leaked binding on a reused worker task would tag later occurrences with the first id. `ensure_trace_context` inherits, keeping layered scheduled bindings and a manual trigger inside a Gateway request on one trace.
 
-`deerflow_trace_id` is a DeerFlow correlation metadata key, not Langfuse's native
-trace id and not a DeerFlow `run_id`. Keep the existing subagent `trace_id` field
-separate: that short id is still only for subagent execution logs/status.
+**Every other carrier is a derived output, never read back as an input.** `worker._bind_trace_id` stamps the runtime context and `config["metadata"]`; `services.start_run` stamps the run record; a caller-sent `deerflow_trace_id` (`body.metadata`, `body.config.context`) is replaced — honouring it would let the persisted run disagree with the header and the logs. `_SERVER_OWNED_RUNTIME_CONTEXT_KEYS` covers the embedded path, `redact_config_secrets` scrubs the kwargs echo (`runs.kwargs_json`), and `build_run_config` merges metadata onto a copy so the stamp cannot reach `body.config`. Callers pin an id with `X-Trace-Id`.
+
+Accepted divergence: a crash-recovered scheduled launch reuses its run via the idempotency key without restamping — the record keeps the first attempt's id, the retry's logs a fresh one; restamping would rewrite an existing record. Not a bug. Thread metadata omits the key entirely — a thread spans many runs.
+
+**Do not open-code fallback chains.** Two helpers own the resolution order:
+
+- `resolve_trace_id(*carriers)` — first usable carrier, else ambient. For ids travelling as data in `runtime.context`; ContextVars do not survive a bare thread hop.
+- `ensure_trace_context(trace_id)` — reuse the surrounding scope, else start a self-contained one. For boundary crossings (`SubagentExecutor._aexecute`, the memory `trace_context_manager` hook) and non-HTTP entry points; no argument mints a scoped id.
+
+`request_trace_context` (HTTP) deliberately does **not** inherit: a crafted header must not fall back to the previous request's id.
+
+`get_current_trace_id()` stays nullable only for the logging filter (pre-entry-point records render as `trace_id=-`); everything else uses `ensure_trace_id()`/`resolve_trace_id()`.
+
+`DeerFlowClient.stream()` binds per `next()` step and around `inner.close()`, never across a `yield`: a sync generator shares the caller's context, so a scope held across yields would leak the id and break on cross-context GC finalization.
+
+`logging.enhance.enabled` gates **log output only** (`trace_id` field presence and format) — not the id, the header, or the run metadata — so `TraceMiddleware` reads no `AppConfig`; `logging` stays restart-required (`STARTUP_ONLY_FIELDS["logging"]`). `X-Trace-Id` is in `CORS_EXPOSED_HEADERS` (not safelisted). Unhandled-exception 500s keep the header — `TraceMiddleware` sends its own plain 500 (CORS-opaque, see its docstring) before re-raising; mid-stream failures propagate unchanged.
+
+Tests: the `tests/test_trace_*` and `tests/test_worker_trace_binding.py` suites, `test_gateway_services.py`, `test_run_metadata_secret_safety.py`, plus the Langfuse suites in `tracing/AGENTS.md`.
+
+### Managed Lark CLI credentials (`integrations/lark_cli.py`)
+
+App registration and direct app switching replace the per-user Lark credential
+tree transactionally. Clear the old OAuth data before running `lark-cli config
+init`: on Linux that command writes the new app secret into the file-backed
+keychain under the data directory, so clearing the directory afterward would
+leave `config.json` with a dangling keychain reference. The transaction snapshot
+still supplies the previous OAuth data for logout and restores the complete old
+tree if any switch step fails.
 
 ### Browser Progress Screenshots (`community/browser_automation/`)
 
@@ -96,6 +108,13 @@ each mount, during directory preflight, and before each SDK write. The deadline
 does not interrupt active filesystem or E2B SDK calls.
 
 The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
+
+For policy-scoped turns, clearing the four managed remote skill categories and
+uploading their prepared projection is one per-user/thread/skills-root critical
+section, shared with acquire and release. The provider snapshots that canonical
+root at startup and carries it through warm-pool identity and E2B metadata; a VM
+from another root is never adopted. A second policy sync cannot reset the remote
+tree until the first upload pass has completed.
 
 An invalid mount does not block later mounts.
 
