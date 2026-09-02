@@ -242,6 +242,10 @@ Direct pytest collection or execution of `tests/test_client_live.py` remains
 skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
 default CI workflows.
 
+Jina request-failure logging tests set a dummy API key so the separate once-per-process
+missing-key warning cannot make assertions depend on test order or shard placement.
+Missing-key behavior has its own tests in `tests/test_jina_client.py`.
+
 ### Running the Full Application
 
 From the **project root** directory:
