@@ -29,6 +29,7 @@ from deerflow.utils.custom_events import aemit_custom_event, emit_custom_event
 logger = logging.getLogger(__name__)
 
 _EMPTY_RESPONSE_RETRY_CONTEXT_KEY = "__empty_response_retry_consumed"
+_EMPTY_RESPONSE_RETRY_CONSUMED = object()
 _NON_CIRCUIT_FAILURE_REASONS = {"burst_rate", "empty_response"}
 
 
@@ -58,9 +59,9 @@ def _consume_empty_response_retry(request: ModelRequest) -> bool:
     if not isinstance(context, dict):
         # Direct middleware calls without runtime context retain one retry per call.
         return True
-    if context.get(_EMPTY_RESPONSE_RETRY_CONTEXT_KEY) is True:
+    if context.get(_EMPTY_RESPONSE_RETRY_CONTEXT_KEY) is _EMPTY_RESPONSE_RETRY_CONSUMED:
         return False
-    context[_EMPTY_RESPONSE_RETRY_CONTEXT_KEY] = True
+    context[_EMPTY_RESPONSE_RETRY_CONTEXT_KEY] = _EMPTY_RESPONSE_RETRY_CONSUMED
     return True
 
 

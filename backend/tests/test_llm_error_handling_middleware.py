@@ -14,6 +14,7 @@ from langchain.agents.middleware.types import ModelResponse
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import StructuredTool
 from langgraph.errors import GraphBubbleUp
 
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
@@ -394,6 +395,23 @@ def test_empty_response_retry_budget_is_shared_across_model_calls_in_one_run(mon
     assert second_result.additional_kwargs["error_reason"] == "empty_response"
 
 
+def test_caller_cannot_preconsume_empty_response_retry_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    middleware = _build_middleware(retry_max_attempts=3, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    request = SimpleNamespace(runtime=SimpleNamespace(context={"__empty_response_retry_consumed": True}))
+    attempts = 0
+    monkeypatch.setattr("time.sleep", lambda _delay: None)
+
+    def empty_handler(_request) -> AIMessage:
+        nonlocal attempts
+        attempts += 1
+        return AIMessage(content="", response_metadata={"finish_reason": "stop"})
+
+    result = middleware.wrap_model_call(request, empty_handler)
+
+    assert attempts == 2
+    assert result.additional_kwargs["error_reason"] == "empty_response"
+
+
 @pytest.mark.anyio
 async def test_async_empty_response_retry_budget_is_shared_across_model_calls_in_one_run(
     monkeypatch: pytest.MonkeyPatch,
@@ -517,6 +535,65 @@ async def test_empty_response_recovery_runs_through_create_agent_astream(monkeyp
 
     assert model.call_count == 2
     assert states[-1]["messages"][-1].content == "recovered through graph stream"
+
+
+class _EmptyRetryToolThenEmptyGraphModel(BaseChatModel):
+    call_count: int = 0
+
+    @property
+    def _llm_type(self) -> str:
+        return "empty-retry-tool-then-empty"
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.call_count += 1
+        if self.call_count == 2:
+            message = AIMessage(
+                content="",
+                tool_calls=[{"id": "call-probe", "name": "probe", "args": {}}],
+                response_metadata={"finish_reason": "tool_calls"},
+            )
+        else:
+            message = AIMessage(content="", response_metadata={"finish_reason": "stop"})
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return self._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+
+@pytest.mark.anyio
+async def test_empty_response_retry_budget_survives_real_agent_tool_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """真实工具循环中，整个 run 只能消费一次空响应重试。"""
+    model = _EmptyRetryToolThenEmptyGraphModel()
+    middleware = _build_middleware(retry_max_attempts=2, retry_base_delay_ms=1, retry_cap_delay_ms=1)
+    tool_invocations: list[str] = []
+
+    def probe() -> str:
+        tool_invocations.append("probe")
+        return "probe-result"
+
+    async def fake_sleep(_delay: float) -> None:
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    tool = StructuredTool.from_function(probe, name="probe", description="Record one deterministic invocation")
+    agent = create_agent(model=model, tools=[tool], middleware=[middleware], context_schema=dict)
+    states = [
+        state
+        async for state in agent.astream(
+            {"messages": [HumanMessage(content="use the probe")]},
+            stream_mode="values",
+            context={"thread_id": "tool-loop-thread", "run_id": "tool-loop-run"},
+        )
+    ]
+
+    final_message = states[-1]["messages"][-1]
+    assert model.call_count == 3
+    assert tool_invocations == ["probe"]
+    assert final_message.additional_kwargs["deerflow_error_fallback"] is True
+    assert final_message.additional_kwargs["error_reason"] == "empty_response"
 
 
 def test_sync_retry_event_preserves_langgraph_control_flow(monkeypatch: pytest.MonkeyPatch) -> None:
