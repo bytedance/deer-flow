@@ -82,7 +82,7 @@ def _contains_file_url(value: str) -> bool:
         return _contains_file_url(candidate)
 
     for index, character in enumerate(value):
-        if character == ":" and _FILE_URL_SCHEME.match(value[index + 1 :]):
+        if character == ":" and _contains_file_url(value[index + 1 :]):
             return True
     return False
 

@@ -145,6 +145,8 @@ def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> Non
         "@file:///C:/Windows/args.rsp",
         "FILE:///etc/passwd",
         "/out:file:///C:/Windows/secret.txt",
+        "/out: file:///C:/Windows/secret.txt",
+        "/out:\tFILE:///etc/passwd",
     ],
 )
 def test_execute_program_rejects_unmapped_path_shaped_argument(argument: str, monkeypatch) -> None:

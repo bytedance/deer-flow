@@ -194,6 +194,10 @@ def test_split_program_argument_preserves_option_prefix(value: str, expected: tu
         "FILE:///etc/passwd",
         "/out:file:///C:/Windows/secret.txt",
         " file:///etc/passwd ",
+        "/out: file:///C:/Windows/secret.txt",
+        "/out:\tFILE:///etc/passwd",
+        "--out: file:///C:/Windows/secret.txt",
+        "--out:\tFILE:///etc/passwd",
     ],
 )
 def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms(value: str) -> None:
