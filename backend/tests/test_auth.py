@@ -1275,6 +1275,53 @@ def test_rate_limiter_counts_failure_when_config_breaks(monkeypatch):
         _login_attempts.clear()
 
 
+def test_login_local_broken_config_fails_closed_after_first_failure(monkeypatch):
+    """Route-level pin of the same sequence, through POST /login/local.
+
+    The first wrong password is verified once and counted (the 500 comes from
+    the re-raised config error, not from a skipped record); the second request
+    from the same client IP must 500 in _check_rate_limit *before*
+    authenticate() is reached — no unlimited password verification while
+    config.yaml stays malformed.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.gateway.routers import auth as auth_router
+    from deerflow.config import app_config as app_config_module
+
+    def _malformed():
+        raise ValueError("config validation error")
+
+    monkeypatch.setattr(app_config_module, "get_app_config", _malformed)
+
+    calls = {"authenticate": 0}
+
+    class _Provider:
+        async def authenticate(self, credentials):
+            calls["authenticate"] += 1
+            return None  # wrong password
+
+    monkeypatch.setattr(auth_router, "get_local_provider", lambda: _Provider())
+    monkeypatch.delenv("AUTH_TRUSTED_PROXIES", raising=False)
+    auth_router._login_attempts.clear()
+
+    app = FastAPI()
+    app.include_router(auth_router.router)
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            first = client.post("/api/v1/auth/login/local", data={"username": "user@example.com", "password": "wrong"})
+            assert first.status_code == 500
+            assert calls["authenticate"] == 1  # verified once — and counted despite the raise
+            assert auth_router._login_attempts["testclient"][0] == 1
+
+            second = client.post("/api/v1/auth/login/local", data={"username": "user@example.com", "password": "wrong-again"})
+            assert second.status_code == 500
+            assert calls["authenticate"] == 1  # fail-closed: no second verification
+    finally:
+        auth_router._login_attempts.clear()
+
+
 # ── Client IP extraction ─────────────────────────────────────────────────
 
 
