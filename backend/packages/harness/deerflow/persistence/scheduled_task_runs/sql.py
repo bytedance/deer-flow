@@ -15,8 +15,6 @@ from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, TERM
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
-# Shared with scheduled_tasks/sql.py — defined canonically in scheduled_tasks/model.py.
-QUEUED_RUN_STATUSES: tuple[str, ...] = ("queued",)
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
 

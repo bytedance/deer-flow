@@ -41,6 +41,6 @@ class ScheduledTaskRow(Base):
 
 # Status constants - shared between scheduled_tasks and scheduled_task_runs
 # to avoid circular import and ensure consistency.
-# Import these from deerflow.persistence.scheduled_tasks in both modules.
+# Import these from deerflow.persistence.scheduled_tasks.model in both modules.
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
 ACTIVE_RUN_STATUSES: frozenset[str] = frozenset({"queued", "launching", "running"})

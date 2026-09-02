@@ -108,7 +108,7 @@ async def _create_run(
         status=status,
     )
     # Explicitly set created_at so multi-history regressions exercise the
-    # secondary recency key behind _fetch_latest_run. scheduled_for still
+    # primary recency key behind _fetch_latest_run. scheduled_for still
     # defaults to the logical occurrence time unless a test overrides it.
     if created_at is not None:
         async with run_repo._sf() as session:
