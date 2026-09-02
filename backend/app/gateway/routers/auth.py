@@ -284,6 +284,16 @@ async def _check_rate_limit(ip: str) -> None:
     if record is None:
         return
     max_attempts, lockout_seconds = await asyncio.to_thread(_login_throttle_policy)
+    # The await above is a yield point: while this coroutine was suspended,
+    # another request for the same IP may have deleted or replaced the record
+    # (the pre-async version was atomic on the loop). The pre-read served only
+    # as the cheap clean-IP skip; decide on a fresh snapshot from here on —
+    # everything below is synchronous, and every mutation is guarded by
+    # re-comparing against that snapshot so a record replaced mid-flight
+    # (e.g. a successful login followed by a new failure) is never clobbered.
+    record = _login_attempts.get(ip)
+    if record is None:
+        return
     fail_count, locked_at, locked_duration = record
     if fail_count < max_attempts:
         return
@@ -298,7 +308,8 @@ async def _check_rate_limit(ip: str) -> None:
     if now >= locked_at + locked_duration:
         # The lock served the full sentence of the duration in force when it
         # started — a later duration increase must not resurrect it.
-        del _login_attempts[ip]
+        if _login_attempts.get(ip) == record:
+            del _login_attempts[ip]
         return
     if now < locked_at + lockout_seconds:
         # Still locked. The sentence now follows the current duration, and
@@ -306,7 +317,7 @@ async def _check_rate_limit(ip: str) -> None:
         # sentence always matches the policy the lock was last evaluated
         # under; a later raise can never resurrect time the lock already
         # served under a shorter policy.
-        if lockout_seconds != locked_duration:
+        if lockout_seconds != locked_duration and _login_attempts.get(ip) == record:
             _login_attempts[ip] = (fail_count, locked_at, lockout_seconds)
         raise HTTPException(
             status_code=429,
@@ -314,7 +325,8 @@ async def _check_rate_limit(ip: str) -> None:
         )
     # Original sentence still running, but the current (lowered) duration has
     # already elapsed — release early.
-    del _login_attempts[ip]
+    if _login_attempts.get(ip) == record:
+        del _login_attempts[ip]
 
 
 _MAX_TRACKED_IPS = 10000

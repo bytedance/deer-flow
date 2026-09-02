@@ -1202,6 +1202,92 @@ async def test_rate_limiter_lowered_then_raised_duration_not_resurrected(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_concurrent_checks_on_expired_lock_are_race_free(monkeypatch):
+    """Synchronized checks of the same expired lock must all resolve cleanly.
+
+    Policy resolution yields the event loop (asyncio.to_thread), so the sync
+    version's atomicity is gone: with a pre-await snapshot only, concurrent
+    checks of an expired record raced into double ``del`` — one request
+    returned normally and the others raised KeyError (review reproduction).
+    """
+    import asyncio
+
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    def _defaults():
+        return LocalAuthConfig().max_login_attempts, LocalAuthConfig().lockout_seconds
+
+    monkeypatch.setattr(auth_router, "_login_throttle_policy", _defaults)
+    _login_attempts.clear()
+    try:
+        _login_attempts["10.0.0.9"] = (5, 1.0, 1.0)  # sentence long expired
+
+        results = await asyncio.gather(*[_check_rate_limit("10.0.0.9") for _ in range(8)], return_exceptions=True)
+
+        assert all(result is None for result in results), results
+        assert "10.0.0.9" not in _login_attempts
+    finally:
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_check_survives_record_deleted_during_policy_resolution(monkeypatch):
+    """A record removed while the checker is suspended must not KeyError.
+
+    Deterministic stand-in for the suspension-window interleaving: the policy
+    resolution itself removes the record, exactly like a concurrent success
+    login would while this coroutine sits in ``asyncio.to_thread``.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_success
+
+    def _policy_that_deletes_the_record():
+        _record_login_success("10.0.0.10")
+        return 5, 300.0
+
+    monkeypatch.setattr(auth_router, "_login_throttle_policy", _policy_that_deletes_the_record)
+    _login_attempts.clear()
+    try:
+        _login_attempts["10.0.0.10"] = (5, 1.0, 1.0)  # expired
+
+        await _check_rate_limit("10.0.0.10")  # pre-fix: KeyError
+
+        assert "10.0.0.10" not in _login_attempts
+    finally:
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
+async def test_check_never_clobbers_record_replaced_during_policy_resolution(monkeypatch):
+    """A record replaced while the checker is suspended must survive intact.
+
+    The pre-await snapshot said "locked"; while suspended, a successful login
+    plus one new failure replaced the record with a fresh counter. The checker
+    must re-read and leave the fresh record alone instead of writing its
+    stale-snapshot decision over it.
+    """
+    from app.gateway.routers import auth as auth_router
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts
+
+    def _policy_that_replaces_the_record():
+        _login_attempts["10.0.0.11"] = (1, 0.0, 0.0)
+        return 2, 60.0
+
+    monkeypatch.setattr(auth_router, "_login_throttle_policy", _policy_that_replaces_the_record)
+    _login_attempts.clear()
+    try:
+        _login_attempts["10.0.0.11"] = (2, 1.0, 1.0)  # locked, sentence running
+
+        await _check_rate_limit("10.0.0.11")  # fresh read: (1, 0, 0) < max 2 → allowed
+
+        assert _login_attempts["10.0.0.11"] == (1, 0.0, 0.0)
+    finally:
+        _login_attempts.clear()
+
+
+@pytest.mark.asyncio
 async def test_rate_limiter_eviction_expires_by_stored_sentence_not_current_threshold(monkeypatch):
     """The capacity sweep must expire records by their own committed sentence,
     with no gate on the current threshold.
