@@ -601,13 +601,42 @@ def test_bundled_topologies_wire_trusted_proxies():
     so per-IP limiters must key on nginx's X-Real-IP: without
     AUTH_TRUSTED_PROXIES every visitor shares the proxy's address and the
     share-resolution throttle becomes one global 60/min bucket (a
-    deployment-wide outage, not a per-client limit)."""
+    deployment-wide outage, not a per-client limit).
+
+    The two topologies earn that trust differently. Docker compose may
+    default to the compose-internal ranges: the gateway port is unpublished,
+    so the TCP peer is always a compose container. Kubernetes may NOT
+    default to the private ranges — namespace peers include the user-code
+    sandbox pods, and a default trust would let them forge X-Real-IP and
+    rotate the login/share throttle buckets — so the Helm chart ships the
+    env only when the operator sets it explicitly, plus a NetworkPolicy
+    restricting gateway ingress to the bundled nginx/frontend/provisioner
+    pods; under that guarantee an operator can safely set the pod network."""
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[2]
     compose = (repo_root / "docker/docker-compose.yaml").read_text(encoding="utf-8")
-    helm = (repo_root / "deploy/helm/deer-flow/templates/gateway-deployment.yaml").read_text(encoding="utf-8")
+    templates = repo_root / "deploy/helm/deer-flow/templates"
+    helm = (templates / "gateway-deployment.yaml").read_text(encoding="utf-8")
+    policy = (templates / "gateway-networkpolicy.yaml").read_text(encoding="utf-8")
+    values = (repo_root / "deploy/helm/deer-flow/values.yaml").read_text(encoding="utf-8")
     assert "AUTH_TRUSTED_PROXIES" in compose
     assert compose.index("gateway:") < compose.index("AUTH_TRUSTED_PROXIES")
     assert "AUTH_TRUSTED_PROXIES" in helm
     assert "trustedProxies" in helm
+    # No cluster-wide default trust in Kubernetes, and the env is wired only
+    # when the operator opts in.
+    assert 'default "10.0.0.0/8' not in helm
+    assert "if .Values.gateway.trustedProxies" in helm
+    # The NetworkPolicy limits gateway ingress to the bundled deer-flow
+    # pods (sandbox pods must not reach the ClusterIP directly).
+    assert "kind: NetworkPolicy" in policy
+    assert "app.kubernetes.io/component: gateway" in policy
+    for component in ("nginx", "frontend", "provisioner"):
+        assert f"app.kubernetes.io/component: {component}" in policy
+    assert "port: 8001" in policy
+    assert "Ingress" in policy
+    # On by default; the fail-closed trustedProxies default lives next to it.
+    assert "networkPolicy:" in values
+    assert values.index("enabled: true", values.index("networkPolicy:")) - values.index("networkPolicy:") < 120
+    assert 'trustedProxies: ""' in values

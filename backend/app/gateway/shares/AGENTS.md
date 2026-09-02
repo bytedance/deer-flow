@@ -82,11 +82,15 @@ Gateway) through response or exception headers; per-IP
 resolve throttle (in-memory, per-worker — a courtesy control,
 the token is 256-bit unguessable; the bucket key uses the deployment-wide
 trusted-proxy model from `app.gateway.client_ip`, shared with the login
-limiter — behind the shipped nginx the bundled Docker and Helm topologies
-set `AUTH_TRUSTED_PROXIES` to the proxy networks (`gateway.trustedProxies`
-overrides in Helm), so the limit stays per-client; a custom proxy front
-must set `AUTH_TRUSTED_PROXIES` itself or every anonymous visitor shares
-the proxy's single bucket); and zero thread-state access — explicit share
+limiter — the bundled Docker topology sets `AUTH_TRUSTED_PROXIES` to the
+compose-internal ranges (safe: the gateway port is unpublished, so the peer
+is always a compose container); the Helm chart ships no cluster-wide
+default (namespace peers include user-code sandbox pods, which must never
+be trusted proxies) but restricts gateway ingress to the nginx/frontend/
+provisioner pods via a NetworkPolicy, under which `gateway.trustedProxies`
+set to the pod network safely restores per-client keying; until it is set,
+every anonymous visitor shares the proxy's single bucket); and zero
+thread-state access — explicit share
 records are the only gate in every mode, including auth-disabled. The
 bearer-URL response must never survive in a browser/proxy cache past
 revocation. The

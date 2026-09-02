@@ -114,14 +114,23 @@ spec:
             - name: GATEWAY_PORT
               value: "8001"
             {{- /* Per-IP limiters (login, share resolution) must key on the
-                  client address nginx forwards, not on the nginx pod's
-                  address (one global bucket). The gateway service is
-                  cluster-internal only — external traffic enters through
-                  nginx — so trusting the private ranges is safe here, and
-                  operators fronting the gateway directly can override via
-                  gateway.trustedProxies. */ -}}
+                  client address nginx forwards — but there is deliberately
+                  NO cluster-wide default here: in Kubernetes every pod in
+                  the namespace, including the user-code sandbox pods, can
+                  reach the gateway ClusterIP, so trusting the private
+                  ranges by default would hand the trusted-proxy identity
+                  (and with it X-Real-IP forgery, defeating both throttles)
+                  to arbitrary user code. The bundled NetworkPolicy
+                  (gateway.networkPolicy, on by default) restricts gateway
+                  ingress to the nginx pods; under that guarantee operators
+                  can safely set gateway.trustedProxies to the pod network
+                  to restore per-IP keying. Until they do, anonymous
+                  visitors share one throttle bucket — fail-closed on
+                  trust rather than fail-open on throttling. */ -}}
+            {{- if .Values.gateway.trustedProxies }}
             - name: AUTH_TRUSTED_PROXIES
-              value: {{ .Values.gateway.trustedProxies | default "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16" | quote }}
+              value: {{ .Values.gateway.trustedProxies | quote }}
+            {{- end }}
             - name: DEER_FLOW_INTERNAL_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
