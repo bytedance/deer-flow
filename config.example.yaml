@@ -23,8 +23,10 @@ config_version: 38
 # Log level for deerflow modules (debug/info/warning/error)
 log_level: info
 
-# Request trace correlation for Gateway logs, HTTP response headers, and
-# Langfuse metadata. Disabled by default to preserve existing HTTP/log output.
+# Trace ids are always issued and always returned in the `X-Trace-Id` response
+# header; this block controls log output only — whether records carry a
+# `trace_id` field, and in which format. Off by default because enabling it
+# changes the log format. Restart required (see reload_boundary.py).
 logging:
   enhance:
     enabled: false
@@ -1688,6 +1690,10 @@ skills:
 
   # Path where skills are mounted in the sandbox container
   # This is used by the agent to access skills in both local and Docker sandbox
+  # AIO/provisioner and E2B modes require a canonical absolute non-root path
+  # that does not overlap reserved platform mounts. Providers snapshot this
+  # path for identity, mounts, metadata, and synchronization, so restart the
+  # Gateway after changing it.
   # Default: /mnt/skills
   container_path: /mnt/skills
 

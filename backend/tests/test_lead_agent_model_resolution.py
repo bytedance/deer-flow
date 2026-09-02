@@ -205,6 +205,8 @@ def test_make_lead_agent_scopes_bootstrap_middlewares_to_custom_agent(monkeypatc
 
     assert len(middleware_calls) == 1
     assert middleware_calls[0]["agent_name"] == "game"
+    assert middleware_calls[0]["available_skills"] == {"bootstrap"}
+    assert middleware_calls[0]["owns_agent_skill_projection"] is False
     assert len(prompt_calls) == 1
 
 

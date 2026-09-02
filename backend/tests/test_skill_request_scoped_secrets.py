@@ -1008,7 +1008,7 @@ class TestBashToolInjectsActiveSecrets:
             patch.object(tools_mod, "is_local_sandbox", return_value=False),
             patch.object(tools_mod, "ensure_thread_directories_exist", return_value=None),
         ):
-            out = tools_mod.bash_tool.func(runtime, "run skill", "echo hi")
+            out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run skill")
         return out, captured
 
     def test_active_secret_forwarded_as_env(self):
@@ -1049,7 +1049,7 @@ class TestBashToolInjectsActiveSecrets:
             patch.object(tools_mod, "_apply_cwd_prefix", side_effect=lambda command, td: command),
             patch("deerflow.config.app_config.get_app_config", return_value=fake_cfg),
         ):
-            out = tools_mod.bash_tool.func(runtime, "run local skill", "echo hi")
+            out = tools_mod.bash_tool.func(runtime=runtime, command="echo hi", description="run local skill")
 
         assert out == "done"
         assert captured["command"] == "echo hi"

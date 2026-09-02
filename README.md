@@ -330,6 +330,8 @@ DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser
 > [!IMPORTANT]
 > The Gateway still owns active run tasks in process, so production defaults to a single Gateway worker (`GATEWAY_WORKERS=1`). Multi-worker deployments require Postgres, the Redis stream bridge (`stream_bridge.type: redis`), `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; process-local memory/JSONL event stores cannot enforce singleton delivery receipts across workers. The bridge shares SSE delivery and bounded `Last-Event-ID` replay across workers. When a valid reconnect cursor has been trimmed, or a subscriber that already established an empty-stream wait falls behind before its first delivery, Memory and Redis emit a machine-readable SSE `gap` event instead of silently returning a partial replay; the Web UI reloads durable thread/event state and resumes from the retained tail. Lease reconciliation marks runs from dead workers as errors, persists their delivery receipts, publishes the terminal stream marker, schedules retained-stream cleanup, and updates the affected thread status. SSE, `/wait`, and internal stream consumers use `stream_bridge.heartbeat_interval_seconds` (default `15`) for idle liveness checks; changing it requires a Gateway restart. Malformed Redis reconnect IDs live-tail new events instead of replaying the retained buffer, and the rolling retained-buffer TTL (`stream_ttl_seconds`) remains a cleanup safety net rather than a run timeout. IM channel state and other process-local services still need their own multi-worker coordination.
 >
+> After a run publishes its terminal stream marker, its process-local `RunRecord` remains available for the existing five-minute grace period before cleanup; durable run history remains available through `RunStore`, while the stream bridge retains its delivery tail on its separate cleanup schedule.
+>
 > Run cancellation may land on any Gateway worker. A non-owning worker now persists the interrupt or rollback request for the live owner, which observes it during lease renewal and performs the normal cancellation flow; load-balancer routing alone no longer produces a 409. The first accepted action wins even if a retry lands on the owner, and accepted cancellation competes atomically with owner completion. Dead owners still follow lease takeover and orphan recovery. Cancellation latency is therefore bounded by the lease heartbeat interval.
 >
 > With lease heartbeat enabled, a transient RunStore renewal error is retried only until the last confirmed lease expires; the stale worker then cancels local execution and suppresses checkpoint, completion-hook, delivery-receipt, and thread-status finalization. A remote tool side effect already in flight may still be outside local cancellation.
@@ -486,7 +488,7 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
-Settings > Tools updates one MCP server at a time: an invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
+Settings > Tools adds, replaces, and deletes one MCP server at a time through targeted mutations that preserve concurrent sibling changes; deletes use a bodyless URL-addressed request. An invalid stdio command on one server no longer blocks toggling another, while enabling that invalid server remains protected by the command allowlist and surfaces the backend validation message in the UI.
 Targeted updates accept both DeerFlow's `type` field and the MCP-spec `transport` field for SSE/HTTP servers.
 Runtime MCP and skill updates replace `extensions_config.json` atomically, so an interrupted write cannot leave the shared configuration truncated or partially written.
 MCP routing hints can also prefer a specific MCP tool for matching requests without forbidding other tools. When `tool_search` defers MCP schemas, matching routing metadata can auto-promote up to `tool_search.auto_promote_top_k` deferred schemas before the model call.
@@ -715,16 +717,38 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 #### Request Trace Correlation
 
-Gateway request trace correlation is disabled by default so existing HTTP responses and log formats stay unchanged. To enable it, set:
+Every Gateway HTTP response carries an `X-Trace-Id` header. The id is inherited
+from an inbound `X-Trace-Id` when the caller sends one and generated otherwise, so
+a proxy or an upstream service can pin one id across services. It needs no
+configuration and cannot be turned off.
+
+The same id stays attached to work that outlives the HTTP response: the detached
+run task, any subagents it delegates to, and the background memory-update threads.
+It is recorded as `deerflow_trace_id` on the run record (visible in the runs API),
+in the thread's checkpoint metadata, and in Langfuse traces. Scheduled tasks, MCP
+task notification runs, and IM channel messages start outside HTTP and mint their
+own id per occurrence.
+
+Log records carry that id only when enhanced logging is on:
 
 ```yaml
 logging:
   enhance:
-    enabled: true
-    format: text
+    enabled: true   # print trace_id into log records
+    format: text    # or json
 ```
 
-When enabled, every Gateway HTTP response includes `X-Trace-Id`, logs include `trace_id`, and Langfuse traces created by that request include `metadata.deerflow_trace_id` with the same value.
+This is off by default because turning it on changes the log format. `logging` is
+restart-required, so edit `config.yaml` and restart the Gateway. The setting
+affects log output only — the id, the response header, and the run metadata are
+unaffected.
+
+`deerflow_trace_id` is a DeerFlow correlation id: it is not a run id, and it is not
+a provider's native trace id. It is not a lookup key either — nothing resolves a
+thread or a run from it; use it to correlate log lines. A `deerflow_trace_id` sent
+in a run request's `metadata` or `config.context` is ignored and overwritten, so
+the response header, the logs, and the persisted run can never disagree. To pin a
+correlation id, send the `X-Trace-Id` header.
 
 Gateway run history also records one terminal `run.delivery` receipt per run,
 including zero-output and crash-recovered runs. The receipt is persisted before
@@ -797,6 +821,14 @@ LangSmith and Langfuse attach as LangChain callbacks, so you can enable both and
 
 For Docker deployments, tracing is disabled by default. Set `LANGSMITH_TRACING=true` and `LANGSMITH_API_KEY` in your `.env` to enable it.
 
+#### Existing-Run Stream Actions
+
+Existing-run SSE joins are observation-only on `GET`: supplying
+`action=interrupt|rollback` returns `405`. Cancellation on this stream route is
+`POST`-only and requires the `runs:cancel` permission. Accordingly, the OpenAPI
+contract exposes `action` and `wait` only on `POST`; the `GET` operation exposes
+only its path parameters.
+
 #### Personal Access Tokens
 
 Non-interactive clients (CI pipelines, scripts, server-to-server integrations)
@@ -853,6 +885,8 @@ When you install `.skill` archives through the Gateway, DeerFlow accepts standar
 
 Disabling a skill also removes it from the sandbox filesystem view, so shell commands and structured file tools follow the same enabled state. Local, Docker/AIO, hostPath provisioner, and newly created E2B sandboxes source `/mnt/skills` from enabled-only projections that update when public, custom, legacy, or managed integration skills are toggled, edited, created, deleted, or installed. Structured `read_file` calls (including line ranges and read-before-write checks) use the sandbox provider's mount mapping, so the user identity captured when the sandbox was acquired remains authoritative. Managed integration packages remain shared, while their projected filesystem visibility follows each user's enabled state. Multi-worker Gateways re-read on-disk enable state while rebuilding user projections, so a toggle handled by one worker is honored by another worker's next sandbox acquire. Existing E2B sandboxes retain their creation-time snapshot until they are recreated. PVC-backed provisioner skills keep their configured PVC snapshot/layout for now; dynamic PVC materialization is tracked separately.
 
+For `LocalSandboxProvider`, this is a managed tool-path boundary rather than host filesystem isolation. Explicit per-Agent skill policies are accepted only while host bash is disabled (the default), because a host subprocess can address canonical paths without using the provider's virtual-path mappings. Use Docker/AIO, the Kubernetes provisioner, or E2B when the filesystem boundary must remain enforceable alongside shell access.
+
 Managed integrations install shared read-only skill packs without mixing them
 into custom skills. The Lark/Feishu CLI integration is available under
 `Settings → Integrations → Lark / Feishu CLI`; an administrator installs or
@@ -882,6 +916,8 @@ is per-user (it never touches another user's credentials), validates the new
 credentials through the official CLI's live tenant-token probe before replacing
 the active app, and revokes/removes the previous app's OAuth tokens. A rejected
 credential change does not supersede an in-progress setup or authorization flow.
+The previous OAuth data is cleared before the CLI stores the replacement app,
+so the new file-backed keychain secret remains available during reconnection.
 DeerFlow then immediately opens browser authorization for the newly bound app so
 the switch ends in a usable connection.
 
@@ -940,7 +976,7 @@ cd backend
 uv run python -m deerflow.skills.review.cli ../skills/public/data-analysis --format text --fail-on error --fail-on-incomplete
 ```
 
-Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
+Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, rendered web capture, file operations, bash execution — and supports custom tools via MCP servers and Python functions. The bundled DDG, Brave, Tavily, and SearXNG search providers accept an optional `time_range` of `day`, `week`, `month`, or `year`; omitting it preserves existing search behavior. For DDG recency searches, DeerFlow excludes DDGS backends that ignore time limits. Swap anything. Add anything.
 
 Advanced deployments can enable pluggable authorization with `authorization.enabled` in `config.yaml`. A configured `AuthorizationProvider` filters denied tools before they reach the model or deferred-tool catalog, then the same provider is checked again before every business-tool execution through the existing guardrail middleware. Gateway `threads:*` and `runs:*` route permissions are derived from the same provider, while existing owner checks and admin-only management gates remain in force. Every HTTP route that starts or enables a future Agent run requires `runs:create`: this includes the stateless `POST /api/runs/stream` and `POST /api/runs/wait` endpoints plus scheduled-task create, update, resume, and manual-trigger mutations. Scheduled-task mutations retain their existing `threads:write` requirement, and the stateless routes separately enforce ownership when the optional thread ID is supplied in the request body. A generated `tool_search` may bypass the second tool check only when it fronts the current build's already-filtered deferred catalog. Model access follows the same provider: the Gateway `models` list is filtered per principal, `model:use` is enforced on model detail requests and again when the runtime resolves the agent's model, and a denied default model falls back to the first remaining candidate that also passes `model:use`. The built-in RBAC provider supports per-role `tools`, `routes`, `models`, `skills`, and `sandbox` allow/deny policies and validates that `default_role` names a configured role; authorization is disabled by default. See `config.example.yaml` and the [authorization RFC](docs/plans/2026-07-10-pluggable-authorization-rfc.md).
 
@@ -1205,6 +1241,12 @@ The Hash counts remote VMs and in-flight creates, repairs interrupted creates
 from E2B metadata, grace-protects stale inventory omissions, and blocks new
 creates while Redis or initial inventory is unavailable. Run Redis with persistence, non-evicting memory, and HA.
 
+E2B snapshots `skills.container_path` when the provider starts and includes the
+canonical root in its thread identity, warm-pool seed, and remote metadata. A
+VM created for a different root is never adopted; reconciliation reaps it after
+the configured grace period once no live peer owns it. Restart the Gateway after
+changing the root.
+
 E2B acquisition uses a bounded executor. Waiting acquisitions do not use the
 default asyncio executor.
 
@@ -1232,7 +1274,7 @@ Image bytes loaded for a vision-model call are transient: DeerFlow removes the h
 
 After each run, DeerFlow records a workspace change summary for the run-owned `workspace` and `outputs` directories. The Web UI shows a compact "files changed" badge on the assistant turn; opening it reveals created, modified, and deleted files with text diffs when safe to display. Uploads are excluded because they are user inputs, not agent-generated changes, and stdio MCP temporary/debug files under the DeerFlow-owned `.mcp/` namespace are excluded because they are process-internal state (like `.git/` and `node_modules/`, any directory named `.mcp` is excluded at any depth). Large, binary, or sensitive-looking files are shown as metadata only.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership comes from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes.
 
 Text artifacts are streamed with HTTP byte-range support. The Web UI initially
 loads at most 1 MiB, shows the preview size when a file is larger, and waits for
@@ -1508,12 +1550,12 @@ immediately after starting any deployment that is not loopback-only.
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
-Backend `make test` is offline by default and excludes live external-API
-coverage. Maintainers can explicitly run the real `DeerFlowClient` integration
-suite with `cd backend && make test-live` after providing a valid root
-`config.yaml` and API credentials; this may incur API costs and create local
-sandboxes, artifacts, or files. Direct pytest runs additionally require
-`DEER_FLOW_RUN_LIVE_TESTS=1`.
+Backend `make test` excludes live external-API and blocking-I/O coverage.
+Run `cd backend && make test-blocking-io` for strict blocking-I/O checks.
+Maintainers can run the real `DeerFlowClient` suite with `cd backend && make test-live`.
+This command requires a valid root `config.yaml` and API credentials.
+It can incur API costs and create local sandboxes, artifacts, or files.
+Direct pytest runs additionally require `DEER_FLOW_RUN_LIVE_TESTS=1`.
 
 Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
 Backend blocking-IO diagnostics are available from the repository root with

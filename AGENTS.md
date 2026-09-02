@@ -100,6 +100,14 @@ Skill quality review note:
   tag-neutralized; full raw payloads stay in tool artifacts. See
   [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
   `skill-creator` ownership boundaries.
+- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
+  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
+  edits from their head revision, but only the manifest from the trusted base
+  revision can suppress that run. Entries match one error finding exactly,
+  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
+  output, and can never waive blocker findings. Adding a waiver and relying on
+  it therefore requires two steps: merge the reviewed waiver first, then update
+  the affected public skill in a later pull request.
 
 Scheduled-task note:
 - The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
@@ -146,12 +154,13 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-cd backend && make test       # Backend test suite
+cd backend && make test       # Default backend suite; excludes live and blocking-I/O tests
+cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
 # Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server: Webpack on Windows, Turbopack elsewhere (override with DEER_FLOW_DEV_BUNDLER)
+cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
 cd frontend && pnpm check     # Lint + type check (run before committing)
 cd frontend && pnpm test      # Unit tests
 ```
