@@ -342,13 +342,50 @@ def _collapse_separators_once(text: str) -> tuple[str, list[tuple[int, int]]]:
     return "".join(normalized), spans
 
 
+def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[str, list[tuple[int, int]]]:
+    """Resolve ``.``/``..``/``%2E`` segments away (RFC 3986 dot-segment
+    removal — browser URL shortening and the nginx URI normalizer both do
+    this, so ``/api/a/b/../../threads/…`` reaches the owner-scoped route).
+    Stack-shaped, matching real resolution: N ``..`` cancel N preceding
+    segments, so ``ab/cd/..`` stays ``ab`` (public) while ``a/b/../..``
+    cancels to nothing. A cancelled segment's original bytes leave the
+    shadow exactly like the dot that cancelled them; ``%2E`` variants are
+    recognized because the shadow does not percent-decode."""
+    out: list[str] = []
+    out_spans: list[tuple[int, int]] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] == "/":
+            j = i + 1
+            while j < n and text[j] not in "/?#":
+                j += 1
+            segment = text[i + 1 : j].lower()
+            if segment in (".", "%2e"):
+                i = j
+                continue
+            if segment in ("..", "%2e%2e", ".%2e", "%2e."):
+                while out and out[-1] != "/":
+                    out.pop()
+                    out_spans.pop()
+                if out:
+                    out.pop()
+                    out_spans.pop()
+                i = j
+                continue
+        out.append(text[i])
+        out_spans.append(spans[i])
+        i += 1
+    return "".join(out), out_spans
+
+
 def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, int]]]:
     """Normalize escape and backslash separators for classification.
 
     Returns the normalized text plus, for every normalized character, the
     ``(first, last)`` original index it was produced from, so a match found in
     the normalized text can be cut out of the original — escaped bytes must
-    never survive into the public output. A run of backslashes before a ``/``
+    never survive the public output. A run of backslashes before a ``/``
     collapses into that single ``/`` (JSON ``\\/`` escapes at any depth);
     remaining backslashes are treated as Windows-style separators. Separator
     characters arriving as HTML character references (``&#47;``, ``&sol;``,
@@ -360,15 +397,18 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
     the pass runs repeatedly until it stabilizes (bounded by
     ``_COLLAPSE_MAX_PASSES``, the same depth the percent-decoding loop
     allows); spans are composed across passes so every cut still lands on
-    original bytes.
+    original bytes. Each round also resolves dot segments away, so decodes
+    that reveal ``.``/``..`` compositions (``&#46;&#46;``, ``%2E``) are
+    normalized like their resolved forms.
     """
     normalized, spans = _collapse_separators_once(text)
     for _ in range(_COLLAPSE_MAX_PASSES - 1):
         collapsed, collapsed_spans = _collapse_separators_once(normalized)
-        if collapsed == normalized:
+        resolved, resolved_spans = _remove_dot_segments_once(collapsed, collapsed_spans)
+        if resolved == normalized:
             break
-        normalized = collapsed
-        spans = [(spans[first][0], spans[last][1]) for first, last in collapsed_spans]
+        normalized = resolved
+        spans = [(spans[first][0], spans[last][1]) for first, last in resolved_spans]
     return normalized, spans
 
 
@@ -412,25 +452,14 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 # in running text classifies identically instead of publishing a
 # live-looking private link.
 #
-# The boundary before ``api``/``mnt`` is the token start, a real separator,
-# or a joining terminator (tool-style comma lists: a public head may not
-# shield the private tail behind it) — never mid-word or across a dot or
-# hyphen, where the bytes name a longer public identifier or host
-# (``foo_api/threads``, ``foo.api``, ``foo-mnt``). ``_`` is a cut
-# terminator but stays a non-boundary for the same reason.
-_PHRASE_BOUNDARY = f"(?:^|[{re.escape('/' + _REFERENCE_CUT_TERMINATORS.replace('_', ''))}])"
-# Dot-segment groups resolve away at the same layers that merge ``//``
-# (browser URL shortening folds ``.``/``%2E`` segments, nginx normalizes
-# ``..``), so ``/api/x/../threads/…`` and ``/mnt/./user-data`` reach the
-# owner-scoped route exactly like their collapsed forms. Each group cancels
-# exactly one segment — a lone ``..`` cannot cancel two, so
-# ``/api/ab/cd/../threads`` stays public (it resolves to ``ab/threads``) —
-# and the group is a lazy optional so the zero-dot phrase (every common
-# case) matches without exploring cancellations; the greedy multi-segment
-# form backtracked to the token end at every phrase position.
-_DOT_SEGMENTS = r"(?:/(?:\.|%2e){1,2}|/[^/?#\s]+/(?:\.|%2e){1,2})"
-_API_THREAD_REFERENCE_RE = re.compile(_PHRASE_BOUNDARY + r"api(?:" + _DOT_SEGMENTS + r")??/threads/[^/?#\s]+/", re.IGNORECASE)
-_MNT_USER_DATA_RE = re.compile(_PHRASE_BOUNDARY + r"mnt(?:" + _DOT_SEGMENTS + r")??/user-data", re.IGNORECASE)
+# The phrase boundary is a lookbehind — the phrase starts wherever any
+# non-word, non-dot, non-hyphen character (or nothing) precedes it. Any
+# join character can head a whitespace-free token (``/docs&api/…``,
+# ``/docs，api/…``), while ``foo_api``/``foo.api``/``foo-mnt`` stay public
+# identifiers. Dot segments are resolved away inside the shadow, so the
+# surfaces match their literal resolved shapes here.
+_API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/threads/[^/?#\s]+/", re.IGNORECASE)
+_MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data", re.IGNORECASE)
 
 
 def _trim_reference_punctuation(value: str) -> str:
@@ -473,8 +502,15 @@ def _starts_with_private_reference(window: str) -> bool:
         candidate = unquote(decoded)
         if candidate == decoded:
             break
-        decoded = _PROBE_SLASH_RUN_RE.sub("/", candidate)
-    decoded = _trim_reference_punctuation(decoded).lower()
+        decoded = candidate
+    decoded = _PROBE_SLASH_RUN_RE.sub("/", decoded)
+    if "/." in decoded:
+        decoded, _ = _remove_dot_segments_once(decoded, [(index, index) for index in range(len(decoded))])
+    # Leading separators are stripped before the anchored match: the phrase
+    # regexes use a lookbehind boundary, so they match at the phrase itself
+    # (a protocol-relative ``//mnt/…`` strips to the phrase and classifies
+    # like the absolute form).
+    decoded = _trim_reference_punctuation(decoded).lstrip("/").lower()
     return _MNT_USER_DATA_RE.match(decoded) is not None or _API_THREAD_REFERENCE_RE.match(decoded) is not None
 
 
@@ -537,10 +573,11 @@ def _private_reference_segments(value: str) -> list[tuple[int, int]]:
         probe = pos
         while probe < n and value[probe] in _REFERENCE_CUT_TERMINATORS:
             probe += 1
-        if candidate is not None and candidate[0] == probe:
-            # The regex already proves the phrase sits exactly at the probe
-            # position — no window decode needed. This is the common joined
-            # list shape; decoding per item here was the quadratic hotspot.
+        # A regex phrase sitting exactly at the probe position — bare, or
+        # behind its own single separator — proves itself without any
+        # window decode. This is the common joined-list shape; decoding per
+        # item here was the quadratic hotspot.
+        if candidate is not None and (candidate[0] == probe or (candidate[0] == probe + 1 and value[probe] == "/")):
             probed = True
         else:
             probed = probe > pos and probe < n and not value[probe].isspace() and _starts_with_private_reference(value[probe : probe + _SEGMENT_PROBE_WINDOW])
@@ -553,12 +590,12 @@ def _private_reference_segments(value: str) -> list[tuple[int, int]]:
         if candidate is not None and (not probed or candidate[0] < probe):
             start, walk_from = candidate
             cut_gap(pos, start)
-            if start > 0 and walk_from > start:
-                # The boundary character before the phrase (a separator or a
-                # joining terminator) is public structure: cut from the phrase
-                # itself, so ``/docs,api/...`` keeps its comma and a public
-                # host keeps the separator that introduced the private subpath.
-                start += 1
+            if start == 1 and value[0] == "/":
+                # A standalone reference's own leading separator belongs to
+                # the cut; a separator deeper in the token is public
+                # structure introducing the phrase (a public host keeps the
+                # slash before a private-shaped subpath).
+                start = 0
             end = _phrase_end(value, walk_from)
             if end <= start:
                 pos = start + 1

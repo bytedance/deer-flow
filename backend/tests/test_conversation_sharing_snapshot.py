@@ -393,6 +393,43 @@ async def test_neutralize_large_joined_tokens_stay_tractable():
     assert ",/x," in result  # public junk between the cuts survives
 
 
+async def test_neutralize_multi_dot_segment_resolution():
+    """Dot-segment removal is stack-shaped: N ``..`` cancel N preceding
+    segments, in any mix with ``.`` — the classifier must see the resolved
+    path, not just one cancellation."""
+    neutralize = _neutralize_private_references
+    assert neutralize("see /api/a/b/../../threads/t1/uploads/x.pdf now") == "see [private artifact omitted] now"
+    assert neutralize("see /mnt/a/b/../../user-data/x.csv now") == "see [private artifact omitted] now"
+    assert neutralize("see /api/x/./../threads/t1/artifacts now") == "see [private artifact omitted] now"
+    assert neutralize("see /api/x/.././threads/t1/artifacts now") == "see [private artifact omitted] now"
+    assert neutralize("see /api/a/b/%2e%2e/%2e%2e/threads/t1/u now") == "see [private artifact omitted] now"
+    # one real segment + two dots cancels the surface name itself: public
+    assert neutralize("see /api/x/%2e%2e/%2e%2e/threads/t1/u now") == "see /api/x/%2e%2e/%2e%2e/threads/t1/u now"
+    assert neutralize("grab [the export](/api/a/b/../../threads/t1/uploads/q4.pdf)") == "grab the export [private artifact omitted]"
+    assert neutralize("x /docs,/api/a/b/../../threads/t1/u y") == "x /docs,/[private artifact omitted] y"
+    # bare relative form with dots must keep its round-8 protection
+    assert neutralize("report at api/./threads/t1/uploads/q4.pdf") == "report at [private artifact omitted]"
+    assert neutralize("report at api/a/../threads/t1/uploads/q4.pdf") == "report at [private artifact omitted]"
+    # a ``..`` may cancel the surface name itself: the resolved path is public
+    assert neutralize("/api/../threads/t1/u") == "/api/../threads/t1/u"
+    assert neutralize("/mnt/../user-data/x") == "/mnt/../user-data/x"
+
+
+async def test_neutralize_nonterminator_join_characters():
+    """Any non-word character can join a public head to a private tail in
+    one whitespace-free token — the boundary is "not a word/dot/hyphen
+    char", not a fixed punctuation list (fullwidth and symbolic joins
+    included)."""
+    neutralize = _neutralize_private_references
+    assert neutralize("report at /docs&api/threads/t1/uploads/q4.pdf now") == "report at /docs&[private artifact omitted] now"
+    assert neutralize("report at /docs=api/threads/t1/uploads/q4.pdf now") == "report at /docs=[private artifact omitted] now"
+    assert neutralize("report at /docs，api/threads/t1/uploads/q4.pdf now") == "report at /docs，[private artifact omitted] now"
+    assert neutralize("grab [x](/docs&api/threads/t1/uploads/q.pdf)") == "grab x [private artifact omitted]"
+    # word, dot, and hyphen adjacency still shields nothing (public identifiers)
+    assert neutralize("see foo.api/threads/th1/artifacts") == "see foo.api/threads/th1/artifacts"
+    assert neutralize("see foo-mnt/user-data") == "see foo-mnt/user-data"
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted
