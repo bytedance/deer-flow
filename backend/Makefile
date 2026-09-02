@@ -48,7 +48,7 @@ test-shard:
 # suite so duration-aware sharding reflects real wall-clock cost. Run locally or
 # in a periodic job, then commit the refreshed file.
 test-shard-durations:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --durations-path=$(DURATIONS_FILE) tests/ -q
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m "not live" --ignore=tests/blocking_io --store-durations --clean-durations --durations-path=$(DURATIONS_FILE) tests/ -q
 
 lint:
 	uv run ruff check .

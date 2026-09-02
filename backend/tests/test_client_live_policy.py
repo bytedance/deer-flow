@@ -168,6 +168,7 @@ def test_default_ci_workflow_does_not_opt_in_to_live_tests() -> None:
 def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
     workflow = (REPO_ROOT / ".github" / "workflows" / "backend-unit-tests.yml").read_text(encoding="utf-8")
 
+    assert "shard: [1, 2, 3, 4]" in workflow
     assert "make test-shard SPLITS=4" in workflow
     assert "GROUP=${{ matrix.shard }}" in workflow
 
@@ -191,6 +192,14 @@ def test_ci_unit_test_workflow_runs_duration_aware_shards() -> None:
     assert 'pytest -m "not live"' in full_command
     assert "--ignore=tests/blocking_io" in full_command
     assert LIVE_OPT_IN not in full_command
+
+
+def test_duration_baseline_target_replaces_stale_entries() -> None:
+    command = _dry_run_make_target("test-shard-durations")
+
+    assert "--store-durations" in command
+    assert "--clean-durations" in command
+    assert "--durations-path=.test_durations" in command
 
 
 def test_blocking_io_ci_workflow_owns_dedicated_suite() -> None:
