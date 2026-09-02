@@ -454,7 +454,7 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
-    from app.gateway.auth_disabled import is_auth_disabled
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION, is_auth_disabled
 
     return UserResponse(
         id=str(user.id),
@@ -466,6 +466,9 @@ async def get_me(request: Request):
         # DEER_FLOW_AUTH_DISABLED (a non-NEXT_PUBLIC env compiles to false in
         # the client bundle), so session-only affordances gate on this field.
         auth_disabled=is_auth_disabled(),
+        # The identity fence's generation tag: the session token's iat, so
+        # the client can declare what it believes it is on PAT requests.
+        session_generation=_session_generation(request) if getattr(request.state, "auth_source", None) == AUTH_SOURCE_SESSION else None,
     )
 
 
@@ -483,6 +486,57 @@ def require_session_source(request: Request) -> None:
 
     if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint requires interactive session authentication")
+
+
+SESSION_IDENTITY_HEADER = "X-DF-Session"
+
+
+def _session_generation(request: Request) -> int | None:
+    """Epoch-second ``iat`` of the current session token, or None.
+
+    The generation is what makes "same tab, replaced session" detectable:
+    every login mints a fresh token, so a stale client-side identity can
+    never present the current session's generation. Non-session sources
+    (PAT bearer, auth-disabled) have no session token and yield None.
+    """
+    from app.gateway.auth.jwt import decode_token
+    from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME
+
+    token = request.cookies.get(ACCESS_TOKEN_COOKIE_NAME)
+    if not token:
+        return None
+    payload = decode_token(token)
+    iat = getattr(payload, "iat", None)
+    return int(iat.timestamp()) if iat is not None else None
+
+
+def require_session_identity_fence(request: Request) -> None:
+    """Reject a declared identity the current session does not hold.
+
+    A cross-tab account switch replaces the shared session cookie at once
+    while a backgrounded tab's React state still names the previous
+    account, and remount/reconnect/invalidation can fire a PAT request in
+    that window — fetching, caching, and rendering the wrong account's
+    token summaries, or minting/revoking credentials for it. Browser
+    clients declare what they believe they are (``X-DF-Session:
+    <user_id>:<generation>``, both from ``/me``) and the backend compares
+    the declaration against the authenticated principal before any read
+    or side effect. Requests without a declaration (the README-documented
+    curl flows) pass: those clients hold exactly one credential by
+    construction.
+    """
+    from app.gateway.auth_disabled import AUTH_SOURCE_SESSION
+
+    declared = request.headers.get(SESSION_IDENTITY_HEADER)
+    if declared is None:
+        return
+    user = getattr(request.state, "user", None)
+    generation = _session_generation(request)
+    if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION or user is None or generation is None or declared != f"{user.id}:{generation}":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Session identity changed — refresh the page and retry",
+        )
 
 
 class PATCreateRequest(BaseModel):
@@ -534,7 +588,7 @@ def _pat_summary(record: dict) -> PATSummaryResponse:
     )
 
 
-@router.post("/pats", status_code=status.HTTP_201_CREATED, response_model=PATCreatedResponse, dependencies=[Depends(require_session_source)])
+@router.post("/pats", status_code=status.HTTP_201_CREATED, response_model=PATCreatedResponse, dependencies=[Depends(require_session_source), Depends(require_session_identity_fence)])
 async def create_pat(request: Request, body: PATCreateRequest):
     """Create a personal access token for the session user.
 
@@ -571,7 +625,7 @@ async def create_pat(request: Request, body: PATCreateRequest):
     )
 
 
-@router.get("/pats", response_model=list[PATSummaryResponse], dependencies=[Depends(require_session_source)])
+@router.get("/pats", response_model=list[PATSummaryResponse], dependencies=[Depends(require_session_source), Depends(require_session_identity_fence)])
 async def list_pats(request: Request):
     """List the session user's tokens. Never returns digests or raw tokens."""
     from app.gateway.deps import get_pat_repo
@@ -581,7 +635,7 @@ async def list_pats(request: Request):
     return [_pat_summary(record) for record in records]
 
 
-@router.delete("/pats/{pat_id}", response_model=MessageResponse, dependencies=[Depends(require_session_source)])
+@router.delete("/pats/{pat_id}", response_model=MessageResponse, dependencies=[Depends(require_session_source), Depends(require_session_identity_fence)])
 async def revoke_pat(request: Request, pat_id: str):
     """Revoke one of the session user's tokens. Revocation is immediate."""
     from app.gateway.deps import get_pat_repo

@@ -41,3 +41,4 @@ class UserResponse(BaseModel):
     needs_setup: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")
     auth_disabled: bool = Field(False, description="Runtime DEER_FLOW_AUTH_DISABLED state, so clients can hide session-only affordances")
+    session_generation: int | None = Field(None, description="Epoch-second iat of the current session token — the identity fence's generation tag; None for non-session sources")

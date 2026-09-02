@@ -7,17 +7,22 @@ const fetchMock = rs.hoisted(() => rs.fn());
 // Mutable on purpose: the identity-switch regression needs to change the
 // authenticated user between renders, which the static useAuth mock can't.
 const authMock = rs.hoisted(() => ({
-  user: { id: "test-user" } as { id: string } | null,
+  user: { id: "test-user" } as {
+    id: string;
+    session_generation?: number | null;
+  } | null,
 }));
+const refreshUserMock = rs.hoisted(() => rs.fn());
 
 rs.mock("@/core/api/fetcher", () => ({
   fetch: fetchMock,
 }));
 
 rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: authMock.user }),
+  useAuth: () => ({ user: authMock.user, refreshUser: refreshUserMock }),
 }));
 
+import { StaleSessionIdentityError } from "@/core/pats/api";
 import { patQueryKey, usePats, useRevokePat } from "@/core/pats/hooks";
 import type { PatSummary } from "@/core/pats/types";
 
@@ -44,6 +49,7 @@ function summary(id: string): PatSummary {
 describe("useRevokePat", () => {
   beforeEach(() => {
     fetchMock.mockReset();
+    refreshUserMock.mockReset();
     authMock.user = { id: "test-user" };
   });
 
@@ -94,6 +100,7 @@ describe("useRevokePat", () => {
 describe("usePats", () => {
   beforeEach(() => {
     fetchMock.mockReset();
+    refreshUserMock.mockReset();
     authMock.user = { id: "user-a" };
   });
 
@@ -157,5 +164,75 @@ describe("usePats", () => {
     expect(queryClient.getQueryData(patQueryKey("user-b"))).toEqual([
       summary("pat-b"),
     ]);
+  });
+
+  it("declares the session identity on list requests once /me provided a generation", async () => {
+    authMock.user = { id: "user-a", session_generation: 1756700000 };
+    fetchMock.mockResolvedValue(Response.json([summary("pat-a")]));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => usePats(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => {
+      expect(result.current.pats).toHaveLength(1);
+    });
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect((init.headers as Record<string, string>)["X-DF-Session"]).toBe(
+      "user-a:1756700000",
+    );
+  });
+
+  it("omits the declaration when no generation is known", async () => {
+    authMock.user = { id: "user-a" };
+    fetchMock.mockResolvedValue(Response.json([summary("pat-a")]));
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => usePats(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => {
+      expect(result.current.pats).toHaveLength(1);
+    });
+    const init = fetchMock.mock.calls[0]![1] as RequestInit;
+    expect((init.headers as Record<string, string>)["X-DF-Session"]).toBe(
+      undefined,
+    );
+  });
+
+  it("reconciles instead of rendering when the fence rejects the stale identity", async () => {
+    // The race the backend fence closes: this tab still believes user-a,
+    // the session cookie belongs to user-b, and the remount-fired list
+    // request carries user-a's declaration. The fence answers 409 — no
+    // wrong-account data may cross the boundary — and the only correct
+    // client response is to reconcile the auth state, never to render.
+    authMock.user = { id: "user-a", session_generation: 1756700000 };
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          detail: "Session identity changed — refresh the page and retry",
+        }),
+        { status: 409, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => usePats(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => {
+      expect(result.current.error).toBeInstanceOf(StaleSessionIdentityError);
+    });
+    expect(result.current.pats).toEqual([]);
+    expect(queryClient.getQueryData(patQueryKey("user-a"))).toBeUndefined();
+    await waitFor(() => {
+      expect(refreshUserMock).toHaveBeenCalledTimes(1);
+    });
   });
 });
