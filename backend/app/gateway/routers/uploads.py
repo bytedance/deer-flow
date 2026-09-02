@@ -11,7 +11,7 @@ from typing import BinaryIO
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
+from app.gateway.authz import SandboxRequestLease, require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
@@ -363,142 +363,159 @@ async def upload_files(
 
     sandbox_provider = get_sandbox_provider()
     sync_to_sandbox = not _uses_thread_data_mounts(sandbox_provider)
+    sandbox_lease: SandboxRequestLease | None = None
     sandbox = None
-    if sync_to_sandbox:
-        # Phase 3: enforce sandbox:execute before acquiring — a role denied
-        # sandbox execution must not trigger sandbox allocation just by
-        # uploading files. Deny skips the sync; the upload itself still
-        # succeeds (files stay in the thread uploads dir; the agent cannot
-        # consume them via sandbox anyway).
-        sandbox, _sandbox_id, sandbox_denied = await try_acquire_sandbox_for_request(
-            request,
-            sandbox_provider,
-            thread_id,
-            user_id=effective_user_id,
-            app_config=config,
-        )
-        if not sandbox_denied and sandbox is None:
-            raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
-    auto_convert_documents = _auto_convert_documents_enabled(config)
-
-    for file in files:
-        if not file.filename:
-            continue
-
-        try:
-            original_filename = normalize_filename(file.filename)
-            safe_filename = claim_unique_filename(original_filename, seen_filenames)
-        except ValueError:
-            logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
-            continue
-
-        try:
-            file_path, file_size, total_size = await _write_upload_file_with_limits(
-                file,
-                uploads_dir=uploads_dir,
-                display_filename=safe_filename,
-                max_single_file_size=limits.max_file_size,
-                max_total_size=limits.max_total_size,
-                total_size=total_size,
+    try:
+        if sync_to_sandbox:
+            # Phase 3: enforce sandbox:execute before acquiring — a role denied
+            # sandbox execution must not trigger sandbox allocation just by
+            # uploading files. Deny skips the sync; the upload itself still
+            # succeeds (files stay in the thread uploads dir; the agent cannot
+            # consume them via sandbox anyway).
+            sandbox_lease = await try_acquire_sandbox_for_request(
+                request,
+                sandbox_provider,
+                thread_id,
+                user_id=effective_user_id,
+                app_config=config,
+                owner_prefix="gateway:upload",
+                release_on_last=False,
             )
-            written_paths.append(file_path)
+            sandbox = sandbox_lease.sandbox
+            if not sandbox_lease.denied and sandbox is None:
+                raise HTTPException(status_code=500, detail="Failed to acquire sandbox")
 
-            virtual_path = upload_virtual_path(safe_filename)
+        auto_convert_documents = _auto_convert_documents_enabled(config)
 
-            if sync_to_sandbox:
-                sandbox_sync_targets.append((file_path, virtual_path))
+        for file in files:
+            if not file.filename:
+                continue
 
-            file_info = {
-                "filename": safe_filename,
-                "size": file_size,
-                "path": str(sandbox_uploads / safe_filename),
-                "virtual_path": virtual_path,
-                "artifact_url": upload_artifact_url(thread_id, safe_filename),
-            }
-            if safe_filename != original_filename:
-                file_info["original_filename"] = original_filename
+            try:
+                original_filename = normalize_filename(file.filename)
+                safe_filename = claim_unique_filename(original_filename, seen_filenames)
+            except ValueError:
+                logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
+                continue
 
-            logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
+            try:
+                file_path, file_size, total_size = await _write_upload_file_with_limits(
+                    file,
+                    uploads_dir=uploads_dir,
+                    display_filename=safe_filename,
+                    max_single_file_size=limits.max_file_size,
+                    max_total_size=limits.max_total_size,
+                    total_size=total_size,
+                )
+                written_paths.append(file_path)
 
-            file_ext = file_path.suffix.lower()
-            if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
-                # Reserve the companion .md exclusively so conversion cannot
-                # truncate another uploaded or derived file — including one
-                # left by an earlier request (seen_filenames is request-scoped).
-                provisional_md_name = Path(safe_filename).with_suffix(".md").name
-                unique_md_name = await run_file_io(reserve_unique_filename, uploads_dir, provisional_md_name, seen_filenames)
-                md_output = file_path.with_name(unique_md_name)
-                md_path = None
-                try:
-                    md_path = await convert_file_to_markdown(file_path, output_path=md_output)
-                    if md_path:
-                        written_paths.append(md_path)
-                        md_virtual_path = upload_virtual_path(md_path.name)
+                virtual_path = upload_virtual_path(safe_filename)
 
-                        if sync_to_sandbox:
-                            sandbox_sync_targets.append((md_path, md_virtual_path))
+                if sync_to_sandbox:
+                    sandbox_sync_targets.append((file_path, virtual_path))
 
-                        file_info["markdown_file"] = md_path.name
-                        file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
-                        file_info["markdown_virtual_path"] = md_virtual_path
-                        file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                        try:
-                            await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
-                        except (OSError, ValueError):
-                            # Sidecar is advisory: the companion is already on
-                            # disk and stem fallback still resolves it. Do not
-                            # 500 / roll back files this request already wrote.
-                            logger.warning(
-                                "Failed to record companion mapping for %s",
-                                safe_filename,
-                                exc_info=True,
-                            )
-                        else:
-                            recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
-                finally:
-                    if md_path is None:
-                        # Convert returned None, raised, or was cancelled.
-                        # Unlink here (sync) so a CancelledError cannot skip an
-                        # awaited run_file_io and leave a 0-byte name occupied.
-                        release_reserved_filename(uploads_dir, unique_md_name, seen_filenames)
+                file_info = {
+                    "filename": safe_filename,
+                    "size": file_size,
+                    "path": str(sandbox_uploads / safe_filename),
+                    "virtual_path": virtual_path,
+                    "artifact_url": upload_artifact_url(thread_id, safe_filename),
+                }
+                if safe_filename != original_filename:
+                    file_info["original_filename"] = original_filename
 
-            uploaded_files.append(file_info)
+                logger.info(f"Saved file: {safe_filename} ({file_size} bytes) to {file_info['path']}")
 
-        except HTTPException as e:
-            await run_file_io(_cleanup_uploaded_paths, written_paths, recorded_companions)
-            raise e
-        except UnsafeUploadPathError as e:
-            logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
-            skipped_files.append(safe_filename)
-            continue
-        except Exception as e:
-            logger.error(f"Failed to upload {file.filename}: {e}")
-            await run_file_io(_cleanup_uploaded_paths, written_paths, recorded_companions)
-            raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+                file_ext = file_path.suffix.lower()
+                if auto_convert_documents and file_ext in CONVERTIBLE_EXTENSIONS:
+                    # Reserve the companion .md exclusively so conversion cannot
+                    # truncate another uploaded or derived file — including one
+                    # left by an earlier request (seen_filenames is request-scoped).
+                    provisional_md_name = Path(safe_filename).with_suffix(".md").name
+                    unique_md_name = await run_file_io(reserve_unique_filename, uploads_dir, provisional_md_name, seen_filenames)
+                    md_output = file_path.with_name(unique_md_name)
+                    md_path = None
+                    try:
+                        md_path = await convert_file_to_markdown(file_path, output_path=md_output)
+                        if md_path:
+                            written_paths.append(md_path)
+                            md_virtual_path = upload_virtual_path(md_path.name)
 
-    # Uploaded files are created with 0o600 permissions (owner read/write only).
-    # In Docker sandbox deployments the gateway writes as root but the sandbox
-    # process runs as a non-root user (typically UID 1000).  Without group/other
-    # read bits the sandbox cannot access the files — whether the uploads
-    # directory is bind-mounted into the container or synced via
-    # sandbox.update_file.  Always add group/other read bits so every sandbox
-    # configuration can read the uploaded content.
-    await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
+                            if sync_to_sandbox:
+                                sandbox_sync_targets.append((md_path, md_virtual_path))
 
-    if sync_to_sandbox and sandbox is not None:
-        for file_path, virtual_path in sandbox_sync_targets:
-            await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
+                            file_info["markdown_file"] = md_path.name
+                            file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
+                            file_info["markdown_virtual_path"] = md_virtual_path
+                            file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
+                            try:
+                                await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
+                            except (OSError, ValueError):
+                                # Sidecar is advisory: the companion is already on
+                                # disk and stem fallback still resolves it. Do not
+                                # 500 / roll back files this request already wrote.
+                                logger.warning(
+                                    "Failed to record companion mapping for %s",
+                                    safe_filename,
+                                    exc_info=True,
+                                )
+                            else:
+                                recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
+                    finally:
+                        if md_path is None:
+                            # Convert returned None, raised, or was cancelled.
+                            # Unlink here (sync) so a CancelledError cannot skip an
+                            # awaited run_file_io and leave a 0-byte name occupied.
+                            release_reserved_filename(uploads_dir, unique_md_name, seen_filenames)
 
-    message = f"Successfully uploaded {len(uploaded_files)} file(s)"
-    if skipped_files:
-        message += f"; skipped {len(skipped_files)} unsafe file(s)"
+                uploaded_files.append(file_info)
 
-    return UploadResponse(
-        success=not skipped_files,
-        files=uploaded_files,
-        message=message,
-        skipped_files=skipped_files,
-    )
+            except HTTPException as e:
+                await run_file_io(_cleanup_uploaded_paths, written_paths, recorded_companions)
+                raise e
+            except UnsafeUploadPathError as e:
+                logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
+                skipped_files.append(safe_filename)
+                continue
+            except Exception as e:
+                logger.error(f"Failed to upload {file.filename}: {e}")
+                await run_file_io(_cleanup_uploaded_paths, written_paths, recorded_companions)
+                raise HTTPException(status_code=500, detail=f"Failed to upload {file.filename}: {str(e)}")
+
+        # Uploaded files are created with 0o600 permissions (owner read/write only).
+        # In Docker sandbox deployments the gateway writes as root but the sandbox
+        # process runs as a non-root user (typically UID 1000).  Without group/other
+        # read bits the sandbox cannot access the files — whether the uploads
+        # directory is bind-mounted into the container or synced via
+        # sandbox.update_file.  Always add group/other read bits so every sandbox
+        # configuration can read the uploaded content.
+        await run_file_io(_make_uploaded_paths_sandbox_readable, written_paths)
+
+        if sync_to_sandbox and sandbox is not None:
+            for file_path, virtual_path in sandbox_sync_targets:
+                await run_file_io(_sync_upload_to_sandbox, sandbox, file_path, virtual_path)
+
+        message = f"Successfully uploaded {len(uploaded_files)} file(s)"
+        if skipped_files:
+            message += f"; skipped {len(skipped_files)} unsafe file(s)"
+
+        return UploadResponse(
+            success=not skipped_files,
+            files=uploaded_files,
+            message=message,
+            skipped_files=skipped_files,
+        )
+
+    finally:
+        if sandbox_lease is not None:
+            try:
+                await sandbox_lease.release()
+            except Exception:
+                logger.warning(
+                    "Failed to release sandbox request lease after upload sync: %s",
+                    sandbox_lease.sandbox_id,
+                    exc_info=True,
+                )
 
 
 @router.get("/limits", response_model=UploadLimits)

@@ -32,10 +32,16 @@ from deerflow.sandbox.exceptions import (
     SandboxRuntimeError,
 )
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
+from deerflow.sandbox.lease import (
+    get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
+    sandbox_command_scope,
+    sandbox_lease_owner,
+)
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -61,6 +67,7 @@ _FILE_URL_PATTERN = re.compile(r"\bfile://\S+", re.IGNORECASE)
 _URL_WITH_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _URL_IN_COMMAND_PATTERN = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s\"'`;&|<>()]+", re.IGNORECASE)
 _DOTDOT_PATH_SEGMENT_PATTERN = re.compile(r"(?:^|[/\\=])\.\.(?:$|[/\\])")
+_LOCAL_BASH_PATH_RECOVERY_GUIDANCE = "For environment questions, use command-only probes such as uname; otherwise use an allowed virtual path. Do not repeat the rejected path."
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
     "/bin/",
     "/usr/bin/",
@@ -1255,7 +1262,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
     # Block file:// URLs which bypass the absolute-path regex but allow local file exfiltration
     file_url_match = _FILE_URL_PATTERN.search(command)
     if file_url_match:
-        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe file:// URL in command: {file_url_match.group()}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
     unsafe_paths: list[str] = []
     allowed_paths = _get_mcp_allowed_paths()
@@ -1275,7 +1282,7 @@ def validate_local_bash_command_paths(command: str, thread_data: ThreadDataState
 
     if unsafe_paths:
         unsafe = ", ".join(sorted(dict.fromkeys(unsafe_paths)))
-        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}")
+        raise PermissionError(f"Unsafe absolute paths in command: {unsafe}. Use paths under {VIRTUAL_PATH_PREFIX}. {_LOCAL_BASH_PATH_RECOVERY_GUIDANCE}")
 
 
 def replace_virtual_paths_in_command(command: str, thread_data: ThreadDataState | None) -> str:
@@ -1404,6 +1411,44 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     return sandbox
 
 
+def _rollback_failed_sandbox_lookup(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Undo an acquire whose active client disappeared before lookup."""
+    try:
+        if owner_id is not None:
+            get_sandbox_lease_manager(provider).release(owner_id)
+        else:
+            provider.release(sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
+async def _rollback_failed_sandbox_lookup_async(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Async rollback without blocking the event loop on provider cleanup."""
+    try:
+        if owner_id is not None:
+            await get_sandbox_lease_manager(provider).release_async(owner_id)
+        else:
+            await asyncio.to_thread(provider.release, sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after async post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
 @contextmanager
 def sandbox_authorization_scope(runtime: Runtime) -> Iterator[None]:
     """Authorize once for one complete synchronous sandbox tool invocation."""
@@ -1440,6 +1485,14 @@ async def sandbox_authorization_scope_async(runtime: Runtime) -> AsyncIterator[N
         _SANDBOX_AUTHORIZATION_CHECKED.reset(token)
 
 
+def _resolve_runtime_thread_id(runtime: Runtime) -> str | None:
+    """Resolve the thread identity consistently for reuse and acquisition."""
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if thread_id is None:
+        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    return thread_id
+
+
 def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     """Ensure sandbox is initialized, acquiring lazily if needed.
 
@@ -1473,15 +1526,28 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             app_config=safe_app_config(),
         )
 
-    # Check if sandbox already exists in state
-    # Discarding fork_restored is safe: after_agent short-circuits on the
-    # still-wrapped state before the context-based release branch, so this
-    # reuse path never releases the parent sandbox.
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    # Check if sandbox already exists in state. A fork-restored execution keeps
+    # the wrapper so after_agent cannot park the parent's sandbox, but it still
+    # binds a non-releasing holder: parent cleanup cannot close the client under
+    # the child, and the child's outer fence can clean its command scope.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            if owner_id is not None and thread_id is not None:
+                sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
+                    owner_id,
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=resolve_runtime_user_id(runtime),
+                    release_on_last=not fork_restored,
+                )
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+            sandbox = provider.get(sandbox_id)
             if sandbox is not None:
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id  # Ensure sandbox_id is in context for releasing in after_agent
@@ -1489,14 +1555,21 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
             # Sandbox was released, fall through to acquire new one
 
     # Lazy acquisition: get thread_id and acquire sandbox
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = provider.acquire(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    owner_id = sandbox_lease_owner(runtime.context)
+    if owner_id is None:
+        sandbox_id = provider.acquire(thread_id, user_id=user_id)
+    else:
+        sandbox_id = get_sandbox_lease_manager(provider).acquire(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+        )
 
     # Update runtime state - this persists across tool calls
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
@@ -1504,6 +1577,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1532,31 +1606,52 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
             app_config=await safe_app_config_async(),
         )
 
-    # Same discard as the sync path above: the reuse path never releases,
-    # because after_agent short-circuits on the still-wrapped state first.
-    sandbox_state, _ = unwrap_sandbox(runtime.state.get("sandbox"))
+    # Same borrowed-holder rule as the sync path above: keep the fork wrapper
+    # while counting the child as an active client user.
+    sandbox_state, fork_restored = unwrap_sandbox(runtime.state.get("sandbox"))
     if sandbox_state is not None:
         sandbox_id = sandbox_state.get("sandbox_id")
         if sandbox_id is not None:
-            sandbox = get_sandbox_provider().get(sandbox_id)
+            provider = get_sandbox_provider()
+            owner_id = sandbox_lease_owner(runtime.context)
+            thread_id = _resolve_runtime_thread_id(runtime)
+            if owner_id is not None and thread_id is not None:
+                sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
+                    owner_id,
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=resolve_runtime_user_id(runtime),
+                    release_on_last=not fork_restored,
+                )
+                if not fork_restored:
+                    runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
+            sandbox = provider.get(sandbox_id)
             if sandbox is not None:
                 if runtime.context is not None:
                     runtime.context["sandbox_id"] = sandbox_id
                 return sandbox
 
-    thread_id = runtime.context.get("thread_id") if runtime.context else None
-    if thread_id is None:
-        thread_id = runtime.config.get("configurable", {}).get("thread_id") if runtime.config else None
+    thread_id = _resolve_runtime_thread_id(runtime)
     if thread_id is None:
         raise SandboxRuntimeError("Thread ID not available in runtime context")
 
     provider = get_sandbox_provider()
-    sandbox_id = await provider.acquire_async(thread_id, user_id=resolve_runtime_user_id(runtime))
+    user_id = resolve_runtime_user_id(runtime)
+    owner_id = sandbox_lease_owner(runtime.context)
+    if owner_id is None:
+        sandbox_id = await provider.acquire_async(thread_id, user_id=user_id)
+    else:
+        sandbox_id = await get_sandbox_lease_manager(provider).acquire_async(
+            owner_id,
+            thread_id,
+            user_id=user_id,
+        )
 
     runtime.state["sandbox"] = {"sandbox_id": sandbox_id}
 
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1577,11 +1672,35 @@ async def _run_sync_tool_after_async_sandbox_init(
             if func is None:
                 return "Error: Tool implementation not available"
 
-            return await asyncio.to_thread(func, runtime, *args)
+            return await run_sync_lifecycle_operation(func, runtime, *args)
     except SandboxError as e:
         return f"Error: {e}"
     except Exception as e:
         return f"Error: Unexpected error initializing sandbox: {_sanitize_error(e, runtime)}"
+
+
+def _execute_bash_command(
+    sandbox: Sandbox,
+    command: str,
+    *,
+    runtime: Runtime,
+    env: dict[str, str] | None,
+    timeout: float | None = None,
+) -> str:
+    """Route subagent bash calls through their isolated shell-session scope."""
+    scope_id = sandbox_command_scope(runtime.context)
+    scoped_execute = getattr(sandbox, "execute_command_in_scope", None)
+    if scope_id is not None and callable(scoped_execute):
+        return scoped_execute(
+            command,
+            env=env,
+            timeout=timeout,
+            scope_id=scope_id,
+        )
+    # Keep duck-typed custom providers and test doubles compatible: the scoped
+    # method is an additive Sandbox API, and ordinary/lead executions retain
+    # the original execute_command path.
+    return sandbox.execute_command(command, env=env, timeout=timeout)
 
 
 def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
@@ -1886,12 +2005,18 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
-    """Execute a bash command in a Linux environment.
+    """Execute a bash command in the configured execution environment.
 
 
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    - When running against the local host via host bash, inspect the current environment instead of
+      guessing. For OS detection, start with `uname -s`; on Darwin follow with `sw_vers`. On Linux,
+      start with `uname -a` and read host system files such as `/etc/os-release` only when the active
+      sandbox policy permits it.
+    - If local host bash rejects a path, do not repeat the rejected command. For environment questions,
+      retry with command-only probes; otherwise use allowed virtual paths or explain the restriction.
     - To start a long-lived process such as a web server, ALWAYS run it in the background with its
       output redirected, e.g. `your-command > /mnt/user-data/workspace/server.log 2>&1 &`, then check
       the log file or poll the port. A long-lived process run in the foreground blocks the turn until
@@ -1936,7 +2061,13 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             except Exception:
                 max_chars = 20000
                 command_timeout = None
-            output = sandbox.execute_command(command, env=injected_env, timeout=command_timeout)
+            output = _execute_bash_command(
+                sandbox,
+                command,
+                runtime=runtime,
+                env=injected_env,
+                timeout=command_timeout,
+            )
             return _truncate_bash_output(
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
                 max_chars,
@@ -1952,7 +2083,18 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(mask_secret_values(sandbox.execute_command(command, env=injected_env), injected_env), max_chars)
+        return _truncate_bash_output(
+            mask_secret_values(
+                _execute_bash_command(
+                    sandbox,
+                    command,
+                    runtime=runtime,
+                    env=injected_env,
+                ),
+                injected_env,
+            ),
+            max_chars,
+        )
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:

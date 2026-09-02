@@ -60,6 +60,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+# Kept as wire keys here instead of importing ``deerflow.sandbox`` at module
+# load: executor tests and extension embedders replace that package while
+# breaking agent/tool import cycles.
+_SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
+_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
 
 
 _previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
@@ -1308,6 +1313,8 @@ class SubagentExecutor:
                 status=SubagentStatus.RUNNING,
                 started_at=datetime.now(),
             )
+        sandbox_lease_owner_id = f"subagent:{result.task_id}"
+        execution_context: dict[str, Any] | None = None
         from deerflow_extension_api import ExtensionData, TaskInfo
 
         from deerflow.extensions import get_loaded_extensions
@@ -1465,6 +1472,9 @@ class SubagentExecutor:
             context["authz_attributes"] = dict(self.authz_attributes)
             context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
             context["is_subagent"] = True
+            context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
+            context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
+            execution_context = context
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
@@ -1623,6 +1633,20 @@ class SubagentExecutor:
             )
 
         finally:
+            if execution_context is not None and execution_context.get("sandbox_id") is not None:
+                try:
+                    from deerflow.sandbox import get_sandbox_provider
+                    from deerflow.sandbox.lease import get_sandbox_lease_manager
+
+                    provider = get_sandbox_provider()
+                    await get_sandbox_lease_manager(provider).release_async(sandbox_lease_owner_id)
+                except Exception:
+                    logger.warning(
+                        "[trace=%s] Failed to release sandbox execution lease for subagent %s",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
+                    )
             if task_info is not None and task_store is not None:
                 try:
                     await notify_task_stop(

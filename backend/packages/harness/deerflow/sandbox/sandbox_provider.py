@@ -178,6 +178,9 @@ def reset_sandbox_provider() -> None:
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
     if provider is not None:
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(provider)
         provider.reset()
 
 
@@ -195,6 +198,9 @@ def shutdown_sandbox_provider() -> None:
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
     if provider is not None and hasattr(provider, "shutdown"):
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(provider)
         provider.shutdown()
 
 
@@ -211,4 +217,9 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
     """
     global _default_sandbox_provider
     with _provider_lock:
+        previous = _default_sandbox_provider
         _default_sandbox_provider = provider
+    if previous is not None and previous is not provider:
+        from deerflow.sandbox.lease import discard_sandbox_lease_manager
+
+        discard_sandbox_lease_manager(previous)
