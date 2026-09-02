@@ -2,9 +2,10 @@
 
 Written at convert time so historical listing can recover collision-renamed
 companions (``a.pdf`` → ``a_1.md``) after summarization drops message metadata.
-Each entry also carries the companion's convert-time fingerprint (size and
-mtime) so a same-named file that later replaces the companion — for example
-after the companion was deleted inside the sandbox — is not mistaken for it.
+Each entry also carries the companion's convert-time fingerprint (size, mtime,
+and inode) so a same-named file that later replaces the companion — for example
+after the companion was deleted inside the sandbox — is not mistaken for it,
+while an in-place edit of the converted markdown stays attached.
 The sidecar JSON lives beside the files it describes and is hidden from
 listings. The lock file lives *outside* sandbox-visible directories (beside
 ``user-data``, not inside ``uploads``), is opened with no-follow semantics,
@@ -69,11 +70,15 @@ class CompanionEntry:
 
     ``size`` / ``mtime_ns`` are ``None`` for rows written before the map
     started recording fingerprints; those verify by existence only.
+    ``dev`` / ``ino`` identify the convert-time inode so an in-place edit
+    stays attached while a delete-and-recreate under the same name goes stale.
     """
 
     name: str
     size: int | None = None
     mtime_ns: int | None = None
+    dev: int | None = None
+    ino: int | None = None
 
 
 def is_companion_map_file(filename: str) -> bool:
@@ -267,16 +272,18 @@ def _sanitize_entry(key: object, value: object) -> tuple[str, CompanionEntry] | 
     if isinstance(value, str):
         # Version-1 rows stored the bare companion basename (no fingerprint).
         name: object = value
-        size = mtime_ns = None
+        size = mtime_ns = dev = ino = None
     elif isinstance(value, dict):
         name = value.get("name")
         size = _sanitize_fingerprint(value.get("size"))
         mtime_ns = _sanitize_fingerprint(value.get("mtime_ns"))
+        dev = _sanitize_fingerprint(value.get("dev"))
+        ino = _sanitize_fingerprint(value.get("ino"))
     else:
         return None
     if not isinstance(name, str) or not _is_safe_companion(name):
         return None
-    return key, CompanionEntry(name=name, size=size, mtime_ns=mtime_ns)
+    return key, CompanionEntry(name=name, size=size, mtime_ns=mtime_ns, dev=dev, ino=ino)
 
 
 def _sanitize_mapping(raw: object) -> dict[str, CompanionEntry]:
@@ -321,7 +328,16 @@ def _persist_unlocked(uploads_dir: Path, mapping: dict[str, CompanionEntry]) -> 
 
     payload = {
         "version": _MAP_VERSION,
-        "companions": {original: {"name": entry.name, "size": entry.size, "mtime_ns": entry.mtime_ns} for original, entry in mapping.items()},
+        "companions": {
+            original: {
+                "name": entry.name,
+                "size": entry.size,
+                "mtime_ns": entry.mtime_ns,
+                "dev": entry.dev,
+                "ino": entry.ino,
+            }
+            for original, entry in mapping.items()
+        },
     }
     data = json.dumps(payload, ensure_ascii=False, indent=2)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{_COMPANION_MAP_PREFIX}.", suffix=".tmp", dir=uploads_dir)
@@ -354,23 +370,36 @@ def load_companion_entries(uploads_dir: Path) -> dict[str, CompanionEntry]:
     return _load_unlocked(uploads_dir)
 
 
+def _has_usable_identity(entry: CompanionEntry) -> bool:
+    """Return whether *entry* recorded a trustworthy convert-time inode.
+
+    ``st_ino == 0`` is treated as missing: some Windows volumes report it for
+    every file, which cannot distinguish an in-place edit from a recreate.
+    """
+    return entry.dev is not None and entry.ino is not None and entry.ino != 0
+
+
 def companion_entry_matches(uploads_dir: Path, entry: CompanionEntry) -> bool:
     """Return whether *entry*'s companion file is still the converted original.
 
-    Verifies existence plus the convert-time fingerprint when one was recorded,
-    so a same-named replacement (companion deleted, then an unrelated file
-    uploaded under its name) does not match. Legacy entries without a
-    fingerprint verify by existence only.
+    When a convert-time inode was recorded, a same-inode file stays attached
+    even after an in-place edit (``echo >>``, ``write_file``, ``str_replace``).
+    Delete-then-recreate under the same name gets a new inode and is stale.
+    Legacy rows without an inode fall back to size/mtime, so an in-place edit
+    of those rows is still stale. Rows with no fingerprint verify by existence
+    only.
     """
     candidate = uploads_dir / entry.name
     try:
         if candidate.is_symlink() or not candidate.is_file():
             return False
-        if entry.size is None and entry.mtime_ns is None:
-            return True
         current = candidate.stat()
     except OSError:
         return False
+    if _has_usable_identity(entry):
+        return current.st_dev == entry.dev and current.st_ino == entry.ino
+    if entry.size is None and entry.mtime_ns is None:
+        return True
     if entry.size is not None and current.st_size != entry.size:
         return False
     return entry.mtime_ns is None or current.st_mtime_ns == entry.mtime_ns
@@ -380,7 +409,8 @@ def lookup_companion_mapping(uploads_dir: Path, original: str) -> str | None:
     """Return the mapped companion basename, or ``None``.
 
     ``None`` means either no entry exists or the recorded companion no longer
-    matches its convert-time fingerprint (deleted or replaced).
+    matches its convert-time fingerprint (deleted, replaced, or — for legacy
+    size/mtime rows — edited in place).
     """
     if not _is_safe_original(original):
         return None
@@ -418,8 +448,9 @@ def mapped_companion_names(
 def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -> None:
     """Persist ``original → companion`` after a successful conversion.
 
-    Captures the companion's current size and mtime as its fingerprint so a
-    later same-named replacement is not mistaken for the converted file.
+    Captures the companion's current size, mtime, and inode as its fingerprint
+    so a later same-named replacement is not mistaken for the converted file,
+    while an in-place edit of the same inode stays attached.
 
     Raises:
         ValueError: If either name is unsafe.
@@ -437,7 +468,7 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
         with _map_write_lock(uploads_dir):
             # Stat inside the lock: sampling the fingerprint before acquiring it
             # would let a concurrent writer swap the companion in between, so the
-            # recorded size/mtime could describe a file this mapping never pointed at.
+            # recorded fingerprint could describe a file this mapping never pointed at.
             try:
                 if companion_path.is_symlink() or not companion_path.is_file():
                     raise FileNotFoundError(f"Companion file does not exist: {companion!r}")
@@ -453,6 +484,8 @@ def record_companion_mapping(uploads_dir: Path, original: str, companion: str) -
                 name=companion,
                 size=companion_stat.st_size,
                 mtime_ns=companion_stat.st_mtime_ns,
+                dev=companion_stat.st_dev,
+                ino=companion_stat.st_ino,
             )
             _persist_unlocked(uploads_dir, mapping)
     except CompanionMapLockTimeout:

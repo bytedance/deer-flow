@@ -45,9 +45,10 @@ def resolve_converted_markdown_path(
     ``a.pdf`` to ``a_1.md``), then the convert-time sidecar mapping, then a
     same-directory ``<stem>.md`` for threads that predate the sidecar. A
     sidecar entry whose target is missing or no longer matches its
-    convert-time fingerprint (deleted or replaced by an unrelated file) is
-    treated as stale — the stem fallback is skipped so ``a.pdf`` cannot
-    inherit ``a.md`` from ``a.docx``.
+    convert-time fingerprint (deleted, replaced, or — for legacy size/mtime
+    rows — edited in place) is treated as stale — the stem fallback is skipped
+    so ``a.pdf`` cannot inherit ``a.md`` from ``a.docx``.
+    An in-place edit of a current-version companion (same inode) stays attached.
     Symlinks and paths that resolve outside *file_path*'s directory are ignored.
 
     Pass a preloaded *entries* mapping to reuse one sidecar read for a whole

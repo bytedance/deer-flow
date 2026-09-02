@@ -442,8 +442,19 @@ async def upload_files(
                         file_info["markdown_path"] = str(sandbox_uploads / md_path.name)
                         file_info["markdown_virtual_path"] = md_virtual_path
                         file_info["markdown_artifact_url"] = upload_artifact_url(thread_id, md_path.name)
-                        await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
-                        recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
+                        try:
+                            await run_file_io(record_companion_mapping, uploads_dir, safe_filename, md_path.name)
+                        except (OSError, ValueError):
+                            # Sidecar is advisory: the companion is already on
+                            # disk and stem fallback still resolves it. Do not
+                            # 500 / roll back files this request already wrote.
+                            logger.warning(
+                                "Failed to record companion mapping for %s",
+                                safe_filename,
+                                exc_info=True,
+                            )
+                        else:
+                            recorded_companions.setdefault(uploads_dir, []).append((safe_filename, md_path.name))
                 finally:
                     if md_path is None:
                         # Convert returned None, raised, or was cancelled.

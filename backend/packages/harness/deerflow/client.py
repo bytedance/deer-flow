@@ -1611,7 +1611,7 @@ class DeerFlowClient:
                             # fail the whole upload (this path has no rollback).
                             try:
                                 record_companion_mapping(uploads_dir, dest_name, md_path.name)
-                            except (OSError, FileNotFoundError):
+                            except (OSError, ValueError):
                                 logger.warning(
                                     "Failed to record companion mapping for %s",
                                     dest_name,

@@ -1186,6 +1186,96 @@ def test_upload_files_records_companion_mapping_via_file_io(tmp_path):
     assert load_companion_map(thread_uploads_dir) == {"notes.docx": "notes.md"}
 
 
+def test_upload_files_succeeds_when_companion_sidecar_write_fails(tmp_path):
+    """Sidecar write is advisory; a mapping IO error must not 500 or roll back files."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+    real_record = uploads.record_companion_mapping
+    calls = {"n": 0}
+
+    def flaky_record(uploads_dir, original, companion):
+        calls["n"] += 1
+        if original == "two.pdf":
+            raise OSError("disk full")
+        return real_record(uploads_dir, original, companion)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=_fake_convert_honoring_output_path()),
+        ),
+        patch.object(uploads, "record_companion_mapping", flaky_record),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[
+                    UploadFile(filename="keep.txt", file=BytesIO(b"keep")),
+                    UploadFile(filename="one.pdf", file=BytesIO(b"PDF1")),
+                    UploadFile(filename="two.pdf", file=BytesIO(b"PDF2")),
+                ],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert [info.filename for info in result.files] == ["keep.txt", "one.pdf", "two.pdf"]
+    assert result.files[1].markdown_file == "one.md"
+    assert result.files[2].markdown_file == "two.md"
+    assert (thread_uploads_dir / "keep.txt").read_bytes() == b"keep"
+    assert (thread_uploads_dir / "one.pdf").read_bytes() == b"PDF1"
+    assert (thread_uploads_dir / "two.pdf").read_bytes() == b"PDF2"
+    assert (thread_uploads_dir / "one.md").is_file()
+    assert (thread_uploads_dir / "two.md").is_file()
+    from deerflow.uploads.companion_map import load_companion_map
+
+    assert load_companion_map(thread_uploads_dir) == {"one.pdf": "one.md"}
+    assert calls["n"] == 2
+
+
+def test_upload_files_succeeds_when_companion_sidecar_write_raises_value_error(tmp_path):
+    """ValueError from the sidecar writer (symlink path, unsafe name) is also advisory."""
+    thread_uploads_dir = tmp_path / "uploads"
+    thread_uploads_dir.mkdir(parents=True)
+
+    with (
+        patch.object(uploads, "get_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "ensure_uploads_dir", return_value=thread_uploads_dir),
+        patch.object(uploads, "get_sandbox_provider", return_value=_mounted_provider()),
+        patch.object(uploads, "_auto_convert_documents_enabled", return_value=True),
+        patch.object(
+            uploads,
+            "convert_file_to_markdown",
+            AsyncMock(side_effect=_fake_convert_honoring_output_path({"report.pdf": "FROM_PDF"})),
+        ),
+        patch.object(uploads, "record_companion_mapping", side_effect=ValueError("Companion map path is a symlink")),
+    ):
+        result = asyncio.run(
+            call_unwrapped(
+                uploads.upload_files,
+                "thread-local",
+                request=MagicMock(),
+                files=[UploadFile(filename="report.pdf", file=BytesIO(b"pdf-bytes"))],
+                config=SimpleNamespace(),
+            )
+        )
+
+    assert result.success is True
+    assert result.files[0].markdown_file == "report.md"
+    assert (thread_uploads_dir / "report.pdf").is_file()
+    assert (thread_uploads_dir / "report.md").read_text(encoding="utf-8") == "FROM_PDF"
+    from deerflow.uploads.companion_map import load_companion_map
+
+    assert load_companion_map(thread_uploads_dir) == {}
+
+
 def test_upload_files_user_markdown_after_convertible_is_renamed_not_overwritten(tmp_path):
     """If convert claims stem.md first, a later same-request .md is renamed."""
     thread_uploads_dir = tmp_path / "uploads"

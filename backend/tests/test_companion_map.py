@@ -89,11 +89,15 @@ class TestRecordAndLoad:
             name="a.md",
             size=expected.st_size,
             mtime_ns=expected.st_mtime_ns,
+            dev=expected.st_dev,
+            ino=expected.st_ino,
         )
         raw = json.loads((tmp_path / COMPANION_MAP_FILENAME).read_text(encoding="utf-8"))
         assert raw["version"] == 2
         assert raw["companions"]["a.docx"]["name"] == "a.md"
         assert raw["companions"]["a.docx"]["size"] == expected.st_size
+        assert raw["companions"]["a.docx"]["dev"] == expected.st_dev
+        assert raw["companions"]["a.docx"]["ino"] == expected.st_ino
 
     def test_record_requires_an_existing_regular_companion(self, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -123,10 +127,10 @@ class TestRecordAndLoad:
         payload = {
             "version": 2,
             "companions": {
-                "ok.pdf": {"name": "ok.md", "size": 3, "mtime_ns": 123},
+                "ok.pdf": {"name": "ok.md", "size": 3, "mtime_ns": 123, "dev": 1, "ino": 99},
                 "legacy.pdf": "legacy.md",
                 "bad-name.pdf": {"name": "../escape.md", "size": 1, "mtime_ns": 1},
-                "bad-size.pdf": {"name": "b.md", "size": "huge", "mtime_ns": True},
+                "bad-size.pdf": {"name": "b.md", "size": "huge", "mtime_ns": True, "dev": "x", "ino": True},
                 "not-dict.pdf": 42,
                 "../evil.pdf": "x.md",
             },
@@ -139,7 +143,7 @@ class TestRecordAndLoad:
             "bad-size.pdf": "b.md",
         }
         entries = load_companion_entries(tmp_path)
-        assert entries["ok.pdf"] == CompanionEntry(name="ok.md", size=3, mtime_ns=123)
+        assert entries["ok.pdf"] == CompanionEntry(name="ok.md", size=3, mtime_ns=123, dev=1, ino=99)
         # Malformed fingerprint fields degrade to "no fingerprint", not a dropped row.
         assert entries["bad-size.pdf"] == CompanionEntry(name="b.md")
 
@@ -219,17 +223,58 @@ class TestMappedCompanionNames:
 
 
 class TestFingerprintStaleness:
-    def test_modified_companion_content_is_stale(self, tmp_path):
+    def test_in_place_edit_keeps_companion_attached(self, tmp_path):
         companion = tmp_path / "a_1.md"
         companion.write_text("# PDF\n", encoding="utf-8")
         record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
+        recorded = companion.stat()
         companion.write_text("# PDF\n\nedited inside the sandbox\n", encoding="utf-8")
+        after = companion.stat()
+        assert (after.st_dev, after.st_ino) == (recorded.st_dev, recorded.st_ino)
 
         entry = load_companion_entries(tmp_path)["a.pdf"]
-        assert not companion_entry_matches(tmp_path, entry)
+        assert companion_entry_matches(tmp_path, entry)
+        assert lookup_companion_mapping(tmp_path, "a.pdf") == "a_1.md"
+        assert mapped_companion_names(tmp_path) == {"a_1.md"}
+        assert has_companion_entry(tmp_path, "a.pdf") is True
+
+    def test_recreated_same_bytes_is_stale(self, tmp_path):
+        companion = tmp_path / "a_1.md"
+        text = "# PDF\n"
+        companion.write_text(text, encoding="utf-8")
+        record_companion_mapping(tmp_path, "a.pdf", "a_1.md")
+        recorded_ino = load_companion_entries(tmp_path)["a.pdf"].ino
+        companion.unlink()
+        replacement = tmp_path / "a_1.md"
+        replacement.write_text(text, encoding="utf-8")
+        if recorded_ino is not None and replacement.stat().st_ino == recorded_ino:
+            pytest.skip("filesystem reused the inode after unlink")
+
         assert lookup_companion_mapping(tmp_path, "a.pdf") is None
         assert mapped_companion_names(tmp_path) == set()
         assert has_companion_entry(tmp_path, "a.pdf") is True
+
+    def test_legacy_size_mtime_row_treats_edit_as_stale(self, tmp_path):
+        companion = tmp_path / "a_1.md"
+        companion.write_text("# PDF\n", encoding="utf-8")
+        st = companion.stat()
+        payload = {
+            "version": 2,
+            "companions": {
+                "a.pdf": {
+                    "name": "a_1.md",
+                    "size": st.st_size,
+                    "mtime_ns": st.st_mtime_ns,
+                }
+            },
+        }
+        (tmp_path / COMPANION_MAP_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+        companion.write_text("# PDF\n\nedited\n", encoding="utf-8")
+
+        entry = load_companion_entries(tmp_path)["a.pdf"]
+        assert entry.dev is None and entry.ino is None
+        assert not companion_entry_matches(tmp_path, entry)
+        assert lookup_companion_mapping(tmp_path, "a.pdf") is None
 
     def test_same_named_replacement_is_not_the_recorded_companion(self, tmp_path):
         """The stale-sidecar gap: companion deleted outside the API, then an
