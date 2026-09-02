@@ -3780,3 +3780,90 @@ def test_update_thread_state_inserts_new_checkpoint_each_call() -> None:
     assert all(cid is not None for cid in resp_ids), f"response missing checkpoint_id: {resp_ids}"
     assert set(resp_ids) <= set(ids), f"aput discarded endpoint-assigned id: returned {resp_ids}, stored {ids}"
     assert resp_ids[1] > resp_ids[0], f"endpoint-assigned uuid6 not preserved/ordered through aput: {resp_ids}"
+
+
+class TestRestReadsCarryMessageSeq:
+    """Opening a conversation must expose the same feed seq the stream does.
+
+    `_MessageSeqStamper` sits on the streaming publish path, so a client that
+    joins a live run gets placement information while one that merely opens the
+    thread does not — and opening is the common case. Without a seq the merge
+    falls back to the nearest shared anchor, which after summarization sits deep
+    inside the loaded page, so a rescued first user turn renders behind the
+    newest question instead of at the head (#4666).
+    """
+
+    @staticmethod
+    def _seed_thread(app, checkpointer, thread_id: str, *, with_feed: bool) -> None:
+        """Create the thread and its checkpoint without going through HTTP.
+
+        ``POST /api/threads`` writes its own initial checkpoint, which would
+        overwrite the one under test.
+        """
+
+        async def _seed() -> None:
+            await app.state.thread_store.create(thread_id)
+            if with_feed:
+                await app.state.run_event_store.put(
+                    thread_id=thread_id,
+                    run_id="r1",
+                    event_type="llm.human.input",
+                    category="message",
+                    content={"type": "human", "id": "u1__user", "content": "MARK-FIRST"},
+                )
+            await checkpointer.aput(
+                {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+                {
+                    **empty_checkpoint(),
+                    "id": str(uuid6(clock_seq=-2)),
+                    "channel_values": {"messages": [HumanMessage(content="MARK-FIRST", id="u1__user")]},
+                    "channel_versions": {"messages": 1},
+                },
+                {"source": "loop", "step": 1, "writes": {}, "parents": {}},
+                {"messages": 1},
+            )
+
+        asyncio.run(_seed())
+
+    def _app_with_feed(self, thread_id: str):
+        from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+        app, _store, checkpointer = _build_thread_app()
+        app.state.run_event_store = MemoryRunEventStore()
+        self._seed_thread(app, checkpointer, thread_id, with_feed=True)
+        return app
+
+    def test_state_carries_the_seq_of_a_persisted_message(self) -> None:
+        app = self._app_with_feed("thread-seq-state")
+
+        with TestClient(app) as client:
+            response = client.get("/api/threads/thread-seq-state/state")
+
+        assert response.status_code == 200, response.text
+        messages = response.json()["values"]["messages"]
+        assert messages[0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    def test_history_carries_the_seq_of_a_persisted_message(self) -> None:
+        app = self._app_with_feed("thread-seq-history")
+
+        with TestClient(app) as client:
+            response = client.post("/api/threads/thread-seq-history/history", json={"limit": 1})
+
+        assert response.status_code == 200, response.text
+        messages = response.json()[0]["values"]["messages"]
+        assert messages[0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    def test_a_message_the_feed_does_not_know_is_left_unstamped(self) -> None:
+        """Only persisted messages get a seq; the rest keep the weaving path."""
+        from deerflow.runtime.events.store.memory import MemoryRunEventStore
+
+        app, _store, checkpointer = _build_thread_app()
+        app.state.run_event_store = MemoryRunEventStore()
+        self._seed_thread(app, checkpointer, "thread-seq-unknown", with_feed=False)
+
+        with TestClient(app) as client:
+            response = client.get("/api/threads/thread-seq-unknown/state")
+
+        assert response.status_code == 200, response.text
+        messages = response.json()["values"]["messages"]
+        assert "deerflow_seq" not in (messages[0].get("additional_kwargs") or {})
