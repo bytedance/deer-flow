@@ -7,6 +7,9 @@
 #   `DEER_FLOW_CONFIG_PATH` to point at a specific config file.
 # - Runtime state defaults to `.deer-flow` under the project root. Override it
 #   with `DEER_FLOW_HOME` when you need a different writable data directory.
+# - Set `DEER_FLOW_DATE_TIMEZONE` to an IANA timezone name (e.g. `Asia/Shanghai`)
+#   when the conversation date injected into agents should follow a zone other
+#   than the server's local timezone.
 # - Environment variables are available for all field values. Example: `api_key: $OPENAI_API_KEY`
 # - The `use` path is a string that looks like "package_name.sub_package_name.module_name:class_name/variable_name".
 

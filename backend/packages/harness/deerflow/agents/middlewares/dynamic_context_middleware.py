@@ -24,6 +24,12 @@ Date-update format:
     <system-reminder>
     <current_date>2026-05-09, Saturday</current_date>
     </system-reminder>
+
+By default the injected date follows the server's local timezone. Set the
+``DEER_FLOW_DATE_TIMEZONE`` environment variable to an IANA timezone name (for
+example ``Asia/Shanghai``) when the host clock runs UTC but the conversation
+date should follow another zone. Invalid values log a warning and fall back to
+the server-local timezone.
 """
 
 from __future__ import annotations
@@ -31,10 +37,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, tzinfo
 from typing import TYPE_CHECKING, override
+from zoneinfo import ZoneInfo
 
 from deerflow_extension_api import ContentKind, provenance_kwargs
 from langchain.agents.middleware import AgentMiddleware
@@ -76,8 +84,27 @@ __all__ = [
 ]
 
 
+_DATE_TIMEZONE_ENV = "DEER_FLOW_DATE_TIMEZONE"
+
+
+def _date_timezone() -> tzinfo | None:
+    """Resolve the configured IANA timezone for injected dates, or None for server-local."""
+    raw = os.environ.get(_DATE_TIMEZONE_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return ZoneInfo(raw)
+    except Exception:
+        logger.warning("Invalid %s=%r; falling back to the server-local timezone", _DATE_TIMEZONE_ENV, raw)
+        return None
+
+
 def _format_current_date() -> str:
-    return datetime.now().strftime("%Y-%m-%d, %A")
+    tz = _date_timezone()
+    now = datetime.now(tz)
+    if tz is not None:
+        now = now.astimezone(tz)
+    return now.strftime("%Y-%m-%d, %A")
 
 
 def _format_current_date_reminder(current_date: str) -> str:

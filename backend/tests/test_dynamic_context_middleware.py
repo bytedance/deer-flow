@@ -800,3 +800,52 @@ def test_no_recursive_id_swap_in_full_middleware_flow():
     msgs_v2 = result_v2["messages"]
     assert msgs_v2[0].id == "msg-2"  # reminder takes new message's ID
     assert msgs_v2[1].id == "msg-2__user"  # user content gets derived ID
+
+
+# ---------------------------------------------------------------------------
+# Date timezone formatting
+# ---------------------------------------------------------------------------
+
+
+def test_format_current_date_defaults_to_server_local_without_env(monkeypatch):
+    """Without DEER_FLOW_DATE_TIMEZONE the formatter keeps the legacy server-local behavior."""
+    from datetime import datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 8, 9, 0)
+        monkeypatch.delenv("DEER_FLOW_DATE_TIMEZONE", raising=False)
+
+        assert _format_current_date() == "2026-05-08, Friday"
+        mock_dt.now.assert_called_once_with(None)
+
+
+def test_format_current_date_honors_configured_timezone(monkeypatch):
+    """A UTC instant must be rendered in the IANA zone named by DEER_FLOW_DATE_TIMEZONE."""
+    from datetime import UTC, datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    # 2026-09-02 20:30 UTC is 2026-09-03 04:30 in Asia/Shanghai: a UTC-only
+    # formatter would report the wrong day for a Shanghai user.
+    fixed_utc = datetime(2026, 9, 2, 20, 30, 0, tzinfo=UTC)
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = fixed_utc
+        monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Asia/Shanghai")
+
+        assert _format_current_date() == "2026-09-03, Thursday"
+
+
+def test_format_current_date_invalid_timezone_falls_back(monkeypatch, caplog):
+    """An unparseable IANA name must warn and degrade to the server-local timezone."""
+    from datetime import datetime
+
+    from deerflow.agents.middlewares.dynamic_context_middleware import _format_current_date
+
+    with mock.patch("deerflow.agents.middlewares.dynamic_context_middleware.datetime") as mock_dt:
+        mock_dt.now.return_value = datetime(2026, 5, 8, 9, 0)
+        monkeypatch.setenv("DEER_FLOW_DATE_TIMEZONE", "Not/A_Zone")
+
+        assert _format_current_date() == "2026-05-08, Friday"
+    assert "DEER_FLOW_DATE_TIMEZONE" in caplog.text
