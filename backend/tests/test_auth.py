@@ -940,7 +940,7 @@ def test_rate_limiter_honors_configured_attempts_and_lockout(monkeypatch):
         assert exc_info.value.status_code == 429
         # The lockout window comes from lockout_seconds (60s), not the 300s
         # default: at locked_at + 61 the lock must already be released.
-        _, locked_at = _login_attempts[ip]
+        _, locked_at, _ = _login_attempts[ip]
         monkeypatch.setattr(auth_router.time, "time", lambda: locked_at + 61.0)
         _check_rate_limit(ip)
         assert ip not in _login_attempts
@@ -1005,9 +1005,8 @@ def test_rate_limiter_policy_change_semantics():
     Raising max_login_attempts mid-lockout immediately unblocks IPs whose
     fail_count falls below the new threshold — that is the issue #5108 use
     case (shared-egress-IP office unblocked by raising the limit, no restart).
-    Lowering the threshold clears in-flight below-threshold counters once
-    (fail_count >= new max but locked_at == 0.0 hits the expired branch);
-    subsequent failures accumulate under the new, stricter policy.
+    Tightening the threshold keeps the accumulated count (see the dedicated
+    test below); subsequent failures lock under the new, stricter policy.
     """
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
     from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
@@ -1077,14 +1076,14 @@ def test_local_auth_throttle_config_validation():
 
 
 def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypatch):
-    """A live lockout_seconds change applies to in-flight lockouts in both
-    directions: expiry is derived at check time as locked_at + the currently
-    configured duration, not an absolute deadline baked in at lock creation.
+    """A live lockout_seconds change applies to in-flight lockouts, in the
+    direction that serves the operator, without resurrecting served sentences.
 
-    This pins the documented "reload applies on the next login" claim for
-    durations: lowering 60 → 1 releases an active lock after 1s (not the
-    original 60s), and raising 1 → 60 before the next login keeps a lock
-    alive past its original 1-second window.
+    A lock records the duration in force when it started. At check time an
+    active sentence follows the *currently* configured duration — lowering
+    60 → 1 releases early — while a lock that already served its original
+    sentence stays expired even if the duration is later raised (no
+    resurrection), and a raise while the lock is still active extends it.
     """
     from app.gateway.routers import auth as auth_router
     from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
@@ -1111,7 +1110,7 @@ def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypa
         _set_policy(60.0)
         _record_login_failure(ip)
         _record_login_failure(ip)
-        _, locked_at = _login_attempts[ip]
+        _, locked_at, _ = _login_attempts[ip]
         _freeze_clock_at(locked_at + 2.0)
         with pytest.raises(HTTPException):
             _check_rate_limit(ip)  # 2s into the 60s window: still locked
@@ -1119,17 +1118,112 @@ def test_rate_limiter_active_lockout_honors_live_lockout_seconds_change(monkeypa
         _check_rate_limit(ip)  # 2s > 1s: unlocked on the very next login
         assert ip not in _login_attempts
 
-        # Raising mid-lockout extends.
+        # Raising while the lock is still active extends it.
         _set_policy(1.0)
         _record_login_failure(ip)
         _record_login_failure(ip)
-        _, locked_at = _login_attempts[ip]
-        _freeze_clock_at(locked_at + 2.0)  # past the original 1s expiry...
-        _set_policy(60.0)  # ...but the operator lengthened the window first
+        _, locked_at, _ = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 0.5)  # still inside the 1s sentence
+        _set_policy(60.0)  # operator lengthens the window mid-sentence
         with pytest.raises(HTTPException):
-            _check_rate_limit(ip)  # 2s < 60s: still locked
+            _check_rate_limit(ip)  # active, and 0.5 < 60: extended
+        _freeze_clock_at(locked_at + 2.0)  # past the original 1s sentence
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)  # extended: 2 < 60, still locked
+
+        # A sentence that already elapsed before the raise is not resurrected.
+        _set_policy(1.0)
+        _record_login_failure(ip)
+        _record_login_failure(ip)
+        _, locked_at, _ = _login_attempts[ip]
+        _freeze_clock_at(locked_at + 2.0)  # past the 1s sentence, no check yet
+        _set_policy(60.0)  # operator lengthens the window for *future* locks
+        _check_rate_limit(ip)  # the served 1s sentence is not resurrected
+        assert ip not in _login_attempts
     finally:
         reset_app_config()
+        _login_attempts.clear()
+
+
+def test_rate_limiter_tightened_threshold_preserves_failures():
+    """Tightening max_login_attempts mid-count keeps the accumulated failures.
+
+    An IP with four failures under max_login_attempts=5 must not get a fresh
+    budget when the operator lowers the threshold to 2: the count stays, the
+    next failure starts the lock, and a successful login still clears it.
+    """
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure, _record_login_success
+    from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+    from deerflow.config.auth_config import AuthAppConfig, LocalAuthConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    def _set_policy(max_attempts: int) -> None:
+        set_app_config(
+            AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                auth=AuthAppConfig(local=LocalAuthConfig(max_login_attempts=max_attempts, lockout_seconds=60.0)),
+            )
+        )
+
+    _login_attempts.clear()
+    try:
+        ip = "10.0.0.6"
+        _set_policy(5)
+        for _ in range(4):
+            _record_login_failure(ip)  # 4 failures: counting, never locked
+
+        _set_policy(2)  # operator tightens the policy mid-count
+        _check_rate_limit(ip)  # allowed this once — but the count survives
+        assert _login_attempts[ip][0] == 4
+
+        _record_login_failure(ip)  # 4 + 1 >= 2: locks on the very next failure
+        with pytest.raises(HTTPException):
+            _check_rate_limit(ip)
+
+        # A correct password still clears everything (no retroactive lockout
+        # of a legitimate user who fat-fingered the password four times).
+        _record_login_success(ip)
+        _check_rate_limit(ip)
+        assert ip not in _login_attempts
+    finally:
+        reset_app_config()
+        _login_attempts.clear()
+
+
+def test_rate_limiter_counts_failure_when_config_breaks(monkeypatch):
+    """A malformed config hot-edit must not hand out unlimited verification.
+
+    Endpoint order per failed login: _check_rate_limit (clean IPs skip the
+    config read) → authenticate() → _record_login_failure. If the record call
+    raises on the broken config *before* mutating state, the IP stays clean
+    and every subsequent wrong password reaches authenticate() again. The
+    failure must land (counted under the model defaults) before the error
+    re-raises; from then on the dirty IP's own check reads the broken config
+    and fails closed — before authenticate.
+    """
+    from app.gateway.routers.auth import _check_rate_limit, _login_attempts, _record_login_failure
+    from deerflow.config import app_config as app_config_module
+
+    def _malformed():
+        raise ValueError("config validation error")
+
+    _login_attempts.clear()
+    monkeypatch.setattr(app_config_module, "get_app_config", _malformed)
+    try:
+        ip = "10.0.0.7"
+
+        # First failed login: still allowed through to authenticate(), then
+        # the record call fails loudly — but the failure is counted first.
+        _check_rate_limit(ip)  # clean IP: no config read, allowed
+        with pytest.raises(ValueError, match="config validation error"):
+            _record_login_failure(ip)
+        assert _login_attempts[ip] == (1, 0.0, 0.0)
+
+        # Second login: the now-dirty IP's check reads the broken config and
+        # fails closed *before* authenticate() — no more password verification.
+        with pytest.raises(ValueError, match="config validation error"):
+            _check_rate_limit(ip)
+    finally:
         _login_attempts.clear()
 
 

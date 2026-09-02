@@ -2723,9 +2723,10 @@ authorization:
 #     # never lock an IP, or a single typo would block the shared egress).
 #     # Defaults preserve the historical hardcoded policy (5 failures /
 #     # 5 minutes). Live-read per login, so a config reload applies without
-#     # a Gateway restart — including to a lockout already in progress
-#     # (active locks expire at locked_at + the currently configured
-#     # lockout_seconds).
+#     # a Gateway restart: lowering lockout_seconds releases an active lock
+#     # early and tightening max_login_attempts keeps already-counted
+#     # failures; a raised lockout_seconds extends a still-active lock but
+#     # never resurrects one that already expired.
 #     # max_login_attempts: 5
 #     # lockout_seconds: 300
 #

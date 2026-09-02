@@ -174,11 +174,12 @@ def _set_session_cookie(response: Response, token: str, request: Request, *, rem
 # no-config.yaml fallback is the LocalAuthConfig model defaults — a single source
 # of truth, not a second copy of the numbers.
 
-# ip → (fail_count, locked_at_timestamp). Storing the lock *start* (not an
-# absolute deadline) lets _check_rate_limit derive the expiry as
-# locked_at + the currently configured lockout_seconds, so a live duration
-# change applies to in-flight lockouts too.
-_login_attempts: dict[str, tuple[int, float]] = {}
+# ip → (fail_count, locked_at, locked_duration). A lock carries the duration
+# in force when it started, so _check_rate_limit can tell an active sentence
+# from a served one: a lowered lockout_seconds releases an active lock early,
+# a raised one extends it — but a lock that already served its original
+# sentence is never resurrected by a later duration increase.
+_login_attempts: dict[str, tuple[int, float, float]] = {}
 
 
 def _login_throttle_policy() -> tuple[int, float]:
@@ -278,34 +279,54 @@ def _check_rate_limit(ip: str) -> None:
     if record is None:
         return
     max_attempts, lockout_seconds = _login_throttle_policy()
-    fail_count, locked_at = record
-    if fail_count >= max_attempts:
-        # Expiry is derived from the *currently* configured duration, so a live
-        # lockout_seconds change applies to in-flight lockouts in both
-        # directions — matching the documented "reload applies on next login".
-        if locked_at > 0.0 and time.time() < locked_at + lockout_seconds:
-            raise HTTPException(
-                status_code=429,
-                detail="Too many login attempts. Try again later.",
-            )
+    fail_count, locked_at, locked_duration = record
+    if fail_count < max_attempts:
+        return
+    if locked_at == 0.0:
+        # Over the *current* threshold but the lock never started under the
+        # threshold these failures accumulated under (the operator tightened
+        # max_login_attempts mid-count). Keep the record: the next failure
+        # starts the lock and a successful login clears it — deleting here
+        # would hand the IP a fresh budget under a stricter policy.
+        return
+    now = time.time()
+    if now >= locked_at + locked_duration:
+        # The lock served the full sentence of the duration in force when it
+        # started — a later duration increase must not resurrect it.
         del _login_attempts[ip]
+        return
+    if now < locked_at + lockout_seconds:
+        # Still inside the original sentence. The *current* duration governs
+        # from here: a lowered lockout_seconds releases early, and a raised
+        # one extends this sentence — but only because the IP is being
+        # evaluated while still locked (renewal); a sentence that already
+        # elapsed is never resurrected by the branch above.
+        if lockout_seconds > locked_duration:
+            _login_attempts[ip] = (fail_count, locked_at, lockout_seconds)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again later.",
+        )
+    # Original sentence still running, but the current (lowered) duration has
+    # already elapsed — release early.
+    del _login_attempts[ip]
 
 
 _MAX_TRACKED_IPS = 10000
 
 
-def _record_login_failure(ip: str) -> None:
-    """Record a failed login attempt for the given IP."""
-    max_attempts, lockout_seconds = _login_throttle_policy()
-    # Evict expired lockouts when dict grows too large
+def _record_failure_under_policy(ip: str, max_attempts: int, lockout_seconds: float) -> None:
+    """Apply one failed login to the counter under an explicit policy."""
+    # Evict expired lockouts when dict grows too large. Each record expires by
+    # its own locked_duration, so eviction is immune to live policy changes.
     if len(_login_attempts) >= _MAX_TRACKED_IPS:
         now = time.time()
-        expired = [k for k, (c, t) in _login_attempts.items() if c >= max_attempts and t > 0.0 and now >= t + lockout_seconds]
+        expired = [k for k, (c, t, d) in _login_attempts.items() if c >= max_attempts and t > 0.0 and now >= t + d]
         for k in expired:
             del _login_attempts[k]
         # If still too large, evict cheapest-to-lose half: below-threshold
         # IPs (locked_at=0.0) sort first, then earliest-locked (≈ earliest
-        # to expire under the current duration).
+        # to expire under its own duration).
         if len(_login_attempts) >= _MAX_TRACKED_IPS:
             by_time = sorted(_login_attempts.items(), key=lambda kv: kv[1][1])
             for k, _ in by_time[: len(by_time) // 2]:
@@ -313,11 +334,33 @@ def _record_login_failure(ip: str) -> None:
 
     record = _login_attempts.get(ip)
     if record is None:
-        _login_attempts[ip] = (1, 0.0)
+        _login_attempts[ip] = (1, 0.0, 0.0)
     else:
         new_count = record[0] + 1
-        locked_at = time.time() if new_count >= max_attempts else 0.0
-        _login_attempts[ip] = (new_count, locked_at)
+        if new_count >= max_attempts:
+            _login_attempts[ip] = (new_count, time.time(), lockout_seconds)
+        else:
+            _login_attempts[ip] = (new_count, 0.0, 0.0)
+
+
+def _record_login_failure(ip: str) -> None:
+    """Record a failed login attempt for the given IP."""
+    try:
+        max_attempts, lockout_seconds = _login_throttle_policy()
+    except Exception:
+        # A malformed config keeps failing loudly, but dropping the failure
+        # here would leave the IP clean — and a clean IP skips the config
+        # read in _check_rate_limit, so every subsequent wrong password would
+        # reach authenticate() again: unlimited password verification for as
+        # long as the file stays broken. Count under the model defaults so
+        # the throttle fails closed (the next check reads the broken config
+        # before authenticate), then re-raise.
+        from deerflow.config.auth_config import LocalAuthConfig
+
+        fallback = LocalAuthConfig()
+        _record_failure_under_policy(ip, fallback.max_login_attempts, fallback.lockout_seconds)
+        raise
+    _record_failure_under_policy(ip, max_attempts, lockout_seconds)
 
 
 def _record_login_success(ip: str) -> None:
