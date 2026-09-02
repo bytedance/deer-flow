@@ -3,6 +3,7 @@
 import asyncio
 import concurrent.futures
 import logging
+import threading
 import time
 import uuid
 from contextvars import ContextVar
@@ -73,6 +74,63 @@ _explicit_app_config: ContextVar[Any | None] = ContextVar(
     "deerflow_explicit_subagent_app_config",
     default=None,
 )
+
+
+def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> None:
+    """Run one subagent middleware-journal append on the journal owner's loop."""
+    try:
+        journal.record_middleware(**kwargs)
+    except Exception:
+        logger.warning("Failed to record subagent middleware event", exc_info=True)
+
+
+class _ParentLoopMiddlewareRecorderProxy:
+    """Forward subagent loop-detection events to the parent run's event loop.
+
+    ``RunJournal`` owns parent-loop tasks and may wrap an event store backed by
+    a loop-bound SQL pool. Subagents execute on a persistent isolated loop, so
+    the journal object itself must never be called there.
+    """
+
+    def __init__(self, journal: Any, loop: asyncio.AbstractEventLoop) -> None:
+        self._journal = journal
+        self._loop = loop
+        self._state_lock = threading.Lock()
+        self._closed = False
+
+    def record_middleware(self, **kwargs: Any) -> None:
+        with self._state_lock:
+            if self._closed or self._loop.is_closed():
+                logger.debug("Dropping subagent middleware event after parent loop shutdown")
+                return
+            try:
+                self._loop.call_soon_threadsafe(
+                    _record_middleware_on_parent_loop,
+                    self._journal,
+                    dict(kwargs),
+                )
+            except RuntimeError:
+                # The loop may close between is_closed() and scheduling.
+                logger.debug("Dropping subagent middleware event after parent loop shutdown")
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether the task-tool boundary has fenced new child events."""
+        with self._state_lock:
+            return self._closed
+
+    async def aclose(self) -> None:
+        """Fence late child events and drain every append accepted before it."""
+        if asyncio.get_running_loop() is not self._loop:
+            logger.warning("Cannot drain subagent middleware recorder from a non-owner loop")
+            return
+        with self._state_lock:
+            self._closed = True
+        if self._loop.is_closed():
+            return
+        # record_middleware holds _state_lock through call_soon_threadsafe, so
+        # all accepted callbacks are already ahead of this continuation.
+        await asyncio.sleep(0)
 
 
 def _is_subagent_terminal(result: Any) -> bool:
@@ -815,6 +873,17 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    loop_detection_recorder = None
+    parent_journal = parent_context.get("__run_journal")
+    if parent_journal is not None:
+        # The task tool runs on the parent run's loop. Pass only a proxy across
+        # the isolated-subagent boundary so middleware persistence is delivered
+        # on the loop that owns the RunJournal and its event store.
+        loop_detection_recorder = _ParentLoopMiddlewareRecorderProxy(
+            parent_journal,
+            asyncio.get_running_loop(),
+        )
+        executor_kwargs["loop_detection_recorder"] = loop_detection_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
@@ -1105,3 +1174,6 @@ async def task_tool(
             # must end as an interrupted run, not a failed tool call.
             raise asyncio.CancelledError
         raise
+    finally:
+        if loop_detection_recorder is not None:
+            await loop_detection_recorder.aclose()

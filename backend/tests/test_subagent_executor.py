@@ -82,11 +82,13 @@ def _setup_executor_classes():
     # Save original modules
     original_modules = {name: sys.modules.get(name) for name in _MOCKED_MODULE_NAMES}
     original_executor = sys.modules.get("deerflow.subagents.executor")
+    original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
 
-    # Preload the real deferred-tool helpers before replacing the parent agent
-    # packages with cycle-breaking test doubles. Executor imports this module
-    # lazily while building initial state.
+    # Preload real executor dependencies before replacing their parent packages
+    # with cycle-breaking test doubles. Keeping the concrete leaf modules in
+    # sys.modules makes this fixture independent of test collection order.
+    audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
 
     # Remove mocked executor if exists (from conftest.py)
@@ -101,6 +103,7 @@ def _setup_executor_classes():
     storage_module.get_or_new_skill_storage = lambda **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
     storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
     sys.modules["deerflow.skills.storage"] = storage_module
+    sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
 
     # Import real classes inside fixture
@@ -146,6 +149,10 @@ def _setup_executor_classes():
         sys.modules["deerflow.subagents.executor"] = original_executor
     elif "deerflow.subagents.executor" in sys.modules:
         del sys.modules["deerflow.subagents.executor"]
+    if original_audit_context is not None:
+        sys.modules["deerflow.agents.middlewares.audit_context"] = original_audit_context
+    else:
+        sys.modules.pop("deerflow.agents.middlewares.audit_context", None)
     if original_tool_search is not None:
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:
@@ -3641,6 +3648,7 @@ class TestSubagentGuardrailAttribution:
         oauth_provider=None,
         oauth_id=None,
         run_id=None,
+        loop_detection_recorder=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -3664,6 +3672,7 @@ class TestSubagentGuardrailAttribution:
             oauth_provider=oauth_provider,
             oauth_id=oauth_id,
             run_id=run_id,
+            loop_detection_recorder=loop_detection_recorder,
         )
 
     @pytest.mark.anyio
@@ -3699,6 +3708,32 @@ class TestSubagentGuardrailAttribution:
         assert context.get("oauth_id") == "subj-123"
         assert context.get("run_id") == "run-42"
         assert context.get("is_subagent") is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_narrow_loop_detection_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """The child context receives the loop-safe proxy, never the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            loop_detection_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_loop_detection_recorder") is recorder
+        assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
 
     @pytest.mark.anyio
     async def test_aexecute_propagates_channel_user_id_to_subagent_context(
