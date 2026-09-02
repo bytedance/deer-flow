@@ -31,6 +31,7 @@ const patsMockState = rs.hoisted(() => ({
   patsHookCalls: 0,
   createHookCalls: 0,
   revokeHookCalls: 0,
+  reconciling: false,
   revokePending: false,
   revokeMutate: async (_patId: string) => undefined,
 }));
@@ -169,7 +170,7 @@ rs.mock("@/core/static-mode", () => ({
 
 rs.mock("@/core/pats", () => ({
   PatStoreUnavailableError,
-  patQueryKey: (userId: string | null) => ["pats", userId ?? "anonymous"],
+  patQueriesForUser: (userId: string | null) => ["pats", userId ?? "anonymous"],
   PAT_SCOPES: [
     "threads:read",
     "threads:write",
@@ -184,6 +185,7 @@ rs.mock("@/core/pats", () => ({
       pats: patsMockState.pats,
       isLoading: false,
       error: patsMockState.error,
+      reconciling: patsMockState.reconciling,
     };
   },
   useCreatePat: () => {
@@ -211,6 +213,7 @@ afterEach(() => {
   patsMockState.patsHookCalls = 0;
   patsMockState.createHookCalls = 0;
   patsMockState.revokeHookCalls = 0;
+  patsMockState.reconciling = false;
   patsMockState.revokePending = false;
   patsMockState.revokeMutate = async () => undefined;
   staticModeMockState.enabled = false;
@@ -247,6 +250,22 @@ describe("PatSettingsPage", () => {
     expect(patsMockState.patsHookCalls).toBe(0);
     expect(patsMockState.createHookCalls).toBe(0);
     expect(patsMockState.revokeHookCalls).toBe(0);
+  });
+
+  it("holds token management while the session identity reconciles", () => {
+    // No complete session identity (cleared user / missing generation):
+    // no request may leave, the empty-list message must not misread as
+    // "this account has no tokens", and minting must be unavailable.
+    patsMockState.reconciling = true;
+
+    renderWithQueryClient(<PatSettingsPage />);
+
+    expect(screen.getByText("Loading")).toBeDefined();
+    expect(screen.queryByText("No API tokens yet")).toBeNull();
+    const createButton = screen.getByRole("button", {
+      name: "Create token",
+    });
+    expect(createButton.getAttribute("disabled")).not.toBeNull();
   });
 
   it("latches create against a true double-click before isPending renders", () => {

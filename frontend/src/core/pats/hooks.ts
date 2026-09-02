@@ -6,35 +6,59 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import {
   createPat,
   listPats,
+  MissingSessionIdentityError,
   PatStoreUnavailableError,
   revokePat,
   StaleSessionIdentityError,
 } from "./api";
-import type { SessionIdentity } from "./api";
+import type { DeclaredSessionIdentity } from "./api";
 import type { CreatePatRequest } from "./types";
 
 /**
- * PAT summaries are per-account data: the key carries the authenticated
- * user's id so signing out and back in as a different user within the cache
- * retention window can never surface the previous account's tokens.
+ * PAT summaries are per-account — and, within an account, per session
+ * generation: replacing the session (sign-in elsewhere, password change)
+ * reissues the cookie with a new generation, and the key must follow it so
+ * a fence rejection never strands the observer on the errored key.
  */
-export function patQueryKey(userId: string | null) {
-  return ["pats", userId ?? "anonymous"] as const;
+export const PATS_QUERY_KEY = "pats" as const;
+
+// The placeholder address the query sits at while no complete identity
+// exists. It is never fetched (the query is disabled), so it can never hold
+// data — it exists only so the observer has a stable key during handoff.
+const PENDING_IDENTITY_KEY = [PATS_QUERY_KEY, "pending-identity"] as const;
+
+export function patQueryKey(identity: DeclaredSessionIdentity) {
+  return [PATS_QUERY_KEY, identity.userId, identity.generation] as const;
 }
 
-function useSessionIdentity(): SessionIdentity | null {
+/** Prefix covering every generation of one user's PAT list queries. */
+export function patQueriesForUser(userId: string | null) {
+  return [PATS_QUERY_KEY, userId ?? "anonymous"] as const;
+}
+
+/**
+ * The complete identity every browser PAT request declares: the
+ * authenticated user plus the session generation from /me. Incomplete —
+ * user cleared by a failed /me refresh, or no generation yet — means this
+ * tab has no fence-able view of who is signed in, and an undeclared request
+ * would be admitted by the backend as a non-browser client, reading or
+ * mutating whatever account the cookie currently authenticates. Every
+ * browser PAT operation is therefore held until the identity is complete.
+ */
+function useCompleteSessionIdentity(): DeclaredSessionIdentity | null {
   const { user } = useAuth();
-  if (!user) return null;
-  return { userId: user.id, generation: user.session_generation ?? null };
+  if (!user || user.session_generation == null) return null;
+  return { userId: user.id, generation: user.session_generation };
 }
 
 /**
  * The backend's identity fence rejected this tab's stale view of who is
  * signed in (another tab switched the shared session). Reconciling is the
  * only correct response: refreshUser converges React state onto the
- * cookie's account, which changes the identity-scoped query key, so the
- * corrected account's data loads under its own key. Suppressing a refetch
- * trigger alone cannot fence remount, reconnect, or invalidation requests.
+ * cookie's account — flipping the user id or the session generation, and
+ * with it the identity-scoped query key, so the corrected account's data
+ * loads under its own key. Suppressing a refetch trigger alone cannot
+ * fence remount, reconnect, or invalidation requests.
  */
 function useIdentityReconciler() {
   const { refreshUser } = useAuth();
@@ -44,31 +68,36 @@ function useIdentityReconciler() {
 }
 
 export function usePats() {
-  const { user } = useAuth();
-  const identity = useSessionIdentity();
+  const identity = useCompleteSessionIdentity();
   const reconcile = useIdentityReconciler();
   const queryClient = useQueryClient();
-  const userId = user?.id ?? null;
 
-  // A cross-tab account switch replaces the session cookie immediately,
-  // while this tab's React auth state only catches up after AuthProvider's
-  // throttled visibility refresh. Any fetch TanStack fires in that window
-  // carries the stale identity's declaration, which the backend fence
-  // rejects before any data crosses the boundary — and the previous
-  // identity's cached list is dropped on change so it can never resurface
-  // if the cookie flips back within the gc window.
-  const previousUserId = useRef<string | null>(userId);
+  // Drop the previous identity's cached list the moment the complete
+  // identity changes — account switch or session replacement — so nothing
+  // cached under the old key can resurface if the cookie flips back within
+  // the gc window.
+  const previousIdentity = useRef<DeclaredSessionIdentity | null>(identity);
   useEffect(() => {
-    if (previousUserId.current === userId) return;
-    void queryClient.removeQueries({
-      queryKey: patQueryKey(previousUserId.current),
-    });
-    previousUserId.current = userId;
-  }, [userId, queryClient]);
+    const previous = previousIdentity.current;
+    const unchanged =
+      (previous === null && identity === null) ||
+      (previous !== null &&
+        identity !== null &&
+        previous.userId === identity.userId &&
+        previous.generation === identity.generation);
+    if (unchanged) return;
+    if (previous !== null) {
+      void queryClient.removeQueries({ queryKey: patQueryKey(previous) });
+    }
+    previousIdentity.current = identity;
+  }, [identity, queryClient]);
 
   const query = useQuery({
-    queryKey: patQueryKey(userId),
+    queryKey: identity ? patQueryKey(identity) : PENDING_IDENTITY_KEY,
     queryFn: () => listPats(identity),
+    // No complete identity means no browser PAT request at all — the page
+    // renders the reconciling state instead of a list while this holds.
+    enabled: identity !== null,
     refetchOnWindowFocus: false,
     // A 503 (memory backend, no PAT store) is a legitimate deployment state,
     // not a transient failure worth retrying — everything else (network
@@ -101,23 +130,34 @@ export function usePats() {
     pats: query.data ?? [],
     isLoading: query.isLoading,
     error: query.error,
+    // True while the browser has no complete session identity: queries and
+    // mutations are held until /me reconciles.
+    reconciling: identity === null,
   };
 }
 
 export function useCreatePat() {
   const client = useQueryClient();
   const { user } = useAuth();
-  const identity = useSessionIdentity();
+  const identity = useCompleteSessionIdentity();
   const reconcile = useIdentityReconciler();
   return useMutation({
-    mutationFn: (request: CreatePatRequest) => createPat(request, identity),
+    mutationFn: (request: CreatePatRequest) => {
+      if (!identity) {
+        // The page disables the controls; this guard enforces the contract:
+        // an undeclared browser mint would bind the credential to whatever
+        // account the cookie currently authenticates.
+        throw new MissingSessionIdentityError();
+      }
+      return createPat(request, identity);
+    },
     onSuccess: () => {
       // Deliberately NOT returned: TanStack awaits promises returned from
       // onSuccess, which would keep the mutation pending through the list
       // refetch and delay (or, on a hung refetch, strand) the show-once
       // token the caller is waiting on.
       void client.invalidateQueries({
-        queryKey: patQueryKey(user?.id ?? null),
+        queryKey: patQueriesForUser(user?.id ?? null),
       });
     },
     onError: (error) => {
@@ -133,17 +173,23 @@ export function useCreatePat() {
 export function useRevokePat() {
   const client = useQueryClient();
   const { user } = useAuth();
-  const identity = useSessionIdentity();
+  const identity = useCompleteSessionIdentity();
   const reconcile = useIdentityReconciler();
   return useMutation({
-    mutationFn: (patId: string) => revokePat(patId, identity),
+    mutationFn: (patId: string) => {
+      if (!identity) {
+        // Same contract as creation: no undeclared browser revocation.
+        throw new MissingSessionIdentityError();
+      }
+      return revokePat(patId, identity);
+    },
     onSuccess: async () => {
       // Unlike creation, revocation has no show-once result that must be
       // exposed immediately. Keep the mutation pending until active list
       // observers have refreshed so the success UI cannot leave the revoked
       // credential rendered as active.
       await client.invalidateQueries({
-        queryKey: patQueryKey(user?.id ?? null),
+        queryKey: patQueriesForUser(user?.id ?? null),
       });
     },
     onError: (error) => {

@@ -29,7 +29,31 @@ export type SessionIdentity = {
   generation: number | null;
 };
 
+/**
+ * The identity a browser PAT request must be able to declare in full: user
+ * id plus a non-null session generation from /me. An undeclared request is
+ * deliberately admitted by the backend as a non-browser client (curl flows)
+ * — which is exactly why the browser must never send one.
+ */
+export type DeclaredSessionIdentity = {
+  userId: string;
+  generation: number;
+};
+
 export const SESSION_IDENTITY_HEADER = "X-DF-Session";
+
+/**
+ * A browser PAT operation was attempted before /me established the
+ * fence-able identity (no user, or no session generation yet). Held at the
+ * hooks layer so an undeclared request cannot leak the cookie's current
+ * account into a stale tab.
+ */
+export class MissingSessionIdentityError extends Error {
+  constructor() {
+    super("Session identity unavailable");
+    this.name = "MissingSessionIdentityError";
+  }
+}
 
 /**
  * The declaration the backend compares against the authenticated session.

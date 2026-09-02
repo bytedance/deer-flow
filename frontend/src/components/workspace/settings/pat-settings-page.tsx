@@ -36,7 +36,7 @@ import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   PatStoreUnavailableError,
-  patQueryKey,
+  patQueriesForUser,
   useCreatePat,
   usePats,
   useRevokePat,
@@ -122,7 +122,7 @@ function InteractivePatSettingsPage() {
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const { pats, isLoading, error } = usePats();
+  const { pats, isLoading, error, reconciling } = usePats();
   const create = useCreatePat();
   const revoke = useRevokePat();
 
@@ -262,7 +262,7 @@ function InteractivePatSettingsPage() {
   function showUnavailableStoreState() {
     toast.error(t.settings.tokens.unavailableTitle);
     void queryClient.invalidateQueries({
-      queryKey: patQueryKey(user?.id ?? null),
+      queryKey: patQueriesForUser(user?.id ?? null),
     });
   }
 
@@ -284,7 +284,11 @@ function InteractivePatSettingsPage() {
             ? error.message
             : t.settings.tokens.loadError}
         </div>
-      ) : isLoading ? (
+      ) : isLoading || reconciling ? (
+        // `reconciling`: no complete session identity yet (a failed /me
+        // refresh cleared the user, or the generation has not arrived). No
+        // request may leave in that state, and an empty-list message would
+        // misread as "this account has no tokens" — show loading instead.
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
       ) : pats.length === 0 ? (
         <div className="text-muted-foreground rounded-md border border-dashed p-4 text-sm">
@@ -365,6 +369,10 @@ function InteractivePatSettingsPage() {
           <Button
             variant="outline"
             size="sm"
+            // Held while the session identity is incomplete: a mint cannot
+            // be declared without it, and the mutation refuses undeclared
+            // browser requests outright.
+            disabled={reconciling}
             onClick={() => {
               resetCreateForm();
               setCreated(null);
@@ -607,7 +615,7 @@ function InteractivePatSettingsPage() {
             <Button
               variant="destructive"
               onClick={() => void handleRevoke()}
-              disabled={revoke.isPending}
+              disabled={revoke.isPending || reconciling}
             >
               {revoke.isPending
                 ? t.common.loading

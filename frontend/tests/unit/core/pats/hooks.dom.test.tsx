@@ -7,7 +7,7 @@ const fetchMock = rs.hoisted(() => rs.fn());
 // Mutable on purpose: the identity-switch regression needs to change the
 // authenticated user between renders, which the static useAuth mock can't.
 const authMock = rs.hoisted(() => ({
-  user: { id: "test-user" } as {
+  user: null as {
     id: string;
     session_generation?: number | null;
   } | null,
@@ -22,8 +22,17 @@ rs.mock("@/core/auth/AuthProvider", () => ({
   useAuth: () => ({ user: authMock.user, refreshUser: refreshUserMock }),
 }));
 
-import { StaleSessionIdentityError } from "@/core/pats/api";
-import { patQueryKey, usePats, useRevokePat } from "@/core/pats/hooks";
+import {
+  MissingSessionIdentityError,
+  StaleSessionIdentityError,
+} from "@/core/pats/api";
+import {
+  patQueriesForUser,
+  patQueryKey,
+  useCreatePat,
+  usePats,
+  useRevokePat,
+} from "@/core/pats/hooks";
 import type { PatSummary } from "@/core/pats/types";
 
 function createWrapper(queryClient: QueryClient) {
@@ -46,11 +55,24 @@ function summary(id: string): PatSummary {
   };
 }
 
+function staleIdentityResponse(): Response {
+  return new Response(
+    JSON.stringify({
+      detail: "Session identity changed — refresh the page and retry",
+    }),
+    { status: 409, headers: { "Content-Type": "application/json" } },
+  );
+}
+
+function identity(userId: string, generation: number) {
+  return { userId, generation } as const;
+}
+
 describe("useRevokePat", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     refreshUserMock.mockReset();
-    authMock.user = { id: "test-user" };
+    authMock.user = { id: "test-user", session_generation: 1756700000 };
   });
 
   afterEach(() => {
@@ -84,7 +106,7 @@ describe("useRevokePat", () => {
 
     await waitFor(() => {
       expect(invalidateQueries).toHaveBeenCalledWith({
-        queryKey: patQueryKey("test-user"),
+        queryKey: patQueriesForUser("test-user"),
       });
     });
     expect(settled).toBe(false);
@@ -95,13 +117,69 @@ describe("useRevokePat", () => {
     });
     expect(settled).toBe(true);
   });
+
+  it("refuses to revoke while the session identity is incomplete", async () => {
+    // A cleared user (failed /me refresh) must never issue an undeclared
+    // DELETE: the backend admits undeclared requests as non-browser clients
+    // and would revoke the cookie's current account unfenced.
+    authMock.user = null;
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => useRevokePat(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await act(async () => {
+      await expect(result.current.mutateAsync("pat-1")).rejects.toBeInstanceOf(
+        MissingSessionIdentityError,
+      );
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("useCreatePat", () => {
+  beforeEach(() => {
+    fetchMock.mockReset();
+    refreshUserMock.mockReset();
+    authMock.user = { id: "user-a", session_generation: 1756700000 };
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("refuses to mint while the session identity is incomplete", async () => {
+    // Same fence contract as revocation: a browser mint without a complete
+    // declaration would bind the new credential to whatever account the
+    // cookie currently authenticates.
+    authMock.user = { id: "user-a" };
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { result } = renderHook(() => useCreatePat(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await act(async () => {
+      await expect(
+        result.current.mutateAsync({
+          name: "ci",
+          scopes: ["threads:read"],
+          expires_in_days: null,
+        }),
+      ).rejects.toBeInstanceOf(MissingSessionIdentityError);
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("usePats", () => {
   beforeEach(() => {
     fetchMock.mockReset();
     refreshUserMock.mockReset();
-    authMock.user = { id: "user-a" };
+    authMock.user = { id: "user-a", session_generation: 1756700000 };
   });
 
   afterEach(() => {
@@ -153,17 +231,19 @@ describe("usePats", () => {
     });
 
     act(() => {
-      authMock.user = { id: "user-b" };
+      authMock.user = { id: "user-b", session_generation: 1756800000 };
     });
     rerender();
 
     await waitFor(() => {
       expect(result.current.pats.map((pat) => pat.id)).toEqual(["pat-b"]);
     });
-    expect(queryClient.getQueryData(patQueryKey("user-a"))).toBeUndefined();
-    expect(queryClient.getQueryData(patQueryKey("user-b"))).toEqual([
-      summary("pat-b"),
-    ]);
+    expect(
+      queryClient.getQueryData(patQueryKey(identity("user-a", 1756700000))),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryData(patQueryKey(identity("user-b", 1756800000))),
+    ).toEqual([summary("pat-b")]);
   });
 
   it("declares the session identity on list requests once /me provided a generation", async () => {
@@ -185,23 +265,74 @@ describe("usePats", () => {
     );
   });
 
-  it("omits the declaration when no generation is known", async () => {
-    authMock.user = { id: "user-a" };
-    fetchMock.mockResolvedValue(Response.json([summary("pat-a")]));
+  it("holds list requests while the session identity is incomplete", async () => {
+    // The fence admits undeclared requests on purpose (curl flows), so the
+    // browser must never be the one to send them: with the user cleared by a
+    // failed /me refresh — or /me not having provided a generation yet — no
+    // list request may leave, and the hook reports the reconciling state the
+    // page renders instead of an empty list.
+    for (const user of [null, { id: "user-a" }] as const) {
+      fetchMock.mockReset();
+      authMock.user = user as { id: string } | null;
+      const queryClient = new QueryClient({
+        defaultOptions: { queries: { retry: false } },
+      });
+      const { result } = renderHook(() => usePats(), {
+        wrapper: createWrapper(queryClient),
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(result.current.pats).toEqual([]);
+      expect(result.current.reconciling).toBe(true);
+      cleanup();
+    }
+  });
+
+  it("recovers on the new generation's key after the fence rejects a replaced session", async () => {
+    // Password change: same user, reissued session cookie, new generation.
+    // The first list request carries the old generation and is fenced with
+    // 409; reconciliation refreshes /me, and the corrected generation must
+    // flip the query key — otherwise the observer stays on the errored
+    // query and the page is stuck on "Session identity changed" forever.
+    authMock.user = { id: "user-a", session_generation: 1756700000 };
+    fetchMock
+      .mockResolvedValueOnce(staleIdentityResponse())
+      .mockResolvedValueOnce(Response.json([summary("pat-a")]));
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
-    const { result } = renderHook(() => usePats(), {
+    const { result, rerender } = renderHook(() => usePats(), {
       wrapper: createWrapper(queryClient),
     });
 
     await waitFor(() => {
-      expect(result.current.pats).toHaveLength(1);
+      expect(result.current.error).toBeInstanceOf(StaleSessionIdentityError);
     });
-    const init = fetchMock.mock.calls[0]![1] as RequestInit;
-    expect((init.headers as Record<string, string>)["X-DF-Session"]).toBe(
-      undefined,
+    await waitFor(() => {
+      expect(refreshUserMock).toHaveBeenCalledTimes(1);
+    });
+
+    // What the reconciled /me produces: the same user under generation 2.
+    act(() => {
+      authMock.user = { id: "user-a", session_generation: 1756800000 };
+    });
+    rerender();
+
+    await waitFor(() => {
+      expect(result.current.pats.map((pat) => pat.id)).toEqual(["pat-a"]);
+    });
+    expect(result.current.error).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const second = fetchMock.mock.calls[1]![1] as RequestInit;
+    expect((second.headers as Record<string, string>)["X-DF-Session"]).toBe(
+      "user-a:1756800000",
     );
+    // The rejected generation's entry cannot resurface inside the gc window.
+    expect(
+      queryClient.getQueryData(patQueryKey(identity("user-a", 1756700000))),
+    ).toBeUndefined();
   });
 
   it("reconciles instead of rendering when the fence rejects the stale identity", async () => {
@@ -211,14 +342,7 @@ describe("usePats", () => {
     // wrong-account data may cross the boundary — and the only correct
     // client response is to reconcile the auth state, never to render.
     authMock.user = { id: "user-a", session_generation: 1756700000 };
-    fetchMock.mockResolvedValue(
-      new Response(
-        JSON.stringify({
-          detail: "Session identity changed — refresh the page and retry",
-        }),
-        { status: 409, headers: { "Content-Type": "application/json" } },
-      ),
-    );
+    fetchMock.mockResolvedValue(staleIdentityResponse());
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
     });
@@ -230,7 +354,9 @@ describe("usePats", () => {
       expect(result.current.error).toBeInstanceOf(StaleSessionIdentityError);
     });
     expect(result.current.pats).toEqual([]);
-    expect(queryClient.getQueryData(patQueryKey("user-a"))).toBeUndefined();
+    expect(
+      queryClient.getQueryData(patQueryKey(identity("user-a", 1756700000))),
+    ).toBeUndefined();
     await waitFor(() => {
       expect(refreshUserMock).toHaveBeenCalledTimes(1);
     });
