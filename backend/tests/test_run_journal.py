@@ -4,6 +4,7 @@ Uses MemoryRunEventStore as the backend for direct event inspection.
 """
 
 import asyncio
+import weakref
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -17,6 +18,124 @@ from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
 def test_run_journal_is_marked_as_loop_bound():
     assert RunJournal.deerflow_loop_bound is True
+
+
+@pytest.mark.anyio
+async def test_close_flushes_and_detaches_runtime_dependencies():
+    class ProgressReporter:
+        async def __call__(self, snapshot):
+            del snapshot
+
+    store = MemoryRunEventStore()
+    reporter = ProgressReporter()
+    store_ref = weakref.ref(store)
+    reporter_ref = weakref.ref(reporter)
+    journal = RunJournal(
+        "r-close",
+        "t-close",
+        store,
+        progress_reporter=reporter,
+        flush_threshold=100,
+    )
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    await journal.close()
+
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._progress_reporter is None
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
+    del store, reporter
+    await asyncio.sleep(0)
+    assert store_ref() is None
+    assert reporter_ref() is None
+
+
+@pytest.mark.anyio
+async def test_close_preserves_buffer_and_dependencies_when_flush_fails():
+    class FailOnceRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            if self.put_batch_calls == 1:
+                raise RuntimeError("transient store failure")
+            return await super().put_batch(events)
+
+    store = FailOnceRunEventStore()
+    journal = RunJournal("r-close-retry", "t-close-retry", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    with pytest.raises(RuntimeError, match="transient store failure"):
+        await journal.close()
+
+    assert journal._closed is False
+    assert journal._store is store
+    assert len(journal._buffer) == 1
+
+    await journal.close()
+
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    events = await store.list_events("t-close-retry", "r-close-retry")
+    assert [event["event_type"] for event in events] == ["middleware:test"]
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_discards_buffer_and_detaches_runtime_dependencies():
+    class TrackingRunEventStore(MemoryRunEventStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.put_batch_calls = 0
+
+        async def put_batch(self, events):
+            self.put_batch_calls += 1
+            return await super().put_batch(events)
+
+    store = TrackingRunEventStore()
+    journal = RunJournal("r-close-discard", "t-close-discard", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+
+    await journal.close(flush=False)
+
+    assert store.put_batch_calls == 0
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+
+
+@pytest.mark.anyio
+async def test_close_without_flush_detaches_when_cancellation_interrupts_pending_task_cleanup():
+    store = MemoryRunEventStore()
+    journal = RunJournal("r-close-cancelled", "t-close-cancelled", store, flush_threshold=100)
+    journal.record_middleware("test", name="test", hook="after", action="record", changes={})
+    first_cancellation_seen = asyncio.Event()
+
+    async def stubborn_pending_flush() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            first_cancellation_seen.set()
+            await asyncio.Event().wait()
+
+    pending_flush = asyncio.create_task(stubborn_pending_flush())
+    journal._pending_flush_tasks.add(pending_flush)
+    close_task = asyncio.create_task(journal.close(flush=False))
+    await asyncio.wait_for(first_cancellation_seen.wait(), timeout=1)
+
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    assert pending_flush.done()
+    assert journal._closed is True
+    assert journal._store is None
+    assert journal._buffer == []
+    assert journal._pending_flush_tasks == set()
 
 
 @pytest.fixture
@@ -330,7 +449,15 @@ class TestFinalToolMessageReconciliation:
         assert not any(m["event_type"] == "llm.tool.result" for m in messages)
 
     @pytest.mark.anyio
-    async def test_root_chain_end_ignores_non_allowlisted_tool_message(self, journal_setup):
+    async def test_root_chain_end_ignores_subagent_tool_message(self, journal_setup):
+        """Reconciliation covers the lead agent's own calls only.
+
+        A subagent's internal tool results belong to its own step feed
+        (``subagent.step``), not to the thread's message feed;
+        ``_remember_current_run_tool_calls`` records lead-agent calls only.
+        This is the boundary that keeps reconciliation safe now that it is no
+        longer narrowed to an ``ask_clarification`` allowlist.
+        """
         from langchain_core.messages import ToolMessage
 
         j, store = journal_setup
@@ -338,7 +465,7 @@ class TestFinalToolMessageReconciliation:
             _make_llm_response("", tool_calls=[{"id": "call_search", "name": "web_search", "args": {"query": "deerflow"}}]),
             run_id=uuid4(),
             parent_run_id=None,
-            tags=["lead_agent"],
+            tags=["subagent:general-purpose"],
         )
         tool_msg = ToolMessage(content="Search result", tool_call_id="call_search", name="web_search")
 
@@ -371,6 +498,40 @@ class TestFinalToolMessageReconciliation:
 
         messages = await store.list_messages("t1")
         assert not any(m["event_type"] == "llm.tool.result" for m in messages)
+
+    @pytest.mark.anyio
+    async def test_root_chain_end_reconciles_any_middleware_short_circuited_tool_message(self, journal_setup):
+        """A middleware that blocks a tool call still returns a user-visible result.
+
+        ReadBeforeWriteMiddleware answers a blocked ``write_file`` with an error
+        ToolMessage instead of running the tool, so LangChain never emits
+        ``on_tool_end`` and the message never reached the event store. The user
+        saw it during the run and it vanished on reload (#4666). Reconciliation
+        is not specific to ``ask_clarification``: any visible tool result the
+        model asked for in this run belongs in the thread feed.
+        """
+        from langchain_core.messages import ToolMessage
+
+        j, store = journal_setup
+        j.on_llm_end(
+            _make_llm_response("", tool_calls=[{"id": "call_write", "name": "write_file", "args": {"path": "/mnt/user-data/outputs/a.txt"}}]),
+            run_id=uuid4(),
+            parent_run_id=None,
+            tags=["lead_agent"],
+        )
+        blocked = ToolMessage(
+            content="Error: write_file blocked — read the file before writing to it",
+            tool_call_id="call_write",
+            name="write_file",
+        )
+
+        j.on_chain_end({"messages": [blocked]}, run_id=uuid4())
+        await j.flush()
+
+        messages = await store.list_messages("t1")
+        tool_results = [m for m in messages if m["event_type"] == "llm.tool.result"]
+        assert len(tool_results) == 1
+        assert tool_results[0]["content"]["name"] == "write_file"
 
 
 class TestCustomEvents:
@@ -421,6 +582,58 @@ class TestBufferFlush:
         await j.flush()
         events = await store.list_events("t1", "r1")
         assert any(e["event_type"] == "llm.ai.response" for e in events)
+
+
+class TestFeedGeneration:
+    """The counter that tells a cached feed lookup when to re-ask.
+
+    A message this run produces is not in the feed while it is only buffered,
+    so a reader looking it up legitimately misses. Bumping this on every write
+    lets that reader retry exactly when retrying could answer differently,
+    rather than either polling the store or caching the miss for the whole run
+    (#4696 review).
+    """
+
+    @pytest.mark.anyio
+    async def test_buffering_alone_does_not_advance_it(self, journal_setup):
+        j, _store = journal_setup
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        assert len(j._buffer) == 1
+        assert j.feed_generation == 0
+
+    @pytest.mark.anyio
+    async def test_a_threshold_flush_advances_it(self, journal_setup):
+        j, _store = journal_setup
+        j._flush_threshold = 1
+
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j.feed_generation == 1
+
+    @pytest.mark.anyio
+    async def test_a_terminal_flush_advances_it(self, journal_setup):
+        j, _store = journal_setup
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+
+        await j.flush()
+
+        assert j.feed_generation == 1
+
+    @pytest.mark.anyio
+    async def test_a_failed_write_leaves_it_alone(self):
+        """Nothing became readable, so a cached miss must not be re-asked."""
+
+        class FailingStore(MemoryRunEventStore):
+            async def put_batch(self, events):
+                raise RuntimeError("store unavailable")
+
+        j = RunJournal("r-gen", "t-gen", FailingStore(), flush_threshold=1)
+        j.on_llm_end(_make_llm_response("A"), run_id=uuid4(), parent_run_id=None, tags=["lead_agent"])
+        await asyncio.sleep(0.1)
+
+        assert j.feed_generation == 0
 
 
 class TestIdentifyCaller:
@@ -996,12 +1209,23 @@ class TestProgressSnapshots:
             parent_run_id=None,
             tags=["lead_agent"],
         )
+        pending_task = j._pending_progress_task
+        assert pending_task is not None
+        pending_task_ref = weakref.ref(pending_task)
 
         await asyncio.wait_for(j.flush(), timeout=0.2)
 
         assert snapshots[-1]["total_tokens"] == 15
         assert snapshots[-1]["llm_call_count"] == 1
         assert snapshots[-1]["last_ai_message"] == "First"
+        assert j._pending_progress_task is None
+
+        # The journal must not keep the cancelled task (and its traceback
+        # frame) alive until cyclic GC. Dropping this last local reference
+        # should release it immediately.
+        del pending_task
+        await asyncio.sleep(0)
+        assert pending_task_ref() is None
 
 
 class TestChatModelStartHumanMessage:
@@ -1387,6 +1611,34 @@ class TestDeliveryTracking:
         assert content["paths"] == ["/mnt/user-data/outputs/report.md"]
         assert content["by_tool"] == {"present_files": ["/mnt/user-data/outputs/report.md"]}
         assert delivery[0]["category"] == "outputs"
+
+    @pytest.mark.anyio
+    async def test_tool_callback_name_preserves_attribution_when_message_lookup_misses(self, journal_setup):
+        from langchain_core.messages import ToolMessage
+        from langgraph.types import Command
+
+        j, store = journal_setup
+        tool_run_id = uuid4()
+        j.on_tool_start(
+            {"name": "present_files"},
+            "",
+            run_id=tool_run_id,
+        )
+        j.on_tool_end(
+            Command(
+                update={
+                    "artifacts": ["/mnt/user-data/outputs/report.md"],
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_missing")],
+                }
+            ),
+            run_id=tool_run_id,
+        )
+        j.record_delivery()
+        await j.flush()
+
+        events = await store.list_events("t1", "r1")
+        content = next(e for e in events if e["event_type"] == "run.delivery")["content"]
+        assert content["by_tool"] == {"present_files": ["/mnt/user-data/outputs/report.md"]}
 
     @pytest.mark.anyio
     async def test_command_with_multiple_messages_records_artifacts_once(self, journal_setup):

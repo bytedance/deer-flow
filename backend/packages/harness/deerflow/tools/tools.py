@@ -7,9 +7,13 @@ from deerflow.config.app_config import AppConfig
 from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
+    batch_status,
+    batch_task,
     cancel_background_task,
+    cancel_batch,
     list_background_tasks,
     list_uploaded_files,
     present_file_tool,
@@ -117,7 +121,9 @@ def get_available_tools(
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
-        logger.info("Including subagent tools (task)")
+        if is_subagent_batch_runtime_available():
+            builtin_tools.extend((batch_task, batch_status, cancel_batch))
+        logger.info("Including native subagent tools")
 
     # If no model_name specified, use the first model (default)
     if model_name is None and config.models:

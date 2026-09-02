@@ -1,0 +1,73 @@
+name: Sandbox Image Smoke
+
+# Real-image validation of the Docker sandbox hardening: pulls the shipped
+# AIO image and drives it through the production readiness deadline
+# (SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT). The offline unit suite (-m "not
+# live") never runs this, so this dedicated job is the only place the
+# known-bad capability/startup regressions are caught before merge.
+#
+# Reproducibility: the image reference comes from the repository variable
+# SANDBOX_SMOKE_IMAGE (pin a digest there, e.g.
+# registry/.../all-in-one-sandbox@sha256:...). When unset it falls back to
+# the mutable :latest tag and the resolved digest is printed to the job
+# summary so a failure can be reproduced against the exact image tested.
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'backend/packages/harness/deerflow/community/aio_sandbox/**'
+      - 'backend/tests/test_aio_sandbox_local_backend.py'
+      - '.github/workflows/sandbox-image-smoke.yml'
+
+concurrency:
+  group: sandbox-image-smoke-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  sandbox-image-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SANDBOX_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve an immutable image reference for this run
+        # Pull once on the runner's platform and export the immutable
+        # repo@sha256 reference through GITHUB_ENV: the test then runs the
+        # exact image recorded here, and a tag moving between steps cannot
+        # make the summary name a different image than the one executed.
+        # (docker manifest inspect + jq is not used because picking a
+        # manifest from the index by hand can miss the runner's platform.)
+        run: |
+          set -euo pipefail
+          docker pull "$SANDBOX_SMOKE_IMAGE_REF" >/dev/null
+          repo_digest="$(docker image inspect "$SANDBOX_SMOKE_IMAGE_REF" --format '{{index .RepoDigests 0}}')"
+          echo "DEER_FLOW_SANDBOX_SMOKE_IMAGE=$repo_digest" >> "$GITHUB_ENV"
+          echo "Smoke-testing immutable reference: $repo_digest" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Run the live real-image smoke test
+        working-directory: backend
+        run: uv run pytest -m live tests/test_aio_sandbox_local_backend.py -v

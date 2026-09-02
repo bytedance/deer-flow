@@ -180,6 +180,19 @@ class Paths:
         """
         return self.base_dir / "agents"
 
+    @property
+    def managed_subagents_dir(self) -> Path:
+        """Deployment-level managed subagent definitions.
+
+        Each definition is stored as its own JSON file so an atomic replace
+        never targets a mounted directory or a single shared manifest file.
+        """
+        return self.base_dir / "managed-subagents"
+
+    def managed_subagent_file(self, name: str) -> Path:
+        """Path to one managed subagent definition."""
+        return self.managed_subagents_dir / f"{name.lower()}.json"
+
     def agent_dir(self, name: str) -> Path:
         """Legacy per-agent directory (no user isolation): `{base_dir}/agents/{name}/`."""
         return self.agents_dir / name.lower()
@@ -281,6 +294,18 @@ class Paths:
     def user_integration_skills_view_dir(self, user_id: str) -> Path:
         """Enabled managed integration skills exposed to one user's sandboxes."""
         return self.user_skills_view_dir(user_id) / "integrations"
+
+    def thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> Path:
+        """Sandbox-visible skill projection scoped to one user/thread.
+
+        The directory lives below the thread root so ordinary thread deletion
+        also removes its policy projection.
+        """
+        return self.thread_dir(thread_id, user_id=user_id) / "skills_view"
+
+    def host_thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> str:
+        """Host path for a thread-scoped skill projection."""
+        return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "skills_view")
 
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """

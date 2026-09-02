@@ -6,10 +6,14 @@ Handles container lifecycle, port allocation, and cross-process container discov
 
 from __future__ import annotations
 
+import csv
+import ipaddress
 import json
 import logging
 import os
+import posixpath
 import shlex
+import socket
 import subprocess
 from datetime import datetime
 
@@ -139,20 +143,130 @@ def _is_loopback_sandbox_host(host: str) -> bool:
     return _normalize_sandbox_host(host) in {"", "localhost", "127.0.0.1", "::1", "[::1]"}
 
 
+def _is_ip_bind_spec(value: str) -> bool:
+    """Return True when ``value`` (bare or bracketed) is an IP literal."""
+    inner = value.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    try:
+        ipaddress.ip_address(inner)
+        return True
+    except ValueError:
+        return False
+
+
+def _normalize_docker_bind_spec(value: str) -> str:
+    """Bracket bare IPv6 literals for Docker's ``-p`` publish syntax.
+
+    Docker requires the host part of a publish spec to be a bracketed IPv6
+    literal (``[fd00::1]:port:8080``), but operators writing the bind override
+    naturally give the bare address. Raw and already-bracketed IPv6 forms are
+    normalized; IPv4 addresses and hostnames pass through unchanged.
+    """
+    candidate = value.strip()
+    inner = candidate
+    if candidate.startswith("[") and candidate.endswith("]"):
+        inner = candidate[1:-1]
+    try:
+        if ipaddress.ip_address(inner).version == 6:
+            return f"[{inner}]"
+    except ValueError:
+        pass
+    return candidate
+
+
+# Fallback gateway of Docker's default bridge network (docker0). Used when the
+# daemon cannot be queried (see _docker_bridge_gateway_ip) so non-loopback
+# sandbox deployments still get a host-only bind instead of 0.0.0.0.
+_DOCKER_BRIDGE_GATEWAY_FALLBACK = "172.17.0.1"
+
+# Hardening defaults for sandbox containers. The sandbox executes untrusted,
+# model-authored code, so containers get bounded resources by default; every
+# value can be tuned or disabled through the corresponding DEER_FLOW_SANDBOX_*
+# environment variable (see _start_container).
+_DEFAULT_SANDBOX_MEMORY = "2g"
+_DEFAULT_SANDBOX_CPUS = "2"
+_DEFAULT_SANDBOX_PIDS_LIMIT = "512"
+
+
+def _docker_bridge_gateway_ip() -> str | None:
+    """Return the gateway IPv4 of Docker's default bridge network, or None.
+
+    The gateway is discovered from the daemon (``docker network inspect
+    bridge``) because the address is deployment-specific: daemons with a
+    custom ``bip`` or rootless/multi-network setups do not use 172.17.0.1.
+    Any failure (docker missing, daemon down, unparsable or non-IPv4 output)
+    returns None so the caller can fall back to the well-known default.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "network",
+                "inspect",
+                "bridge",
+                "--format",
+                "{{(index .IPAM.Config 0).Gateway}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.debug(f"Could not query Docker bridge gateway: {e}")
+        return None
+    if result.returncode != 0:
+        logger.debug(f"docker network inspect bridge failed: {(result.stderr or '').strip()}")
+        return None
+    candidate = (result.stdout or "").strip()
+    try:
+        if ipaddress.ip_address(candidate).version != 4:
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
     """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
 
-    Bare-metal/local runs talk to sandboxes through localhost and should not
-    expose the sandbox HTTP API on every host interface.  Docker-outside-of-
-    Docker deployments commonly use ``host.docker.internal`` from another
-    container; keep their legacy broad bind unless operators opt into a
-    narrower bind with ``DEER_FLOW_SANDBOX_BIND_HOST``.  When operators choose
-    an IPv6 loopback sandbox host, bind Docker to IPv6 loopback as well so the
-    advertised sandbox URL and published socket use the same address family.
+    Bare-metal/local runs talk to sandboxes through localhost and bind to
+    127.0.0.1, so the sandbox HTTP API (which has no authentication — anyone
+    who can reach it gets arbitrary shell execution) is never exposed on
+    other host interfaces.
+
+    Non-loopback sandbox hosts (typically Docker-outside-of-Docker via
+    ``host.docker.internal``) used to bind 0.0.0.0, which published the
+    unauthenticated exec API on every interface of the host. They now bind
+    the address the sandbox host itself resolves to: ``host.docker.internal``
+    follows the daemon's ``host-gateway-ip`` mapping (customizable, possibly
+    IPv6), so resolving it yields exactly where the gateway will connect —
+    the published port and the advertised sandbox URL always match. Only
+    when resolution fails does the default bridge gateway serve as a
+    best-effort fallback (with a warning). Operators that genuinely need the
+    old broad bind (e.g. remote clients connecting to the sandbox API
+    directly) can restore it with ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` —
+    that re-exposes an unauthenticated shell endpoint and should be paired
+    with an external firewall. When operators choose an IPv6 loopback
+    sandbox host, bind Docker to IPv6 loopback as well so the advertised
+    sandbox URL and published socket use the same address family.
     """
-    explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST")
-    if explicit_bind is not None:
-        explicit_bind = explicit_bind.strip()
+    explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST", "").strip()
+    if explicit_bind:
+        explicit_bind = _normalize_docker_bind_spec(explicit_bind)
+        if explicit_bind and not _is_ip_bind_spec(explicit_bind):
+            # -p requires an IP literal as the host part; Docker rejects a
+            # hostname there, which would prevent every sandbox from
+            # starting. Resolve hostname overrides to the address the daemon
+            # actually maps (e.g. host.docker.internal -> host-gateway-ip).
+            resolved = _resolve_sandbox_host_address(explicit_bind)
+            if resolved is None:
+                raise RuntimeError(
+                    f"DEER_FLOW_SANDBOX_BIND_HOST={explicit_bind!r} is not an IP literal and could not be resolved; "
+                    "Docker publish specs require an IP address as the host part. "
+                    "Set an IPv4/IPv6 literal (bare or bracketed) or a resolvable hostname."
+                )
+            explicit_bind = resolved
         if explicit_bind:
             logger.debug("Docker sandbox bind: %s (explicit bind host override)", explicit_bind)
             return explicit_bind
@@ -165,8 +279,147 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
         return "127.0.0.1"
 
-    logger.debug("Docker sandbox bind: 0.0.0.0 (non-loopback sandbox host compatibility)")
-    return "0.0.0.0"
+    resolved = _resolve_sandbox_host_address(host)
+    if resolved:
+        logger.debug(
+            "Docker sandbox bind: %s (resolved from sandbox host %r, follows the daemon host-gateway mapping)",
+            resolved,
+            host,
+        )
+        return resolved
+
+    # Resolution failed (unusual — e.g. a custom hostname with no DNS entry
+    # yet). Fall back to the default bridge gateway so non-loopback setups
+    # still get a host-only bind, and tell the operator to set the explicit
+    # override when their host-gateway-ip is customized or IPv6.
+    gateway = _docker_bridge_gateway_ip() or _DOCKER_BRIDGE_GATEWAY_FALLBACK
+    logger.warning(
+        "Could not resolve sandbox host %r for the Docker bind; falling back to the default bridge gateway %s. If the daemon's host-gateway-ip is customized or IPv6, set DEER_FLOW_SANDBOX_BIND_HOST to that address explicitly.",
+        host,
+        gateway,
+    )
+    return gateway
+
+
+def _env_flag_enabled(name: str) -> bool:
+    """Return True when environment variable ``name`` holds an affirmative value."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_flag_disabled(name: str) -> bool:
+    """Return True when ``name`` is explicitly set to a negative value.
+
+    For flags whose behavior defaults to ON, only an explicit opt-out
+    (``0``/``false``/``no``/``off``) counts as disabled; any other value,
+    including unset, keeps the default.
+    """
+    return os.environ.get(name, "").strip().lower() in {"0", "false", "no", "off"}
+
+
+def _strip_ipv6_brackets(value: str) -> str:
+    """Return ``value`` without IPv6 URL-style brackets, if any."""
+    inner = value.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        return inner[1:-1]
+    return inner
+
+
+def _normalize_sandbox_host_for_url(host: str) -> str:
+    """Bracket IPv6 literals exactly once for a URL authority (``host:port``).
+
+    ``http://fd00::1:8080`` is malformed — the URL authority form requires
+    brackets around IPv6 (``http://[fd00::1]:8080``), while operators (and
+    DEER_FLOW_SANDBOX_HOST) may carry the address in either bare or
+    bracketed form. Strip first, re-bracket once, so both inputs produce the
+    same URL; IPv4 addresses and hostnames pass through unchanged.
+    """
+    inner = _strip_ipv6_brackets(host)
+    try:
+        if ipaddress.ip_address(inner).version == 6:
+            return f"[{inner}]"
+    except ValueError:
+        pass
+    return inner
+
+
+def _resolve_sandbox_host_address(host: str) -> str | None:
+    """Resolve ``host`` to the bind spec Docker should publish sandboxes on.
+
+    ``host.docker.internal`` resolves to whatever the daemon's
+    ``host-gateway-ip`` maps it to (customizable and possibly IPv6), so the
+    address the gateway will actually *connect* to is exactly this
+    resolution — binding it keeps the published port and the advertised
+    sandbox URL on the same address instead of guessing the default bridge
+    IPv4. IPv6 results are bracketed for Docker's ``-p`` syntax. Returns
+    None when the name cannot be resolved.
+    """
+    # getaddrinfo takes the bare form; a bracketed IPv6 literal (legal in
+    # DEER_FLOW_SANDBOX_HOST) would fail to resolve and silently fall back
+    # to the IPv4 bridge gateway, splitting the bind from the URL address.
+    lookup = _strip_ipv6_brackets(host)
+    try:
+        infos = socket.getaddrinfo(lookup, None)
+    except OSError as e:
+        logger.debug(f"Could not resolve sandbox host {host!r}: {e}")
+        return None
+    for family, _, _, _, sockaddr in infos:
+        ip = sockaddr[0]
+        if family == socket.AF_INET6:
+            # Drop any zone id (%eth0) — Docker bind specs do not accept it.
+            ip = ip.split("%", 1)[0]
+            if ip in ("::",):
+                continue
+            return f"[{ip}]"
+        if family == socket.AF_INET and ip not in ("0.0.0.0",):
+            return ip
+    return None
+
+
+def _effective_docker_network_target(raw: str) -> str:
+    r"""Return the network Docker will actually attach to for ``--network raw``.
+
+    Mirrors Docker CLI's parser (opts/network.go): a value without ``=`` is
+    the short syntax — the whole value is a network name or ID. A value with
+    ``=`` is the long syntax — a CSV of ``key=value`` fields in any order
+    (``name=``, ``alias=``, ``ip=``, ``ip6=``, ``mac-address=``,
+    ``link-local-ip=``, ``driver-opt=``, ``gw-priority=``) — and the network
+    is the value of the ``name=`` field, with the last occurrence winning
+    and fields lowercased, exactly as Docker does it.
+
+    Validation must run on this effective value: neither ``name=host`` nor
+    ``gw-priority=0,name=host`` reads as the bare word ``host``, but both
+    attach the host network namespace all the same, silently voiding the
+    port publish. A long-syntax value with no ``name=`` field cannot name a
+    network at all (Docker rejects it as well), so the raw value is returned
+    and falls through the checks harmlessly.
+    """
+    value = raw.strip()
+    if "=" not in value:
+        return value.lower()
+    target = ""
+    for field in next(csv.reader([value])):
+        key, _, val = field.partition("=")
+        key = key.strip().lower()
+        val = val.strip().lower()  # Docker lowercases the whole field as well
+        if key == "name":
+            target = val  # last name= wins, mirroring the loop in network.go
+    return target or value.lower()
+
+
+def _docker_resource_limit(env_name: str, default: str) -> str | None:
+    """Resolve a Docker resource limit from the environment with a safe default.
+
+    Unset/empty keeps the secure default; ``0`` or ``none`` disables the limit
+    entirely (escape hatch for hosts where the default breaks a workload);
+    any other value is passed through verbatim so operators can tune it.
+    """
+    raw = os.environ.get(env_name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip()
+    if value.lower() in {"0", "none"}:
+        return None
+    return value
 
 
 def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
@@ -270,6 +523,7 @@ class LocalContainerBackend(SandboxBackend):
         sandbox_id: str,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
         *,
+        config_mount_exclusion_root: str | None = None,
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
@@ -280,6 +534,10 @@ class LocalContainerBackend(SandboxBackend):
             thread_id: Thread ID for which the sandbox is being created. Useful for backends that want to organize sandboxes by thread.
             sandbox_id: Deterministic sandbox identifier (used in container name).
             extra_mounts: Additional volume mounts as (host_path, container_path, read_only) tuples.
+            config_mount_exclusion_root: Exclude config-level mounts at or
+                below this container path. Policy-scoped skill projections use
+                this to prevent a nested operator mount from overlaying an
+                excluded skill back into the restricted view.
             user_id: User bucket already reflected in extra_mounts. Accepted for
                 interface compatibility with remote backends.
             provision_lark_cli_runtime: Ignored — the local backend provisions the
@@ -307,7 +565,12 @@ class LocalContainerBackend(SandboxBackend):
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
             try:
-                container_id = self._start_container(container_name, port, extra_mounts)
+                container_id = self._start_container(
+                    container_name,
+                    port,
+                    extra_mounts,
+                    config_mount_exclusion_root=config_mount_exclusion_root,
+                )
                 break
             except RuntimeError as exc:
                 release_port(port)
@@ -332,7 +595,7 @@ class LocalContainerBackend(SandboxBackend):
 
         # When running inside Docker (DooD), sandbox containers are reachable via
         # host.docker.internal rather than localhost (they run on the host daemon).
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         return SandboxInfo(
             sandbox_id=sandbox_id,
             sandbox_url=f"http://{sandbox_host}:{port}",
@@ -395,7 +658,7 @@ class LocalContainerBackend(SandboxBackend):
         if port is None:
             return None
 
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         sandbox_url = f"http://{sandbox_host}:{port}"
         if not wait_for_sandbox_ready(sandbox_url, timeout=5):
             return None
@@ -461,7 +724,7 @@ class LocalContainerBackend(SandboxBackend):
         inspections = self._batch_inspect(container_names)
 
         infos: list[SandboxInfo] = []
-        sandbox_host = os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost")
+        sandbox_host = _normalize_sandbox_host_for_url(os.environ.get("DEER_FLOW_SANDBOX_HOST", "localhost"))
         for container_name in container_names:
             data = inspections.get(container_name)
             if data is None:
@@ -536,6 +799,8 @@ class LocalContainerBackend(SandboxBackend):
         container_name: str,
         port: int,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        config_mount_exclusion_root: str | None = None,
     ) -> str:
         """Start a new container.
 
@@ -543,6 +808,8 @@ class LocalContainerBackend(SandboxBackend):
             container_name: Name for the container.
             port: Host port to map to container port 8080.
             extra_mounts: Additional volume mounts.
+            config_mount_exclusion_root: Config-level mounts at or below this
+                container root are omitted for this container only.
 
         Returns:
             The container ID.
@@ -552,9 +819,138 @@ class LocalContainerBackend(SandboxBackend):
         """
         cmd = [self._runtime, "run"]
 
-        # Docker-specific security options
+        # Docker-only security hardening. The sandbox container executes
+        # untrusted, model-authored code, so it must not run with the
+        # daemon's permissive defaults: all Linux capabilities are dropped
+        # except the minimum the shipped image's entrypoint needs to
+        # initialize itself, privilege escalation (setuid/sudo) is blocked,
+        # and CPU/memory/PID footprints are bounded so one runaway sandbox
+        # cannot exhaust the host or fork-bomb it. Each knob has an env
+        # escape hatch documented in backend/docs/CONFIGURATION.md. Apple
+        # Container's CLI does not support these flags, so they are
+        # Docker-only.
         if self._runtime == "docker":
-            cmd.extend(["--security-opt", "seccomp=unconfined"])
+            # The default image (/opt/gem/run.sh) starts as root, creates the
+            # gem account at runtime, chown -R's /opt/jupyter, and drops to
+            # that user via su before starting the services. That needs
+            # CHOWN/SETUID/SETGID; additionally the root nginx master writes
+            # logs under /var/log/nginx that belong to the gem user, which
+            # requires DAC_OVERRIDE — without it nginx dies with
+            # "open() .../access.log failed (13: Permission denied)" on every
+            # start (a runtime need, not just startup: access.log is written
+            # per request). Dropping ALL of them makes the image fail before
+            # the readiness endpoint exists.
+            # no-new-privileges stays: it only blocks *gaining* privileges
+            # through exec, it does not revoke the capabilities added here,
+            # and su from the already-root entrypoint does not need to gain
+            # anything. Everything else (NET_RAW, SYS_PTRACE, ...) stays
+            # dropped, which is the bulk of the attack-surface reduction.
+            # For a pre-initialized non-root image nothing ever runs as
+            # root, so the handoff capabilities are not needed — and leaving
+            # them available for the container's lifetime would let
+            # sandboxed code chown bind-mounted paths or impersonate
+            # mounted-file UIDs/GIDs. Such images opt out with
+            # DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS=0 (see CONFIGURATION.md),
+            # which drops every capability including these three.
+            if _env_flag_disabled("DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"):
+                cmd.extend(["--cap-drop=ALL", "--security-opt", "no-new-privileges"])
+            else:
+                cmd.extend(
+                    [
+                        "--cap-drop=ALL",
+                        "--cap-add=CHOWN",
+                        "--cap-add=SETUID",
+                        "--cap-add=SETGID",
+                        "--cap-add=DAC_OVERRIDE",
+                        "--security-opt",
+                        "no-new-privileges",
+                    ]
+                )
+
+            # The shipped AIO image runs a Chromium-based browser that does
+            # not start under Docker's default seccomp profile — its upstream
+            # quick-start always passes seccomp=unconfined and the upstream
+            # FAQ documents the browser failing under the default profile
+            # (Chromium needs namespace-related syscalls). Keep that option
+            # as the default so the shipped image keeps working. Two ways to
+            # tighten it for a known image:
+            #   DEER_FLOW_SANDBOX_SECCOMP_PROFILE=/path/to/profile.json
+            #       → use a restricted, Chromium-compatible profile instead
+            #         (Docker's default profile plus the needed syscalls);
+            #   DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED=0
+            #       → fall back to Docker's default profile, only for images
+            #         verified to start and pass their browser checks with it.
+            seccomp_profile = os.environ.get("DEER_FLOW_SANDBOX_SECCOMP_PROFILE", "").strip()
+            if seccomp_profile:
+                cmd.extend(["--security-opt", f"seccomp={seccomp_profile}"])
+            elif not _env_flag_disabled("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED"):
+                cmd.extend(["--security-opt", "seccomp=unconfined"])
+            else:
+                # The documented opt-out must actually enable Docker's
+                # built-in filtering: merely omitting the option would
+                # inherit the daemon's configured default, which can itself
+                # be unconfined or a custom profile.
+                # https://docs.docker.com/reference/cli/docker/container/run/#optional-security-options---security-opt
+                cmd.extend(["--security-opt", "seccomp=builtin"])
+
+            if memory := _docker_resource_limit("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY):
+                cmd.extend(["--memory", memory])
+            if cpus := _docker_resource_limit("DEER_FLOW_SANDBOX_CPUS", _DEFAULT_SANDBOX_CPUS):
+                cmd.extend(["--cpus", cpus])
+            if pids_limit := _docker_resource_limit("DEER_FLOW_SANDBOX_PIDS_LIMIT", _DEFAULT_SANDBOX_PIDS_LIMIT):
+                cmd.extend(["--pids-limit", pids_limit])
+
+            # No --user is forced by default: the default AIO sandbox image
+            # is upstream-built and its runtime user is not pinned here, and
+            # a wrong user would break the sandbox server's home-directory
+            # assumptions. Deployments that know their image's user (and the
+            # UID/GID ownership of its mounts) can pass it through.
+            if container_user := os.environ.get("DEER_FLOW_SANDBOX_CONTAINER_USER", "").strip():
+                cmd.extend(["--user", container_user])
+
+            # Default: the daemon's default network (unchanged behavior).
+            # Point this at a dedicated, egress-controlled Docker network so
+            # sandbox traffic can be filtered by that network's policy —
+            # otherwise sandbox code can reach internal networks and cloud
+            # metadata endpoints directly, bypassing the gateway's SSRF
+            # protections.
+            if network := os.environ.get("DEER_FLOW_SANDBOX_NETWORK", "").strip():
+                # Validate the *effective* target: Docker accepts the extended
+                # "name=<network>" long syntax in addition to plain names and
+                # network IDs, and "name=host" / "name=none" attach exactly
+                # like the bare words while dodging a raw-string check.
+                target = _effective_docker_network_target(network)
+                if target == "host" or target.startswith("container:"):
+                    # Docker discards -p/--publish in host mode and
+                    # container:<name> shares another container's network
+                    # namespace, so either one voids the hardened bind below
+                    # and re-exposes the unauthenticated sandbox exec API on
+                    # the host's interfaces. Refuse instead of silently
+                    # losing the bind.
+                    # https://docs.docker.com/engine/network/drivers/host/
+                    raise RuntimeError(
+                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} resolves to the {target.split(':', 1)[0]!r} network, "
+                        "which would void the sandbox port bind (Docker drops -p/--publish in host mode and shares "
+                        "the network namespace for container:<name>). Use a dedicated egress-controlled bridge "
+                        "network instead."
+                    )
+                if target == "none":
+                    # The none driver gives the container only a loopback
+                    # interface, so the published sandbox HTTP API cannot
+                    # receive traffic: readiness would time out (60s), the
+                    # container would be destroyed, and every acquisition
+                    # would fail. Refuse at start-up with a clear message
+                    # instead of failing opaquely on first use.
+                    # https://docs.docker.com/engine/network/drivers/none/
+                    raise RuntimeError(
+                        f"DEER_FLOW_SANDBOX_NETWORK={network!r} resolves to the 'none' network, which leaves the "
+                        "container loopback-only, so the published sandbox API port cannot receive traffic (readiness "
+                        "would time out and every acquisition would fail). Use a dedicated egress-controlled bridge "
+                        "network instead."
+                    )
+                # Pass the raw value through: custom names, network IDs, and
+                # the legit name=<custom-net> long form all keep working.
+                cmd.extend(["--network", network])
 
         if self._runtime == "docker":
             port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
@@ -576,8 +972,21 @@ class LocalContainerBackend(SandboxBackend):
         for key, value in self._environment.items():
             cmd.extend(["-e", f"{key}={value}"])
 
-        # Config-level volume mounts
+        # Config-level volume mounts. A policy-scoped skills view owns its
+        # complete container subtree; keeping a more-specific config mount
+        # would let Docker overlay an excluded skill inside that view.
+        exclusion_root = None
+        if config_mount_exclusion_root is not None:
+            exclusion_root = posixpath.normpath(config_mount_exclusion_root.rstrip("/") or "/")
+
         for mount in self._config_mounts:
+            mount_path = posixpath.normpath(str(mount.container_path).rstrip("/") or "/")
+            if exclusion_root is not None and (mount_path == exclusion_root or mount_path.startswith(exclusion_root.rstrip("/") + "/")):
+                logger.info(
+                    "Skipping config mount inside policy-scoped skills root: %s",
+                    mount.container_path,
+                )
+                continue
             cmd.extend(
                 _format_container_mount(
                     self._runtime,

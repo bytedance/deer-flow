@@ -165,10 +165,19 @@ export function MessageListItem({
 }) {
   const { t } = useI18n();
   const isHuman = message.type === "human";
-  const editableText = useMemo(
-    () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
-    [isHuman, message],
+  // One derivation serves both editing and the toolbar, and only runs when
+  // either consumer can use it: assistant rows never render this toolbar
+  // (the sole call site passes showCopyButton only for non-assistant rows)
+  // and the toolbar stays unrendered while loading — matching the guard the
+  // pre-memo call sat behind instead of deriving for every settled row.
+  const copyData = useMemo(
+    () =>
+      isHuman || (!isLoading && showCopyButton)
+        ? (getMessageCopyData(message) ?? "")
+        : "",
+    [isHuman, isLoading, showCopyButton, message],
   );
+  const editableText = isHuman ? copyData : "";
   const [isEditing, setIsEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
@@ -239,7 +248,7 @@ export function MessageListItem({
           )}
         >
           <div className="pointer-events-auto flex gap-1">
-            <CopyButton clipboardData={getMessageCopyData(message)} />
+            <CopyButton clipboardData={copyData} />
             {canEdit && isHuman && onEditAndRegenerate && !isEditing && (
               <Tooltip content={t.common.editAndRerun}>
                 <Button
@@ -421,6 +430,11 @@ function MessageContent_({
         rawContent.includes("<uploaded_files>")
       ) {
         // If the content contains an upload context tag, we return the parsed files from the content for backward compatibility.
+        // <uploaded_files> is display-only compat for pre-#4174 history (#4212).
+        // Accepted tradeoff (review): a live user typing the legacy spelling can
+        // fabricate chips / hide their own message text — display-only and
+        // self-inflicted, no backend semantics. Age-gating the legacy spelling
+        // is a possible follow-up if this ever matters.
         return parseUploadedFiles(rawContent);
       }
       return null;

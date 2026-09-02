@@ -23,6 +23,7 @@ from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
 from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+from app.gateway.authz import require_cancel_permission_if
 from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
@@ -35,6 +36,7 @@ from app.gateway.utils import sanitize_log_param
 from app.mcp_tasks.errors import PermanentNotificationError
 from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
 from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
 from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
 from deerflow.config.app_config import get_app_config
@@ -64,6 +66,7 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.runs.naming import resolve_root_run_name
@@ -74,6 +77,9 @@ from deerflow.runtime.secret_context import (
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
 from deerflow.runtime.user_context import reset_current_user, set_current_user
+from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
+from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -113,7 +119,16 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            TOOL_RECEIPT_KEY,
+            TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
+            # Attached when a values frame is serialized, for display ordering only.
+            # A replayed message carrying it back would write a thread-scoped seq
+            # into the checkpoint, which a fork then re-seeds and reassigns (#4380).
+            MESSAGE_SEQ_KEY,
+            SUBAGENT_TOOL_RECEIPTS_KEY,
+            SUBAGENT_RECEIPT_VERDICT_KEY,
+            SUBAGENT_ACCEPTANCE_VERDICT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -189,7 +204,10 @@ async def _ensure_thread_metadata(
         await thread_store.create(
             record.thread_id,
             assistant_id=record.assistant_id,
-            metadata=record.metadata,
+            # Seeded from the run that created the thread, minus the run-scoped
+            # trace id: a thread spans many runs and as many trace ids, so
+            # pinning the first one here would be misleading rather than useful.
+            metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
         )
 
 
@@ -265,6 +283,26 @@ def _strip_external_metadata_from_message_like(item: Any) -> Any:
     return item
 
 
+#: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped
+#: execution evidence (citation verdict PR2, acceptance checklist PR4) that a
+#: caller must never supply.
+_SERVER_OWNED_DELEGATION_VERDICT_KEYS = frozenset({"receipt_verdict", "acceptance_verdict"})
+
+
+def _strip_external_delegation_verdict(entry: Any) -> Any:
+    """Remove runtime-stamped verdicts from a caller-supplied ledger entry.
+
+    ``receipt_verdict``/``acceptance_verdict`` are server-owned execution
+    evidence stamped at task write-back. Ledger entries are plain dicts, not
+    messages, so the message-metadata stripper never sees them; without this
+    a caller can persist a forged verdict that ``render_delegation_ledger``
+    would present as fact.
+    """
+    if isinstance(entry, dict) and _SERVER_OWNED_DELEGATION_VERDICT_KEYS & entry.keys():
+        return {key: value for key, value in entry.items() if key not in _SERVER_OWNED_DELEGATION_VERDICT_KEYS}
+    return entry
+
+
 def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
     """Remove server-owned message metadata from caller-supplied state values.
 
@@ -280,7 +318,9 @@ def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, An
     """
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
-        if isinstance(value, list):
+        if channel == "delegations" and isinstance(value, list):
+            stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
+        elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
         else:
             stripped[channel] = _strip_external_metadata_from_message_like(value)
@@ -301,13 +341,17 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content``, dynamic-context reminder markers, and the
-    transient view-image context marker are server-owned. External callers
-    cannot supply them; trusted internal channel calls may preserve metadata
-    they added before invoking this boundary.
+    ``original_user_content``, dynamic-context reminder markers, the
+    transient view-image context marker, tool receipts, and delegated receipt
+    metadata/verdicts are server-owned. External callers cannot supply them;
+    trusted internal channel calls may preserve metadata they added before
+    invoking this boundary. The same applies to the ``delegations`` channel:
+    a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
+    stripped before the graph runs.
     """
     if raw_input is None:
         return {}
+    result = raw_input
     messages = raw_input.get("messages")
     if messages and isinstance(messages, list):
         converted: list[Any] = []
@@ -326,8 +370,14 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
                 converted.append(msg)
         if not trusted_internal:
             converted = [_strip_external_message_metadata(message) for message in converted]
-        return {**raw_input, "messages": converted}
-    return raw_input
+        result = {**raw_input, "messages": converted}
+    if not trusted_internal:
+        delegations = result.get("delegations")
+        if isinstance(delegations, list):
+            cleaned = [_strip_external_delegation_verdict(entry) for entry in delegations]
+            if cleaned != delegations:
+                result = {**result, "delegations": cleaned}
+    return result
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -359,22 +409,27 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
 _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 
-# Server-owned authorization identity fields. These must never be accepted from
-# client-supplied ``body.config.context`` or ``body.config.configurable``. They
+# Server-owned authorization and sandbox lifecycle identity fields. These must
+# never be accepted from client-supplied ``body.config.context`` or
+# ``body.config.configurable``. They
 # are either produced by Gateway auth state, admitted from a separately
 # authenticated internal request channel, or reserved for LangGraph Server.
 #   ``is_internal``             — derived from ``request.state.auth_source``
 #   ``authz_attributes``        — Phase 1A has no Gateway-side producer; cleared.
 #   ``channel_user_id``         — accepted only from trusted internal context.
 #   ``langgraph_auth_user*``    — populated only by LangGraph Server auth.
-_SERVER_OWNED_AUTHZ_CONTEXT_KEYS: frozenset[str] = frozenset(
-    {
-        "is_internal",
-        "authz_attributes",
-        "channel_user_id",
-        "langgraph_auth_user",
-        "langgraph_auth_user_id",
-    }
+#   ``sandbox_*_id``           — created only inside the run/subagent lifecycle.
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
+    frozenset(
+        {
+            "is_internal",
+            "authz_attributes",
+            "channel_user_id",
+            "langgraph_auth_user",
+            "langgraph_auth_user_id",
+        }
+    )
+    | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
@@ -485,20 +540,32 @@ def inject_authenticated_user_context(
     Values copied through the free-form RunnableConfig are always cleared.
     """
 
-    # --- Server-owned authorization identity fields ---
+    # --- Server-owned authorization and sandbox lifecycle identity fields ---
     # Clear any client-forged values from both config sections, then write the
     # authoritative is_internal. This runs before ALL early returns so that
     # even user_id-is-None paths get a defined is_internal value.
     runtime_context = config.setdefault("context", {})
     if not isinstance(runtime_context, dict):
         raise TypeError("run context must be a mapping")
-    for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
+    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
         runtime_context.pop(key, None)
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
-        for key in _SERVER_OWNED_AUTHZ_CONTEXT_KEYS:
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
             configurable.pop(key, None)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
+    # ``user_id`` is server-owned for EXTERNAL callers: it now selects which
+    # user's credential user-scoped MCP auth injects, so a client-forged value
+    # must never survive any early return below — scrub it here and restamp it
+    # only from ``request.state.user``. Internal callers (IM channels, the
+    # scheduler) are the deliberate exception: they authenticate their own end
+    # users and supply that identity in run context (PR #3294), which the
+    # internal-role branch below preserves.
+    user = getattr(getattr(request, "state", None), "user", None)
+    if auth_source != AUTH_SOURCE_INTERNAL and getattr(user, "system_role", None) != INTERNAL_SYSTEM_ROLE:
+        runtime_context.pop("user_id", None)
+        if isinstance(configurable, dict):
+            configurable.pop("user_id", None)
     runtime_context["is_internal"] = auth_source == AUTH_SOURCE_INTERNAL
     if auth_source == AUTH_SOURCE_INTERNAL and request_context is not None:
         channel_user_id = request_context.get("channel_user_id")
@@ -575,6 +642,43 @@ def _resolve_max_recursion_limit() -> int:
         return get_app_config().max_recursion_limit
     except Exception:
         return _DEFAULT_MAX_RECURSION_LIMIT
+
+
+def _resolve_scheduler_recursion_limit() -> int:
+    """Resolve the scheduled-run recursion_limit from ``AppConfig.scheduler``.
+
+    Falls back to ``_DEFAULT_RECURSION_LIMIT`` when the app config cannot be
+    loaded so a missing ``config.yaml`` in tests still launches with the server
+    default rather than crashing dispatch. The value is clamped to
+    ``max_recursion_limit`` here, at dispatch, so an operator value above the
+    ceiling never reaches ``build_run_config`` as an unclamped value — which
+    would otherwise be misattributed as a "client" overage and emit a
+    ``clamped client recursion_limit`` warning on every scheduled run.
+    ``build_run_config`` keeps its own clamp for genuine client-supplied
+    bodies (defense in depth; its warning then only fires for real clients).
+
+    Both silent paths now emit an operator-visible warning: the pre-clamp
+    (operator value above ``max_recursion_limit``) and the config-load failure
+    fallback (``_DEFAULT_RECURSION_LIMIT`` returned instead of the operator
+    value).
+    """
+    try:
+        raw = get_app_config().scheduler.recursion_limit
+        max_limit = _resolve_max_recursion_limit()
+        if raw > max_limit:
+            logger.warning(
+                "scheduler.recursion_limit %d exceeds max_recursion_limit %d; clamped to %d for scheduled runs",
+                raw,
+                max_limit,
+                max_limit,
+            )
+        return min(raw, max_limit)
+    except Exception:
+        logger.warning(
+            "failed to load app config; falling back to recursion_limit=%d for scheduled runs",
+            _DEFAULT_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT
 
 
 def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
@@ -706,7 +810,15 @@ def build_run_config(
             external_values.pop(INTERNAL_CHECKPOINT_MODE_KEY, None)
 
     if metadata:
-        config.setdefault("metadata", {}).update(metadata)
+        # Merged onto a copy: config["metadata"] is the same dict object as the
+        # caller's body.config["metadata"] (the passthrough above copies
+        # references), and an in-place update would write server-stamped keys
+        # -- the trace id -- through into the request body that is persisted
+        # and echoed as the run's kwargs.
+        existing_metadata = config.get("metadata")
+        merged_metadata = dict(existing_metadata) if isinstance(existing_metadata, dict) else {}
+        merged_metadata.update(metadata)
+        config["metadata"] = merged_metadata
     return config
 
 
@@ -1133,6 +1245,15 @@ async def start_run(
         Reject a missing thread instead of auto-creating metadata. Internal
         notification runs use this so a deleted chat cannot be resurrected.
     """
+    # Cancel-capability gate. interrupt/rollback strategies terminate an already
+    # active run — runs:cancel capability, not runs:create — so a create-only
+    # PAT must not reach them. Enforced here, the single choke point every
+    # run-creation path flows through (HTTP routes and internal launchers
+    # alike), so no entry point can bypass it; regenerate launches pass
+    # multitask_strategy="reject" and are unaffected. Requests without a
+    # stamped auth context (internal/test compositions) skip the gate.
+    require_cancel_permission_if(request, body.multitask_strategy != "reject")
+
     try:
         validate_thread_id(thread_id)
     except ValueError as exc:
@@ -1217,7 +1338,18 @@ async def start_run(
             graph_input = Command(resume=command["resume"])
         else:
             graph_input = normalize_input(body.input, trusted_internal=is_internal_caller)
-        config = build_run_config(thread_id, body.config, body.metadata, assistant_id=body.assistant_id)
+        # deerflow_trace_id is server-issued, so the caller's value is replaced
+        # here at the trust boundary. body.metadata forks two ways -- through
+        # build_run_config into config["metadata"], which the run worker
+        # restamps, and through create_or_reject into the run record, which the
+        # runs API echoes verbatim. Only the first is covered downstream, so
+        # without this the run record is the one surface that persists a forged
+        # id, disagreeing with the response header, the logs, and the
+        # checkpoint. The caller's own metadata keys are preserved.
+        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
+
+        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
         await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
 
         # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
@@ -1334,7 +1466,7 @@ async def start_run(
                     thread_id,
                     body.assistant_id,
                     on_disconnect=disconnect,
-                    metadata=body.metadata or {},
+                    metadata=run_metadata,
                     # Persist a secret-redacted copy of the config: the run record is
                     # written to runs.kwargs_json and echoed by the run API, so a
                     # request-scoped secret (#3861) must not ride along. The live
@@ -1406,7 +1538,7 @@ async def launch_scheduled_thread_run(
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config=None,
+        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
@@ -1427,7 +1559,21 @@ async def launch_scheduled_thread_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    record = await start_run(body, thread_id, request)
+    scheduled_task_run_id = (metadata or {}).get("scheduled_task_run_id")
+    idempotency_key = f"scheduled-task:{scheduled_task_run_id}" if isinstance(scheduled_task_run_id, str) else None
+    # Non-HTTP entry point: the lifespan scheduler calls this with a synthetic
+    # request, so TraceMiddleware never runs. The scope is opened per launch,
+    # never around the poller loop, or every scheduled run would collapse onto
+    # one id. Reached from inside an HTTP request -- a manual trigger, or the
+    # scheduler service's own per-occurrence scope -- ensure_trace_context
+    # keeps that trace instead of minting a competing one.
+    with ensure_trace_context():
+        record = await start_run(
+            body,
+            thread_id,
+            request,
+            idempotency_key=idempotency_key,
+        )
     return {"run_id": record.run_id, "thread_id": record.thread_id}
 
 
@@ -1499,14 +1645,18 @@ async def launch_mcp_task_notification_run(
         feedback_keys=None,
     )
     idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    # Non-HTTP entry point, same as launch_scheduled_thread_run above: the MCP
+    # task service drives this from its own background loop, so one scope per
+    # notification keeps every delivery attempt separately correlatable.
     try:
-        record = await start_run(
-            body,
-            thread_id,
-            request,
-            idempotency_key=idempotency_key,
-            require_existing_thread=True,
-        )
+        with ensure_trace_context():
+            record = await start_run(
+                body,
+                thread_id,
+                request,
+                idempotency_key=idempotency_key,
+                require_existing_thread=True,
+            )
     except HTTPException as exc:
         if exc.status_code == 409:
             raise ConflictError(str(exc.detail)) from exc
@@ -1521,12 +1671,22 @@ async def sse_consumer(
     record: RunRecord,
     request: Request,
     run_mgr: RunManager,
+    *,
+    apply_on_disconnect: bool = True,
 ):
     """Async generator that yields SSE frames from the bridge.
 
-    The ``finally`` block implements ``on_disconnect`` semantics:
+    The ``finally`` block implements ``on_disconnect`` semantics, but only for
+    the stream returned by the *creating* endpoint (``apply_on_disconnect=True``):
+
     - ``cancel``: abort the background task on client disconnect.
     - ``continue``: let the task run; events are discarded.
+
+    Join/observer streams pass ``apply_on_disconnect=False``: the creator's
+    cancel-on-disconnect policy expresses the creator's intent for their own
+    connection, and a read-only observer closing a join must not cancel the
+    run (a runs:read-only credential would otherwise cancel without
+    runs:cancel just by disconnecting).
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
@@ -1571,8 +1731,9 @@ async def sse_consumer(
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
-        # cancellation request. Only apply on_disconnect to locally-owned runs.
-        if not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        # cancellation request. Only apply on_disconnect to locally-owned runs,
+        # and only on the creator's own stream — never on an observer join.
+        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
                 await run_mgr.cancel(record.run_id)
 
@@ -1584,6 +1745,12 @@ async def wait_for_run_completion(
     run_mgr: RunManager,
 ) -> bool:
     """Block until the run publishes ``END_SENTINEL``, honouring on_disconnect.
+
+    Creator-side only, unlike ``sse_consumer``'s observer joins: every caller
+    must be the endpoint that created the run or a path reached only after an
+    explicit, permission-gated cancel. This helper intentionally keeps
+    applying the record's ``on_disconnect`` policy on disconnect — do not
+    wire it to observer surfaces.
 
     The non-streaming ``/wait`` endpoints used to ``await record.task``
     directly with no disconnect handling.  When the client (or an

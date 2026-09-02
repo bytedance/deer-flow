@@ -15,7 +15,7 @@
         "id": "ac8f27cd-0f2e-4a82-a432-f4b37d18a846"
       },
       {
-        "content": "<uploaded_files>\nThe following files have been uploaded and are available for use:\n\n- titanic.csv (58.9 KB)\n  Path: /mnt/user-data/uploads/titanic.csv\n\nYou can read these files using the `read_file` tool with the paths shown above.\n</uploaded_files>",
+        "content": "<current_uploads>\nThe following files have been uploaded and are available for use:\n\n- titanic.csv (58.9 KB)\n  Path: /mnt/user-data/uploads/titanic.csv\n\nYou can read these files using the `read_file` tool with the paths shown above.\n</current_uploads>",
         "additional_kwargs": {},
         "response_metadata": {},
         "type": "system",
