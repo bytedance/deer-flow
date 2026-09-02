@@ -501,12 +501,17 @@ async def get_user_profile() -> UserProfileResponse:
     """
     _require_agents_api_enabled()
 
-    try:
+    def _read_profile() -> UserProfileResponse:
+        # Worker thread: exists() + read_text() are filesystem IO that must
+        # stay off the event loop, matching list_agents/get_agent/etc.
         user_md_path = get_paths().user_md_file
         if not user_md_path.exists():
             return UserProfileResponse(content=None)
         raw = user_md_path.read_text(encoding="utf-8").strip()
         return UserProfileResponse(content=raw or None)
+
+    try:
+        return await asyncio.to_thread(_read_profile)
     except Exception as e:
         logger.error(f"Failed to read user profile: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to read user profile: {str(e)}")
@@ -529,11 +534,16 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     """
     _require_agents_api_enabled()
 
-    try:
+    def _write_profile() -> None:
+        # Worker thread: mkdir() + write_text() are filesystem IO that must
+        # stay off the event loop, matching create_agent_endpoint/etc.
         paths = get_paths()
         paths.base_dir.mkdir(parents=True, exist_ok=True)
         paths.user_md_file.write_text(request.content, encoding="utf-8")
         logger.info(f"Updated USER.md at {paths.user_md_file}")
+
+    try:
+        await asyncio.to_thread(_write_profile)
         return UserProfileResponse(content=request.content or None)
     except Exception as e:
         logger.error(f"Failed to update user profile: {e}", exc_info=True)
