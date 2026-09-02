@@ -449,6 +449,62 @@ async def test_cancelled_async_acquire_releases_unbound_provider_result() -> Non
 
 
 @pytest.mark.anyio
+async def test_repeated_cancellation_waits_for_provider_acquire_reconciliation() -> None:
+    acquire_started = asyncio.Event()
+    allow_acquire = asyncio.Event()
+
+    class _BlockingAsyncProvider(_LeaseProvider):
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            self.acquire_calls.append((thread_id, user_id))
+            acquire_started.set()
+            await allow_acquire.wait()
+            return self.sandbox.id
+
+    provider = _BlockingAsyncProvider()
+    manager = SandboxLeaseManager(provider)
+    acquire_task = asyncio.create_task(manager.acquire_async("cancelled", "thread-1", user_id="user-1"))
+    await acquire_started.wait()
+
+    acquire_task.cancel()
+    await asyncio.sleep(0)
+    acquire_task.cancel()
+    await asyncio.sleep(0)
+
+    retain_done = threading.Event()
+
+    def retain_next_owner() -> None:
+        manager.retain(
+            "next",
+            "shared",
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+        retain_done.set()
+
+    retain_thread = threading.Thread(target=retain_next_owner)
+    retain_thread.start()
+    try:
+        assert not acquire_task.done()
+        retain_thread.join(timeout=0.05)
+        assert retain_thread.is_alive()
+
+        allow_acquire.set()
+        with pytest.raises(asyncio.CancelledError):
+            await acquire_task
+        retain_thread.join(timeout=1)
+
+        assert not retain_thread.is_alive()
+        assert retain_done.is_set()
+        assert provider.release_calls == ["shared"]
+        assert manager.binding_for("cancelled") is None
+        assert manager.binding_for("next") == "shared"
+    finally:
+        allow_acquire.set()
+        retain_thread.join(timeout=1)
+        manager.close()
+
+
+@pytest.mark.anyio
 async def test_cancelled_async_acquire_keeps_same_thread_serialized_through_reconciliation() -> None:
     acquire_started = asyncio.Event()
     allow_acquire = asyncio.Event()
@@ -475,6 +531,9 @@ async def test_cancelled_async_acquire_keeps_same_thread_serialized_through_reco
     acquire_task.cancel()
     allow_acquire.set()
     assert await asyncio.to_thread(release_started.wait, 1)
+    acquire_task.cancel()
+    await asyncio.sleep(0)
+    assert not acquire_task.done()
 
     retain_done = threading.Event()
 
@@ -532,6 +591,36 @@ async def test_cancelled_async_acquire_logs_reconciliation_failure(caplog) -> No
 
 
 @pytest.mark.anyio
+async def test_cancelled_async_acquire_preserves_cancellation_when_rollback_fails(caplog) -> None:
+    acquire_started = asyncio.Event()
+    allow_acquire = asyncio.Event()
+
+    class _FailingRollbackProvider(_LeaseProvider):
+        async def acquire_async(self, thread_id=None, *, user_id=None):
+            self.acquire_calls.append((thread_id, user_id))
+            acquire_started.set()
+            await allow_acquire.wait()
+            return self.sandbox.id
+
+        def release(self, sandbox_id):
+            raise RuntimeError("rollback failed")
+
+    provider = _FailingRollbackProvider()
+    manager = SandboxLeaseManager(provider)
+    acquire_task = asyncio.create_task(manager.acquire_async("cancelled", "thread-1", user_id="user-1"))
+    await acquire_started.wait()
+
+    with caplog.at_level("WARNING", logger="deerflow.sandbox.lease"):
+        acquire_task.cancel()
+        allow_acquire.set()
+        with pytest.raises(asyncio.CancelledError):
+            await acquire_task
+
+    assert "Cancelled sandbox acquire rollback failed during reconciliation" in caplog.text
+    assert "rollback failed" in caplog.text
+
+
+@pytest.mark.anyio
 async def test_cancelled_async_release_logs_reconciliation_failure(caplog) -> None:
     release_started = threading.Event()
     allow_release_failure = threading.Event()
@@ -561,6 +650,44 @@ async def test_cancelled_async_release_logs_reconciliation_failure(caplog) -> No
 
     assert "Cancelled sandbox release failed during reconciliation" in caplog.text
     assert "provider release failed" in caplog.text
+
+
+@pytest.mark.anyio
+async def test_repeated_cancellation_waits_for_async_release_reconciliation() -> None:
+    release_started = threading.Event()
+    allow_release = threading.Event()
+
+    class _BlockingReleaseProvider(_LeaseProvider):
+        def release(self, sandbox_id):
+            release_started.set()
+            assert allow_release.wait(timeout=1)
+            super().release(sandbox_id)
+
+    provider = _BlockingReleaseProvider()
+    manager = SandboxLeaseManager(provider)
+    manager.retain(
+        "cancelled",
+        "shared",
+        thread_id="thread-1",
+        user_id="user-1",
+    )
+    release_task = asyncio.create_task(manager.release_async("cancelled"))
+    assert await asyncio.to_thread(release_started.wait, 1)
+
+    for _ in range(3):
+        release_task.cancel()
+        await asyncio.sleep(0)
+    try:
+        assert not release_task.done()
+        allow_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await release_task
+
+        assert manager.binding_for("cancelled") is None
+        assert provider.release_calls == ["shared"]
+    finally:
+        allow_release.set()
+        manager.close()
 
 
 def test_new_acquire_waits_until_last_release_transition_finishes() -> None:

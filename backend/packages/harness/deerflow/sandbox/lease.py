@@ -34,6 +34,21 @@ SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
 )
 
 
+async def _drain_task_after_cancellation[T](task: asyncio.Task[T]) -> T:
+    """Wait for ``task`` even if the current task is cancelled again.
+
+    Lifecycle reconciliation must keep its serializer until provider work has
+    finished. Repeated cancellation is therefore remembered by the caller but
+    cannot propagate into the reconciliation task or interrupt this drain.
+    """
+    while True:
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.done():
+                return task.result()
+
+
 @dataclass(frozen=True)
 class _LeaseBinding:
     sandbox_id: str
@@ -215,17 +230,26 @@ class SandboxLeaseManager:
             # worker thread, which cannot be stopped by cancelling the awaiter.
             # Reconcile the result before relinquishing the serializer.
             try:
-                sandbox_id = await acquire_task
+                sandbox_id = await _drain_task_after_cancellation(acquire_task)
             except Exception:
                 logger.warning(
                     "Cancelled sandbox acquire failed during reconciliation",
                     exc_info=True,
                 )
                 raise cancellation
-            await asyncio.to_thread(
-                self._release_unbound_acquire,
-                sandbox_id,
+            rollback_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._release_unbound_acquire,
+                    sandbox_id,
+                )
             )
+            try:
+                await _drain_task_after_cancellation(rollback_task)
+            except Exception:
+                logger.warning(
+                    "Cancelled sandbox acquire rollback failed during reconciliation",
+                    exc_info=True,
+                )
             raise cancellation
         with self._metadata_lock:
             previous, release_previous = self._bind_locked(
@@ -467,7 +491,7 @@ class SandboxLeaseManager:
             # Complete lifecycle cleanup before allowing cancellation to leave
             # the agent's finally block.
             try:
-                await release_task
+                await _drain_task_after_cancellation(release_task)
             except Exception:
                 logger.warning(
                     "Cancelled sandbox release failed during reconciliation",
