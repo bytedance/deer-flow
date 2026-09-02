@@ -582,6 +582,68 @@ def test_main_treats_all_as_new_when_baseline_review_fails(tmp_path, monkeypatch
     assert "NEW error R004" in output
 
 
+def test_main_fails_closed_when_head_findings_contain_non_dict_entry(tmp_path, monkeypatch, capsys):
+    """A malformed entry inside findings must fail the gate, not be silently
+    dropped: main's run_review treats it as a failure, and dropping it in
+    baseline mode would shrink the candidate set (fail-open direction)."""
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: tmp_path / "base-pkg")
+    monkeypatch.setattr(
+        runner,
+        "collect_review_facts",
+        lambda *a, **kw: {"findings": [], "completeness": {}} if "base-pkg" in str(a[0]) else {"findings": ["corrupted"], "completeness": {}},
+    )
+
+    exit_code = runner.main(["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)])
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "malformed findings" in output
+
+
+def test_main_fails_closed_when_baseline_facts_contain_non_dict_entry(tmp_path, monkeypatch, capsys):
+    """A malformed baseline entry must invalidate the baseline instead of
+    quietly shrinking base_keys (a corrupted baseline would classify the
+    matching head finding as NEW — the opposite fail direction)."""
+    _write_skill(tmp_path, "alpha")
+    diff_output = _diff_stdout()
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: tmp_path / "base-pkg")
+    head_error = {
+        "path": "skills/public/alpha/SKILL.md",
+        "rule_id": "R004",
+        "line": 7,
+        "message": "possibly pre-existing",
+        "severity": "error",
+    }
+
+    def fake_git_diff(command, **kwargs):
+        return _completed(command, stdout=diff_output)
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_git_diff)
+    monkeypatch.setattr(runner, "extract_package_at_ref", lambda *a, **kw: tmp_path / "base-pkg")
+    monkeypatch.setattr(
+        runner,
+        "collect_review_facts",
+        lambda *a, **kw: {"findings": ["corrupted"], "completeness": {}} if "base-pkg" in str(a[0]) else _baseline_facts(head_error),
+    )
+
+    exit_code = runner.main(["--base-ref", "base", "--head-ref", "head", "--repo-root", str(tmp_path)])
+    output = capsys.readouterr().out
+    assert exit_code == 1
+    assert "baseline review failed" in output
+    assert "NEW error R004" in output
+
+
 def test_baseline_finding_key_excludes_line_number():
     base = {"path": "p", "rule_id": "R", "line": 20, "message": "m"}
     head = {"path": "p", "rule_id": "R", "line": 30, "message": "m"}

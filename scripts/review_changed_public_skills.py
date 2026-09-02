@@ -115,15 +115,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             base_pkg = extract_package_at_ref(package_rel, base_ref, repo_root)
             if base_pkg is not None:
                 base_facts = collect_review_facts(base_pkg, repo_root, args.python)
-                if base_facts is not None:
+                if base_facts is not None and all(
+                    isinstance(f, dict) for f in base_facts.get("findings", [])
+                ):
                     base_keys = {
-                        baseline_finding_key(f)
-                        for f in base_facts.get("findings", [])
-                        if isinstance(f, dict)
+                        baseline_finding_key(f) for f in base_facts.get("findings", [])
                     }
                 else:
-                    # Baseline review itself failed.  Do not silently pass:
-                    # treat every head finding as new (fail-closed).
+                    # Baseline review itself failed or produced malformed
+                    # findings.  Do not silently pass: treat every head
+                    # finding as new (fail-closed).  A corrupted entry must
+                    # not quietly shrink the exempt set.
                     base_keys = set()
                     print(
                         f"[skill-review] WARNING: baseline review failed at {base_ref}; "
@@ -162,9 +164,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 failed = True
                 continue
 
-            head_findings = [
-                f for f in head_facts.get("findings", []) if isinstance(f, dict)
-            ]
+            raw_head_findings = head_facts.get("findings", [])
+            if not all(isinstance(f, dict) for f in raw_head_findings):
+                # Malformed entry inside findings: same fail-closed policy as
+                # main's run_review.  Dropping it would shrink the gate
+                # candidate set, which is the fail-open direction.
+                print(
+                    f"[skill-review] Failed: {package_rel} (head review produced "
+                    f"malformed findings)"
+                )
+                failed = True
+                continue
+
+            head_findings = list(raw_head_findings)
             new_findings = [
                 f for f in head_findings if baseline_finding_key(f) not in base_keys
             ]
