@@ -40,7 +40,7 @@ from deerflow.sandbox.lease import (
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.path_patterns import build_output_mask_pattern, replace_output_path_matches
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sandbox.sandbox_provider import SandboxProvider, get_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.tools.types import Runtime
@@ -1409,6 +1409,44 @@ def sandbox_from_runtime(runtime: Runtime | None = None) -> Sandbox:
     return sandbox
 
 
+def _rollback_failed_sandbox_lookup(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Undo an acquire whose active client disappeared before lookup."""
+    try:
+        if owner_id is not None:
+            get_sandbox_lease_manager(provider).release(owner_id)
+        else:
+            provider.release(sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
+async def _rollback_failed_sandbox_lookup_async(
+    provider: SandboxProvider,
+    sandbox_id: str,
+    owner_id: str | None,
+) -> None:
+    """Async rollback without blocking the event loop on provider cleanup."""
+    try:
+        if owner_id is not None:
+            await get_sandbox_lease_manager(provider).release_async(owner_id)
+        else:
+            await asyncio.to_thread(provider.release, sandbox_id)
+    except Exception:
+        logger.warning(
+            "Failed to roll back sandbox after async post-acquire lookup failure: %s",
+            sandbox_id,
+            exc_info=True,
+        )
+
+
 @contextmanager
 def sandbox_authorization_scope(runtime: Runtime) -> Iterator[None]:
     """Authorize once for one complete synchronous sandbox tool invocation."""
@@ -1537,6 +1575,7 @@ def ensure_sandbox_initialized(runtime: Runtime | None = None) -> Sandbox:
     # Retrieve and return the sandbox
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        _rollback_failed_sandbox_lookup(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:
@@ -1610,6 +1649,7 @@ async def ensure_sandbox_initialized_async(runtime: Runtime | None = None) -> Sa
 
     sandbox = provider.get(sandbox_id)
     if sandbox is None:
+        await _rollback_failed_sandbox_lookup_async(provider, sandbox_id, owner_id)
         raise SandboxNotFoundError("Sandbox not found after acquisition", sandbox_id=sandbox_id)
 
     if runtime.context is not None:

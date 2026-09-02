@@ -6,6 +6,7 @@ import pytest
 from langchain.tools import ToolRuntime
 from langgraph.types import Overwrite
 
+from deerflow.sandbox.exceptions import SandboxNotFoundError
 from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, get_sandbox_lease_manager
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
@@ -101,6 +102,25 @@ class _FallthroughProvider(SandboxProvider):
         self.released.append(sandbox_id)
 
 
+class _PostAcquireLookupFailureProvider(SandboxProvider):
+    """Provider that binds an id but cannot return its active client."""
+
+    def __init__(self) -> None:
+        self.released: list[str] = []
+
+    def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        return "lost-after-acquire"
+
+    async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
+        return "lost-after-acquire"
+
+    def get(self, sandbox_id: str) -> Sandbox | None:
+        return None
+
+    def release(self, sandbox_id: str) -> None:
+        self.released.append(sandbox_id)
+
+
 def _make_runtime(state: dict) -> ToolRuntime:
     return ToolRuntime(
         state=state,
@@ -111,6 +131,53 @@ def _make_runtime(state: dict) -> ToolRuntime:
         tool_call_id="call-1",
         store=None,
     )
+
+
+def test_post_acquire_lookup_failure_unwinds_sync_execution_lease() -> None:
+    provider = _PostAcquireLookupFailureProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "sync-owner",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+        manager = get_sandbox_lease_manager(provider)
+
+        with pytest.raises(SandboxNotFoundError, match="Sandbox not found after acquisition"):
+            ensure_sandbox_initialized(runtime)
+
+        assert manager.binding_for("sync-owner") is None
+        assert provider.released == ["lost-after-acquire"]
+    finally:
+        reset_sandbox_provider()
+
+
+@pytest.mark.anyio
+async def test_post_acquire_lookup_failure_unwinds_async_execution_lease() -> None:
+    provider = _PostAcquireLookupFailureProvider()
+    set_sandbox_provider(provider)
+    try:
+        runtime = _make_runtime({})
+        runtime.context.update(
+            {
+                SANDBOX_LEASE_OWNER_CONTEXT_KEY: "async-owner",
+                "thread_id": "thread-1",
+                "user_id": "user-1",
+            }
+        )
+        manager = get_sandbox_lease_manager(provider)
+
+        with pytest.raises(SandboxNotFoundError, match="Sandbox not found after acquisition"):
+            await ensure_sandbox_initialized_async(runtime)
+
+        assert manager.binding_for("async-owner") is None
+        assert provider.released == ["lost-after-acquire"]
+    finally:
+        reset_sandbox_provider()
 
 
 def test_ensure_sandbox_initialized_unwraps_overwrite_state() -> None:
