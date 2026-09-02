@@ -20,7 +20,7 @@ from deerflow.config.agents_config import (
 from deerflow.config.app_config import get_app_config
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentExistsError, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id, resolve_runtime_user_id
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ class AgentResponse(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all, []=none)")
+    allowed_subagents: list[str] | None = Field(default=None, description="Subagent allowlist (None=all enabled, []=none)")
     model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
     thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
@@ -64,6 +65,7 @@ class AgentCreateRequest(BaseModel):
     model: str | None = Field(default=None, description="Optional model override")
     tool_groups: list[str] | None = Field(default=None, description="Optional tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Optional skill whitelist (None=all enabled, []=none)")
+    allowed_subagents: list[str] | None = Field(default=None, description="Subagent allowlist (None=all enabled, []=none)")
     model_settings: AgentModelSettings | None = Field(default=None, description="Per-agent sampling overrides (temperature / max_tokens)")
     thinking_enabled: bool | None = Field(default=None, description="Per-agent thinking-mode default (None = runtime default)")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Per-agent reasoning-effort default (None = runtime default)")
@@ -77,6 +79,7 @@ class AgentUpdateRequest(BaseModel):
     model: str | None = Field(default=None, description="Updated model override")
     tool_groups: list[str] | None = Field(default=None, description="Updated tool group whitelist")
     skills: list[str] | None = Field(default=None, description="Updated skill whitelist (None=all, []=none)")
+    allowed_subagents: list[str] | None = Field(default=None, description="Updated subagent allowlist (None=all, []=none)")
     model_settings: AgentModelSettings | None = Field(default=None, description="Updated per-agent sampling overrides")
     thinking_enabled: bool | None = Field(default=None, description="Updated per-agent thinking-mode default")
     reasoning_effort: ReasoningEffort | None = Field(default=None, description="Updated per-agent reasoning-effort default")
@@ -190,6 +193,7 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
         model=agent_cfg.model,
         tool_groups=agent_cfg.tool_groups,
         skills=agent_cfg.skills,
+        allowed_subagents=agent_cfg.allowed_subagents,
         model_settings=agent_cfg.model_settings,
         thinking_enabled=agent_cfg.thinking_enabled,
         reasoning_effort=agent_cfg.reasoning_effort,
@@ -248,10 +252,14 @@ async def check_agent_name(name: str) -> dict:
     _validate_agent_name(name)
     normalized = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+
     # Availability is defined by the active backend and stays consistent with
     # create()'s conflict rule (file: per-user or legacy dir; db: a row). The
     # exists() probe is filesystem IO / a DB round trip, so keep it off the loop.
-    exists = await asyncio.to_thread(get_agent_store().exists, normalized, user_id=user_id)
+    def _exists() -> bool:
+        return get_agent_store().exists(normalized, user_id=user_id)
+
+    exists = await asyncio.to_thread(_exists)
     return {"available": not exists, "name": normalized}
 
 
@@ -326,14 +334,15 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
         config_data["tool_groups"] = request.tool_groups
     if request.skills is not None:
         config_data["skills"] = request.skills
+    if request.allowed_subagents is not None:
+        config_data["allowed_subagents"] = request.allowed_subagents
     # model / model_settings / thinking_enabled / reasoning_effort (issue #4336).
     _apply_model_behavior(config_data, request)
-
-    store = get_agent_store()
 
     def _create_agent() -> AgentResponse:
         # Worker thread: existence checks + persistence (file IO or a DB round
         # trip) must stay off the event loop.
+        store = get_agent_store()
         store.create(normalized_name, config_data, request.soul, user_id=user_id)
         logger.info("Created agent '%s'", normalized_name)
         agent_cfg = load_agent_config(normalized_name, user_id=user_id)
@@ -419,7 +428,7 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
         # Use model_fields_set to distinguish "field omitted" from "explicitly set to null".
         # This is critical for skills where None means "inherit all" (not "don't change").
         fields_set = request.model_fields_set
-        config_changed = bool(fields_set & ({"description", "tool_groups", "skills"} | set(_MODEL_BEHAVIOR_FIELDS)))
+        config_changed = bool(fields_set & ({"description", "tool_groups", "skills", "allowed_subagents"} | set(_MODEL_BEHAVIOR_FIELDS)))
 
         updated: dict | None = None
         if config_changed:
@@ -440,6 +449,11 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             if new_skills is not None:
                 updated["skills"] = new_skills
 
+            # allowed_subagents: None = all, [] = hard deny, list = whitelist.
+            new_allowed_subagents = request.allowed_subagents if "allowed_subagents" in fields_set else agent_cfg.allowed_subagents
+            if new_allowed_subagents is not None:
+                updated["allowed_subagents"] = new_allowed_subagents
+
             # model / model_settings / thinking_enabled / reasoning_effort:
             # take explicitly-set request fields, else preserve the existing
             # value (issue #4336).
@@ -456,11 +470,14 @@ async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
             for key, value in preserve_non_managed_fields(agent_cfg).items():
                 updated.setdefault(key, value)
 
-        store = get_agent_store()
         # Persist config (when changed) and/or soul (when provided) off the
         # event loop. A no-change PATCH commits nothing and re-reads current state.
         if updated is not None or request.soul is not None:
-            await asyncio.to_thread(store.update, name, updated, request.soul, user_id=user_id)
+
+            def _update_agent() -> None:
+                get_agent_store().update(name, updated, request.soul, user_id=user_id)
+
+            await asyncio.to_thread(_update_agent)
 
         logger.info(f"Updated agent '{name}'")
 
@@ -563,6 +580,7 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
+
     store = get_agent_store()
 
     # Enqueue-side user ids go through resolve_runtime_user_id() (runtime
@@ -606,7 +624,10 @@ async def delete_agent(name: str) -> None:
 
     try:
         # Off the event loop: file rmtree or a DB delete plus memory cleanup.
-        outcome = await asyncio.to_thread(store.delete, name, user_id=user_id)
+        def _delete_agent() -> AgentDeleteOutcome:
+            return store.delete(name, user_id=user_id)
+
+        outcome = await asyncio.to_thread(_delete_agent)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")

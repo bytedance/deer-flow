@@ -1,4 +1,15 @@
-"""Gateway-side plumbing for app-scoped extension contributions."""
+"""Gateway-side plumbing for app-scoped extension contributions.
+
+Every contributed router mounted here runs behind the host's ``AuthMiddleware``
+(added earlier in ``create_app()``) and cannot enter a host-reserved or
+auth-exempt prefix, so every request reaching a contributed route is already
+session-authenticated. "Logged in" and "administrator" are still different
+questions, though, and a contributed route asks the second one through
+``deerflow_extension_api.auth``: ``resolve_principal(request)`` /
+``require_admin(request)`` read a resolver the host installs on ``app.state``,
+handing the router a neutral projection of identity rather than the host's
+own auth context.
+"""
 
 from __future__ import annotations
 

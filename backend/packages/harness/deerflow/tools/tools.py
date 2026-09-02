@@ -4,9 +4,23 @@ from langchain.tools import BaseTool
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
 from deerflow.reflection import resolve_variable
 from deerflow.sandbox.security import is_host_bash_allowed
-from deerflow.tools.builtins import ask_clarification_tool, list_uploaded_files, present_file_tool, review_skill_package, task_tool, view_image_tool
+from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+from deerflow.tools.builtins import (
+    ask_clarification_tool,
+    batch_status,
+    batch_task,
+    cancel_background_task,
+    cancel_batch,
+    list_background_tasks,
+    list_uploaded_files,
+    present_file_tool,
+    review_skill_package,
+    task_tool,
+    view_image_tool,
+)
 from deerflow.tools.mcp_metadata import tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
 
@@ -94,6 +108,8 @@ def get_available_tools(
 
     # Conditionally add tools based on config
     builtin_tools = BUILTIN_TOOLS.copy()
+    if is_mcp_task_runtime_available():
+        builtin_tools.extend((list_background_tasks, cancel_background_task))
     if include_upload_tool:
         builtin_tools.append(list_uploaded_files)
     skill_evolution_config = getattr(config, "skill_evolution", None)
@@ -105,7 +121,9 @@ def get_available_tools(
     # Add subagent tools only if enabled via runtime parameter
     if subagent_enabled:
         builtin_tools.extend(SUBAGENT_TOOLS)
-        logger.info("Including subagent tools (task)")
+        if is_subagent_batch_runtime_available():
+            builtin_tools.extend((batch_task, batch_status, cancel_batch))
+        logger.info("Including native subagent tools")
 
     # If no model_name specified, use the first model (default)
     if model_name is None and config.models:

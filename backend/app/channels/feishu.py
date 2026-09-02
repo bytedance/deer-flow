@@ -26,10 +26,12 @@ from app.channels.message_bus import (
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.uploads.manager import claim_unique_filename, normalize_filename, write_upload_file_no_symlink
 
 logger = logging.getLogger(__name__)
 PENDING_CLARIFICATION_TTL_SECONDS = 30 * 60
 FEISHU_INBOUND_BATCH_WINDOW_SECONDS = 0.75
+FEISHU_MAX_INBOUND_FILE_BYTES = 20_000_000
 SOURCE_PREVIEW_METADATA_KEY = "feishu_source_preview"
 
 
@@ -382,13 +384,23 @@ class FeishuChannel(Channel):
             logger.warning("[Feishu] received message with no files: %s", msg)
             return msg
         text = msg.text
+        search_from = 0
+
+        def replace_next_placeholder(placeholder: str, replacement: str) -> None:
+            nonlocal search_from, text
+            idx = text.find(placeholder, search_from)
+            if idx < 0:
+                return
+            text = f"{text[:idx]}{replacement}{text[idx + len(placeholder) :]}"
+            search_from = idx + len(replacement)
+
         for file in files:
             if file.get("image_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["image_key"], "image", thread_id, user_id=user_id)
-                text = text.replace("[image]", virtual_path, 1)
+                replace_next_placeholder("[image]", virtual_path)
             elif file.get("file_key"):
                 virtual_path = await self._receive_single_file(msg.thread_ts, file["file_key"], "file", thread_id, user_id=user_id)
-                text = text.replace("[file]", virtual_path, 1)
+                replace_next_placeholder("[file]", virtual_path)
         msg.text = text
         return msg
 
@@ -429,42 +441,54 @@ class FeishuChannel(Channel):
             return f"Failed to obtain the [{type}]"
 
         try:
-            content: bytes = await asyncio.to_thread(image_stream.read)
+            content = await asyncio.to_thread(image_stream.read, FEISHU_MAX_INBOUND_FILE_BYTES + 1)
         except Exception:
             logger.exception("[Feishu] failed to read resource stream: resource_key=%s, type=%s", file_key, type)
             return f"Failed to obtain the [{type}]"
 
+        if isinstance(content, bytearray):
+            content = bytes(content)
+        elif isinstance(content, memoryview):
+            content = content.tobytes()
+
         if not content:
             logger.warning("[Feishu] empty resource content: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+        if not isinstance(content, bytes):
+            logger.warning("[Feishu] resource stream returned non-bytes content: resource_key=%s, type=%s", file_key, type)
+            return f"Failed to obtain the [{type}]"
+        if len(content) > FEISHU_MAX_INBOUND_FILE_BYTES:
+            logger.warning(
+                "[Feishu] inbound resource exceeds 20 MB download limit, skipping: resource_key=%s, type=%s",
+                file_key,
+                type,
+            )
             return f"Failed to obtain the [{type}]"
 
         effective_user_id = user_id or get_effective_user_id()
         paths = await asyncio.to_thread(get_paths)
 
-        ext = "png" if type == "image" else "bin"
-        raw_filename = getattr(response, "file_name", "") or f"feishu_{file_key[-12:]}.{ext}"
-
-        # Sanitize filename: preserve extension, replace path chars in name part
-        if "." in raw_filename:
-            name_part, ext = raw_filename.rsplit(".", 1)
-            name_part = re.sub(r"[./\\]", "_", name_part)
-            filename = f"{name_part}.{ext}"
-        else:
-            filename = re.sub(r"[./\\]", "_", raw_filename)
+        default_ext = "png" if type == "image" else "bin"
+        key_token = re.sub(r"[^A-Za-z0-9_-]", "", file_key)[-12:] or "attachment"
+        fallback_name = f"feishu_{key_token}.{default_ext}"
+        raw_filename = getattr(response, "file_name", "") or fallback_name
+        try:
+            safe_filename = normalize_filename(raw_filename)
+        except (TypeError, ValueError):
+            safe_filename = fallback_name
 
         def _persist():
             paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
             uploads_dir = paths.sandbox_uploads_dir(thread_id, user_id=effective_user_id).resolve()
-            resolved_target = uploads_dir / filename
-            # Use thread_lock to avoid filename conflicts when writing.
             with self._thread_lock:
-                resolved_target.write_bytes(content)
-            return resolved_target
+                seen = {entry.name for entry in uploads_dir.iterdir()}
+                unique_name = claim_unique_filename(safe_filename, seen)
+                return write_upload_file_no_symlink(uploads_dir, unique_name, content)
 
         try:
             resolved_target = await asyncio.to_thread(_persist)
-        except Exception:
-            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", filename, type)
+        except (OSError, ValueError, RuntimeError):
+            logger.exception("[Feishu] failed to persist downloaded resource: %s, type=%s", safe_filename, type)
             return f"Failed to obtain the [{type}]"
 
         virtual_path = f"{VIRTUAL_PATH_PREFIX}/uploads/{resolved_target.name}"

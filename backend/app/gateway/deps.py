@@ -132,9 +132,10 @@ def _validate_agent_storage(config: AppConfig) -> None:
     """Fail fast on an agent-storage backend the database cannot support.
 
     ``agent_storage.backend: db`` needs a durable, shared SQL database — a
-    ``memory`` database is per-process, so agent definitions would silently
-    diverge across nodes (and there is no SQL URL to open). Mirrors deermem's
-    create_storage fail-fast and the multi-worker gate above.
+    ``memory`` database is per-process, so custom-agent and managed-subagent
+    definitions would silently diverge across nodes (and there is no SQL URL
+    to open). Mirrors deermem's create_storage fail-fast and the multi-worker
+    gate above.
 
     Also warns when a multi-worker Postgres deployment leaves agent storage on
     ``file``: custom agents created on one node's local disk are invisible to
@@ -155,7 +156,9 @@ def _validate_agent_storage(config: AppConfig) -> None:
         workers = 1
     if workers > 1 and db_backend == "postgres" and backend == "file":
         logger.warning(
-            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': custom agents are stored per-node on local disk and are not visible across workers/nodes. Set agent_storage.backend='db' to share them.",
+            "GATEWAY_WORKERS=%s with database.backend='postgres' but agent_storage.backend='file': "
+            "custom agents and managed subagents are stored per-node on local disk and are not visible "
+            "across workers/nodes. Set agent_storage.backend='db' to share them.",
             workers,
         )
 
@@ -450,15 +453,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         sf = get_session_factory()
         if sf is not None:
             from deerflow.persistence.feedback import FeedbackRepository
+            from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
             from deerflow.persistence.run import RunRepository
 
             app.state.run_store = RunRepository(sf)
             app.state.feedback_repo = FeedbackRepository(sf)
+            from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
+
+            app.state.pat_repo = PersonalAccessTokenRepository(sf, last_used_write_interval_seconds=PAT_LAST_USED_WRITE_INTERVAL_SECONDS)
         else:
             from deerflow.runtime.runs.store.memory import MemoryRunStore
 
             app.state.run_store = MemoryRunStore()
             app.state.feedback_repo = None
+            # Memory backend has no durable PAT store, so Bearer credentials
+            # cannot be validated there and are rejected by the middleware.
+            app.state.pat_repo = None
 
         # Services are app-scoped. Capture this app's immutable extension set
         # once and close over the same object for teardown; the process-wide
@@ -498,6 +508,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 ScheduledTaskRunRepository,
             )
             from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+            from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
             app.state.scheduled_task_repo = ScheduledTaskRepository(
                 sf,
@@ -508,8 +519,10 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 run_repository=app.state.run_store,
             )
             app.state.mcp_task_repo = McpTaskRepository(sf)
+            app.state.subagent_batch_repo = SubagentBatchRepository(sf)
         else:
             app.state.mcp_task_repo = None
+            app.state.subagent_batch_repo = None
             app.state.scheduled_task_repo = None
             app.state.scheduled_task_run_repo = None
 
@@ -676,6 +689,20 @@ def get_mcp_task_service(request: Request):
     return val
 
 
+def get_subagent_batch_repo(request: Request):
+    val = getattr(request.app.state, "subagent_batch_repo", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch repository not available")
+    return val
+
+
+def get_subagent_batch_service(request: Request):
+    val = getattr(request.app.state, "subagent_batch_service", None)
+    if val is None:
+        raise HTTPException(status_code=503, detail="Subagent batch service not available")
+    return val
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -694,6 +721,7 @@ def get_run_context(request: Request) -> RunContext:
         checkpoint_channel_mode=getattr(request.app.state, "checkpoint_channel_mode", "full"),
         checkpoint_snapshot_frequency=getattr(request.app.state, "checkpoint_snapshot_frequency", None),
         thread_store=get_thread_store(request),
+        mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
@@ -731,6 +759,19 @@ def get_local_provider() -> LocalAuthProvider:
     return _cached_local_provider
 
 
+def get_pat_repo(request: Request):
+    """Return the personal-access-token repository from app state.
+
+    Raises 503 when the process runs on the memory backend (no durable PAT
+    storage), so PAT management routes fail explicitly instead of silently
+    accepting tokens nobody can validate.
+    """
+    pat_repo = getattr(request.app.state, "pat_repo", None)
+    if pat_repo is None:
+        raise HTTPException(status_code=503, detail="Personal access tokens require a configured database")
+    return pat_repo
+
+
 async def get_current_user_from_request(request: Request):
     """Get the current authenticated user from the request cookie.
 
@@ -738,12 +779,13 @@ async def get_current_user_from_request(request: Request):
     """
     state = getattr(request, "state", None)
     state_user = getattr(state, "user", None)
-    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
+    from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_PAT, AUTH_SOURCE_SESSION
 
     if state_user is not None and getattr(state, "auth_source", None) in {
         AUTH_SOURCE_SESSION,
         AUTH_SOURCE_AUTH_DISABLED,
         AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_PAT,
     }:
         return state_user
 
@@ -782,13 +824,13 @@ async def get_current_user_from_request(request: Request):
     return user
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
-    """Require the authenticated caller to be an admin user.
+async def is_admin_user(request: Request) -> bool:
+    """Return whether the authenticated caller is an admin user.
 
     ``AuthMiddleware`` normally stamps ``request.state.user`` before the request
     reaches a router. Falling back to the strict dependency keeps the route safe
     in tests or alternative ASGI compositions that mount a router without the
-    global middleware. ``detail`` is the route-specific 403 message.
+    global middleware.
 
     Centralising this here means a future change to the admin definition (e.g.
     allowing an internal system role, adding audit logging, or switching to a
@@ -796,11 +838,28 @@ async def require_admin_user(request: Request, *, detail: str) -> None:
     per-router copies that previously existed in ``mcp``, ``channel_connections``
     and ``channels``.
     """
+    # PAT credentials never carry admin capability: no scope in the PAT
+    # universe grants it, so an admin's automation token must not unlock
+    # admin-only routes (skill installs, integration credentials, MCP config).
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        return False
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)
 
-    if getattr(user, "system_role", None) != "admin":
+    return getattr(user, "system_role", None) == "admin"
+
+
+async def require_admin_user(request: Request, *, detail: str) -> None:
+    """Require the authenticated caller to be an admin user.
+
+    ``detail`` is the route-specific 403 message. The shared predicate keeps
+    read-side redaction and write authorization on the same admin definition.
+    """
+
+    if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
 
 
