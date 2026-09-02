@@ -74,8 +74,9 @@ class ConversationContext:
     # lands during debounce would otherwise look current and restore facts.
     # Same-key merges keep the earlier value unless a newer clear is already
     # visible; then the queue consumes the pre-clear snapshot and starts a
-    # fresh fence. A missing token and emergency (bypass) snapshots are never
-    # refreshed.
+    # fresh fence. An incoming peek older than the queued context is refused
+    # so that snapshot cannot inherit the newer fence. A missing token and
+    # emergency (bypass) snapshots are never refreshed.
     clear_generation: tuple[int, int] | None = None
 
 
@@ -213,9 +214,25 @@ class MemoryUpdateQueue:
         # emergency snapshot. Re-reading after a clear and blindly refreshing
         # would restore pre-clear facts; a visible newer clear instead consumes
         # the pre-clear snapshot and starts a fresh fence so post-clear turns
-        # are extracted on this flush.
+        # are extracted on this flush. A late add whose peek is older than the
+        # queued context must not replace messages: that would inherit the
+        # newer fence and restore the pre-clear snapshot.
         if existing is None:
             enqueued_clear_generation = captured_clear_generation
+        elif existing.clear_generation is not None and is_stale_clear_generation(captured_clear_generation, existing.clear_generation):
+            incoming = ConversationContext(
+                thread_id=thread_id,
+                messages=messages,
+                agent_name=agent_name,
+                user_id=user_id,
+                trace_id=trace_id,
+                signals=signals,
+                bypass_watermark=bypass_watermark,
+                clear_generation=captured_clear_generation,
+            )
+            if not self._consume_pre_clear_feed(incoming):
+                existing.clear_generation = captured_clear_generation
+            return existing
         elif existing.bypass_watermark or existing.clear_generation is None:
             enqueued_clear_generation = existing.clear_generation
         elif is_stale_clear_generation(existing.clear_generation, captured_clear_generation) and self._consume_pre_clear_feed(existing):

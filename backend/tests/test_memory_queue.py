@@ -499,3 +499,105 @@ def test_queue_coalesce_does_not_refresh_missing_generation_from_storage() -> No
 
     assert queue._items[0].clear_generation is None
     mock_updater.peek_clear_generation.assert_called_once_with("researcher", user_id="alice")
+
+
+def test_queue_refuses_older_generation_overwrite_of_newer_fenced_work() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (2, 0)
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["after clear"], agent_name="researcher", user_id="alice")
+        with queue._lock:
+            kept = queue._enqueue_locked(
+                thread_id="thread-1",
+                messages=["between clears"],
+                agent_name="researcher",
+                user_id="alice",
+                trace_id=None,
+                signals=frozenset({"correction"}),
+                bypass_watermark=False,
+                captured_clear_generation=(1, 0),
+            )
+
+    assert kept.messages == ["after clear"]
+    assert kept.clear_generation == (2, 0)
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["after clear"]
+    assert queue._items[0].clear_generation == (2, 0)
+    assert queue._items[0].signals == frozenset()
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["between clears"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+    )
+
+
+def test_queue_downgrades_fence_when_older_incoming_consume_fails() -> None:
+    mock_updater = MagicMock()
+    mock_updater.peek_clear_generation.return_value = (2, 0)
+    mock_updater.mark_feed_consumed.side_effect = RuntimeError("watermark unavailable")
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    with patch.object(queue, "_schedule_timer"):
+        queue.add(thread_id="thread-1", messages=["after clear"], agent_name="researcher", user_id="alice")
+        with queue._lock:
+            queue._enqueue_locked(
+                thread_id="thread-1",
+                messages=["between clears"],
+                agent_name="researcher",
+                user_id="alice",
+                trace_id=None,
+                signals=frozenset(),
+                bypass_watermark=False,
+                captured_clear_generation=(1, 0),
+            )
+
+    assert queue._items[0].messages == ["after clear"]
+    assert queue._items[0].clear_generation == (1, 0)
+
+
+def test_queue_out_of_order_lock_does_not_let_older_snapshot_inherit_newer_fence() -> None:
+    mock_updater = MagicMock()
+    generation = [(1, 0)]
+    peeked_first = threading.Event()
+    release_first = threading.Event()
+
+    def peek(agent_name: str | None, *, user_id: str | None = None) -> tuple[int, int]:
+        value = generation[0]
+        if value == (1, 0) and not peeked_first.is_set():
+            peeked_first.set()
+            assert release_first.wait(timeout=2)
+        return value
+
+    mock_updater.peek_clear_generation.side_effect = peek
+    queue = MemoryUpdateQueue(DeerMemConfig(), mock_updater)
+    errors: list[BaseException] = []
+
+    def older_add() -> None:
+        try:
+            queue.add(thread_id="thread-1", messages=["between clears"], agent_name="researcher", user_id="alice")
+        except BaseException as exc:
+            errors.append(exc)
+
+    with patch.object(queue, "_schedule_timer"):
+        older = threading.Thread(target=older_add)
+        older.start()
+        assert peeked_first.wait(timeout=2)
+        generation[0] = (2, 0)
+        queue.add(thread_id="thread-1", messages=["after clear"], agent_name="researcher", user_id="alice")
+        release_first.set()
+        older.join(timeout=2)
+        assert not older.is_alive()
+
+    assert errors == []
+    assert queue.pending_count == 1
+    assert queue._items[0].messages == ["after clear"]
+    assert queue._items[0].clear_generation == (2, 0)
+    mock_updater.mark_feed_consumed.assert_called_once_with(
+        ["between clears"],
+        thread_id="thread-1",
+        user_id="alice",
+        agent_name="researcher",
+        bypass_watermark=False,
+    )

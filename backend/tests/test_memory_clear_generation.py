@@ -404,6 +404,49 @@ def test_queued_coalesce_after_clear_extracts_post_clear_turns(tmp_path: Path) -
     assert later == facts
 
 
+def test_out_of_order_enqueue_does_not_restore_facts_after_clear(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(return_value=MagicMock(content=_extraction_json("User prefers typed Python")))
+    manager_a = _manager(tmp_path, host_llm)
+    manager_a.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    pre_clear = _queue_conversation()
+    post_clear = _queue_conversation(human="Also remember that I prefer typed Python.", ai="Noted, I will keep that preference.")
+    full_conversation = [*pre_clear, *post_clear]
+
+    manager_b = _manager(tmp_path)
+    manager_b.clear_memory(agent_name="researcher", user_id="alice")
+
+    manager_a.add(thread_id="thread-1", messages=full_conversation, agent_name="researcher", user_id="alice")
+    queued = manager_a._queue._items[0]
+    assert queued.clear_generation == (0, 1)
+    queued_messages = list(queued.messages)
+    _stop_debounce(manager_a)
+
+    with manager_a._queue._lock:
+        manager_a._queue._enqueue_locked(
+            thread_id="thread-1",
+            messages=pre_clear,
+            agent_name="researcher",
+            user_id="alice",
+            trace_id=None,
+            signals=frozenset(),
+            bypass_watermark=False,
+            captured_clear_generation=(0, 0),
+        )
+
+    assert manager_a._queue.pending_count == 1
+    assert manager_a._queue._items[0].messages == queued_messages
+    assert manager_a._queue._items[0].clear_generation == (0, 1)
+
+    manager_a._queue.flush()
+
+    host_llm.invoke.assert_called_once()
+    facts = {fact["content"] for fact in manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"]}
+    assert "User likes Python" not in facts
+    assert "User prefers typed Python" in facts
+
+
 class IgnoringClearGenerationStorage(MemoryStorage):
     """Custom provider that swallows fence kwargs through ``**scope``."""
 
