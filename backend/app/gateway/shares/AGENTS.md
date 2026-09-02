@@ -41,9 +41,12 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   **public messages**, not raw rows (tool output never consumes budget). At
   exactly 2000 public messages the scan continues only to prove that no older
   public message exists; older tool/hidden rows do not make a complete share
-  fail. An independent 50k raw-scan budget is consumed inside the canonical
+  fail. A 2 MiB rendered-bytes budget bounds the total public text — a
+  "few huge messages" thread fails 413 like a many-messages one, because
+  every anonymous resolution deserializes and re-sanitizes the stored
+  snapshot. An independent 50k raw-scan budget is consumed inside the canonical
   pager, before its visibility filters, and uses one sentinel row to prove an
-  over-limit history without walking the remainder. Either bound rejecting yields **413**
+  over-limit history without walking the remainder. Any bound rejecting yields **413**
   (`ShareSnapshotTooLarge`) — a share promises the complete visible
   transcript, so it is never silently truncated.
 - `GET` lists management metadata (never token hashes); `DELETE /{share_id}`
@@ -74,8 +77,10 @@ Gateway) through response or exception headers; per-IP
 resolve throttle (in-memory, per-worker — a courtesy control,
 the token is 256-bit unguessable; the bucket key uses the deployment-wide
 trusted-proxy model from `app.gateway.client_ip`, shared with the login
-limiter — behind the shipped nginx, deployments must set
-`AUTH_TRUSTED_PROXIES` to the proxy network or every anonymous visitor shares
+limiter — behind the shipped nginx the bundled Docker and Helm topologies
+set `AUTH_TRUSTED_PROXIES` to the proxy networks (`gateway.trustedProxies`
+overrides in Helm), so the limit stays per-client; a custom proxy front
+must set `AUTH_TRUSTED_PROXIES` itself or every anonymous visitor shares
 the proxy's single bucket); and zero thread-state access — explicit share
 records are the only gate in every mode, including auth-disabled. The
 bearer-URL response must never survive in a browser/proxy cache past

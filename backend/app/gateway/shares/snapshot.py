@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 _SNAPSHOT_SCAN_PAGE_SIZE = 200
 _SNAPSHOT_MAX_MESSAGES = 2000
+# Total renderable-text budget: the persisted snapshot duplicates the whole
+# transcript and every anonymous resolution deserializes AND re-sanitizes
+# it, so a "few huge messages" thread must fail 413 exactly like a
+# many-messages one instead of turning each public read into unbounded work.
+_SNAPSHOT_MAX_RENDERED_BYTES = 2 * 1024 * 1024
 # Independent safety bound on RAW scanned rows: a tool-heavy thread can carry
 # far more rows than public messages, and without this the backward scan
 # would walk an unbounded history while the public-message count stays under
@@ -129,6 +134,7 @@ class ShareSnapshotTooLarge(Exception):
         self.thread_id = thread_id
         self.hit = hit
         self.cap = cap
+        self.limit_kind = limit_kind
 
 
 async def build_share_snapshot(
@@ -149,10 +155,14 @@ async def build_share_snapshot(
     # to public messages PER PAGE so the share cap counts what would
     # actually be published (tool rows and hidden/control messages don't
     # consume budget); page order flips only at the end so each page stays
-    # chronological. Two bounds: the public-message cap enforces the share
-    # contract, the raw-scan cap bounds work on row-heavy threads.
+    # chronological. Three bounds: the public-message cap enforces the share
+    # contract, the rendered-bytes cap keeps one share from persisting (and
+    # re-deserializing + re-sanitizing on every anonymous read) an
+    # unbounded transcript that stays under the message count, and the
+    # raw-scan cap bounds work on row-heavy threads.
     pages: list[list[dict[str, Any]]] = []
     public_messages = 0
+    rendered_bytes = 0
     raw_scan_budget = _RawMessageScanBudget(_SNAPSHOT_MAX_SCANNED_ROWS)
     before_seq: int | None = None
     while True:
@@ -184,6 +194,14 @@ async def build_share_snapshot(
         if page_messages:
             pages.append(page_messages)
             public_messages += len(page_messages)
+            rendered_bytes += sum(len(message["content"]) for message in page_messages)
+        if rendered_bytes > _SNAPSHOT_MAX_RENDERED_BYTES:
+            logger.warning(
+                "Share snapshot for thread %s exceeded the %d rendered-bytes cap; refusing partial share",
+                thread_id,
+                _SNAPSHOT_MAX_RENDERED_BYTES,
+            )
+            raise ShareSnapshotTooLarge(thread_id, rendered_bytes, _SNAPSHOT_MAX_RENDERED_BYTES, limit_kind="rendered-bytes")
         if public_messages > _SNAPSHOT_MAX_MESSAGES:
             # ``has_more`` describes canonical page-eligible rows, not public
             # messages. Reject only after observing the first public message

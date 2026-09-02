@@ -567,6 +567,26 @@ async def test_snapshot_cap_rejects_instead_of_truncating(caplog):
     assert any("refusing partial share" in record.message for record in caplog.records)
 
 
+async def test_snapshot_rejects_few_huge_messages_by_rendered_bytes():
+    """A thread far under the message count whose renderable text exceeds the
+    byte budget must fail 413 too: the persisted snapshot duplicates the
+    transcript and every anonymous read deserializes and re-sanitizes it."""
+
+    async def fake_scan(thread_id, *, limit, before_seq, request, user_id, raw_scan_budget=None):
+        return [_row(1, {"type": "human", "content": "x" * 200}), _row(2, {"type": "ai", "content": "y" * 200})], False
+
+    from app.gateway.shares import snapshot as snapshot_module
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(snapshot_module, "_SNAPSHOT_MAX_RENDERED_BYTES", 256)
+        mp.setattr("app.gateway.routers.thread_runs._scan_thread_message_page", fake_scan)
+        with pytest.raises(ShareSnapshotTooLarge) as excinfo:
+            await build_share_snapshot("thread-1", request=object(), user_id="user-1")
+
+    assert excinfo.value.limit_kind == "rendered-bytes"
+    assert excinfo.value.cap == 256
+
+
 async def test_snapshot_rejects_when_terminal_page_pushes_public_count_over_cap():
     """A mixed terminal page may cross the cap even when no older page exists."""
 

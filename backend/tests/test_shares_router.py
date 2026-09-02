@@ -594,3 +594,20 @@ def test_resolve_tracker_prunes_oldest_without_flushing_everyone():
         assert "198.51.100.10" in shares_router._public_resolve_hits
     finally:
         shares_router._public_resolve_hits.clear()
+
+
+def test_bundled_topologies_wire_trusted_proxies():
+    """The shipped nginx front ends the gateway in both bundled topologies,
+    so per-IP limiters must key on nginx's X-Real-IP: without
+    AUTH_TRUSTED_PROXIES every visitor shares the proxy's address and the
+    share-resolution throttle becomes one global 60/min bucket (a
+    deployment-wide outage, not a per-client limit)."""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    compose = (repo_root / "docker/docker-compose.yaml").read_text(encoding="utf-8")
+    helm = (repo_root / "deploy/helm/deer-flow/templates/gateway-deployment.yaml").read_text(encoding="utf-8")
+    assert "AUTH_TRUSTED_PROXIES" in compose
+    assert compose.index("gateway:") < compose.index("AUTH_TRUSTED_PROXIES")
+    assert "AUTH_TRUSTED_PROXIES" in helm
+    assert "trustedProxies" in helm
