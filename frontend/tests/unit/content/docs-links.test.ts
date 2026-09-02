@@ -97,7 +97,10 @@ describe("documentation content links", () => {
     const customAgentDocs = [
       ...customAgentApiDocs,
       ...DOC_LANGUAGES.map((lang) =>
-        readFileSync(join(CONTENT_ROOT, lang, "harness/lead-agent.mdx"), "utf8"),
+        readFileSync(
+          join(CONTENT_ROOT, lang, "harness/lead-agent.mdx"),
+          "utf8",
+        ),
       ),
     ];
 
