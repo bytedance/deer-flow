@@ -158,6 +158,38 @@ def _normalize_tool_arguments(arguments: object) -> str:
     return arguments if _parse_json_object(arguments) is not None else "{}"
 
 
+def _content_block_tool_call(block: object) -> dict | None:
+    """Normalize a provider-native tool-call content block, if present."""
+    if not isinstance(block, dict):
+        return None
+
+    block_type = block.get("type")
+    if block_type not in {"function_call", "tool_call", "tool_use"}:
+        return None
+
+    call_id = block.get("call_id") or block.get("id")
+    name = block.get("name")
+    raw_args = block.get("arguments")
+    if block_type == "tool_call":
+        raw_args = block.get("args", raw_args)
+    elif block_type == "tool_use":
+        raw_args = block.get("input", raw_args)
+
+    if isinstance(raw_args, dict):
+        args = raw_args
+    else:
+        args = _parse_json_object(raw_args) or {}
+
+    normalized_call = {
+        "id": call_id,
+        "name": _normalize_tool_name(name),
+        "args": args,
+    }
+    if _has_invalid_tool_name(name):
+        normalized_call["invalid_tool_name"] = True
+    return normalized_call
+
+
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """Inserts placeholder ToolMessages for dangling tool calls and drops orphan
     ToolMessages (tool results whose originating AIMessage tool_call is gone).
@@ -225,7 +257,19 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
                     normalized_call["invalid_tool_name"] = True
                 normalized.append(normalized_call)
 
-        for invalid_tc in getattr(msg, "invalid_tool_calls", None) or []:
+        # Responses-style checkpoints may retain only the provider-native
+        # function_call block in list-valued content after another middleware
+        # cleared the structured view. Treat that block as a final fallback so
+        # old checkpoints can be repaired without duplicating mirrored calls.
+        invalid_tool_calls = getattr(msg, "invalid_tool_calls", None) or []
+        if not tool_calls and not invalid_tool_calls and not raw_tool_calls:
+            content = getattr(msg, "content", None)
+            if isinstance(content, list):
+                for block in content:
+                    if normalized_call := _content_block_tool_call(block):
+                        normalized.append(normalized_call)
+
+        for invalid_tc in invalid_tool_calls:
             if not isinstance(invalid_tc, dict):
                 continue
             original_name = invalid_tc.get("name")

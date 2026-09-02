@@ -1034,6 +1034,35 @@ class TestHardStopWithListContent:
         assert msg.content[2]["type"] == "text"
         assert _HARD_STOP_MSG in msg.content[2]["text"]
 
+    def test_hard_stop_removes_responses_function_call_content_block(self):
+        """A forced stop must not leave an unanswered Responses API call behind."""
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+        responses_content = [
+            {"type": "reasoning", "id": "rs_1", "summary": []},
+            {
+                "type": "function_call",
+                "id": "fc_1",
+                "call_id": "call_ls",
+                "name": "bash",
+                "arguments": '{"command":"ls"}',
+            },
+            {"type": "text", "text": "I will inspect the directory."},
+        ]
+
+        for _ in range(3):
+            mw._apply(_make_state(tool_calls=call, content=responses_content), runtime)
+
+        result = mw._apply(_make_state(tool_calls=call, content=responses_content), runtime)
+
+        assert result is not None
+        msg = result["messages"][0]
+        assert msg.tool_calls == []
+        assert isinstance(msg.content, list)
+        assert [block["type"] for block in msg.content] == ["reasoning", "text", "text"]
+        assert _HARD_STOP_MSG in msg.content[-1]["text"]
+
     def test_hard_stop_with_none_content(self):
         """Hard stop on None content should produce a plain string."""
         mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=4)

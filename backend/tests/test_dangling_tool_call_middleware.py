@@ -184,6 +184,65 @@ class TestBuildPatchedMessagesPatching:
         assert patched[1].name == "bash"
         assert patched[1].status == "error"
 
+    def test_responses_function_call_content_block_is_patched(self):
+        """Recover checkpoints where only the provider-native call block remains."""
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage.model_construct(
+                content=[
+                    {"type": "reasoning", "id": "rs_1", "summary": []},
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "bash",
+                        "arguments": '{"command":"ls"}',
+                    },
+                    {"type": "text", "text": "partial answer"},
+                ],
+                type="ai",
+                tool_calls=[],
+                invalid_tool_calls=[],
+                additional_kwargs={},
+                response_metadata={},
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        assert patched[0] is msgs[0]
+        assert len(patched) == 2
+        assert isinstance(patched[1], ToolMessage)
+        assert patched[1].tool_call_id == "call_1"
+        assert patched[1].name == "bash"
+        assert patched[1].status == "error"
+
+    def test_responses_content_fallback_does_not_duplicate_structured_call(self):
+        """Native content mirrors structured calls and must not be counted twice."""
+        mw = DanglingToolCallMiddleware()
+        msgs = [
+            AIMessage(
+                content=[
+                    {
+                        "type": "function_call",
+                        "id": "fc_1",
+                        "call_id": "call_1",
+                        "name": "bash",
+                        "arguments": '{"command":"ls"}',
+                    }
+                ],
+                tool_calls=[_tc("bash", "call_1")],
+            )
+        ]
+
+        patched = mw._build_patched_messages(msgs)
+
+        assert patched is not None
+        tool_messages = [message for message in patched if isinstance(message, ToolMessage)]
+        assert len(tool_messages) == 1
+        assert tool_messages[0].tool_call_id == "call_1"
+
     def test_empty_structured_tool_call_name_is_sanitized(self):
         mw = DanglingToolCallMiddleware()
         msgs = [_ai_with_tool_calls([_tc("", "empty_name_call")])]
