@@ -20,7 +20,7 @@ from deerflow.config.agents_config import (
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.config.paths import get_paths
-from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, AgentStore, get_agent_store
+from deerflow.persistence.agents import AgentDeleteOutcome, AgentExistsError, get_agent_store
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
@@ -567,12 +567,11 @@ async def delete_agent(name: str) -> None:
     _validate_agent_name(name)
     name = _normalize_agent_name(name)
     user_id = get_effective_user_id()
-    store = get_agent_store()
 
     try:
-        # Off the event loop: cancel → delete → cancel-on-success, plus any
-        # file/DB I/O from store.delete and get_memory_manager.
-        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, store, name, user_id)
+        # Off the event loop: resolve store + cancel → delete → cancel-on-success
+        # (get_agent_store / memory manager do blocking config and FS I/O).
+        outcome = await asyncio.to_thread(_delete_agent_with_memory_cancel, name, user_id)
     except Exception as e:
         logger.error(f"Failed to delete agent '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to delete agent: {str(e)}")
@@ -593,14 +592,15 @@ async def delete_agent(name: str) -> None:
     logger.info(f"Deleted agent '{name}'")
 
 
-def _delete_agent_with_memory_cancel(store: AgentStore, name: str, user_id: str | None) -> AgentDeleteOutcome:
+def _delete_agent_with_memory_cancel(name: str, user_id: str | None) -> AgentDeleteOutcome:
     """Cancel buffered memory, delete the agent, then cancel again on success.
 
-    Runs entirely in a worker thread so blocking memory/config I/O stays off the
-    event loop. Pre-delete cancel closes the debounce-timer race during rmtree;
-    post-success cancel covers work enqueued mid-delete. A rejected delete may
-    still drop buffered work; that update is re-fed on the next turn.
+    Runs entirely in a worker thread so blocking store/memory/config I/O stays
+    off the event loop. Pre-delete cancel closes the debounce-timer race during
+    rmtree; post-success cancel covers work enqueued mid-delete. A rejected
+    delete may still drop buffered work; that update is re-fed on the next turn.
     """
+    store = get_agent_store()
     _cancel_pending_memory_for_agent(name, user_id)
     outcome = store.delete(name, user_id=user_id)
     if outcome == "deleted":
