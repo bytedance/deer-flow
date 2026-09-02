@@ -1302,3 +1302,19 @@ def test_sandbox_id_none_user_quirk_pinned():
     from deerflow.sandbox.identity import derive_sandbox_scope_token
 
     assert BoxliteProvider._sandbox_id("t-1", None) == derive_sandbox_scope_token(user_id="None", thread_id="t-1")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    class _FindBox:
+        async def exec(self, *argv, env=None, timeout=None):
+            return types.SimpleNamespace(stdout="/mnt/user-data/workspace/notes.txt \n", stderr="", exit_code=0)
+
+    box = BoxliteBox("box-id", box=_FindBox(), run=_fake_run)
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False

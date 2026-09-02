@@ -325,7 +325,9 @@ class OpenSandboxSandbox(Sandbox):
             raise ValueError("max_depth must be non-negative")
         resolved = self._resolve_path(path)
         execution = self._run(f"find {shlex.quote(resolved)} -maxdepth {depth} \\( -type f -o -type d \\) 2>/dev/null | head -500")
-        return [line.strip() for line in execution_stdout(execution).splitlines() if line.strip()]
+        # splitlines() already removed the terminators; do NOT strip entries —
+        # a filename that legitimately ends in whitespace would be corrupted.
+        return [line for line in execution_stdout(execution).splitlines() if line]
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         if max_results <= 0:
@@ -340,7 +342,7 @@ class OpenSandboxSandbox(Sandbox):
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         for entry in execution_stdout(execution).splitlines():
-            entry = entry.strip()
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry or (entry != root and not entry.startswith(root_prefix)) or should_ignore_path(entry):
                 continue
             relative = entry[len(root) :].lstrip("/")

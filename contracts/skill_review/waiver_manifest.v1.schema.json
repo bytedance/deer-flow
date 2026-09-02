@@ -20,6 +20,12 @@
           "line": { "type": "integer", "minimum": 1 },
           "evidence": { "type": "string", "minLength": 1 },
           "file_sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+          "preapproved_file_sha256s": {
+            "type": "array",
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+          },
           "reason": { "type": "string", "minLength": 20 },
           "expires_on": { "type": "string", "format": "date" },
           "approved_in": { "type": "string", "minLength": 1 }

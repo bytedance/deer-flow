@@ -1015,3 +1015,16 @@ def test_sandbox_id_matches_shared_identity():
 
     assert TenkiSandboxProvider._sandbox_id("t-1", "u-1") == derive_sandbox_scope_token(user_id="u-1", thread_id="t-1")
     assert TenkiSandboxProvider._sandbox_id("t-1", "") == derive_sandbox_scope_token(user_id="", thread_id="t-1")
+
+
+def test_list_dir_and_glob_preserve_trailing_space_in_filename() -> None:
+    # "notes.txt " (trailing space) is a legal Linux filename; find prints it
+    # verbatim, one entry per line, so a per-line strip() corrupts the name.
+    box = TenkiSandbox("sb", _FakeSandbox())
+    box.write_file("/mnt/user-data/workspace/notes.txt ", "payload\n")
+
+    assert box.list_dir("/mnt/user-data/workspace") == ["/mnt/user-data/workspace/notes.txt "]
+
+    found, truncated = box.glob("/mnt/user-data/workspace", "notes*")
+    assert found == ["/mnt/user-data/workspace/notes.txt "]
+    assert truncated is False
