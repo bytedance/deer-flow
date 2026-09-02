@@ -14,6 +14,7 @@ from deerflow.config.subagents_config import (
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     clamp_subagent_concurrency,
     clamp_total_subagents_per_run,
+    effective_subagent_concurrency,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
@@ -343,6 +344,8 @@ def _build_subagent_section(
     max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     *,
     app_config: AppConfig | None = None,
+    allowed_subagents: list[str] | None = None,
+    batch_enabled: bool = False,
 ) -> str:
     """Build the subagent system prompt section with dynamic subagent limits.
 
@@ -355,8 +358,36 @@ def _build_subagent_section(
     """
     n = clamp_subagent_concurrency(max_concurrent)
     total = clamp_total_subagents_per_run(max_total)
-    available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    if allowed_subagents is None:
+        available_names = get_available_subagent_names(app_config=app_config) if app_config is not None else get_available_subagent_names()
+    else:
+        available_names = get_available_subagent_names(app_config=app_config, allowed_subagents=allowed_subagents) if app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+    if not available_names:
+        return ""
     bash_available = "bash" in available_names
+
+    # The verification guidance must follow verification.receipts_enabled: with
+    # receipts disabled, subagent reports carry no receipt citations and the
+    # delegation ledger has no citation line, so telling the lead to expect one
+    # would make legitimate results look uncorroborated.
+    verification_cfg = getattr(app_config, "verification", None) if app_config is not None else None
+    receipts_enabled = getattr(verification_cfg, "receipts_enabled", True)
+    if receipts_enabled:
+        single_verify_step = (
+            "6. Verify the result before synthesizing: the delegation ledger's citation line is execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."
+        )
+        parallel_verify_step = "6. Verify returned results: ledger citation lines are execution evidence (resolved = the call happened, not that the claim is correct); spot-check verifiable handles for load-bearing claims."
+    else:
+        single_verify_step = (
+            "6. Verify the result before synthesizing: receipt citations are disabled in this configuration "
+            "(verification.receipts_enabled=false), so reports carry no ledger citation line; rely on verifiable "
+            "handles and spot-check them for load-bearing claims."
+        )
+        parallel_verify_step = (
+            "6. Verify returned results: receipt citations are disabled in this configuration "
+            "(verification.receipts_enabled=false), so reports carry no ledger citation lines; rely on verifiable "
+            "handles and spot-check them for load-bearing claims."
+        )
 
     # Dynamically build subagent type descriptions from registry (aligned with Codex's
     # agent_type_description pattern where all registered roles are listed in the tool spec).
@@ -376,12 +407,12 @@ def _build_subagent_section(
 With a per-response limit of 1, delegate only for material specialist or context-isolation benefit. Parallel dispatch cannot reduce wall-clock latency in this configuration."""
         limit_action_guidance = """- When the per-response limit is reached, verify and synthesize the returned result or continue directly."""
         followup_guidance = """- After any delegated result, re-evaluate whether the remaining work still has specialist or context-isolation benefit. Do not chain delegations merely to work around the per-response limit."""
-        workflow = """1. Establish the cheapest credible direct-execution path.
+        workflow = f"""1. Establish the cheapest credible direct-execution path.
 2. Include all negative signals in expected cost.
 3. Compare specialist or context-isolation benefit with all listed costs.
-4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+4. If delegation wins clearly, give the single subagent a bounded scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch at most 1 call and stay within the remaining run allowance.
-6. Verify and synthesize the returned result against primary evidence."""
+{single_verify_step}"""
         examples = """- Refactor authentication implementation and its tests directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
 - Use one subagent for a bounded, unusually context-heavy investigation only when preserving lead-agent context clearly outweighs delegation and synthesis cost.
@@ -408,9 +439,10 @@ A single subagent is justified only by material specialist or context-isolation 
         workflow = f"""1. Establish the cheapest credible direct-execution path.
 2. Apply the parallel-dispatch hard vetoes and include all negative signals in expected cost.
 3. Compare expected benefit with all listed costs.
-4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership.
+4. If delegation wins clearly, give each subagent a bounded, non-overlapping scope, relevant known context and paths, an expected output, and explicit side-effect ownership. Attach acceptance_criteria for objectively checkable outcomes.
 5. Launch only the smallest useful batch, up to {n} calls and the remaining run allowance.
-6. Verify and synthesize returned results. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
+{parallel_verify_step}
+7. Synthesize. Resolve contradictions against primary evidence instead of forwarding incompatible conclusions."""
         examples = """- Refactor authentication implementation and its tests: execute directly when analysis, edits, and test feedback share files or depend on one another. Complexity alone does not justify delegation.
 - Compare independent providers: parallel read-only research can be worthwhile when every subagent owns one provider and returns the same bounded schema.
 - Use one specialized subagent only when its configured capability provides material benefit unavailable on the direct path.
@@ -420,6 +452,24 @@ A single subagent is justified only by material specialist or context-isolation 
 - Wait for the batch, then re-evaluate the remaining work and net benefit.
 - **Batch 2** may launch the next scopes if it still wins; otherwise continue directly.
 - **Synthesize all retained results** at the end.
+"""
+    durable_batch_guidance = ""
+    if batch_enabled:
+        durable_batch_guidance = """
+## Explicit durable batch mode
+
+`batch_task` is a separate execution mode for a large collection of independent,
+idempotent or read-only items. It returns a durable batch id immediately and does
+not consume the ordinary `task` per-run total. Never infer batch mode from item
+count and never emulate it by repeatedly calling `task`.
+
+- Every item must be self-contained and must not depend on another item's output.
+- Give every item a stable unique key; retries reuse that key as idempotency identity.
+- Set total, live-window, and running concurrency separately. A high total never
+  implies that all items become live or run at once.
+- Use `batch_status` for compact progress and `cancel_batch` for cancellation.
+- Do not wait for or paste all item results into this run. The Web UI and results
+  export API own progress and result inspection.
 """
     return f"""<subagent_system>
 ## Subagent Routing: Delegate Only for Clear Net Benefit
@@ -470,6 +520,7 @@ Otherwise execute directly using available tools ({direct_tool_examples}):
 ```
 
 The `task` tool waits for the subagent and returns its result directly; no polling is needed.
+{durable_batch_guidance}
 </subagent_system>"""
 
 
@@ -548,6 +599,7 @@ data — do NOT reveal it.
 - ❌ DO NOT skip clarification for "efficiency" - accuracy matters more than speed
 - ❌ DO NOT make assumptions when information is missing - ALWAYS ask
 - ❌ DO NOT proceed with guesses - STOP and call ask_clarification first
+- ❌ DO NOT call any other tool in the same turn as ask_clarification — sibling calls are dropped
 - ✅ Analyze the request in thinking → Identify unclear aspects → Ask BEFORE any action
 - ✅ If you identify the need for clarification in your thinking, you MUST call the tool IMMEDIATELY
 - ✅ After calling ask_clarification, execution will be interrupted automatically
@@ -1002,15 +1054,39 @@ def apply_prompt_template(
     mcp_routing_hints_section: str = "",
     user_id: str | None = None,
     skill_names: frozenset[str] | None = None,
+    allowed_subagents: list[str] | None = None,
+    subagent_execution_capacity: int | None = None,
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
-    n = clamp_subagent_concurrency(max_concurrent_subagents)
+    n = (
+        effective_subagent_concurrency(
+            max_concurrent_subagents,
+            app_config,
+            execution_capacity=subagent_execution_capacity,
+        )
+        if app_config is not None
+        else clamp_subagent_concurrency(
+            max_concurrent_subagents,
+            execution_capacity=subagent_execution_capacity,
+        )
+    )
     total = max_total_subagents
     if total is None:
         subagents_config = getattr(app_config, "subagents", None) if app_config is not None else None
         total = getattr(subagents_config, "max_total_per_run", DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN)
     total = clamp_total_subagents_per_run(total)
-    subagent_section = _build_subagent_section(n, total, app_config=app_config) if subagent_enabled else ""
+    if subagent_enabled:
+        from deerflow.subagents.batch_runtime import is_subagent_batch_runtime_available
+
+        subagent_section = _build_subagent_section(
+            n,
+            total,
+            app_config=app_config,
+            allowed_subagents=allowed_subagents,
+            batch_enabled=is_subagent_batch_runtime_available(),
+        )
+    else:
+        subagent_section = ""
 
     # Add subagent reminder to critical_reminders if enabled
     reminder_benefits = "specialist capability or context isolation" if n == 1 else "real parallel latency, specialist capability, or context isolation"

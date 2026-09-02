@@ -53,7 +53,17 @@ test("mergeMessages removes duplicate messages already present in history", () =
   expect(mergeMessages([human, ai, human, ai], [], [])).toEqual([human, ai]);
 });
 
-test("mergeMessages does not collapse an unloaded gap before the first shared anchor", () => {
+test("mergeMessages keeps a protected early message before the first shared anchor instead of dropping it", () => {
+  // #4065 established that an early message rescued by summarization must not
+  // be appended to the tail: its canonical position is earlier, and the tail is
+  // provably wrong. Suppressing it entirely was the other half of that fix, and
+  // it is how a user's own question disappeared from a long thread once the
+  // first history page no longer reached back to it (#4666).
+  //
+  // Both concerns hold at once: the message stays before the first shared
+  // anchor (never the tail), which is the one position both the checkpoint and
+  // seq-sorted history agree on. The gap to the unloaded pages remains, but a
+  // gap is recoverable by paging — a dropped message is not.
   const protectedEarly = {
     id: "protected-early",
     type: "human",
@@ -72,7 +82,7 @@ test("mergeMessages does not collapse an unloaded gap before the first shared an
 
   expect(
     mergeMessages([latestHuman, latestAi], [protectedEarly, latestHuman], []),
-  ).toEqual([latestHuman, latestAi]);
+  ).toEqual([protectedEarly, latestHuman, latestAi]);
 });
 
 test("mergeMessages lets live thread messages replace overlapping history", () => {
@@ -879,8 +889,8 @@ test("buildVisibleHistoryMessages filters superseded runs but keeps regenerated 
   // run_id is carried onto each content message (#3779) so historical subtask
   // cards can fetch their persisted step history on expand.
   expect(buildVisibleHistoryMessages(rows, new Set(["run-old"]))).toEqual([
-    { ...newHuman, run_id: "run-new" },
-    { ...newAi, run_id: "run-new" },
+    { ...newHuman, run_id: "run-new", additional_kwargs: { deerflow_seq: 3 } },
+    { ...newAi, run_id: "run-new", additional_kwargs: { deerflow_seq: 4 } },
   ]);
 });
 
@@ -1688,6 +1698,46 @@ test("reconnected turn order leaves a resent turn after an interrupted run untou
   ).toEqual([interruptedStep, human, newStep]);
 });
 
+test("reconnected turn order keeps interrupted uniform-run history in its original turn", () => {
+  // Branch-seeded and mocked feeds can stamp every message with one run_id.
+  // Without a terminal answer, that synthetic id cannot prove that the older
+  // tool step belongs to the newer human turn.
+  const human1 = {
+    id: "human-1",
+    type: "human",
+    content: "First question",
+    run_id: "run-x",
+  } as Message;
+  const interruptedStep = {
+    id: "step-1",
+    type: "ai",
+    content: "Working on the first question",
+    tool_calls: [{ id: "tc-1", name: "web_search", args: {} }],
+    run_id: "run-x",
+  } as unknown as Message;
+  const human2 = {
+    id: "human-2",
+    type: "human",
+    content: "Second question",
+    run_id: "run-x",
+  } as Message;
+  const step2 = {
+    id: "step-2",
+    type: "ai",
+    content: "Working on the second question",
+    run_id: "run-x",
+  } as Message;
+
+  expect(
+    restoreReconnectedTurnMessageOrder([
+      human1,
+      interruptedStep,
+      human2,
+      step2,
+    ]),
+  ).toEqual([human1, interruptedStep, human2, step2]);
+});
+
 test("reconnected turn order only moves steps of the sandwiched run in multi-turn history", () => {
   const human1 = { id: "human-1", type: "human", content: "First" } as Message;
   const step1 = {
@@ -2092,4 +2142,163 @@ test("refresh reconstructs the same 1-to-6 order from run events without a bridg
       (message) => message.content,
     ),
   ).toEqual(["1", "2", "3", "4", "5", "6"]);
+});
+
+test("a compacted checkpoint's protected user message survives a history page window that misses it (#4666)", () => {
+  // Captured from a real two-round long run: once the thread passes the
+  // 50-row `/messages/page` window AND context compaction fires, the two
+  // sources stop overlapping at the head. History's first page starts
+  // mid-run, while the compacted checkpoint still carries the turn's first
+  // user message (summarization rescues the dynamic-context triplet).
+  //
+  // That message is the user's own question. Suppressing it because its
+  // canonical position sits in an unloaded page makes it vanish from the
+  // transcript entirely — the "用户消息消失" reports in #4666 / #4508 / #4363.
+  const reminder = {
+    id: "u1",
+    type: "system",
+    content: "<system-reminder><current_date>…</current_date>",
+    additional_kwargs: { hide_from_ui: true, dynamic_context_reminder: true },
+  } as unknown as Message;
+  const firstUserMessage = {
+    id: "u1__user",
+    type: "human",
+    content: "MARK-FIRST-QUESTION",
+  } as Message;
+  const recentStep = {
+    id: "step-40",
+    type: "ai",
+    content: "step 40",
+  } as Message;
+  const laterUserMessage = {
+    id: "u2",
+    type: "human",
+    content: "SECOND-QUESTION",
+  } as Message;
+
+  // First history page: starts mid-run, has_more=true — no first user message.
+  const canonicalWindow = [recentStep, laterUserMessage];
+  // Compacted checkpoint: reminder + rescued first user message + recent tail.
+  const compactedCheckpoint = [reminder, firstUserMessage, recentStep];
+
+  const merged = mergeMessages(canonicalWindow, compactedCheckpoint, []);
+
+  expect(merged.map((message) => message.content)).toContain(
+    "MARK-FIRST-QUESTION",
+  );
+});
+
+test("a checkpoint message earlier than the loaded window is placed by its seq (#4666)", () => {
+  // With `deerflow_seq` on both sides, placement stops being a guess. Captured
+  // shape: after compaction the checkpoint still holds the turn's first user
+  // message (seq=2) while the first history page starts at seq=29, so the only
+  // anchor available to the old rule sat 25 rows into the window.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const firstUserMessage = withSeq(
+    {
+      id: "u1__user",
+      type: "human",
+      content: "MARK-FIRST-QUESTION",
+    } as Message,
+    2,
+  );
+  const windowStep = withSeq(
+    { id: "step-29", type: "ai", content: "…step 29" } as Message,
+    29,
+  );
+  const laterUserMessage = withSeq(
+    { id: "u2", type: "human", content: "SECOND-QUESTION" } as Message,
+    41,
+  );
+
+  const anchorStep = withSeq(
+    { id: "step-58", type: "ai", content: "…step 58" } as Message,
+    58,
+  );
+
+  // The anchor must sit INSIDE the window, as it does in the captured run
+  // (canonical #25 of 50): weaving before the anchor is what puts the message
+  // in the middle, and only seq can say it belongs at the head.
+  const canonicalWindow = [windowStep, laterUserMessage, anchorStep];
+  const compactedCheckpoint = [firstUserMessage, anchorStep];
+
+  expect(
+    mergeMessages(canonicalWindow, compactedCheckpoint, []).map(
+      (m) => m.content,
+    ),
+  ).toEqual(["MARK-FIRST-QUESTION", "…step 29", "SECOND-QUESTION", "…step 58"]);
+});
+
+test("buildVisibleHistoryMessages carries each row's seq onto the message", () => {
+  const rows = [
+    {
+      run_id: "run-1",
+      seq: 7,
+      content: { id: "m1", type: "human", content: "hi" } as Message,
+      metadata: { caller: "" },
+      created_at: "2026-08-04T00:00:00Z",
+    },
+  ] as RunMessage[];
+
+  expect(
+    buildVisibleHistoryMessages(rows, new Set())[0]!.additional_kwargs
+      ?.deerflow_seq,
+  ).toBe(7);
+});
+
+test("a checkpoint message earlier than the loaded window is placed by its seq even when the two sides share no anchor (#4666)", () => {
+  // What a user hits by opening an old, already-summarized conversation and
+  // sending a new message. The loaded page is the newest rows from BEFORE that
+  // turn; the compacted checkpoint holds only the rescued first user message
+  // plus steps of the new run, which are not in the feed yet. The two sides
+  // therefore share no identity at all and the anchor walk never runs — so the
+  // rescued turn was appended after the whole window (measured at row 50 of 50
+  // on a reproducing run) even though its seq was known the entire time.
+  const withSeq = (message: Message, seq: number) =>
+    ({
+      ...message,
+      additional_kwargs: { ...message.additional_kwargs, deerflow_seq: seq },
+    }) as Message;
+
+  const rescuedFirstTurn = withSeq(
+    {
+      id: "u1__user",
+      type: "human",
+      content: "MARK-FIRST-QUESTION",
+    } as Message,
+    2,
+  );
+  const loadedWindow = [
+    withSeq(
+      { id: "step-172", type: "ai", content: "…step 172" } as Message,
+      172,
+    ),
+    withSeq(
+      { id: "step-174", type: "ai", content: "…step 174" } as Message,
+      174,
+    ),
+  ];
+  // Steps of the run the user just started: still streaming, so no seq yet, and
+  // no identity in common with the page on screen.
+  const newRunSteps = [
+    { id: "step-new-1", type: "ai", content: "…new step 1" } as Message,
+    { id: "step-new-2", type: "ai", content: "…new step 2" } as Message,
+  ];
+
+  expect(
+    mergeMessages(loadedWindow, [rescuedFirstTurn, ...newRunSteps], []).map(
+      (m) => m.content,
+    ),
+  ).toEqual([
+    "MARK-FIRST-QUESTION",
+    "…step 172",
+    "…step 174",
+    "…new step 1",
+    "…new step 2",
+  ]);
 });

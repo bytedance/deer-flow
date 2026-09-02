@@ -170,14 +170,26 @@ class ThreadMetaRepository(ThreadMetaStore):
         thread_id: str,
         display_name: str,
         *,
+        remove_metadata_keys: tuple[str, ...] = (),
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
-        """Update the display_name (title) for a thread."""
+        """Update the display name and remove caller-selected stale metadata atomically."""
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_display_name")
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
+            if session.get_bind().dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+                row = await session.get(ThreadMetaRow, thread_id)
+            else:
+                result = await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())
+                row = result.scalar_one_or_none()
+            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return
-            await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(display_name=display_name, updated_at=datetime.now(UTC)))
+            row.display_name = display_name
+            metadata = dict(row.metadata_json or {})
+            for key in remove_metadata_keys:
+                metadata.pop(key, None)
+            row.metadata_json = metadata
+            row.updated_at = datetime.now(UTC)
             await session.commit()
 
     async def update_status(

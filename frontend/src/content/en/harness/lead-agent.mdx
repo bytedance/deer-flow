@@ -132,13 +132,13 @@ Plan mode is appropriate for complex, multi-step tasks where showing incremental
 
 The same Lead Agent runtime powers both the default agent and any custom agents you create. A custom agent differs only in:
 
-- its **name** (ASCII slug, auto-derived from `display_name`),
+- its unique ASCII **name**, used by the API, routes, and storage,
 - its **system prompt** or agent-specific instructions,
 - which **skills** it has access to,
 - which **tool groups** it can use, and
 - which **model** it defaults to.
 
-Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Their configuration is stored in `agents/{name}/config.yaml` relative to the backend directory.
+Custom agents are created through the DeerFlow App UI or via the `/api/agents` endpoint. Both paths require `agents_api.enabled: true` in `config.yaml`; the management API is disabled by default. With the default `agent_storage.backend: file`, configuration is stored per user at `{base_dir}/users/{user_id}/agents/{name}/config.yaml`, where `{base_dir}` is `DEER_FLOW_HOME` (default: `backend/.deer-flow`). With `agent_storage.backend: db`, definitions are stored in the shared SQL database instead; it requires `database.backend: sqlite` or `database.backend: postgres`. Use `backend/scripts/migrate_agents_to_db.py` to migrate existing file-backed definitions.
 
 <Callout type="tip">
   When a custom agent is selected in a thread, the Lead Agent loads that agent's

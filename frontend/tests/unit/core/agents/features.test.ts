@@ -10,7 +10,10 @@ rs.mock("@/core/config", () => ({
 
 import { fetchAgentsApiEnabled } from "@/core/agents/api";
 import { fetch as fetcher } from "@/core/api/fetcher";
-import { fetchBrowserControlEnabled } from "@/core/features/api";
+import {
+  fetchBrowserControlEnabled,
+  fetchMcpTasksEnabled,
+} from "@/core/features/api";
 
 const mockedFetch = rs.mocked(fetcher);
 
@@ -77,5 +80,38 @@ describe("fetchBrowserControlEnabled", () => {
   test("throws when the features request fails", async () => {
     mockedFetch.mockResolvedValueOnce(jsonResponse(500, {}));
     await expect(fetchBrowserControlEnabled()).rejects.toThrow();
+  });
+});
+
+describe("fetchMcpTasksEnabled", () => {
+  test("returns true when backend reports mcp_tasks enabled", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        agents_api: { enabled: true },
+        mcp_tasks: { enabled: true },
+      }),
+    );
+    await expect(fetchMcpTasksEnabled()).resolves.toBe(true);
+    expect(mockedFetch).toHaveBeenCalledWith("/api/features");
+  });
+
+  test("returns false when mcp_tasks is disabled or omitted", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        agents_api: { enabled: true },
+        mcp_tasks: { enabled: false },
+      }),
+    );
+    await expect(fetchMcpTasksEnabled()).resolves.toBe(false);
+
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, { agents_api: { enabled: true } }),
+    );
+    await expect(fetchMcpTasksEnabled()).resolves.toBe(false);
+  });
+
+  test("throws when the features request fails", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(500, {}));
+    await expect(fetchMcpTasksEnabled()).rejects.toThrow();
   });
 });
