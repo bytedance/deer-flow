@@ -25,7 +25,9 @@ This phase is backend/API groundwork only: the Share dialog and the HTML
   sections are stripped outside Markdown code examples. Owner-only
   `/mnt/user-data` and thread-route references — any
   `/api/threads/{id}` route, bare or with a `<segment>` subpath, not just
-  artifacts/uploads, with or without a leading separator; the id ends at a
+  artifacts/uploads, with or without a leading separator (the bundled nginx
+  rewrites `/api/langgraph/*` to `/api/*`, so the `/api/langgraph/threads/…`
+  alias classifies like the native route); the id ends at a
   path/query/fragment/whitespace/end boundary, and the mount name ends the
   same way (a public sibling like `/mnt/user-database` is a different name
   and stays) — are replaced with a

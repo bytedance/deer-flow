@@ -519,6 +519,25 @@ async def test_neutralize_encoded_glue_before_phrase():
     assert neutralize("%2Eapi/threads/t1/u") == "%2Eapi/threads/t1/u"
 
 
+def test_neutralize_langgraph_route_alias():
+    """The bundled nginx rewrites ``/api/langgraph/*`` to ``/api/*``
+    (docker/nginx/nginx.conf), so the prefixed form is a live alias of the
+    owner-scoped thread route and must classify like the native one in
+    every layer: raw, entity head, percent middle, fully-encoded head.
+    ``mnt`` phrases are prefix-free and already cover the alias."""
+    neutralize = _neutralize_private_references
+    # raw alias: absolute and markdown forms
+    assert neutralize("see /api/langgraph/threads/t1/u now") == "see [private artifact omitted] now"
+    assert neutralize("[x](/api/langgraph/threads/t1/u)") == "x [private artifact omitted]"
+    # layered forms ride the same machinery as the native route
+    assert neutralize("see &#97;&#112;&#105;/langgraph/threads/t1/u now") == "see [private artifact omitted] now"
+    assert neutralize("see api/lang%67raph/threads/t1/u now") == "see [private artifact omitted] now"
+    assert neutralize("see %61%70%69/langgraph/threads/t1/u now") == "see [private artifact omitted] now"
+    # controls: no thread id after the alias, or no api anchor at all
+    assert neutralize("the /api/langgraph/threads/ route docs") == "the /api/langgraph/threads/ route docs"
+    assert neutralize("langgraph/threads/t1/u without the api anchor") == "langgraph/threads/t1/u without the api anchor"
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted

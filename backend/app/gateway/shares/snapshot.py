@@ -556,10 +556,14 @@ _REFERENCE_CUT_TERMINATORS = ",;:!?)\\]}\"'`*_~(|[<"
 # span-checked sites use the lookbehind-free cores plus ``_boundary_ok``;
 # the anchored probe keeps the lookbehind form (its window starts at a
 # boundary by construction).
+# ``api/langgraph/`` is a live alias of the thread route: the bundled nginx
+# rewrites ``/api/langgraph/*`` to ``/api/*`` (docker/nginx/nginx.conf), so
+# the prefixed shape classifies like the native one. ``mnt`` phrases are
+# prefix-free and already cover the alias.
 _BOUNDARY_BLOCK_RE = re.compile(r"[\w.\-]\Z")
-_CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+_CORE_API_THREAD_REFERENCE_RE = re.compile(r"api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _CORE_MNT_USER_DATA_RE = re.compile(r"mnt/user-data(?![\w.\-])", re.IGNORECASE)
-_API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
+_API_THREAD_REFERENCE_RE = re.compile(r"(?<![\w.\-])api/(?:langgraph/)?threads/[^/?#\s]+(?=[/?#\s]|$)", re.IGNORECASE)
 _MNT_USER_DATA_RE = re.compile(r"(?<![\w.\-])mnt/user-data(?![\w.\-])", re.IGNORECASE)
 
 
