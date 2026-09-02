@@ -44,7 +44,12 @@ from deerflow.runtime.runs.worker import (
     _try_extract_from_message,
     run_agent,
 )
-from deerflow.sandbox.lease import ensure_sandbox_lease_owner, get_sandbox_lease_manager
+from deerflow.sandbox.lease import (
+    SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
+    SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+    ensure_sandbox_lease_owner,
+    get_sandbox_lease_manager,
+)
 from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
 
 
@@ -612,6 +617,26 @@ def test_install_runtime_context_overrides_internal_pre_existing_message_ids():
     )
 
     assert config["context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset({"old-ai"})
+
+
+def test_install_runtime_context_removes_caller_sandbox_execution_identities():
+    config = {
+        "context": {
+            SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
+            SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+        }
+    }
+
+    _install_runtime_context(
+        config,
+        {
+            "thread_id": "record-thread",
+            "run_id": "run-1",
+        },
+    )
+
+    assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in config["context"]
+    assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in config["context"]
 
 
 @pytest.mark.anyio
@@ -2304,6 +2329,18 @@ def test_build_runtime_context_ignores_caller_pre_existing_message_ids():
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
 
     assert CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY not in ctx
+
+
+def test_build_runtime_context_ignores_caller_sandbox_execution_identities():
+    caller_context = {
+        SANDBOX_LEASE_OWNER_CONTEXT_KEY: "forged-owner",
+        SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "forged-scope",
+    }
+
+    ctx = _build_runtime_context("thread-1", "run-1", caller_context)
+
+    assert SANDBOX_LEASE_OWNER_CONTEXT_KEY not in ctx
+    assert SANDBOX_COMMAND_SCOPE_CONTEXT_KEY not in ctx
 
 
 def test_build_runtime_context_ignores_non_dict_caller_context():

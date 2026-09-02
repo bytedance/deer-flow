@@ -13,7 +13,6 @@ import asyncio
 import logging
 import threading
 import uuid
-import weakref
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -27,6 +26,12 @@ logger = logging.getLogger(__name__)
 
 SANDBOX_LEASE_OWNER_CONTEXT_KEY = "sandbox_lease_owner_id"
 SANDBOX_COMMAND_SCOPE_CONTEXT_KEY = "sandbox_command_scope_id"
+SANDBOX_SERVER_OWNED_CONTEXT_KEYS = frozenset(
+    {
+        SANDBOX_LEASE_OWNER_CONTEXT_KEY,
+        SANDBOX_COMMAND_SCOPE_CONTEXT_KEY,
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -483,23 +488,37 @@ class SandboxLeaseManager:
 
 
 _manager_lock = threading.Lock()
-_managers: weakref.WeakKeyDictionary[SandboxProvider, SandboxLeaseManager] = weakref.WeakKeyDictionary()
+_managers: dict[int, tuple[SandboxProvider, SandboxLeaseManager]] = {}
 
 
 def get_sandbox_lease_manager(provider: SandboxProvider) -> SandboxLeaseManager:
-    """Return the process-local lease manager associated with ``provider``."""
+    """Return the process-local lease manager for this provider object.
+
+    Provider implementations are not required to be hashable, and distinct
+    instances that compare equal must not share lifecycle state. Keep a strong
+    identity entry until the provider is explicitly detached; the manager
+    already owns the provider strongly, so a weak-key registry would not make
+    the lifecycle shorter.
+    """
+    provider_id = id(provider)
     with _manager_lock:
-        manager = _managers.get(provider)
-        if manager is None:
-            manager = SandboxLeaseManager(provider)
-            _managers[provider] = manager
+        entry = _managers.get(provider_id)
+        if entry is not None and entry[0] is provider:
+            return entry[1]
+        manager = SandboxLeaseManager(provider)
+        _managers[provider_id] = (provider, manager)
         return manager
 
 
 def discard_sandbox_lease_manager(provider: SandboxProvider) -> None:
     """Forget lease metadata when a provider singleton is detached."""
+    provider_id = id(provider)
     with _manager_lock:
-        manager = _managers.pop(provider, None)
+        entry = _managers.get(provider_id)
+        if entry is None or entry[0] is not provider:
+            manager = None
+        else:
+            _, manager = _managers.pop(provider_id)
     if manager is not None:
         manager.close()
 

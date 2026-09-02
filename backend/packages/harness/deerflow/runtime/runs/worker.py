@@ -77,6 +77,7 @@ from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
+from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
@@ -519,11 +520,14 @@ class _LargeFileToolChunkBatcher:
 # strips ``__``-prefixed keys in build_run_config, but embedded harness callers
 # have no such filter and ``deerflow_trace_id`` carries no prefix to be caught
 # by it anyway.
-_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = frozenset(
-    {
-        CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
-        DEERFLOW_TRACE_METADATA_KEY,
-    }
+_SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
+    frozenset(
+        {
+            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+            DEERFLOW_TRACE_METADATA_KEY,
+        }
+    )
+    | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
 
@@ -602,17 +606,17 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
-        # Assigned, not setdefault: this is a server-owned key, the same rule
-        # _bind_trace_id applies to the runtime context and the run metadata. A
-        # deerflow_trace_id the caller put in body.config.context is an echo of
-        # a past output, not an input, and leaving it would make this one dict
-        # disagree with the response header and the logs.
-        if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
-            existing_context[DEERFLOW_TRACE_METADATA_KEY] = runtime_context[DEERFLOW_TRACE_METADATA_KEY]
+        # Keep both context views authoritative. A server-owned value is
+        # assigned from the runtime context when present and removed otherwise,
+        # so an embedded caller cannot preserve a forged lifecycle identity in
+        # ``config['context']`` after it was rejected by _build_runtime_context.
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+            if key in runtime_context:
+                existing_context[key] = runtime_context[key]
+            else:
+                existing_context.pop(key, None)
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
-        if CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY in runtime_context:
-            existing_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = runtime_context[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY]
         return
 
     config["context"] = dict(runtime_context)

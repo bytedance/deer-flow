@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from dataclasses import dataclass, field
 
 import pytest
 
-from deerflow.sandbox.lease import SandboxLeaseManager
+from deerflow.sandbox.lease import (
+    SandboxLeaseManager,
+    discard_sandbox_lease_manager,
+    get_sandbox_lease_manager,
+)
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.sandbox.search import GrepMatch
@@ -68,6 +73,58 @@ class _LeaseProvider(SandboxProvider):
 
     def release(self, sandbox_id):
         self.release_calls.append(sandbox_id)
+
+
+@dataclass
+class _UnhashableLeaseProvider(SandboxProvider):
+    """Valid value-comparable provider whose instances are not hashable."""
+
+    marker: str = "same"
+    sandbox: _LeaseSandbox = field(default_factory=lambda: _LeaseSandbox("shared"), compare=False)
+    release_calls: list[str] = field(default_factory=list, compare=False)
+
+    def acquire(self, thread_id=None, *, user_id=None):
+        return self.sandbox.id
+
+    def get(self, sandbox_id):
+        return self.sandbox if sandbox_id == self.sandbox.id else None
+
+    def release(self, sandbox_id):
+        self.release_calls.append(sandbox_id)
+
+
+def test_manager_registry_supports_unhashable_provider() -> None:
+    provider = _UnhashableLeaseProvider()
+    assert provider.__hash__ is None
+
+    try:
+        manager = get_sandbox_lease_manager(provider)
+        assert get_sandbox_lease_manager(provider) is manager
+    finally:
+        discard_sandbox_lease_manager(provider)
+
+
+def test_manager_registry_distinguishes_equal_provider_instances_by_identity() -> None:
+    first = _UnhashableLeaseProvider()
+    second = _UnhashableLeaseProvider()
+    assert first == second
+    assert first is not second
+
+    try:
+        first_manager = get_sandbox_lease_manager(first)
+        second_manager = get_sandbox_lease_manager(second)
+
+        assert first_manager is not second_manager
+        first_manager.retain("first-owner", "shared", thread_id="thread-1", user_id="user-1")
+        second_manager.retain("second-owner", "shared", thread_id="thread-1", user_id="user-1")
+        assert first_manager.binding_for("second-owner") is None
+        assert second_manager.binding_for("first-owner") is None
+
+        discard_sandbox_lease_manager(first)
+        assert get_sandbox_lease_manager(second) is second_manager
+    finally:
+        discard_sandbox_lease_manager(first)
+        discard_sandbox_lease_manager(second)
 
 
 def test_last_execution_lease_is_the_only_provider_releaser() -> None:
