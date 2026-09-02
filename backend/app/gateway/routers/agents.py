@@ -583,20 +583,16 @@ async def delete_agent(name: str) -> None:
         # agent dir (with a stray memory.json) and block recreating a
         # same-named agent (issue #3364).
         #
-        # The file backend only discards for genuine custom agents (guards on
-        # the dir containing a config.yaml, mirroring FileAgentStore.delete) so
-        # a no-op delete doesn't drop queued updates for an agent that ends up
+        # Should we discard? The file backend only discards for genuine custom
+        # agents (the dir contains a config.yaml, mirroring FileAgentStore.delete)
+        # so a no-op delete doesn't drop queued updates for an agent that is
         # preserved. SqlAgentStore never writes config.yaml on disk (config/SOUL
         # live in the row), so that guard is always False there and the discard
-        # would silently no-op — skip the filesystem pre-check for db-backend
-        # stores so db-mode deletions still drop pending updates.
-        from deerflow.persistence.agents.file import FileAgentStore
+        # would silently no-op — db-backed stores discard unconditionally
+        # (issue #3364 round-4 review).
+        from deerflow.persistence.agents import should_discard_on_delete
 
-        should_discard = True
-        if isinstance(store, FileAgentStore):
-            target_agent_dir = get_paths().user_agent_dir(user_id, name)
-            should_discard = target_agent_dir.exists() and (target_agent_dir / "config.yaml").is_file()
-        if should_discard:
+        if should_discard_on_delete(store, user_id, name):
             try:
                 from deerflow.agents.memory import get_memory_manager
 

@@ -29,9 +29,32 @@ __all__ = [
     "get_agent_store",
     "make_agent_store",
     "parse_agent_config",
+    "should_discard_on_delete",
 ]
 
 _file_store_singleton: AgentStore | None = None
+
+
+def should_discard_on_delete(store: AgentStore, user_id: str, name: str) -> bool:
+    """Whether deleting ``name`` should first discard its pending memory updates.
+
+    The file backend scopes the discard to genuine custom agents (the agent dir
+    contains a ``config.yaml``), mirroring ``FileAgentStore.delete``, so a no-op
+    delete doesn't drop queued updates for an agent that is preserved. That
+    filesystem guard is meaningless for db-backed stores: ``SqlAgentStore``
+    keeps ``config.yaml``/SOUL in the DB row, never on disk, so the guard is
+    always False there and the discard would silently no-op. Db-backed
+    deletions therefore always discard. Pinned by
+    ``test_should_discard_on_delete_backend_split``.
+    """
+    from deerflow.persistence.agents.file import FileAgentStore
+
+    if not isinstance(store, FileAgentStore):
+        return True
+    from deerflow.config.paths import get_paths
+
+    agent_dir = get_paths().user_agent_dir(user_id, name)
+    return agent_dir.exists() and (agent_dir / "config.yaml").is_file()
 
 
 def make_agent_store(config: AppConfig) -> AgentStore:
