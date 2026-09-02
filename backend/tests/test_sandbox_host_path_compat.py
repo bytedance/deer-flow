@@ -168,6 +168,9 @@ def test_normalize_host_path_preserves_single_letter_posix_container_root() -> N
         ("--mode=release", ("--mode=", "release")),
         ("https://example.test/path", ("", "https://example.test/path")),
         ("url:http://example.test/path", ("", "url:http://example.test/path")),
+        ("file:///C:/Windows/secret.txt", ("", "file:///C:/Windows/secret.txt")),
+        ("--input=file:///C:/Windows/secret.txt", ("", "--input=file:///C:/Windows/secret.txt")),
+        ("/out:FILE:///C:/Windows/secret.txt", ("", "/out:FILE:///C:/Windows/secret.txt")),
     ],
 )
 def test_split_program_argument_preserves_option_prefix(value: str, expected: tuple[str, str]) -> None:
@@ -185,6 +188,11 @@ def test_split_program_argument_preserves_option_prefix(value: str, expected: tu
         r"..\..\Windows\System32\calc.exe",
         r"/out:C:\Windows\secret.txt",
         r"@C:\Windows\args.rsp",
+        "file:///C:/Windows/secret.txt",
+        "--input=file:///C:/Windows/secret.txt",
+        "@file:///C:/Windows/args.rsp",
+        "FILE:///etc/passwd",
+        "/out:file:///C:/Windows/secret.txt",
     ],
 )
 def test_program_argument_path_predicate_covers_rooted_drive_and_traversal_forms(value: str) -> None:

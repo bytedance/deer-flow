@@ -140,6 +140,11 @@ def test_execute_program_batch_invocation_uses_single_helper(monkeypatch) -> Non
         r"..\..\Windows\System32\calc.exe",
         r"/out:C:\Windows\secret.txt",
         r"@C:\Windows\args.rsp",
+        "file:///C:/Windows/secret.txt",
+        "--input=file:///C:/Windows/secret.txt",
+        "@file:///C:/Windows/args.rsp",
+        "FILE:///etc/passwd",
+        "/out:file:///C:/Windows/secret.txt",
     ],
 )
 def test_execute_program_rejects_unmapped_path_shaped_argument(argument: str, monkeypatch) -> None:

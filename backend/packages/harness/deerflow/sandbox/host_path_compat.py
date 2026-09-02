@@ -20,6 +20,7 @@ _GIT_BASH_DRIVE_PATH = re.compile(r"^/(?P<drive>[A-Za-z])(?:/|$)")
 _PROGRAM_ARGUMENT_DRIVE = re.compile(r"^[A-Za-z]:")
 _PROGRAM_ARGUMENT_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _URL_SCHEME_ANYWHERE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://")
+_FILE_URL_SCHEME = re.compile(r"^file://", re.IGNORECASE)
 
 # Match only absolute Windows drive spellings in command text.  POSIX paths
 # remain opaque command arguments unless the caller explicitly normalizes one.
@@ -54,6 +55,24 @@ def is_windows_host_path_spelling(path: str, *, platform_name: str | None = None
 def _has_program_path_syntax(value: str) -> bool:
     normalized = value.replace("\\", "/")
     return bool(value) and (normalized.startswith("/") or value.startswith("\\") or _PROGRAM_ARGUMENT_DRIVE.match(normalized) is not None or _PROGRAM_ARGUMENT_TRAVERSAL.search(normalized) is not None)
+
+
+def _contains_file_url(value: str) -> bool:
+    """Return whether an argument's path candidate is a local ``file://`` URL."""
+    if not isinstance(value, str) or not value:
+        return False
+    if _FILE_URL_SCHEME.match(value):
+        return True
+    if "=" in value:
+        _, candidate = value.split("=", 1)
+        if _contains_file_url(candidate):
+            return True
+    if value.startswith("@") and _contains_file_url(value[1:]):
+        return True
+    for index, character in enumerate(value):
+        if character == ":" and _FILE_URL_SCHEME.match(value[index + 1 :]):
+            return True
+    return False
 
 
 def split_program_argument(value: str) -> tuple[str, str]:
@@ -95,6 +114,8 @@ def program_argument_candidate(value: str) -> str:
 
 def is_program_argument_path(value: str) -> bool:
     """Return whether a program argument contains a rooted, drive, or escape path."""
+    if _contains_file_url(value):
+        return True
     return _has_program_path_syntax(program_argument_candidate(value))
 
 
