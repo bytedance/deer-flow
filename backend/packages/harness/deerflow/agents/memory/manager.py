@@ -240,6 +240,9 @@ class MemoryManager(BaseModel):
         construction), NOT a host config on this method.
         Query-aware backends opt in with ``supports_query_aware_context=True``;
         the host does not pass ``query`` to backends that leave it disabled.
+        Because Gateway awaits ``aget_context()`` on its event loop, an
+        opting-in backend that performs blocking I/O must override that method
+        with native async I/O or explicit offloading.
         """
 
     # ── Tier 2: management ops with defaults ────────────────────────────
