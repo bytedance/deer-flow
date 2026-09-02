@@ -430,6 +430,27 @@ async def test_neutralize_nonterminator_join_characters():
     assert neutralize("see foo-mnt/user-data") == "see foo-mnt/user-data"
 
 
+async def test_neutralize_dots_after_phrase_do_not_erase_it():
+    """Query strings and fragments are opaque to path resolution (browsers
+    and nginx leave ``?/../..`` alone), and dot segments never pop across
+    prose whitespace — a trailing ``?/../..``, ``#/../..``, or `` /../../..``
+    after a private phrase must not erase it from the classification
+    shadow (round-12 regression)."""
+    neutralize = _neutralize_private_references
+    assert neutralize("/mnt/user-data?/..") == "[private artifact omitted].."
+    assert neutralize("/api/threads/th1/artifacts?/../../..") == "[private artifact omitted].."
+    assert neutralize("/mnt/user-data#/../../..") == "[private artifact omitted].."
+    assert neutralize("[x](/mnt/user-data?/../..)") == "x [private artifact omitted]"
+    assert neutralize("see /mnt/user-data/f.csv and /../../..") == "see [private artifact omitted] and /../../.."
+    assert neutralize("/docs,/mnt/user-data,/../..") == "/docs,/[private artifact omitted],/../.."
+    from app.gateway.shares.snapshot import sanitize_share_title
+
+    assert "user-data" not in sanitize_share_title("/mnt/user-data?/..").replace("[private artifact omitted]", "")
+    # an empty ``//`` segment is poppable: WHATWG resolves
+    # ``/api//../threads/…`` back to the owner-scoped surface
+    assert neutralize("/api//../threads/th1/u") == "[private artifact omitted]"
+
+
 async def test_neutralize_preserves_public_content_with_separators():
     neutralize = _neutralize_private_references
     # normalization exists only for classification; public text is emitted

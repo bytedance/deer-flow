@@ -350,30 +350,43 @@ def _remove_dot_segments_once(text: str, spans: list[tuple[int, int]]) -> tuple[
     segments, so ``ab/cd/..`` stays ``ab`` (public) while ``a/b/../..``
     cancels to nothing. A cancelled segment's original bytes leave the
     shadow exactly like the dot that cancelled them; ``%2E`` variants are
-    recognized because the shadow does not percent-decode."""
+    recognized because the shadow does not percent-decode.
+
+    Resolution never crosses non-path structure: a ``?`` or ``#`` starts an
+    opaque query/fragment tail (reset at whitespace — a new path may follow
+    in prose), and a cancellation never pops past whitespace or a joining
+    terminator — ``/mnt/user-data?/..``, ``…user-data,/../..`` and
+    ``…f.csv and /../../..`` keep their phrase intact because browsers and
+    nginx treat those dots as opaque or as a separate item."""
     out: list[str] = []
     out_spans: list[tuple[int, int]] = []
+    opaque = False
     i = 0
     n = len(text)
     while i < n:
-        if text[i] == "/":
+        char = text[i]
+        if char.isspace():
+            opaque = False
+        elif char in "?#":
+            opaque = True
+        if not opaque and char == "/":
             j = i + 1
-            while j < n and text[j] not in "/?#":
+            while j < n and text[j] not in "/?#" and not text[j].isspace():
                 j += 1
             segment = text[i + 1 : j].lower()
             if segment in (".", "%2e"):
                 i = j
                 continue
             if segment in ("..", "%2e%2e", ".%2e", "%2e."):
-                while out and out[-1] != "/":
+                while out and out[-1] != "/" and not out[-1].isspace() and out[-1] not in _REFERENCE_CUT_TERMINATORS:
                     out.pop()
                     out_spans.pop()
-                if out:
+                if out and out[-1] == "/":
                     out.pop()
                     out_spans.pop()
                 i = j
                 continue
-        out.append(text[i])
+        out.append(char)
         out_spans.append(spans[i])
         i += 1
     return "".join(out), out_spans
@@ -401,13 +414,16 @@ def _collapse_separators_with_offsets(text: str) -> tuple[str, list[tuple[int, i
     that reveal ``.``/``..`` compositions (``&#46;&#46;``, ``%2E``) are
     normalized like their resolved forms.
     """
-    normalized, spans = _collapse_separators_once(text)
-    for _ in range(_COLLAPSE_MAX_PASSES - 1):
+    normalized, spans = _remove_dot_segments_once(text, [(index, index) for index in range(len(text))])
+    for _ in range(_COLLAPSE_MAX_PASSES):
         collapsed, collapsed_spans = _collapse_separators_once(normalized)
         resolved, resolved_spans = _remove_dot_segments_once(collapsed, collapsed_spans)
         if resolved == normalized:
             break
         normalized = resolved
+        # resolved_spans entries are (first, last) pairs in prior-normalized
+        # coordinates (the dot pass appends the collapsed spans it read),
+        # so one indirection through ``spans`` reaches original bytes.
         spans = [(spans[first][0], spans[last][1]) for first, last in resolved_spans]
     return normalized, spans
 
