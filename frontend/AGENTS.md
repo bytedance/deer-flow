@@ -17,22 +17,22 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 ## Commands
 
-| Command          | Purpose                                                             |
-| ---------------- | ------------------------------------------------------------------- |
-| `pnpm dev`       | Platform-aware dev server (Webpack on Windows, Turbopack elsewhere) |
-| `pnpm build`     | Production build                                                    |
-| `pnpm check`     | Lint + type check (run before committing)                           |
-| `pnpm lint`      | ESLint only                                                         |
-| `pnpm lint:fix`  | ESLint with auto-fix                                                |
-| `pnpm format`    | Prettier check (`pnpm format:write` to apply)                       |
-| `pnpm test`      | Run unit tests with Rstest                                          |
-| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)                            |
-| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)                              |
-| `pnpm start`     | Start production server                                             |
+| Command          | Purpose                                       |
+| ---------------- | --------------------------------------------- |
+| `pnpm dev`       | Start the development server with Webpack     |
+| `pnpm build`     | Production build                              |
+| `pnpm check`     | Lint + type check (run before committing)     |
+| `pnpm lint`      | ESLint only                                   |
+| `pnpm lint:fix`  | ESLint with auto-fix                          |
+| `pnpm format`    | Prettier check (`pnpm format:write` to apply) |
+| `pnpm test`      | Run unit tests with Rstest                    |
+| `pnpm test:e2e`  | Run E2E tests with Playwright (Chromium)      |
+| `pnpm typecheck` | TypeScript type check (`tsc --noEmit`)        |
+| `pnpm start`     | Start production server                       |
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
-Use `DEER_FLOW_DEV_BUNDLER=turbo` or `DEER_FLOW_DEV_BUNDLER=webpack` with `pnpm dev` to override the platform default when diagnosing a local Next.js bundler issue.
+Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
 Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
 

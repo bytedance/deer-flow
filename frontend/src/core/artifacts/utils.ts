@@ -73,6 +73,16 @@ export function urlOfArtifact({
   return `${getBackendBaseURL()}/api/threads/${encodedThreadId}/artifacts${encodedFilepath}${download ? "?download=true" : ""}`;
 }
 
+export function urlOfArtifactArchive({
+  threadId,
+  runId,
+}: {
+  threadId: string;
+  runId: string;
+}) {
+  return `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/runs/${encodeURIComponent(runId)}/artifacts/archive`;
+}
+
 export function extractArtifactsFromThread(thread: {
   values: Pick<AgentThreadState, "artifacts">;
 }) {
