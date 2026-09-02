@@ -106,18 +106,21 @@ class Paths:
     Directory layout (host side):
         {base_dir}/
         ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
-        ├── agents/
+        ├── agents/                 <-- legacy shared layout (read-only fallback)
         │   └── {agent_name}/
         │       ├── config.yaml
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
-        └── threads/
-            └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+        ├── users/{user_id}/
+        │   ├── USER.md       <-- per-user profile (storage/retrieval via the user-profile routes)
+        │   ├── agents/...    <-- per-user custom agents (current layout)
+        │   ├── skills/...    <-- per-user custom skills
+        │   └── threads/
+        │       └── {thread_id}/
+        │           └── user-data/  <-- mounted as /mnt/user-data/ inside sandbox
+        │               ├── workspace/     <-- /mnt/user-data/workspace/
+        │               ├── uploads/       <-- /mnt/user-data/uploads/
+        │               └── outputs/       <-- /mnt/user-data/outputs/
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
@@ -165,10 +168,13 @@ class Paths:
         """Path to the persisted memory file: `{base_dir}/memory.json`."""
         return self.base_dir / "memory.json"
 
-    @property
-    def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
-        return self.base_dir / "USER.md"
+    def user_md_file(self, user_id: str) -> Path:
+        """Path to a user-scoped profile file: `{base_dir}/users/{user_id}/USER.md`.
+
+        The profile is per-user (like custom skills/agents) so one user's
+        prompt context can never be written or injected for another user.
+        """
+        return self.user_dir(user_id) / "USER.md"
 
     @property
     def agents_dir(self) -> Path:

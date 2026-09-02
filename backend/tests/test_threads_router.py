@@ -765,7 +765,14 @@ def test_insert_race_recovery_claims_unscoped_row_for_trusted_owner() -> None:
     thread_store = _RacingOwnerStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -904,7 +911,14 @@ def test_internal_owner_header_assigns_thread_to_owner() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 
@@ -936,7 +950,14 @@ def test_goal_thread_creation_uses_internal_owner_header() -> None:
     thread_store = MemoryThreadMetaStore(store)
     request = SimpleNamespace(
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
-        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE), auth_source=AUTH_SOURCE_INTERNAL),
+        # Realistic internal-auth fields: the create_thread permission wrapper
+        # authenticates these direct calls, and get_current_user_from_request
+        # honors state.user only when auth_source marks a trusted origin.
+        cookies={},
+        state=SimpleNamespace(
+            user=SimpleNamespace(id="default", system_role=INTERNAL_SYSTEM_ROLE),
+            auth_source=AUTH_SOURCE_INTERNAL,
+        ),
         app=SimpleNamespace(state=SimpleNamespace(checkpointer=checkpointer, thread_store=thread_store)),
     )
 

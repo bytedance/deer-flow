@@ -36,6 +36,14 @@ PAT_ALLOWED_SCOPES: frozenset[str] = frozenset(
     }
 )
 
+# Deliberately NOT in PAT_ALLOWED_SCOPES: the route permissions "memory:read",
+# "memory:write", "agents:read", and "agents:write" exist in authz
+# (they guard the memory/agent routers), but PATs stay on the thread/run
+# lifecycle only — _PAT_ROUTE_RULES default-denies the memory/agent routes
+# for PAT callers regardless of scopes, so admitting these scopes would not
+# even reach those routes. Opening them to PATs is a product decision that
+# must change all three of: this set, _PAT_ROUTE_RULES, and the API docs.
+
 PAT_MAX_NAME_LENGTH = 128
 
 # Default-deny route boundary for PAT callers (#5041 review P1-1): scope
