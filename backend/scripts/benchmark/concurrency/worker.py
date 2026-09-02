@@ -157,6 +157,12 @@ async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float
     # run_concurrency_bench.py for the other half of this handshake).
     print("READY", flush=True)
     sys.stdin.readline()
+    # Time the operation phase only. The orchestrator's wall clock is sampled
+    # after communicate() returns, so it also covers this worker's
+    # engine.dispose(), result serialization and stdout transfer -- teardown
+    # that isn't contention. The orchestrator uses max(ops_elapsed_s) over
+    # workers (all released by the same GO) as the throughput window instead.
+    t_ops0 = time.perf_counter()
 
     results = []
     n_reads = read_count(n_ops, read_ratio)
@@ -188,8 +194,14 @@ async def run_worker(backend: str, worker_id: int, n_ops: int, read_ratio: float
         elapsed = time.perf_counter() - t0
         results.append({"op": "read" if is_read else "write", "ok": ok, "err": err, "latency_s": elapsed})
 
+    ops_elapsed = time.perf_counter() - t_ops0
     await engine.dispose()
-    return {"worker_id": worker_id, "conn_time_s": conn_time, "results": results}
+    return {
+        "worker_id": worker_id,
+        "conn_time_s": conn_time,
+        "ops_elapsed_s": ops_elapsed,
+        "results": results,
+    }
 
 
 def main():

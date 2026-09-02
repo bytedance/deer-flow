@@ -29,12 +29,20 @@ def _result(ok: bool, latency_s: float, err: str | None = None, op: str = "read"
     return {"op": op, "ok": ok, "err": err, "latency_s": latency_s}
 
 
+def _worker(worker_id, results: list[dict], ops_elapsed_s: float = 1.0) -> dict:
+    return {"worker_id": worker_id, "ops_elapsed_s": ops_elapsed_s, "results": results}
+
+
+def _crashed(worker_id, stderr: str = "boom") -> dict:
+    return {"worker_id": worker_id, "crashed": True, "stderr": stderr, "results": []}
+
+
 def test_summarize_counts_completed_ops_across_workers() -> None:
     workers = [
-        {"worker_id": 0, "results": [_result(True, 0.001), _result(True, 0.002)]},
-        {"worker_id": 1, "results": [_result(True, 0.003)]},
+        _worker(0, [_result(True, 0.001), _result(True, 0.002)]),
+        _worker(1, [_result(True, 0.003)]),
     ]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=2, ops_per_worker=2)
+    summary = bench.summarize(workers, n_workers=2, ops_per_worker=2)
     assert summary["completed_ops"] == 3
     assert summary["crashed_workers"] == 0
     assert summary["errors"] == 0
@@ -42,10 +50,10 @@ def test_summarize_counts_completed_ops_across_workers() -> None:
 
 def test_summarize_separates_crashed_workers_from_completed_ops() -> None:
     workers = [
-        {"worker_id": 0, "results": [_result(True, 0.001)]},
-        {"worker_id": None, "crashed": True, "stderr": "boom", "results": []},
+        _worker(0, [_result(True, 0.001)]),
+        _crashed(None),
     ]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=2, ops_per_worker=5)
+    summary = bench.summarize(workers, n_workers=2, ops_per_worker=5)
     assert summary["crashed_workers"] == 1
     assert summary["completed_ops"] == 1
     assert summary["expected_total_ops"] == 10
@@ -53,17 +61,17 @@ def test_summarize_separates_crashed_workers_from_completed_ops() -> None:
 
 def test_summarize_groups_errors_by_exception_type() -> None:
     workers = [
-        {
-            "worker_id": 0,
-            "results": [
+        _worker(
+            0,
+            [
                 _result(False, 0.5, err="OperationalError: database is locked"),
                 _result(False, 0.6, err="OperationalError: database is locked"),
                 _result(False, 0.1, err="IntegrityError: duplicate key"),
                 _result(True, 0.001),
             ],
-        }
+        )
     ]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=4)
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=4)
     assert summary["errors"] == 3
     assert summary["error_types"] == {"OperationalError": 2, "IntegrityError": 1}
 
@@ -73,8 +81,8 @@ def test_summarize_percentiles_are_monotonic_and_within_observed_range() -> None
     latency distribution -- a basic sanity invariant on the aggregation
     math itself, independent of what a real run happens to produce."""
     latencies = [0.001 * i for i in range(1, 101)]  # 1ms..100ms, evenly spaced
-    workers = [{"worker_id": 0, "results": [_result(True, latency) for latency in latencies]}]
-    summary = bench.summarize(workers, wall_time=2.5, n_workers=1, ops_per_worker=100)
+    workers = [_worker(0, [_result(True, latency) for latency in latencies])]
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=100)
 
     assert summary["latency_p50_ms"] <= summary["latency_p95_ms"]
     assert summary["latency_p95_ms"] <= summary["latency_p99_ms"]
@@ -94,8 +102,8 @@ def test_summarize_percentiles_match_hand_computed_nearest_rank_values() -> None
     interpolation, reused here, keeps them distinct from the max.
     """
     latencies = [0.001 * i for i in range(1, 21)]  # 1ms..20ms
-    workers = [{"worker_id": 0, "results": [_result(True, latency) for latency in latencies]}]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=20)
+    workers = [_worker(0, [_result(True, latency) for latency in latencies])]
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=20)
 
     assert summary["latency_p50_ms"] == 10.5
     assert summary["latency_p95_ms"] == 19.05
@@ -109,8 +117,8 @@ def test_summarize_percentiles_match_hand_computed_nearest_rank_values() -> None
 def test_summarize_percentiles_match_hand_computed_values_at_documented_sample_size() -> None:
     """Same shape of check at the documented default sample size (100 ops)."""
     latencies = [0.001 * i for i in range(1, 101)]  # 1ms..100ms
-    workers = [{"worker_id": 0, "results": [_result(True, latency) for latency in latencies]}]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=100)
+    workers = [_worker(0, [_result(True, latency) for latency in latencies])]
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=100)
 
     assert summary["latency_p50_ms"] == 50.5
     assert summary["latency_p95_ms"] == 95.05
@@ -120,13 +128,14 @@ def test_summarize_percentiles_match_hand_computed_values_at_documented_sample_s
 def test_summarize_handles_empty_results_without_crashing() -> None:
     """All workers crashed -- no ops completed at all. Percentiles must
     degrade to None rather than raising (e.g. dividing by zero, or
-    indexing an empty sorted list)."""
-    workers = [{"worker_id": None, "crashed": True, "stderr": "boom", "results": []}]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=10)
+    indexing an empty sorted list); with no operation window there is also
+    no throughput to report."""
+    workers = [_crashed(None)]
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=10)
     assert summary["completed_ops"] == 0
     assert summary["latency_p50_ms"] is None
     assert summary["latency_p99_ms"] is None
-    assert summary["throughput_ops_per_s"] == 0.0
+    assert summary["throughput_ops_per_s"] is None
 
 
 def test_summarize_surfaces_crashed_worker_diagnostics_not_just_a_count() -> None:
@@ -135,11 +144,11 @@ def test_summarize_surfaces_crashed_worker_diagnostics_not_just_a_count() -> Non
     from the summary -- previously captured in run_workers() and then
     discarded, leaving an all-crashed sweep with zero explanation of why."""
     workers = [
-        {"worker_id": 0, "results": [_result(True, 0.001)]},
-        {"worker_id": 1, "crashed": True, "stderr": "OperationalError: unable to open database file", "results": []},
-        {"worker_id": 2, "crashed": True, "stderr": "sqlite3.IntegrityError: UNIQUE constraint failed", "results": []},
+        _worker(0, [_result(True, 0.001)]),
+        _crashed(1, "OperationalError: unable to open database file"),
+        _crashed(2, "sqlite3.IntegrityError: UNIQUE constraint failed"),
     ]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=3, ops_per_worker=1)
+    summary = bench.summarize(workers, n_workers=3, ops_per_worker=1)
     assert summary["crashed_workers"] == 2
     assert summary["crashed_worker_errors"] == [
         {"worker_id": 1, "stderr": "OperationalError: unable to open database file"},
@@ -150,15 +159,12 @@ def test_summarize_surfaces_crashed_worker_diagnostics_not_just_a_count() -> Non
 def test_summary_indicates_failure_for_an_all_crashed_sweep() -> None:
     """The exact scenario the reviewer's repro produced: every worker
     crashed, so the summary looks well-formed (completed_ops: 0,
-    throughput_ops_per_s: 0.0) but represents no real measurement at all.
+    throughput_ops_per_s: None) but represents no real measurement at all.
     main() must treat this as a failure (nonzero exit), not a quiet 0-op
     result -- this pins the check that decides that, independent of
     main()'s argparse/subprocess machinery."""
-    workers = [
-        {"worker_id": 0, "crashed": True, "stderr": "boom", "results": []},
-        {"worker_id": 1, "crashed": True, "stderr": "boom", "results": []},
-    ]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=2, ops_per_worker=4)
+    workers = [_crashed(0), _crashed(1)]
+    summary = bench.summarize(workers, n_workers=2, ops_per_worker=4)
     assert bench.summary_indicates_failure(summary) is True
 
 
@@ -177,12 +183,12 @@ def test_summary_indicates_failure_when_every_op_errored_without_a_crash() -> No
     errors > 0 must also disqualify it -- the PR's conclusions rest on
     '0 errors on both backends'."""
     workers = [
-        {
-            "worker_id": 0,
-            "results": [_result(False, 0.5, err="OperationalError: database is locked", op="write") for _ in range(4)],
-        }
+        _worker(
+            0,
+            [_result(False, 0.5, err="OperationalError: database is locked", op="write") for _ in range(4)],
+        )
     ]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=4)
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=4)
     assert summary["crashed_workers"] == 0
     assert summary["completed_ops"] == summary["expected_total_ops"] == 4
     assert summary["errors"] == 4
@@ -190,12 +196,20 @@ def test_summary_indicates_failure_when_every_op_errored_without_a_crash() -> No
 
 
 def test_summary_indicates_failure_is_false_for_a_clean_run() -> None:
-    workers = [{"worker_id": 0, "results": [_result(True, 0.001) for _ in range(4)]}]
-    summary = bench.summarize(workers, wall_time=1.0, n_workers=1, ops_per_worker=4)
+    workers = [_worker(0, [_result(True, 0.001) for _ in range(4)])]
+    summary = bench.summarize(workers, n_workers=1, ops_per_worker=4)
     assert bench.summary_indicates_failure(summary) is False
 
 
-def test_summarize_throughput_matches_completed_ops_over_wall_time() -> None:
-    workers = [{"worker_id": 0, "results": [_result(True, 0.001) for _ in range(50)]}]
-    summary = bench.summarize(workers, wall_time=5.0, n_workers=1, ops_per_worker=50)
+def test_summarize_throughput_uses_slowest_worker_operation_window() -> None:
+    """Throughput is completed_ops / max(worker ops_elapsed_s), not over the
+    orchestrator's post-communicate() wall clock -- so a worker that spends
+    extra time in teardown/IPC after its last op does not deflate the
+    number, and the slowest still-contending worker sets the window."""
+    workers = [
+        _worker(0, [_result(True, 0.001) for _ in range(30)], ops_elapsed_s=5.0),
+        _worker(1, [_result(True, 0.001) for _ in range(20)], ops_elapsed_s=2.0),
+    ]
+    summary = bench.summarize(workers, n_workers=2, ops_per_worker=25)
+    assert summary["ops_window_s"] == 5.0
     assert summary["throughput_ops_per_s"] == 10.0  # 50 ops / 5s

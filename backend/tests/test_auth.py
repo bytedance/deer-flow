@@ -653,9 +653,7 @@ def test_is_email_violation_rejects_primary_key_and_oauth():
     from app.gateway.auth.repositories.sqlite import _is_email_violation
 
     assert _is_email_violation(_pg_integrity_error("users_pkey")) is False
-    assert (
-        _is_email_violation(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) is False
-    )
+    assert _is_email_violation(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) is False
 
 
 def test_is_uniqueness_violation_distinguishes_unique_from_not_null_and_check():
@@ -669,13 +667,8 @@ def test_is_uniqueness_violation_distinguishes_unique_from_not_null_and_check():
     assert _is_uniqueness_violation(_pg_integrity_error("x", sqlstate="23502")) is False
     # SQLite message forms.
     assert _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) is True
-    assert (
-        _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("PRIMARY KEY constraint failed"))) is True
-    )
-    assert (
-        _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("NOT NULL constraint failed: users.system_role")))
-        is False
-    )
+    assert _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("PRIMARY KEY constraint failed"))) is True
+    assert _is_uniqueness_violation(SimpleNamespace(orig=sqlite3.IntegrityError("NOT NULL constraint failed: users.system_role"))) is False
 
 
 def test_violated_constraint_extracts_name_from_both_backends():
@@ -685,10 +678,7 @@ def test_violated_constraint_extracts_name_from_both_backends():
     from app.gateway.auth.repositories.sqlite import _violated_constraint
 
     assert _violated_constraint(_pg_integrity_error("users_pkey")) == "users_pkey"
-    assert (
-        _violated_constraint(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id")))
-        == "users.id"
-    )
+    assert _violated_constraint(SimpleNamespace(orig=sqlite3.IntegrityError("UNIQUE constraint failed: users.id"))) == "users.id"
     assert _violated_constraint(SimpleNamespace(orig=RuntimeError("opaque driver error"))) is None
 
 

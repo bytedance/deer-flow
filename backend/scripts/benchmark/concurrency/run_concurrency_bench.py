@@ -27,7 +27,6 @@ import json
 import shutil
 import subprocess
 import sys
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
@@ -146,19 +145,17 @@ def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: f
 
     # Start barrier: wait for every worker to print READY (connection
     # established, right before its own timed loop -- see worker.py) before
-    # starting the wall clock or releasing any of them. Otherwise wall_time
-    # is measured from BEFORE any worker was even spawned, so it absorbs N
-    # processes' staggered Python-startup + connection-establishment cost
-    # (conn_time_s already measures that per-worker) and lets early workers
-    # run ahead of ones still starting -- not a controlled N-worker
-    # contention measurement. A worker that crashes before printing READY
-    # closes its stdout, so readline() returns "" rather than hanging;
-    # run_workers() below reports that same worker as crashed via its
-    # nonzero returncode either way.
+    # releasing any of them. Otherwise early workers run ahead of ones still
+    # starting -- not a controlled N-worker contention measurement. Each
+    # worker times its own operation phase (from GO to its last op) and the
+    # throughput window is the max of those (see summarize); the staggered
+    # Python-startup + connection cost stays out of it (conn_time_s measures
+    # that per-worker). A worker that crashes before printing READY closes
+    # its stdout, so readline() returns "" rather than hanging; the loop
+    # below reports that same worker as crashed via its nonzero returncode.
     for _wid, p in procs:
         p.stdout.readline()
 
-    t_start = time.perf_counter()
     for _wid, p in procs:
         try:
             p.stdin.write("GO\n")
@@ -186,20 +183,29 @@ def run_workers(backend: str, n_workers: int, ops_per_worker: int, read_ratio: f
             msg = f"parse error: {e}; stdout={stdout[-500:]}; stderr={stderr[-500:]}"
             print(f"--- worker {wid} produced unparseable output: {msg} ---", file=sys.stderr)
             worker_outputs.append({"worker_id": wid, "crashed": True, "stderr": msg, "results": []})
-    wall_time = time.perf_counter() - t_start
-    return worker_outputs, wall_time
+    return worker_outputs
 
 
-def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: int) -> dict:
+def summarize(worker_outputs, n_workers: int, ops_per_worker: int) -> dict:
     all_results = []
     crashed = 0
     crashed_worker_errors = []
+    ops_windows = []
     for w in worker_outputs:
         if w.get("crashed"):
             crashed += 1
             crashed_worker_errors.append({"worker_id": w.get("worker_id"), "stderr": w.get("stderr")})
             continue
         all_results.extend(w["results"])
+        if "ops_elapsed_s" in w:
+            ops_windows.append(w["ops_elapsed_s"])
+
+    # All non-crashed workers are released by the same GO, so the slowest
+    # worker's operation-phase elapsed is the window during which every
+    # worker was contending. Using it (not the orchestrator's post-
+    # communicate() wall clock) keeps per-worker engine.dispose() +
+    # result serialization + stdout transfer out of the throughput figure.
+    ops_window = max(ops_windows) if ops_windows else 0.0
 
     total_ops = len(all_results)
     errors = [r for r in all_results if not r["ok"]]
@@ -229,8 +235,8 @@ def summarize(worker_outputs, wall_time: float, n_workers: int, ops_per_worker: 
         "crashed_worker_errors": crashed_worker_errors,
         "errors": len(errors),
         "error_types": err_types,
-        "wall_time_s": round(wall_time, 3),
-        "throughput_ops_per_s": round(total_ops / wall_time, 2) if wall_time > 0 else None,
+        "ops_window_s": round(ops_window, 3),
+        "throughput_ops_per_s": round(total_ops / ops_window, 2) if ops_window > 0 else None,
         "latency_p50_ms": round(pct(0.50) * 1000, 3) if pct(0.50) is not None else None,
         "latency_p95_ms": round(pct(0.95) * 1000, 3) if pct(0.95) is not None else None,
         "latency_p99_ms": round(pct(0.99) * 1000, 3) if pct(0.99) is not None else None,
@@ -252,11 +258,7 @@ def summary_indicates_failure(summary: dict) -> bool:
       expected and 0 crashes, so it would otherwise pass as a clean
       measurement. The error breakdown stays in the printed JSON either
       way -- this only stops the exit code from calling it clean."""
-    return (
-        summary["crashed_workers"] > 0
-        or summary["completed_ops"] != summary["expected_total_ops"]
-        or summary.get("errors", 0) > 0
-    )
+    return summary["crashed_workers"] > 0 or summary["completed_ops"] != summary["expected_total_ops"] or summary.get("errors", 0) > 0
 
 
 def main():
@@ -298,8 +300,8 @@ def main():
             emails = asyncio.run(seed_baseline(args.backend, args.pg_url, pg_schema, args.baseline_users))
 
             print(f"--- running {n_workers} workers ({args.backend}, {args.ops_per_worker} ops/worker) ---", file=sys.stderr)
-            worker_outputs, wall_time = run_workers(args.backend, n_workers, args.ops_per_worker, args.read_ratio, emails, args.pg_url, pg_schema)
-            summary = summarize(worker_outputs, wall_time, n_workers, args.ops_per_worker)
+            worker_outputs = run_workers(args.backend, n_workers, args.ops_per_worker, args.read_ratio, emails, args.pg_url, pg_schema)
+            summary = summarize(worker_outputs, n_workers, args.ops_per_worker)
             summary["backend"] = args.backend
             all_summaries.append(summary)
             print(json.dumps(summary, indent=2), file=sys.stderr)

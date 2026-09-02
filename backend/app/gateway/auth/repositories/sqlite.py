@@ -215,9 +215,7 @@ class SQLiteUserRepository(UserRepository):
                     # up as an email conflict for an address that isn't
                     # registered.
                     constraint = _violated_constraint(exc)
-                    raise ValueError(
-                        f"User already exists (constraint: {constraint})" if constraint else "User already exists"
-                    ) from exc
+                    raise ValueError(f"User already exists (constraint: {constraint})" if constraint else "User already exists") from exc
                 # A NOT NULL / CHECK / foreign-key IntegrityError is not a
                 # "user already exists" condition and not part of this
                 # method's ValueError contract -- let it propagate.
