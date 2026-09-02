@@ -1162,3 +1162,383 @@ class TestJsonlRunEventStore:
         assert c == 1
         assert not (tmp_path / "jsonl" / "threads" / "t1" / "runs" / "r2.jsonl").exists()
         assert await s.count_messages("t1") == 1
+
+
+class TestGetMessageSeqs:
+    """Look up the thread-global seq of already-persisted messages by identity.
+
+    A checkpoint carries no seq of its own and loses messages to summarization,
+    so a client merging it with the seq-ordered thread feed cannot place a
+    surviving old message (#4666). The seq already exists here, keyed by the
+    message's identity; this exposes it without paging the whole feed.
+    """
+
+    @pytest.mark.anyio
+    async def test_returns_seq_for_a_persisted_message(self, store):
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello"},
+        )
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
+
+    @pytest.mark.anyio
+    async def test_a_tool_message_is_identified_by_its_tool_call_id(self, store):
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.tool.result",
+            category="message",
+            content={"type": "tool", "id": "lc-abc", "tool_call_id": "call_1", "content": "OK"},
+        )
+
+        assert await store.get_message_seqs("t1", ["tool:call_1"]) == {"tool:call_1": 1}
+
+    @pytest.mark.anyio
+    async def test_the_injected_user_suffix_collapses_to_one_identity(self, store):
+        """DynamicContextMiddleware re-keys the submitted turn ``X`` to ``X__user``.
+
+        The feed stores the ``__user`` copy while a caller may ask under either
+        spelling; both must resolve to the same row, or the very message this
+        feature exists to place would be the one it cannot find.
+        """
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1__user", "content": "hello"},
+        )
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
+
+    @pytest.mark.anyio
+    async def test_unknown_identities_are_absent_rather_than_an_error(self, store):
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello"},
+        )
+
+        result = await store.get_message_seqs("t1", ["message:u1", "message:never-persisted"])
+
+        assert result == {"message:u1": 1}
+
+    @pytest.mark.anyio
+    async def test_non_message_events_are_not_looked_up(self, store):
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="run.start",
+            category="trace",
+            content={"type": "human", "id": "u1"},
+        )
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {}
+
+    @pytest.mark.anyio
+    async def test_lookup_is_scoped_to_the_thread(self, store):
+        await store.put(
+            thread_id="t2",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello"},
+        )
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {}
+
+    @pytest.mark.anyio
+    async def test_an_empty_request_does_not_scan(self, store):
+        assert await store.get_message_seqs("t1", []) == {}
+
+    @pytest.mark.anyio
+    async def test_a_replaced_message_keeps_its_first_seq(self, store):
+        """A message re-persisted later must not jump to the tail of the feed."""
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello"},
+        )
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello (edited)"},
+        )
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
+
+    @pytest.mark.anyio
+    async def test_the_scan_stops_once_every_wanted_identity_is_resolved(self, store):
+        """Rows past the last wanted seq can only lose the earliest-seq-wins
+        tiebreak, so scanning them is busy-work — on `/state`/`/history` reads
+        of long threads this lookup is the only one and the wanted set is
+        typically tiny."""
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hello"},
+        )
+
+        class _Tripwire(dict):
+            def get(self, *_args, **_kwargs):
+                raise AssertionError("scan continued past the row that resolved the last wanted identity")
+
+        store._messages["t1"].append(_Tripwire())
+
+        assert await store.get_message_seqs("t1", ["message:u1"]) == {"message:u1": 1}
+
+    @pytest.mark.anyio
+    async def test_jsonl_store_resolves_identities(self, tmp_path):
+        from deerflow.runtime.events.store.jsonl import JsonlRunEventStore
+
+        s = JsonlRunEventStore(base_dir=tmp_path / "jsonl")
+        await s.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1__user", "content": "hello"},
+        )
+        await s.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.tool.result",
+            category="message",
+            content={"type": "tool", "tool_call_id": "call_1", "content": "OK"},
+        )
+
+        assert await s.get_message_seqs("t1", ["message:u1", "tool:call_1"]) == {
+            "message:u1": 1,
+            "tool:call_1": 2,
+        }
+
+    @pytest.mark.anyio
+    async def test_db_store_resolves_identities(self, tmp_path):
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'seqs.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            s = DbRunEventStore(get_session_factory())
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.human.input",
+                category="message",
+                content={"type": "human", "id": "u1__user", "content": "hello"},
+            )
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.tool.result",
+                category="message",
+                content={"type": "tool", "tool_call_id": "call_1", "content": "OK"},
+            )
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="run.start",
+                category="trace",
+                content={"type": "human", "id": "ignored"},
+            )
+
+            assert await s.get_message_seqs("t1", ["message:u1", "tool:call_1", "message:ignored"]) == {
+                "message:u1": 1,
+                "tool:call_1": 2,
+            }
+        finally:
+            await close_engine()
+
+    @pytest.mark.anyio
+    async def test_db_store_only_decodes_rows_that_can_match(self, tmp_path, monkeypatch):
+        """Rows that cannot hold a wanted identity must not be fetched and
+        JSON-decoded in Python.
+
+        The ``content`` column carries full tool outputs, so on the long
+        threads this lookup exists for (a `/state` or `/history` read of a
+        compacted thread), decoding every message row is heavy I/O plus N
+        JSON parses — and a wanted identity absent from the feed (a message
+        still streaming) would defeat any early-exit and force exactly that
+        full scan. The candidate rows are prefiltered in SQL instead."""
+        import json as real_json
+        from types import SimpleNamespace
+
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store import db as db_module
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'seqs.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            s = DbRunEventStore(get_session_factory())
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.human.input",
+                category="message",
+                content={"type": "human", "id": "u1__user", "content": "hello"},
+            )
+            for i in range(3):
+                await s.put(
+                    thread_id="t1",
+                    run_id="r1",
+                    event_type="llm.ai.output",
+                    category="message",
+                    content={"type": "ai", "id": f"unrelated-{i}", "content": "big tool output " * 100},
+                )
+
+            decoded: list[str] = []
+
+            def counting_loads(raw, *args, **kwargs):
+                decoded.append(raw)
+                return real_json.loads(raw, *args, **kwargs)
+
+            monkeypatch.setattr(db_module, "json", SimpleNamespace(loads=counting_loads, dumps=real_json.dumps, JSONDecodeError=real_json.JSONDecodeError))
+
+            # "message:in-flight" is not in the feed: without the SQL
+            # prefilter it would defeat the early exit and decode all rows.
+            assert await s.get_message_seqs("t1", ["message:u1", "message:in-flight"]) == {"message:u1": 1}
+            assert len(decoded) == 1
+        finally:
+            await close_engine()
+
+    @pytest.mark.anyio
+    async def test_db_store_resolves_an_id_the_sql_prefilter_cannot_express(self, tmp_path):
+        """An id carrying LIKE wildcards or JSON-escaped characters cannot be
+        matched as a raw substring of the stored JSON — the lookup must fall
+        back to the full scan for the whole wanted set, not silently miss."""
+        from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        url = f"sqlite+aiosqlite:///{tmp_path / 'seqs.db'}"
+        await init_engine("sqlite", url=url, sqlite_dir=str(tmp_path))
+        try:
+            s = DbRunEventStore(get_session_factory())
+            await s.put(
+                thread_id="t1",
+                run_id="r1",
+                event_type="llm.human.input",
+                category="message",
+                content={"type": "human", "id": 'odd%wild"card', "content": "hello"},
+            )
+
+            assert await s.get_message_seqs("t1", ['message:odd%wild"card']) == {'message:odd%wild"card': 1}
+        finally:
+            await close_engine()
+
+
+class TestAttachMessageSeq:
+    """The one stamping expression shared by the worker's `_MessageSeqStamper`
+    and the request-scoped `stamp_messages_with_seq` — a single helper so the
+    two counterparts cannot silently diverge."""
+
+    def test_attaches_the_seq_under_the_server_owned_key(self):
+        from deerflow.runtime.events.message_identity import attach_message_seq
+
+        stamped = attach_message_seq({"type": "human", "id": "u1"}, 7)
+
+        assert stamped["additional_kwargs"] == {"deerflow_seq": 7}
+
+    def test_existing_additional_kwargs_are_preserved(self):
+        from deerflow.runtime.events.message_identity import attach_message_seq
+
+        stamped = attach_message_seq({"type": "ai", "id": "a1", "additional_kwargs": {"run_id": "r1"}}, 3)
+
+        assert stamped["additional_kwargs"] == {"run_id": "r1", "deerflow_seq": 3}
+
+    def test_the_input_message_is_not_mutated(self):
+        from deerflow.runtime.events.message_identity import attach_message_seq
+
+        message = {"type": "human", "id": "u1", "additional_kwargs": {"run_id": "r1"}}
+
+        attach_message_seq(message, 5)
+
+        assert message["additional_kwargs"] == {"run_id": "r1"}
+
+
+class TestStampMessagesWithSeq:
+    """Attach the feed seq to an arbitrary list of checkpoint messages.
+
+    The streaming path stamps `values` frames as they are published, but a
+    client that merely opens a conversation never sees a frame: it reads the
+    checkpoint over REST. Without a seq there, a summarization-rescued early
+    turn has no absolute position and lands wherever the nearest anchor puts
+    it (#4666), which is behind the newest question rather than at the head.
+    """
+
+    @pytest.mark.anyio
+    async def test_stamps_a_persisted_message(self, store):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1__user", "content": "MARK-FIRST"},
+        )
+
+        stamped = await stamp_messages_with_seq(store, "t1", [{"type": "human", "id": "u1__user", "content": "MARK-FIRST"}])
+
+        assert stamped[0]["additional_kwargs"]["deerflow_seq"] == 1
+
+    @pytest.mark.anyio
+    async def test_a_message_absent_from_the_feed_is_left_alone(self, store):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        messages = [{"type": "ai", "id": "not-persisted", "content": "…"}]
+
+        stamped = await stamp_messages_with_seq(store, "t1", messages)
+
+        assert "deerflow_seq" not in (stamped[0].get("additional_kwargs") or {})
+
+    @pytest.mark.anyio
+    async def test_the_input_list_is_not_mutated(self, store):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        await store.put(
+            thread_id="t1",
+            run_id="r1",
+            event_type="llm.human.input",
+            category="message",
+            content={"type": "human", "id": "u1", "content": "hi"},
+        )
+        original = [{"type": "human", "id": "u1", "content": "hi"}]
+
+        await stamp_messages_with_seq(store, "t1", original)
+
+        assert original[0].get("additional_kwargs") is None
+
+    @pytest.mark.anyio
+    async def test_a_missing_store_returns_the_messages_unchanged(self):
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        messages = [{"type": "human", "id": "u1", "content": "hi"}]
+
+        assert await stamp_messages_with_seq(None, "t1", messages) == messages
+
+    @pytest.mark.anyio
+    async def test_a_failing_store_degrades_instead_of_raising(self, store):
+        """Placement is an enhancement; a broken lookup must not fail the read."""
+        from deerflow.runtime.events.message_seq import stamp_messages_with_seq
+
+        class _Broken:
+            async def get_message_seqs(self, *_args, **_kwargs):
+                raise RuntimeError("feed unavailable")
+
+        messages = [{"type": "human", "id": "u1", "content": "hi"}]
+
+        assert await stamp_messages_with_seq(_Broken(), "t1", messages) == messages

@@ -338,7 +338,10 @@ class E2BSandbox(Sandbox):
             try:
                 result = client.commands.run(f"find {shlex.quote(resolved)} -maxdepth {int(max_depth)} \\( -type f -o -type d \\) 2>/dev/null | head -500")
                 output = getattr(result, "stdout", "") or ""
-                return [line.strip() for line in output.splitlines() if line.strip()]
+                # splitlines() already removed the terminators; do NOT strip
+                # entries — a filename that legitimately ends in whitespace
+                # would be corrupted and never resolve again.
+                return [line for line in output.splitlines() if line]
             except Exception as e:
                 logger.error("Failed to list_dir %s in e2b sandbox: %s", resolved, e)
                 return []
@@ -405,7 +408,7 @@ class E2BSandbox(Sandbox):
         root = resolved.rstrip("/") or "/"
         root_prefix = root if root == "/" else f"{root}/"
         for entry in output.splitlines():
-            entry = entry.strip()
+            # Do NOT strip: trailing whitespace can be part of the filename.
             if not entry:
                 continue
             if entry != root and not entry.startswith(root_prefix):
