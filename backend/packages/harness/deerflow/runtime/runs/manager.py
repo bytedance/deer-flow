@@ -585,29 +585,14 @@ class RunManager:
                             existing_status,
                         )
                     return False
-                if status in _TERMINAL_RUN_STATUSES:
-                    recovered = await self._insert_terminal_completion_if_absent(
-                        record,
-                        self._completion_payload(record),
-                        row_recovery_payload,
-                    )
-                    if recovered is None:
-                        if self.heartbeat_enabled:
-                            return False
-                        recovered = await self._persist_snapshot_to_store(
-                            record.run_id,
-                            row_recovery_payload,
-                        )
-                else:
-                    recovered = await self._persist_snapshot_to_store(
-                        record.run_id,
-                        row_recovery_payload,
-                    )
-                if recovered:
-                    await self._remember_durable_terminal_authority(record, status)
+                # Terminal transitions returned through the owner-fenced
+                # convergence path above. A missing row here can therefore only
+                # be an active-state persistence gap.
+                recovered = await self._persist_snapshot_to_store(
+                    record.run_id,
+                    row_recovery_payload,
+                )
                 return bool(recovered)
-            if updated is True or not self.heartbeat_enabled:
-                await self._remember_durable_terminal_authority(record, status)
             return True
         except Exception:
             logger.warning("Failed to persist status update for run %s", record.run_id, exc_info=True)
@@ -1582,6 +1567,11 @@ class RunManager:
             record.finalizing = finalizing
             record.updated_at = _now_iso()
 
+    @staticmethod
+    def _has_live_finalizer(record: RunRecord) -> bool:
+        """Return whether ``record`` still has a worker holding its barrier."""
+        return bool(record.finalizing and record.task is not None and not record.task.done())
+
     async def wait_for_prior_finalizing(
         self,
         thread_id: str,
@@ -1599,7 +1589,7 @@ class RunManager:
                     if record.run_id == run_id:
                         found_current = True
                         break
-                    if record.finalizing:
+                    if self._has_live_finalizer(record):
                         prior_finalizing = True
 
                 if not found_current or not prior_finalizing:
@@ -3087,7 +3077,7 @@ class RunManager:
             record = self._runs.get(run_id)
             if record is None:
                 return True
-            if record.finalizing or record.status not in _TERMINAL_RUN_STATUSES:
+            if self._has_live_finalizer(record) or record.status not in _TERMINAL_RUN_STATUSES:
                 return False
             local_status = record.status
             completion_payload = self._completion_payload(record)
@@ -3110,7 +3100,7 @@ class RunManager:
             current = self._runs.get(run_id)
             if current is None:
                 return True
-            if current is not record or current.finalizing or current.status != local_status:
+            if current is not record or self._has_live_finalizer(current) or current.status != local_status:
                 return False
             self._runs.pop(run_id, None)
             self._unindex_run_locked(run_id, current.thread_id)

@@ -15,6 +15,7 @@ from deerflow.persistence.run.sql import _database_wall_clock
 from deerflow.runtime import CancelOutcome, RunManager, RunStatus, ThreadOperationKind
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.store.base import RunStore
+from deerflow.runtime.runs.store.memory import MemoryRunStore
 
 
 def test_postgres_lease_fence_uses_wall_clock_not_transaction_time():
@@ -157,6 +158,40 @@ async def test_legacy_create_run_atomic_store_remains_compatible():
             lease_expires_at=None,
             operation_kind=ThreadOperationKind.checkpoint_write,
         )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["memory", "sql"])
+async def test_update_status_only_transitions_active_rows(backend, tmp_path):
+    store = MemoryRunStore() if backend == "memory" else await _make_repo(tmp_path)
+    try:
+        for source_status in (RunStatus.pending, RunStatus.running):
+            run_id = f"active-{source_status.value}"
+            await store.put(run_id, thread_id=f"thread-{run_id}", status=source_status.value)
+
+            assert await store.update_status(run_id, RunStatus.error.value, error="terminalized") is True
+            row = await store.get(run_id)
+            assert row is not None
+            assert row["status"] == RunStatus.error.value
+            assert row["error"] == "terminalized"
+
+        for source_status in (
+            RunStatus.success,
+            RunStatus.error,
+            RunStatus.timeout,
+            RunStatus.interrupted,
+        ):
+            run_id = f"terminal-{source_status.value}"
+            await store.put(run_id, thread_id=f"thread-{run_id}", status=source_status.value)
+
+            assert await store.update_status(run_id, RunStatus.running.value, error="must not persist") is False
+            row = await store.get(run_id)
+            assert row is not None
+            assert row["status"] == source_status.value
+            assert row["error"] is None
+    finally:
+        if backend == "sql":
+            await _cleanup()
 
 
 class TestRunRepository:

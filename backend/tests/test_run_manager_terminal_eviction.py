@@ -2147,20 +2147,65 @@ async def test_cancel_fails_closed_when_response_and_winner_read_are_both_lost()
 async def test_terminal_eviction_waits_for_finalizing_barrier(status):
     manager = RunManager(store=MemoryRunStore())
     record = await manager.create(f"thread-finalizing-{status.value}")
+    release_worker = asyncio.Event()
+    record.task = asyncio.create_task(release_worker.wait())
     await manager.set_finalizing(record.run_id, True)
     await manager.set_status(record.run_id, status)
+    newer = await manager.create(record.thread_id)
+    wait_task = asyncio.create_task(manager.wait_for_prior_finalizing(record.thread_id, newer.run_id))
 
-    task = manager.schedule_terminal_eviction(record.run_id, delay=0, retry_delay=0.01)
-    assert task is not None
-    await asyncio.sleep(0.03)
+    try:
+        task = manager.schedule_terminal_eviction(record.run_id, delay=0, retry_delay=0.01)
+        assert task is not None
+        await asyncio.sleep(0.03)
 
-    assert record.run_id in manager._runs
-    assert task.done() is False
+        assert record.run_id in manager._runs
+        assert task.done() is False
+        assert wait_task.done() is False
 
-    await manager.set_finalizing(record.run_id, False)
-    await asyncio.wait_for(task, timeout=1)
+        await manager.set_finalizing(record.run_id, False)
+        release_worker.set()
+        await record.task
+        await asyncio.wait_for(wait_task, timeout=1)
+        await asyncio.wait_for(task, timeout=1)
 
-    assert record.run_id not in manager._runs
+        assert record.run_id not in manager._runs
+    finally:
+        release_worker.set()
+        wait_task.cancel()
+        await asyncio.gather(wait_task, return_exceptions=True)
+        await asyncio.gather(record.task, return_exceptions=True)
+        await manager.shutdown(timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_stranded_finalizing_barrier_does_not_block_later_run_or_eviction():
+    manager = RunManager(store=MemoryRunStore())
+    stranded = await manager.create("thread-stranded-finalizing")
+    await manager.set_finalizing(stranded.run_id, True)
+    await manager.set_status(stranded.run_id, RunStatus.error, error="late finalizer failure")
+    stranded.task = asyncio.create_task(asyncio.sleep(0))
+    await stranded.task
+
+    newer = await manager.create(stranded.thread_id)
+    eviction = manager.schedule_terminal_eviction(
+        stranded.run_id,
+        delay=0,
+        retry_delay=0.01,
+    )
+    assert eviction is not None
+
+    try:
+        await asyncio.wait_for(
+            manager.wait_for_prior_finalizing(stranded.thread_id, newer.run_id),
+            timeout=1,
+        )
+        await asyncio.wait_for(eviction, timeout=1)
+
+        assert stranded.run_id not in manager._runs
+        assert newer.run_id in manager._runs
+    finally:
+        await manager.shutdown(timeout=1)
 
 
 @pytest.mark.asyncio

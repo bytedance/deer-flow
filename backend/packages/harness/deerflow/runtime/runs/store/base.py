@@ -170,6 +170,12 @@ class RunStore(abc.ABC):
     ) -> bool | None:
         """Update a run status.
 
+        Implementations must update only rows whose current status is
+        ``pending`` or ``running``. Every other status, including
+        ``interrupted``, is terminal and must never be advanced by this generic
+        write; fenced completion methods own any explicitly supported terminal
+        convergence.
+
         Returns ``False`` when the store can prove no row was updated. Older or
         lightweight stores may return ``None`` when they cannot report rowcount.
         """

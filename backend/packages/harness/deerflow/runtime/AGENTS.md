@@ -150,8 +150,11 @@ exponential backoff plus clipped jitter. The third consecutive failed
 convergence attempt is promoted to a one-time warning for that supervisor;
 later retries return to debug logging and remain unbounded for data safety. The
 `finalizing` barrier applies to every terminal status, including `timeout` and
-`interrupted`, and the final prune rechecks the captured local status after all
-store I/O. A late rollback fence failure is deferred until the worker clears
+`interrupted`, while that record's worker task is still live. A stranded flag
+cannot block later same-thread runs or terminal eviction after the worker has
+exited, because no remaining path can clear it. The final prune rechecks both
+worker liveness and the captured local status after all store I/O. A late
+rollback fence failure is deferred until the worker clears
 `finalizing`, attempts to publish END, and schedules both terminal eviction and
 stream cleanup; lost durable authority still suppresses authority-gated durable
 finalization, metadata/title updates, and the completion callback. Shutdown
