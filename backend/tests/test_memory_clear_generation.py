@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sys
 import threading
 import types
@@ -22,6 +23,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     MemoryClearGenerationConflict,
     MemoryManifestRevisionConflict,
     MemoryStorage,
+    MemoryStorageCorruption,
     create_empty_memory,
     create_storage,
     declares_clear_generation_fence,
@@ -252,7 +254,7 @@ def test_in_flight_extraction_does_not_restore_facts_after_cross_worker_clear(tm
     result = updater.update_memory(conversation, thread_id="thread-1", agent_name="researcher", user_id="alice")
 
     fresh = FileMemoryStorage(config).load("researcher", user_id="alice")
-    assert result is False
+    assert result is None
     assert fresh["facts"] == []
 
     later = updater.update_memory(conversation, thread_id="thread-1", agent_name="researcher", user_id="alice")
@@ -340,6 +342,63 @@ def test_peek_clear_generation_reads_json_without_loading_facts(tmp_path: Path) 
         assert storage.peek_clear_generation("agent-a", user_id="alice") == (0, 1)
 
 
+@pytest.mark.parametrize("error_type", [MemoryStorageCorruption, ValueError])
+def test_generation_capture_failure_skips_normal_enqueue_with_replayable_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture, error_type: type[Exception]) -> None:
+    manager = _manager(tmp_path)
+    manager._updater.peek_clear_generation = MagicMock(side_effect=error_type("broken manifest"))
+
+    with caplog.at_level(logging.WARNING):
+        manager.add(
+            thread_id="thread-capture-failure",
+            messages=_queue_conversation(),
+            agent_name="researcher",
+            user_id="alice",
+        )
+
+    assert manager._queue.pending_count == 0
+    capture_records = [record for record in caplog.records if "clear generation could not be read" in record.getMessage()]
+    assert len(capture_records) == 1
+    assert capture_records[0].levelno == logging.WARNING
+    assert "thread=thread-capture-failure" in capture_records[0].getMessage()
+    assert "will be re-fed" in capture_records[0].getMessage()
+
+
+@pytest.mark.parametrize("invalid_generation", [None, (0,), (True, 0), (-1, 0), ("0", 0)])
+def test_invalid_generation_capture_fails_closed(tmp_path: Path, invalid_generation: Any) -> None:
+    manager = _manager(tmp_path)
+    manager._updater.peek_clear_generation = MagicMock(return_value=invalid_generation)
+
+    manager.add(
+        thread_id="thread-invalid-generation",
+        messages=_queue_conversation(),
+        agent_name="researcher",
+        user_id="alice",
+    )
+
+    assert manager._queue.pending_count == 0
+
+
+@pytest.mark.parametrize("error_type", [MemoryStorageCorruption, ValueError])
+def test_generation_capture_failure_logs_unrecoverable_emergency_drop(tmp_path: Path, caplog: pytest.LogCaptureFixture, error_type: type[Exception]) -> None:
+    manager = _manager(tmp_path)
+    manager._updater.peek_clear_generation = MagicMock(side_effect=error_type("broken manifest"))
+
+    with caplog.at_level(logging.ERROR):
+        manager.add_nowait(
+            thread_id="thread-emergency-capture-failure",
+            messages=_queue_conversation(),
+            agent_name="researcher",
+            user_id="alice",
+        )
+
+    assert manager._queue.pending_count == 0
+    capture_records = [record for record in caplog.records if "clear generation could not be read" in record.getMessage()]
+    assert len(capture_records) == 1
+    assert capture_records[0].levelno == logging.ERROR
+    assert "thread=thread-emergency-capture-failure" in capture_records[0].getMessage()
+    assert "cannot be re-fed" in capture_records[0].getMessage()
+
+
 def test_queued_before_clear_extraction_does_not_restore_facts_after_cross_manager_clear(tmp_path: Path) -> None:
     host_llm = MagicMock()
     host_llm.invoke = MagicMock(side_effect=AssertionError("queued extraction must not call the LLM after a newer clear"))
@@ -364,6 +423,28 @@ def test_queued_before_clear_extraction_does_not_restore_facts_after_cross_manag
     manager_a.add(thread_id="thread-1", messages=conversation, agent_name="researcher", user_id="alice")
     _stop_debounce(manager_a)
     manager_a._queue.flush()
+    host_llm.invoke.assert_not_called()
+    assert manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
+
+
+def test_emergency_queued_before_clear_does_not_restore_facts_after_cross_manager_clear(tmp_path: Path) -> None:
+    host_llm = MagicMock()
+    host_llm.invoke = MagicMock(side_effect=AssertionError("emergency extraction must not call the LLM after a newer clear"))
+    manager_a = _manager(tmp_path, host_llm)
+    manager_a.create_fact("User likes Python", category="preference", confidence=0.9, agent_name="researcher", user_id="alice")
+
+    with patch.object(manager_a._queue, "_schedule_timer"):
+        manager_a.add_nowait(thread_id="thread-emergency", messages=_queue_conversation(), agent_name="researcher", user_id="alice")
+
+    assert manager_a._queue.pending_count == 1
+    assert manager_a._queue._items[0].bypass_watermark is True
+    assert manager_a._queue._items[0].clear_generation == (0, 0)
+
+    manager_b = _manager(tmp_path)
+    manager_b.clear_memory(agent_name="researcher", user_id="alice")
+
+    manager_a._queue.flush()
+
     host_llm.invoke.assert_not_called()
     assert manager_b.get_memory(agent_name="researcher", user_id="alice")["facts"] == []
 

@@ -1542,7 +1542,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
-    ) -> bool:
+    ) -> bool | None:
         """Update memory asynchronously by delegating to the sync path.
 
         Uses ``asyncio.to_thread`` to run the *sync* ``model.invoke()`` path
@@ -1574,7 +1574,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
-    ) -> bool:
+    ) -> bool | None:
         """Pure-sync memory update; bind ``trace_id`` into the request-trace
         ContextVar for the worker thread, then delegate to the impl.
 
@@ -1689,7 +1689,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
-    ) -> bool:
+    ) -> bool | None:
         """Pure-sync memory update using ``model.invoke()``.
 
         Uses the *sync* LLM call path so no event loop is created.  This
@@ -1736,7 +1736,7 @@ class MemoryUpdater:
                         current_generation,
                     )
                     self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
-                    return False
+                    return None
             # Re-detect signals on the post-watermark feed so extraction hints
             # reference only turns the LLM will actually see. The admission-time
             # ``signals`` (detected on the full conversation in DeerMem) already
@@ -1813,12 +1813,11 @@ class MemoryUpdater:
             if outcome is _CommitOutcome.PERSISTED:
                 self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
                 success = True
+                return True
             elif outcome is _CommitOutcome.CONSUMED:
                 self._mark_feed_consumed(watermark_key, messages, bypass_watermark=bypass_watermark)
-                success = False
-            else:
-                success = False
-            return success
+                return None
+            return False
         except json.JSONDecodeError as e:
             logger.warning("Failed to parse LLM response for memory update: %s", e)
             return False
@@ -1884,7 +1883,7 @@ class MemoryUpdater:
         *,
         bypass_watermark: bool = False,
         expected_clear_generation: tuple[int, int] | None = None,
-    ) -> bool:
+    ) -> bool | None:
         """Synchronously update memory using the sync LLM path.
 
         Uses ``model.invoke()`` (sync HTTP) which operates on a completely
@@ -1908,9 +1907,10 @@ class MemoryUpdater:
                 write. ``None`` falls back to the pre-LLM snapshot.
 
         Returns:
-            True if the update persisted. False on any failure (no content,
-            unparseable response, LLM error); failures are swallowed (best-effort)
-            -- a failed update is re-fed on the next conversation turn because the
+            True if the update persisted or no new feed remained, None if a
+            newer clear consumed the feed without persisting it, and False on
+            any failure (no content, unparseable response, LLM error). Failures are swallowed
+            (best-effort) and re-fed on the next conversation turn because the
             watermark does not advance on failure.
         """
         try:

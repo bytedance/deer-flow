@@ -1,6 +1,9 @@
+import logging
 import threading
 import time
 from unittest.mock import MagicMock, call, patch
+
+import pytest
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
 from deerflow.agents.memory.backends.deermem.deermem.core.queue import ConversationContext, MemoryUpdateQueue
@@ -252,6 +255,25 @@ def test_process_queue_forwards_trace_id_to_updater() -> None:
         bypass_watermark=False,
         expected_clear_generation=None,
     )
+
+
+def test_process_queue_distinguishes_consumed_from_failed(caplog: pytest.LogCaptureFixture) -> None:
+    mock_updater = MagicMock()
+    mock_updater.update_memory.side_effect = [True, None, False]
+    queue = _queue(mock_updater)
+    queue._items = [
+        ConversationContext(thread_id="thread-succeeded", messages=["succeeded"]),
+        ConversationContext(thread_id="thread-consumed", messages=["consumed"]),
+        ConversationContext(thread_id="thread-failed", messages=["failed"]),
+    ]
+
+    with caplog.at_level(logging.INFO), patch("deerflow.agents.memory.backends.deermem.deermem.core.queue.time.sleep"):
+        queue._process_queue()
+
+    assert "Memory update consumed after newer clear for thread thread-consumed" in caplog.text
+    assert "Memory update skipped/failed for thread thread-failed" in caplog.text
+    assert "Memory update skipped/failed for thread thread-consumed" not in caplog.text
+    assert "Memory update batch done: 1 succeeded, 1 consumed, 1 failed" in caplog.text
 
 
 # ---------------------------------------------------------------------------

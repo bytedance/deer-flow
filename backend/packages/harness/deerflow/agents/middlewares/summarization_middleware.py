@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 from dataclasses import dataclass
@@ -684,7 +685,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                 raise SummaryGenerationError("summary generation failed")
             return None
         # Fire hooks only once a replacement summary exists (see compact_state).
-        self._fire_hooks(messages_to_summarize, preserved_messages, runtime)
+        await asyncio.to_thread(self._fire_hooks, messages_to_summarize, preserved_messages, runtime)
         self._record_compaction(
             source_content_hashes,
             summary=summary,
