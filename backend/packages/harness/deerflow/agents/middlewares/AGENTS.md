@@ -22,8 +22,9 @@ system-model-call observation (`SystemOperationKind.SUMMARIZATION` /
 `DurableContextMiddleware`'s already-stamped `durable_context_data` block —
 there is no separate message of theirs to stamp. Memory only *reads*
 messages to queue them for extraction; the recalled-memory content that
-actually re-enters context is DynamicContext's `dynamic_context_memory`
-stamp, not anything Memory itself produces.
+actually re-enters context is stamped by DynamicContext as
+`dynamic_context_memory` for the baseline snapshot or `dynamic_turn_memory`
+for query-aware turn recall, not by Memory itself.
 
 **Middleware self-description.** A middleware whose configuration changes agent
 behaviour implements `release_policy_parameters() -> dict[str, object]`

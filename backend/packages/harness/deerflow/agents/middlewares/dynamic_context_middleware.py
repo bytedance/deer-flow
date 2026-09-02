@@ -230,6 +230,17 @@ class DynamicContextMiddleware(AgentMiddleware):
         super().__init__()
         self._agent_name = agent_name
         self._app_config = app_config
+        self._turn_cache_owner_token = uuid.uuid4().hex
+
+    def release_policy_parameters(self) -> dict[str, object]:
+        """Describe the effective memory-injection policy for run identity."""
+        memory_config = self._app_config.memory if self._app_config is not None else None
+        return {
+            "memory_enabled": getattr(memory_config, "enabled", True),
+            "injection_enabled": getattr(memory_config, "injection_enabled", True),
+            "session_injection_enabled": getattr(memory_config, "session_injection_enabled", True),
+            "turn_injection_enabled": getattr(memory_config, "turn_injection_enabled", False),
+        }
 
     def _build_full_reminder(self, runtime: Runtime | None = None) -> tuple[str, str | None]:
         """Return (date_reminder, memory_block | None).
@@ -327,7 +338,7 @@ class DynamicContextMiddleware(AgentMiddleware):
             return request, None
         cache_key = self._turn_cache_key(user_message, query, target_index)
         cached = context.get(DYNAMIC_MEMORY_CONTEXT_KEY)
-        if isinstance(cached, dict) and cached.get("key") == cache_key and isinstance(cached.get("content"), str):
+        if isinstance(cached, dict) and cached.get("owner_token") == self._turn_cache_owner_token and cached.get("key") == cache_key and isinstance(cached.get("content"), str):
             return self._inject_turn_memory(request, target_index, user_message, cached["content"]), None
         return request, (target_index, user_message, query, cache_key, context)
 
@@ -351,9 +362,9 @@ class DynamicContextMiddleware(AgentMiddleware):
             query=query,
         )
 
-    @staticmethod
-    def _store_turn_memory(context: dict, cache_key: str, memory_context: str) -> None:
+    def _store_turn_memory(self, context: dict, cache_key: str, memory_context: str) -> None:
         context[DYNAMIC_MEMORY_CONTEXT_KEY] = {
+            "owner_token": self._turn_cache_owner_token,
             "key": cache_key,
             "content": memory_context,
         }

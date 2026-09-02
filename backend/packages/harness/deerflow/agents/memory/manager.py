@@ -231,12 +231,13 @@ class MemoryManager(BaseModel):
         thread_id: str | None = None,
         query: str | None = None,
     ) -> str:
-        """Return injection-ready memory text for the given bucket.
+        """Return plain memory text for the given bucket.
 
-        Implementations load their memory and format it however they choose;
-        the returned string is injected verbatim by call sites. Format
-        parameters are the backend's own private config (received via
-        ``backend_config`` at construction), NOT a host config on this method.
+        The shared memory-context loader wraps non-empty results in one
+        ``<memory>`` block before injection. Implementations therefore return
+        the body rather than adding another wrapper. Format parameters are the
+        backend's own private config (received via ``backend_config`` at
+        construction), NOT a host config on this method.
         Query-aware backends opt in with ``supports_query_aware_context=True``;
         the host does not pass ``query`` to backends that leave it disabled.
         """
