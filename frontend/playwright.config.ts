@@ -1,4 +1,8 @@
-import { defineConfig, devices } from "@playwright/test";
+import {
+  defineConfig,
+  devices,
+  type PlaywrightTestConfig,
+} from "@playwright/test";
 
 const baseURL = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
 // The marketing landing page is only rendered when NEXT_PUBLIC_STATIC_WEBSITE_ONLY=true.
@@ -9,7 +13,10 @@ const staticBaseURL =
   process.env.PLAYWRIGHT_STATIC_BASE_URL ?? "http://localhost:3100";
 const skipWebServer = process.env.PLAYWRIGHT_SKIP_WEB_SERVER === "1";
 
-const webServers = skipWebServer
+// Explicitly typed so every `env` is a Record<string, string> — without the
+// contextual type the two object literals infer optional `undefined` members
+// in their env unions, which `tsc --noEmit` rejects.
+const webServers: PlaywrightTestConfig["webServer"] = skipWebServer
   ? undefined
   : [
       // Full deployment: `/` redirects into the app. DEER_FLOW_AUTH_DISABLED=1
@@ -62,12 +69,12 @@ export default defineConfig({
       name: "chromium",
       use: { ...devices["Desktop Chrome"] },
       // The marketing landing is exercised by the static-website project below.
-      exclude: ["**/landing.spec.ts"],
+      testIgnore: ["**/landing.spec.ts"],
     },
     {
       name: "static-website",
       use: { ...devices["Desktop Chrome"], baseURL: staticBaseURL },
-      include: ["**/landing.spec.ts"],
+      testMatch: ["**/landing.spec.ts"],
     },
   ],
 

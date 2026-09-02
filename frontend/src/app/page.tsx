@@ -10,14 +10,18 @@ import { SkillsSection } from "@/components/landing/sections/skills-section";
 import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
-import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 // Auth/setup state must be resolved per-request, never statically cached,
 // otherwise first-boot installs would always render the landing page.
 // In static-website mode there is no auth check, so the landing stays a
-// prerendered static page instead of per-request SSR.
-export const dynamic = isStaticWebsiteOnly() ? "auto" : "force-dynamic";
+// prerendered static page instead of per-request SSR. Next.js infers the
+// rendering mode from the dynamic APIs actually used at build time:
+// the full deployment calls cookies() (via getServerSideUser) and is
+// rendered per-request, while the static-website build keeps the guard
+// branch out (NEXT_PUBLIC_STATIC_WEBSITE_ONLY is inlined at build time)
+// and is prerendered as a plain static page.
 
 export default async function LandingPage() {
   // The marketing landing page is intended for the official static website
@@ -36,10 +40,11 @@ export default async function LandingPage() {
       case "gateway_unavailable":
         redirect("/login");
       case "config_error":
-        // Render the landing as a safe fallback when configuration is broken.
-        // Log the message so a broken gateway config is diagnosable.
-        console.error(result.message);
-        break;
+        // Configuration is broken — never fall through to the official-looking
+        // marketing page in a non-static deployment. Match the app layouts:
+        // surface the error so it is diagnosable instead of silently serving
+        // the landing page (#3909).
+        throw new Error(result.message);
       default:
         assertNever(result);
     }
