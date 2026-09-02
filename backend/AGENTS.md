@@ -242,6 +242,10 @@ Direct pytest collection or execution of `tests/test_client_live.py` remains
 skipped unless `DEER_FLOW_RUN_LIVE_TESTS=1` is set. Do not add that opt-in to
 default CI workflows.
 
+Jina request-failure logging tests set a dummy API key so the separate once-per-process
+missing-key warning cannot make assertions depend on test order or shard placement.
+Missing-key behavior has its own tests in `tests/test_jina_client.py`.
+
 ### Running the Full Application
 
 From the **project root** directory:
@@ -311,7 +315,7 @@ Multi-file upload with automatic document conversion:
 - Gateway HTTP uploads stage bytes as `.upload-*.part` files and atomically replace the destination only after size validation. These staging files are hidden from upload listings, agent upload context, and sandbox listing/search tools, and swept on Gateway startup if a hard crash leaves one behind.
 - Gateway HTTP upload/list/delete handlers offload filesystem work through `deerflow.utils.file_io.run_file_io`, a dedicated ContextVar-preserving file IO executor. Non-mounted sandbox uploads acquire sandboxes with `SandboxProvider.acquire_async()` and offload `read_bytes()` plus `sandbox.update_file()` together.
 - Mounted upload paths skip both sandbox acquisition and per-file synchronization. For AIO remote/provisioner deployments this requires an explicit, accurate `sandbox.thread_data_mounts: true`; omission preserves backend auto-detection.
-- Agent receives uploaded file list via `UploadsMiddleware`
+- Agent receives uploaded file list via `UploadsMiddleware`; title generation continues to use the original user request rather than the injected upload-context wrapper, with attachment-only messages falling back to `New Conversation`
 
 See [docs/FILE_UPLOAD.md](docs/FILE_UPLOAD.md) for details.
 
