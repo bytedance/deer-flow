@@ -2196,8 +2196,19 @@ class TestThreadSafety:
         """Test multiple executors running in parallel via thread pool."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
+        capacity = SubagentExecutionCapacity(
+            SubagentRuntimeConfig(
+                max_running=3,
+                max_queued=64,
+                admission_policy="queue",
+                queue_timeout_seconds=300,
+            )
+        )
 
         results = []
 
@@ -2221,6 +2232,7 @@ class TestThreadSafety:
                 config=base_config,
                 tools=[],
                 thread_id=f"thread-{task_id}",
+                execution_capacity=capacity,
             )
 
             with patch.object(executor, "_create_agent", return_value=mock_agent):

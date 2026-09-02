@@ -992,6 +992,8 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
 
 
 def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+    from deerflow.config.extensions_config import ExtensionsConfig
+
     backend_dir = tmp_path / "backend"
     backend_dir.mkdir()
     monkeypatch.chdir(backend_dir)
@@ -1006,6 +1008,7 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
 
     storage = SimpleNamespace(load_skills=_load_skills)
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
+    monkeypatch.setattr(skills_router, "get_extensions_config", lambda: ExtensionsConfig())
 
     def _resolve_config_path(explicit_path=None):
         if explicit_path is None:
